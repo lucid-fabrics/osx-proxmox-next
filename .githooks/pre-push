@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Determine remote branch to diff against
+REMOTE=${1:-origin}
+LOCAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+REMOTE_REF="$REMOTE/$LOCAL_BRANCH"
+
+# If remote branch doesn't exist yet, compare against remote HEAD
+if ! git rev-parse --verify "$REMOTE_REF" &>/dev/null; then
+  REMOTE_REF="$REMOTE/HEAD"
+  if ! git rev-parse --verify "$REMOTE_REF" &>/dev/null; then
+    REMOTE_REF="$REMOTE/main"
+  fi
+fi
+
+# Get the merge base
+MERGE_BASE=$(git merge-base HEAD "$REMOTE_REF" 2>/dev/null || echo "")
+if [ -z "$MERGE_BASE" ]; then
+  exit 0
+fi
+
+# ─── disallowed trailers Patterns ───────────────────────────────────────
+AI_PATTERNS=(
+  '🤖'
+  'Generated with.*Assistant'
+  'Generated with.*Tool'
+  'Trailer-By: Assistant'
+  'Trailer-By: Tool'
+  'Vendor\.com'
+  'noreply@vendor'
+  'Vendor2\.com'
+)
+
+AI_REGEX=$(IFS='|'; echo "${AI_PATTERNS[*]}")
+
+# ─── Check Commit Messages (BLOCKING) ─────────────────────────────
+COMMIT_VIOLATIONS=""
+while IFS= read -r commit_hash; do
+  MSG=$(git log --format=%B -n 1 "$commit_hash")
+  if echo "$MSG" | grep -qiE "$AI_REGEX"; then
+    SUBJECT=$(git log --format=%s -n 1 "$commit_hash")
+    COMMIT_VIOLATIONS="${COMMIT_VIOLATIONS}\n  ✗ ${commit_hash:0:8}: $SUBJECT"
+  fi
+done < <(git rev-list "$MERGE_BASE..HEAD")
+
+if [ -n "$COMMIT_VIOLATIONS" ]; then
+  echo ""
+  echo "╔══════════════════════════════════════════════╗"
+  echo "║  BLOCKED: disallowed trailers in commit messages. ║"
+  echo "║  Reword commits before pushing.              ║"
+  echo "╚══════════════════════════════════════════════╝"
+  echo -e "$COMMIT_VIOLATIONS"
+  exit 1
+fi
+
+# ─── Check Code Diff (BLOCKING) ───────────────────────────────────
+# Exclude .githooks/ from code diff check (they contain the patterns as strings)
+CODE_VIOLATIONS=$(git diff "$MERGE_BASE..HEAD" -- . ':!.githooks' | grep -iE "$AI_REGEX" || true)
+
+if [ -n "$CODE_VIOLATIONS" ]; then
+  echo ""
+  echo "╔══════════════════════════════════════════════╗"
+  echo "║  BLOCKED: disallowed trailers found in code diff. ║"
+  echo "║  Remove AI references before pushing.        ║"
+  echo "╚══════════════════════════════════════════════╝"
+  echo ""
+  echo "$CODE_VIOLATIONS" | head -10
+  exit 1
+fi
+
+# ─── Check Secrets in Diff (BLOCKING) ─────────────────────────────
+SECRET_PATTERNS='(password|passwd|api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*["\x27][^\s]{8,}'
+
+SECRET_VIOLATIONS=$(git diff "$MERGE_BASE..HEAD" | grep -iE "$SECRET_PATTERNS" || true)
+
+if [ -n "$SECRET_VIOLATIONS" ]; then
+  echo ""
+  echo "╔══════════════════════════════════════════════╗"
+  echo "║  BLOCKED: Possible secrets in code diff.     ║"
+  echo "║  Remove or use environment variables.        ║"
+  echo "╚══════════════════════════════════════════════╝"
+  echo ""
+  echo "$SECRET_VIOLATIONS" | head -10
+  exit 1
+fi
+
+exit 0

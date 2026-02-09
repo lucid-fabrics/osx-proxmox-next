@@ -305,6 +305,19 @@ src/osx_proxmox_next/
 
 ---
 
+## 🪝 Git Hooks
+
+```bash
+bash scripts/setup-hooks.sh
+```
+
+Enables pre-commit, commit-msg, and pre-push hooks for:
+- **Commit message validation** — enforces [conventional commits](https://www.conventionalcommits.org/) format
+- **Secret detection** — blocks hardcoded passwords, API keys, tokens
+- **Code quality warnings** — flags TODO/FIXME and debug `print()` statements
+
+---
+
 ## ⚖️ Disclaimer
 
 This project is for **testing, lab use, and learning**. Respect Apple licensing and intellectual property. You are responsible for legal and compliance use in your region.

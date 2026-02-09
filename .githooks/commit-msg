@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
+
+# ─── disallowed trailers Check (BLOCKING) ───────────────────────────────
+AI_PATTERNS=(
+  '🤖'
+  'Generated with.*Assistant'
+  'Generated with.*Tool'
+  'Trailer-By: Assistant'
+  'Trailer-By: Tool'
+  'Vendor\.com'
+  'noreply@vendor'
+  'Vendor2\.com'
+)
+
+AI_REGEX=$(IFS='|'; echo "${AI_PATTERNS[*]}")
+
+if echo "$COMMIT_MSG" | grep -qiE "$AI_REGEX"; then
+  echo ""
+  echo "╔══════════════════════════════════════════════╗"
+  echo "║  BLOCKED: disallowed trailers in commit message.  ║"
+  echo "║  Remove AI references before committing.     ║"
+  echo "╚══════════════════════════════════════════════╝"
+  echo ""
+  echo "  Message: $(head -1 "$COMMIT_MSG_FILE")"
+  exit 1
+fi
+
+# ─── Conventional Commit Format (BLOCKING) ─────────────────────────
+FIRST_LINE=$(head -1 "$COMMIT_MSG_FILE")
+
+# Allow merge commits
+if echo "$FIRST_LINE" | grep -qE '^Merge '; then
+  exit 0
+fi
+
+CONVENTIONAL_REGEX='^(feat|fix|refactor|docs|test|chore|perf|ci)(\(.+\))?: .{1,}'
+
+if ! echo "$FIRST_LINE" | grep -qE "$CONVENTIONAL_REGEX"; then
+  echo ""
+  echo "╔══════════════════════════════════════════════╗"
+  echo "║  BLOCKED: Invalid commit message format.     ║"
+  echo "╚══════════════════════════════════════════════╝"
+  echo ""
+  echo "  Expected: <type>(<scope>): <description>"
+  echo "  Types:    feat|fix|refactor|docs|test|chore|perf|ci"
+  echo ""
+  echo "  Examples:"
+  echo "    feat(wizard): add storage auto-detection"
+  echo "    fix(planner): correct disk size calculation"
+  echo "    docs: update README troubleshooting section"
+  echo ""
+  echo "  Got: $FIRST_LINE"
+  exit 1
+fi
+
+exit 0
