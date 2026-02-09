@@ -36,6 +36,8 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 
 ![macOS Desktop via VNC](docs/images/macos-vnc-desktop.png)
 
+> **Note:** Dynamic wallpapers are known to not display correctly without GPU passthrough on VNC. Use a static wallpaper instead.
+
 ---
 
 ## 🚀 Quick Start
