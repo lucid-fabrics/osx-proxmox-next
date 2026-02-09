@@ -1,4 +1,13 @@
-# OSX Proxmox Next
+<h1 align="center">
+  <br>
+  🍏 OSX Proxmox Next
+  <br>
+</h1>
+
+<p align="center">
+  <strong>One-command macOS VM setup for Proxmox 9.</strong><br>
+  No manual <code>qm</code> commands. No config file editing. Just a guided wizard.
+</p>
 
 <p align="center">
   <a href="https://github.com/wmehanna/osx-proxmox-next">
@@ -10,290 +19,303 @@
   </a>
 </p>
 
-<p align="center">
-  <a href="https://ko-fi.com/lucidfabrics">
-    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">
-  </a>
-</p>
+---
 
-> This project is actively maintained through community support.  
-> If this tool saved you time, please support it: **https://ko-fi.com/lucidfabrics**
->
-> Also please ⭐ this repo: **https://github.com/wmehanna/osx-proxmox-next**
+## 🧰 What It Does
 
-Noob-friendly macOS VM setup for Proxmox 9.
-If you can run one command and follow a simple wizard, you can use this.
+This tool automates macOS virtual machine creation on Proxmox VE 9. It handles VMID selection, CPU/RAM detection, OpenCore bootloader setup, and the full `qm` command sequence — so you don't have to.
 
-## Important Disclaimer
-- This project is for testing, lab use, and learning.
-- Respect Apple licensing and intellectual property.
-- You are responsible for legal/compliance use in your region and environment.
+**You get:**
+- 🧙 A step-by-step TUI wizard: **Preflight > Configure > Review > Dry Run > Live Apply**
+- 🔍 Auto-detected hardware defaults (CPU cores, RAM, storage targets)
+- 💿 Automatic OpenCore and recovery/installer ISO detection
+- 🛡️ Safe dry-run mode to preview every command before execution
+- 🚫 Validation that blocks live apply when required assets are missing
 
-## Support This Project
-This project is built and maintained with donation support.
+![Wizard Screenshot](docs/images/wizard-step2.png)
 
-If this helped you:
-- saved troubleshooting time
-- made macOS on Proxmox easier
-- replaced hours of manual trial/error
+---
 
-please also help visibility:
+## 🚀 Quick Start
 
-## ⭐ Star this repo: https://github.com/wmehanna/osx-proxmox-next
+Run this on your Proxmox 9 host as root:
 
-please consider supporting development:
-
-## 👉 Donate on Ko-fi: https://ko-fi.com/lucidfabrics
-
-## What You Get
-- Guided TUI workflow (Preflight -> Configure -> Dry Run -> Live Apply)
-- Auto-selected VMID (next free ID)
-- Auto-detected CPU/RAM defaults from host hardware (safe limits)
-- Auto-detected Tahoe installer path (when found)
-- Safer defaults for boot/display/disk visibility
-- Clear validation before live apply
-
-## Supported OS Versions
-| macOS | Channel | TSC Required | Notes |
-|---|---|---|---|
-| Sonoma 14 | Stable | Recommended | Best experience with stable TSC flags (`constant_tsc`, `nonstop_tsc`). |
-| Sequoia 15 | Stable | Recommended | Stable timing reduces clock drift and random VM lag. |
-| Tahoe 26 | Preview | Recommended | Preview target; stable timing strongly recommended. |
-
-## Prerequisites
-
-### Hardware Requirements
-| Component | Minimum | Recommended | Notes |
-|---|---|---|---|
-| CPU | Intel/AMD 4 cores | 8+ cores | VT-x/AMD-V required. IOMMU required for passthrough. |
-| RAM | 8GB host RAM | 16GB+ host RAM | Keep headroom for Proxmox. Allocate at least 4GB to VM. |
-| Storage | 64GB free | 128GB+ SSD/NVMe | macOS + APFS updates need extra free space. |
-| GPU | Integrated/basic display | Discrete passthrough GPU | Passthrough can improve UX/perf but needs manual host setup. |
-
-### Host Requirements
-- Proxmox VE 9 host with root shell access.
-- Internet access for bootstrap and dependencies.
-- ISO storage available (for example `/var/lib/vz/template/iso`).
-
-### TSC Check (Recommended)
-```bash
-lscpu | grep -E 'Model name|Flags'
-```
-Look for `constant_tsc` and `nonstop_tsc` in CPU flags.
-
-## Quick Start (One Command)
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/wmehanna/osx-proxmox-next/main/install.sh)"
 ```
 
-## Super Simple Wizard Steps
-1. Open `Preflight` and check for failures.
-2. Open `Wizard`.
-3. Click `Use Recommended`.
-4. Choose macOS version button.
-5. Choose storage target button.
-6. Click `Apply Dry`.
-7. Click `Apply Live`.
+This clones the repo, sets up a Python venv, and launches the TUI wizard.
 
-That is enough for most users.
+### 🪄 Wizard Walkthrough
 
-### Wizard Preview
-![Wizard Step 2](docs/images/wizard-step2.png)
+| Step | What Happens |
+|------|-------------|
+| **1️⃣ Preflight** | Checks for `qm`, `pvesm`, `/dev/kvm`, and root access |
+| **2️⃣ Configure** | Pick macOS version, storage target, and review auto-detected CPU/RAM/VMID |
+| **3️⃣ Review** | Validates config and checks that OpenCore + installer ISOs exist |
+| **4️⃣ Dry Run** | Shows every `qm` command that will run — nothing is executed yet |
+| **5️⃣ Live Apply** | Creates the VM for real |
 
-## If Installer Does Not Show Your Disk
-In macOS installer:
-1. Open Disk Utility.
-2. Click `View -> Show All Devices`.
-3. Select `QEMU HARDDISK Media`.
-4. Erase as:
-- Format: `APFS`
-- Scheme: `GUID Partition Map`
+**Most users:** click **Use Recommended** in step 2, pick your macOS version, pick your storage, then click through to **Live Apply**.
 
-Then continue installation.
+---
 
-## How This Tool Works (Plain English)
-1. Reads your wizard settings.
-2. Finds OpenCore + recovery/installer assets.
-3. Builds a deterministic `qm` command plan.
-4. Runs it in dry mode or live mode.
-5. Blocks unsafe live runs if required assets are missing.
+## 📋 Requirements
 
-## GPU Passthrough (Proxmox 9, Intel/AMD CPU, AMD GPU)
-Host setup is manual:
-1. Enable virtualization + IOMMU in BIOS/UEFI.
-2. Enable IOMMU in kernel cmdline:
-- Intel: `intel_iommu=on iommu=pt`
-- AMD: `amd_iommu=on iommu=pt`
-3. Bind GPU + GPU audio function to `vfio-pci`.
-4. Reboot host.
-5. Attach both functions to VM (`hostpci0`, `hostpci1`).
+### 🖥️ Hardware
 
-Reference:
-- https://pve.proxmox.com/wiki/PCI(e)_Passthrough
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| 🧠 CPU | 4 cores, VT-x/AMD-V | 8+ cores |
+| 💾 RAM | 8 GB host (4 GB to VM) | 16+ GB host |
+| 💽 Storage | 64 GB free | 128+ GB SSD/NVMe |
+| 🎮 GPU | Integrated | Discrete (for passthrough) |
 
-## Network Optimization
-- Use bridge networking (`vmbr0`).
-- Use `virtio` NIC model.
-- Keep MTU consistent across host/switch/VM.
-- Measure before/after tuning (throughput and latency).
+### 🏠 Host
 
-References:
-- https://pve.proxmox.com/wiki/Network_Configuration
-- https://pve.proxmox.com/pve-docs/chapter-qm.html
+- Proxmox VE 9 with root shell access
+- Internet access (for bootstrap + dependencies)
+- ISO storage available (e.g. `/var/lib/vz/template/iso`)
 
-## Suggested Performance Optimizations
-- Use SSD/NVMe-backed storage for VM disks.
-- Avoid overcommitting host CPU/RAM.
-- Keep main install disk on `sata0`.
-- Keep OpenCore on `ide2` and recovery on `ide3`.
-- Use `vga: std` for stable noVNC during install.
-- Change one setting at a time and re-measure.
+### ⏱️ TSC Check (Recommended)
 
-## Optional Performance Profiles (Unsupported)
-These scripts are optional and **not officially supported** by this project.
-They are local host scripts that tune macOS guest responsiveness.
-Use only if you understand the changes and keep the matching revert script ready.
+Stable TSC flags reduce clock drift and VM lag. Check with:
 
-Script locations:
-- `/Users/wassimmehanna/apply_blazing_profile.sh`
-- `/Users/wassimmehanna/revert_blazing_profile.sh`
-- `/Users/wassimmehanna/apply_xcode_profile.sh`
-- `/Users/wassimmehanna/revert_xcode_profile.sh`
-
-What each profile does:
-- `apply_blazing_profile.sh`
-- Disables many UI animations/transparency effects for snappier UI.
-- Forces no sleep on AC power (`pmset` sleep/display/disk/powernap adjustments).
-- Disables Spotlight indexing (`mdutil -a -i off`) to reduce background VM load.
-- Restarts Dock/Finder/SystemUIServer to apply changes.
-- `revert_blazing_profile.sh`
-- Restores normal macOS defaults for animations and power settings.
-- Re-enables Spotlight indexing.
-- Restarts Dock/Finder/SystemUIServer.
-- `apply_xcode_profile.sh`
-- Keeps UI optimization tweaks similar to blazing profile.
-- Prevents system sleep but keeps display sleep timeout for longer coding sessions.
-- Keeps Spotlight indexing ON for Xcode/SourceKit/search workflows.
-- Restarts Dock/Finder/SystemUIServer.
-- `revert_xcode_profile.sh`
-- Restores defaults for the xcode profile changes.
-- Restarts Dock/Finder/SystemUIServer.
-
-Example usage:
 ```bash
-# apply a profile
-bash /Users/wassimmehanna/apply_blazing_profile.sh
-
-# revert if needed
-bash /Users/wassimmehanna/revert_blazing_profile.sh
+lscpu | grep -E 'Model name|Flags'
 ```
 
-Safety guidance:
-- Always snapshot/backup before applying tuning scripts.
-- Apply only one profile at a time.
-- Validate performance and stability after each change.
-- Keep the matching `revert_*` script ready.
-- These scripts accept an optional sudo password argument; avoid storing sensitive passwords in plain text.
+Look for `constant_tsc` and `nonstop_tsc` in the output.
 
-## Enable Apple Services (iCloud, iMessage, FaceTime)
-Apple services depend mostly on clean SMBIOS identity and stable network/time.
+---
 
-### Step-by-step
-1. Generate a unique SMBIOS set for this VM only.
-2. Use an SMBIOS model appropriate for your target macOS (for example recent iMacPro/MacPro class profiles used by OpenCore setups).
-3. Set all required values together in OpenCore config:
-- `SystemSerialNumber`
-- `MLB` (Board Serial)
-- `SystemUUID`
-- `ROM` (use a stable 6-byte value, commonly derived from NIC MAC without separators)
-4. Confirm NVRAM is writable and persists after reboot.
-5. Boot macOS and verify:
-- Date/time are correct (set automatically from network).
-- Network is stable and DNS works.
-6. Sign in order:
-- Sign in to Apple ID in System Settings first.
-- Then open Messages and FaceTime and sign in there.
-7. Reboot once after successful login to confirm session persistence.
+## 🍎 Supported macOS Versions
 
-### Quick validation checklist
-- Identity values are unique to this VM.
-- No identity values copied from another working VM.
-- MAC address is stable (do not regenerate each boot).
-- Same OpenCore EFI is always used for this VM.
-- NVRAM reset is not being triggered on every boot.
+| macOS | Channel | Notes |
+|-------|---------|-------|
+| **Sonoma 14** | ✅ Stable | Best tested, most reliable |
+| **Sequoia 15** | ✅ Stable | Fully supported |
+| **Tahoe 26** | 🧪 Preview | Requires full installer ISO (not just recovery) |
 
-### Common failure fixes
-- "This Mac cannot connect to iCloud":
-- Recheck serial/MLB/UUID/ROM consistency and uniqueness.
-- Sign out of Apple ID, reboot, then sign in again.
-- "iMessage activation failed":
-- Verify ROM format/value and stable MAC mapping.
-- Check date/time sync and reboot router/VM network stack.
-- "Works once then breaks":
-- Ensure VM config is not regenerating SMBIOS or NIC MAC between boots.
+---
 
-Important:
-- Do not share SMBIOS identity values publicly.
-- Do not reuse the same identity across multiple VMs.
-- Apple service activation is controlled by Apple and can still fail even with correct setup.
+## ⌨️ CLI Usage
 
-## FAQ
-### Is this production-ready?
-Primarily designed for testing/lab use.
+For scripting or headless use, the CLI bypasses the TUI entirely:
 
-### Why is live apply blocked with missing assets?
-Because required OpenCore/installer files were not found.
-
-### Why do I see UEFI Shell?
-Usually boot media path/order mismatch.
-
-### Why do I see “Guest has not initialized the display”?
-Usually boot/display profile mismatch during early boot.
-
-### Do I need to set VMID manually?
-No, it auto-selects the next available VMID.
-
-### Can I use GPU passthrough?
-Yes, after host passthrough setup is completed.
-
-## CLI Usage
 ```bash
-# preflight
+# Check host readiness
 osx-next-cli preflight
 
-# dry apply
+# Preview commands (dry run)
 osx-next-cli apply \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm
 
-# live apply
+# Execute for real
 osx-next-cli apply --execute \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm
 ```
 
-## Support The Project
-<p align="left">
+---
+
+## 🔧 Troubleshooting
+
+<details>
+<summary>💽 <strong>macOS installer doesn't show my disk</strong></summary>
+
+In the macOS installer:
+1. Open **Disk Utility**
+2. Click **View > Show All Devices**
+3. Select **QEMU HARDDISK Media**
+4. Erase with format **APFS** and scheme **GUID Partition Map**
+5. Close Disk Utility and continue installation
+</details>
+
+<details>
+<summary>🚫 <strong>Live apply is blocked — missing assets</strong></summary>
+
+The tool requires OpenCore and recovery/installer ISOs in your Proxmox ISO storage. It scans `/var/lib/vz/template/iso` and `/mnt/pve/*/template/iso` for:
+- `opencore-v21.iso` or `opencore-{version}.iso`
+- `{version}-recovery.iso`
+- For Tahoe: a full installer ISO matching `*tahoe*full*.iso` or `*InstallAssistant*.iso`
+</details>
+
+<details>
+<summary>🐚 <strong>I see UEFI Shell instead of macOS boot</strong></summary>
+
+Boot media path or order mismatch. Ensure OpenCore is on `ide2` and recovery/installer on `ide3`, with boot order set to `ide2;ide3;sata0`.
+</details>
+
+<details>
+<summary>🖥️ <strong>"Guest has not initialized the display"</strong></summary>
+
+Boot/display profile mismatch during early boot. Use `vga: std` for stable noVNC during installation.
+</details>
+
+---
+
+## 🎮 GPU Passthrough
+
+Host-side setup is manual and required before the VM can use a discrete GPU.
+
+1. Enable **VT-d / IOMMU** in BIOS/UEFI
+2. Add to kernel cmdline:
+   - Intel: `intel_iommu=on iommu=pt`
+   - AMD: `amd_iommu=on iommu=pt`
+3. Bind GPU + GPU audio to `vfio-pci`
+4. Reboot host
+5. Attach both PCI functions to VM (`hostpci0`, `hostpci1`)
+
+📖 Reference: [Proxmox PCI(e) Passthrough Wiki](https://pve.proxmox.com/wiki/PCI(e)_Passthrough)
+
+---
+
+## ⚡ Performance Tips
+
+- 💿 Use **SSD/NVMe-backed storage** for VM disks
+- 🧠 Don't overcommit host CPU or RAM
+- 🔧 Keep the main macOS disk on `sata0`, OpenCore on `ide2`, recovery on `ide3`
+- 🖥️ Use `vga: std` during installation (switch after)
+- 📏 Change one setting at a time and measure the impact
+
+---
+
+## 🎛️ Guest Performance Profiles (Optional)
+
+These are **optional shell scripts that run inside the macOS guest** to tune responsiveness. They are not part of this project and are not required — use them only if you understand what they change.
+
+### 🔥 Blazing Profile
+
+Optimized for **maximum UI speed** in the VM. Best for general use where you want the snappiest experience.
+
+| What It Changes | Setting |
+|----------------|---------|
+| 🎞️ UI animations | Disabled (window resize, Mission Control, Dock) |
+| 🪟 Transparency effects | Disabled (reduces compositing overhead) |
+| 🔎 Spotlight indexing | **Disabled** (`mdutil -a -i off`) — frees CPU/IO |
+| 😴 Sleep on AC power | Disabled (sleep, display sleep, disk sleep, Power Nap all off) |
+| 🔄 Dock/Finder/SystemUIServer | Restarted to apply changes |
+
+⚠️ **Trade-off:** No Spotlight search (Finder search, Siri suggestions, and in-app search won't index new files).
+
+### 🛠️ Xcode Profile
+
+Optimized for **development workflows** (Xcode, SourceKit, code search). Similar UI optimizations as Blazing, but keeps Spotlight alive.
+
+| What It Changes | Setting |
+|----------------|---------|
+| 🎞️ UI animations | Disabled (same as Blazing) |
+| 🪟 Transparency effects | Disabled (same as Blazing) |
+| 🔎 Spotlight indexing | **Kept ON** — required for Xcode code completion and search |
+| 😴 System sleep | Disabled, but display sleep is allowed (longer coding sessions) |
+| 🔄 Dock/Finder/SystemUIServer | Restarted to apply changes |
+
+⚠️ **Trade-off:** Slightly more background CPU/IO from Spotlight, but Xcode features work fully.
+
+### 🤔 Which Profile Should I Use?
+
+| Use Case | Profile |
+|----------|---------|
+| 🌐 General browsing, testing apps | **Blazing** |
+| 💻 Xcode / SwiftUI / iOS development | **Xcode** |
+| 🤷 Don't know / want defaults | **Neither** — skip this section |
+
+### ▶️ Usage
+
+```bash
+# Apply blazing profile
+bash apply_blazing_profile.sh
+
+# Revert to macOS defaults
+bash revert_blazing_profile.sh
+
+# Apply xcode profile
+bash apply_xcode_profile.sh
+
+# Revert to macOS defaults
+bash revert_xcode_profile.sh
+```
+
+### 🛡️ Safety Notes
+
+- **Snapshot your VM before applying** any profile
+- Apply only one profile at a time
+- Always keep the matching `revert_*` script ready
+- These scripts accept an optional sudo password argument — avoid storing passwords in plain text
+
+---
+
+## ☁️ Enable Apple Services (iCloud, iMessage, FaceTime)
+
+Apple services require a clean, unique SMBIOS identity and stable network/time configuration.
+
+### 📝 Setup
+
+1. **Generate unique SMBIOS values** for this VM (do not copy from another VM):
+   - `SystemSerialNumber`
+   - `MLB` (Board Serial)
+   - `SystemUUID`
+   - `ROM` (stable 6-byte value, usually derived from NIC MAC without separators)
+2. **Set all values** in your OpenCore config
+3. **Verify** NVRAM is writable and persists across reboots
+4. **Boot macOS** and confirm date/time are correct and network/DNS works
+5. **Sign in order:** Apple ID (System Settings) first, then Messages, then FaceTime
+6. **Reboot** once after login to confirm session persistence
+
+### ✅ Checklist
+
+- [ ] SMBIOS values are unique to this VM
+- [ ] MAC address is stable (not regenerated each boot)
+- [ ] Same OpenCore EFI is always used
+- [ ] NVRAM reset is not triggered on every boot
+
+### 🩺 Common Issues
+
+| Problem | Fix |
+|---------|-----|
+| "This Mac cannot connect to iCloud" | Recheck serial/MLB/UUID/ROM uniqueness. Sign out, reboot, sign in again. |
+| "iMessage activation failed" | Verify ROM format and stable MAC mapping. Check date/time sync. |
+| Works once then breaks | VM config is regenerating SMBIOS or NIC MAC between boots. |
+
+> **Important:** Never share SMBIOS values publicly or reuse them across VMs. Apple controls service activation and it can still fail even with correct setup.
+
+---
+
+## 📂 Project Layout
+
+```
+src/osx_proxmox_next/
+  app.py          # TUI wizard (Textual)
+  cli.py          # Non-interactive CLI
+  domain.py       # VM config model + validation
+  planner.py      # qm command generation
+  executor.py     # Dry-run and live execution engine
+  assets.py       # OpenCore/installer ISO detection
+  defaults.py     # Host-aware hardware defaults
+  preflight.py    # Host capability checks
+  rollback.py     # VM snapshot/rollback hints
+  diagnostics.py  # Log bundling + recovery guidance
+  profiles.py     # VM config profile management
+  infrastructure.py # Proxmox command adapter
+```
+
+---
+
+## ⚖️ Disclaimer
+
+This project is for **testing, lab use, and learning**. Respect Apple licensing and intellectual property. You are responsible for legal and compliance use in your region.
+
+---
+
+<p align="center">
+  If this tool saved you time, consider supporting development:<br><br>
   <a href="https://ko-fi.com/lucidfabrics">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">
   </a>
+  <br><br>
+  ⭐ <a href="https://github.com/wmehanna/osx-proxmox-next">Star this repo</a> to help others find it.
 </p>
-
-Primary support link:
-- **https://ko-fi.com/lucidfabrics**
-
-Want a project-specific Ko-fi URL?
-- Create (or rename to) a project-specific Ko-fi username, if available.
-- Ko-fi link format is `https://ko-fi.com/<username>`.
-
-## Project Layout
-- `src/osx_proxmox_next/app.py`: TUI workflow
-- `src/osx_proxmox_next/cli.py`: non-interactive CLI
-- `src/osx_proxmox_next/domain.py`: VM model + validation
-- `src/osx_proxmox_next/planner.py`: command generation
-- `src/osx_proxmox_next/executor.py`: apply engine
-- `src/osx_proxmox_next/assets.py`: OpenCore/installer detection
-- `src/osx_proxmox_next/defaults.py`: host-aware defaults
-- `src/osx_proxmox_next/rollback.py`: rollback hints
