@@ -10,6 +10,15 @@
   </a>
 </p>
 
+<p align="center">
+  <a href="https://ko-fi.com/lucidfabrics">
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">
+  </a>
+</p>
+
+> This project is actively maintained through community support.  
+> If this tool saved you time, please support it: **https://ko-fi.com/lucidfabrics**
+
 Noob-friendly macOS VM setup for Proxmox 9.
 If you can run one command and follow a simple wizard, you can use this.
 
@@ -17,6 +26,18 @@ If you can run one command and follow a simple wizard, you can use this.
 - This project is for testing, lab use, and learning.
 - Respect Apple licensing and intellectual property.
 - You are responsible for legal/compliance use in your region and environment.
+
+## Support This Project
+This project is built and maintained with donation support.
+
+If this helped you:
+- saved troubleshooting time
+- made macOS on Proxmox easier
+- replaced hours of manual trial/error
+
+please consider supporting development:
+
+## 👉 Donate on Ko-fi: https://ko-fi.com/lucidfabrics
 
 ## What You Get
 - Guided TUI workflow (Preflight -> Configure -> Dry Run -> Live Apply)
@@ -176,8 +197,8 @@ osx-next-cli apply --execute \
   </a>
 </p>
 
-Current Ko-fi:
-- https://ko-fi.com/lucidfabrics
+Primary support link:
+- **https://ko-fi.com/lucidfabrics**
 
 Want a project-specific Ko-fi URL?
 - Create (or rename to) a project-specific Ko-fi username, if available.
