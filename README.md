@@ -11,6 +11,7 @@ If you can run one command and follow a simple wizard, you can use this.
 ## What You Get
 - Guided TUI workflow (Preflight -> Configure -> Dry Run -> Live Apply)
 - Auto-selected VMID (next free ID)
+- Auto-detected CPU/RAM defaults from host hardware (with safe limits)
 - Auto-detected Tahoe installer path (when found)
 - Safer defaults that avoid common boot/display/disk issues
 - Clear validation errors before live apply
