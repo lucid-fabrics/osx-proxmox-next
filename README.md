@@ -34,6 +34,8 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 
 ![Wizard Screenshot](docs/images/wizard-step2.png)
 
+![macOS Desktop via VNC](docs/images/macos-vnc-desktop.png)
+
 ---
 
 ## 🚀 Quick Start
