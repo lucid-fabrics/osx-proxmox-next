@@ -20,6 +20,21 @@ If you can run one command and follow a simple wizard, you can use this.
 - `sequoia` (macOS 15)
 - `tahoe` (macOS 26 preview)
 
+## Prerequisites
+
+### Hardware Requirements
+| Component | Minimum | Recommended | Notes |
+|---|---|---|---|
+| CPU | Intel/AMD 4 cores | 8+ cores | Hardware virtualization required (VT-x/AMD-V). IOMMU needed for passthrough. |
+| RAM | 8GB host RAM | 16GB+ host RAM | Keep enough free RAM for Proxmox. Allocate at least 4GB to macOS VM. |
+| Storage | 64GB free | 128GB+ SSD/NVMe | macOS install is large; APFS and updates need extra headroom. |
+| GPU | Integrated/basic display | Discrete GPU passthrough | Passthrough can improve UX/performance but adds setup complexity. |
+
+### Host Requirements
+- Proxmox VE 9 host with admin access (`root` shell).
+- Internet access for installer/bootstrap and dependencies.
+- ISO storage path available (for example `/var/lib/vz/template/iso`).
+
 ## One Command Install
 Run on your Proxmox host:
 
