@@ -119,6 +119,8 @@ def run_cli(argv: list[str] | None = None) -> int:
     result = apply_plan(steps, execute=bool(args.execute))
     if result.ok:
         print(f"Apply OK. Log: {result.log_path}")
+        print()
+        print("If this saved you time: https://ko-fi.com/lucidfabrics")
         return 0
 
     print(f"Apply FAILED. Log: {result.log_path}")
