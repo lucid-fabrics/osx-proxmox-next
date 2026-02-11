@@ -343,6 +343,32 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 
 ---
 
+## 🔮 Roadmap
+
+- 🧩 **Multi-VM templates** — save and reuse configurations across VMs
+- 🔄 **Auto-update OpenCore** — detect and pull latest OpenCore releases
+- 🎮 **GPU passthrough wizard** — guided IOMMU + VFIO setup *(unlocks at 20 sponsors)*
+
+---
+
+## 💖 Supporters
+
+This project is free and open source. Sponsors keep it alive and shape what gets built next.
+
+<p align="center">
+  <a href="https://github.com/sponsors/wmehanna">
+    <img src="https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=github&logoColor=white" alt="Sponsor on GitHub">
+  </a>
+  &nbsp;
+  <a href="https://ko-fi.com/lucidfabrics">
+    <img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
+  </a>
+</p>
+
+> 🪑 *Your name here* — become a backer to get listed.
+
+---
+
 ## ⚖️ Disclaimer
 
 This project is for **testing, lab use, and learning**. Respect Apple licensing and intellectual property. You are responsible for legal and compliance use in your region.
