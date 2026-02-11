@@ -7,6 +7,7 @@ from shlex import join
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .domain import SUPPORTED_MACOS, VmConfig
+from .smbios import generate_smbios, model_for_macos
 
 
 @dataclass
@@ -56,6 +57,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "--scsihw", "virtio-scsi-pci",
             ],
         ),
+        *_smbios_steps(config, vmid),
         PlanStep(
             title="Attach EFI + TPM",
             argv=[
@@ -119,6 +121,39 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
         lines.append(step.command)
         lines.append("")
     return "\n".join(lines)
+
+
+def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
+    if config.no_smbios:
+        return []
+    serial = config.smbios_serial
+    smbios_uuid = config.smbios_uuid
+    model = config.smbios_model
+    if not serial:
+        identity = generate_smbios(config.macos)
+        serial = identity.serial
+        smbios_uuid = identity.uuid
+        model = identity.model
+        config.smbios_serial = serial
+        config.smbios_uuid = smbios_uuid
+        config.smbios_model = model
+        config.smbios_mlb = identity.mlb
+        config.smbios_rom = identity.rom
+    if not model:
+        model = model_for_macos(config.macos)
+    smbios_value = (
+        f"uuid={smbios_uuid},"
+        f"serial={serial},"
+        f"manufacturer=Apple Inc.,"
+        f"product={model},"
+        f"family=Mac"
+    )
+    return [
+        PlanStep(
+            title="Set SMBIOS identity",
+            argv=["qm", "set", vmid, "--smbios1", smbios_value],
+        ),
+    ]
 
 
 def _to_iso_ref(path: Path) -> str:

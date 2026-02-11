@@ -17,6 +17,7 @@ from .executor import apply_plan
 from .planner import PlanStep, build_plan
 from .preflight import run_preflight
 from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
+from .smbios import generate_smbios, SmbiosIdentity
 
 
 class NextApp(App):
@@ -153,6 +154,7 @@ class NextApp(App):
         self.workflow_stage = 1
         self.step_page = 1
         self.storage_targets = self._detect_storage_targets()
+        self.smbios_identity: SmbiosIdentity | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -225,6 +227,9 @@ class NextApp(App):
                             yield Input(value=DEFAULT_STORAGE, id="storage")
                             yield Static("Installer Path", classes="label")
                             yield Input(value="", id="installer_path")
+                        with Horizontal(classes="action_row"):
+                            yield Button("Generate SMBIOS", id="generate_smbios")
+                        yield Static("SMBIOS: not generated yet.", id="smbios_preview")
 
                 with Vertical(id="step3_section", classes="step step_hidden"):
                     yield Static("Step 3: Review and apply")
@@ -270,6 +275,7 @@ class NextApp(App):
             "macos_sonoma": lambda: self._set_macos("sonoma"),
             "macos_sequoia": lambda: self._set_macos("sequoia"),
             "macos_tahoe": lambda: self._set_macos("tahoe"),
+            "generate_smbios": self._generate_smbios,
             "validate": self._validate_only,
             "apply_dry": self.action_apply_dry,
             "apply_live": self.action_apply_live,
@@ -447,6 +453,8 @@ class NextApp(App):
         self.query_one("#macos", Input).value = macos
         if self.query_one("#name", Input).value.startswith("macos-"):
             self.query_one("#name", Input).value = f"macos-{macos}"
+        self.smbios_identity = generate_smbios(macos)
+        self._update_smbios_preview()
         self._apply_host_defaults(silent=True)
         self._update_defaults_preview()
         self._autofill_tahoe_installer_path()
@@ -553,6 +561,7 @@ class NextApp(App):
         memory_mb = int(self.query_one("#memory", Input).value.strip() or "16384")
         disk_gb = int(self.query_one("#disk", Input).value.strip() or "128")
 
+        smbios = self.smbios_identity
         return VmConfig(
             vmid=vmid,
             name=self.query_one("#name", Input).value.strip(),
@@ -563,6 +572,11 @@ class NextApp(App):
             bridge=self.query_one("#bridge", Input).value.strip() or DEFAULT_BRIDGE,
             storage=self.query_one("#storage", Input).value.strip() or DEFAULT_STORAGE,
             installer_path=self.query_one("#installer_path", Input).value.strip(),
+            smbios_serial=smbios.serial if smbios else "",
+            smbios_uuid=smbios.uuid if smbios else "",
+            smbios_mlb=smbios.mlb if smbios else "",
+            smbios_rom=smbios.rom if smbios else "",
+            smbios_model=smbios.model if smbios else "",
         )
 
     def _apply_host_defaults(self, silent: bool = False) -> None:
@@ -599,6 +613,9 @@ class NextApp(App):
             "storage": self.query_one("#storage", Input).value,
         }
         changed = [k for k in after if after[k] != before[k]]
+        if not self.smbios_identity:
+            self.smbios_identity = generate_smbios(macos)
+            self._update_smbios_preview()
         self._update_defaults_preview()
         if not silent:
             labels = {
@@ -630,6 +647,23 @@ class NextApp(App):
             f"storage={self.query_one('#storage', Input).value.strip()}"
         )
         self.query_one("#defaults_preview", Static).update(preview)
+
+    def _generate_smbios(self) -> None:
+        macos = self.query_one("#macos", Input).value.strip().lower() or "sequoia"
+        self.smbios_identity = generate_smbios(macos)
+        self._update_smbios_preview()
+        self._set_wizard_status("SMBIOS identity generated.")
+
+    def _update_smbios_preview(self) -> None:
+        if self.smbios_identity:
+            text = (
+                f"SMBIOS: serial={self.smbios_identity.serial}  "
+                f"uuid={self.smbios_identity.uuid}  "
+                f"model={self.smbios_identity.model}"
+            )
+        else:
+            text = "SMBIOS: not generated yet."
+        self.query_one("#smbios_preview", Static).update(text)
 
     def _set_input_value(self, selector: str, value: str) -> None:
         widget = self.query_one(selector, Input)

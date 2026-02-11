@@ -23,6 +23,12 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
         bridge=args.bridge,
         storage=args.storage,
         installer_path=args.installer_path or "",
+        smbios_serial=args.smbios_serial or "",
+        smbios_uuid=args.smbios_uuid or "",
+        smbios_mlb=args.smbios_mlb or "",
+        smbios_rom=args.smbios_rom or "",
+        smbios_model=args.smbios_model or "",
+        no_smbios=args.no_smbios,
     )
 
 
@@ -46,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--bridge", type=str, required=True)
     common.add_argument("--storage", type=str, required=True)
     common.add_argument("--installer-path", type=str, default="")
+    common.add_argument("--smbios-serial", type=str, default="")
+    common.add_argument("--smbios-uuid", type=str, default="")
+    common.add_argument("--smbios-mlb", type=str, default="")
+    common.add_argument("--smbios-rom", type=str, default="")
+    common.add_argument("--smbios-model", type=str, default="")
+    common.add_argument("--no-smbios", action="store_true", default=False)
 
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("--script-out", type=str, default="")

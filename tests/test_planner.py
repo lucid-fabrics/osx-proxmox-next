@@ -54,6 +54,36 @@ def test_build_plan_sets_applesmc_args() -> None:
     assert "--vga std" in profile.command
 
 
+def test_build_plan_includes_smbios_step() -> None:
+    steps = build_plan(_cfg("sequoia"))
+    titles = [step.title for step in steps]
+    assert "Set SMBIOS identity" in titles
+    smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
+    assert "--smbios1" in smbios_step.command
+    assert "Apple Inc." in smbios_step.command
+    assert "family=Mac" in smbios_step.command
+
+
+def test_build_plan_skips_smbios_when_disabled() -> None:
+    cfg = _cfg("sequoia")
+    cfg.no_smbios = True
+    steps = build_plan(cfg)
+    titles = [step.title for step in steps]
+    assert "Set SMBIOS identity" not in titles
+
+
+def test_build_plan_uses_provided_smbios() -> None:
+    cfg = _cfg("sequoia")
+    cfg.smbios_serial = "TESTSERIAL12"
+    cfg.smbios_uuid = "12345678-1234-1234-1234-123456789ABC"
+    cfg.smbios_model = "MacPro7,1"
+    steps = build_plan(cfg)
+    smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
+    assert "TESTSERIAL12" in smbios_step.command
+    assert "12345678-1234-1234-1234-123456789ABC" in smbios_step.command
+    assert "MacPro7,1" in smbios_step.command
+
+
 def test_build_plan_uses_storage_iso_refs(monkeypatch) -> None:
     from pathlib import Path
     import osx_proxmox_next.planner as planner

@@ -29,6 +29,7 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 - 🧙 A step-by-step TUI wizard: **Preflight > Configure > Review > Dry Run > Live Apply**
 - 🔍 Auto-detected hardware defaults (CPU cores, RAM, storage targets)
 - 💿 Automatic OpenCore and recovery/installer ISO detection
+- 🆔 Auto-generated SMBIOS identity (serial, UUID, model) — no OpenCore editing needed
 - 🛡️ Safe dry-run mode to preview every command before execution
 - 🚫 Validation that blocks live apply when required assets are missing
 
@@ -111,7 +112,7 @@ For scripting or headless use, the CLI bypasses the TUI entirely:
 # Check host readiness
 osx-next-cli preflight
 
-# Preview commands (dry run)
+# Preview commands (dry run) — SMBIOS identity auto-generated
 osx-next-cli apply \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
@@ -122,6 +123,20 @@ osx-next-cli apply --execute \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm
+
+# Skip SMBIOS generation entirely
+osx-next-cli apply --no-smbios \
+  --vmid 910 --name macos-sequoia --macos sequoia \
+  --cores 8 --memory 16384 --disk 128 \
+  --bridge vmbr0 --storage local-lvm
+
+# Provide your own SMBIOS values
+osx-next-cli apply --execute \
+  --vmid 910 --name macos-sequoia --macos sequoia \
+  --cores 8 --memory 16384 --disk 128 \
+  --bridge vmbr0 --storage local-lvm \
+  --smbios-serial C02X1234ABCD --smbios-uuid "$(uuidgen)" \
+  --smbios-model iMacPro1,1
 ```
 
 ---
@@ -257,22 +272,25 @@ bash scripts/profiles/revert_xcode_profile.sh
 
 Apple services require a clean, unique SMBIOS identity and stable network/time configuration.
 
-### 📝 Setup
+### 🆔 SMBIOS Identity (Auto-Generated)
 
-1. **Generate unique SMBIOS values** for this VM (do not copy from another VM):
-   - `SystemSerialNumber`
-   - `MLB` (Board Serial)
-   - `SystemUUID`
-   - `ROM` (stable 6-byte value, usually derived from NIC MAC without separators)
-2. **Set all values** in your OpenCore config
-3. **Verify** NVRAM is writable and persists across reboots
-4. **Boot macOS** and confirm date/time are correct and network/DNS works
-5. **Sign in order:** Apple ID (System Settings) first, then Messages, then FaceTime
-6. **Reboot** once after login to confirm session persistence
+This tool **automatically generates** a unique SMBIOS identity (serial, UUID, model) for each VM and applies it via Proxmox's native `--smbios1` flag. No manual OpenCore config editing required.
+
+- **TUI:** SMBIOS is auto-generated when you click **Use Recommended** or switch macOS versions. Click **Generate SMBIOS** in Advanced options to regenerate.
+- **CLI:** SMBIOS is auto-generated unless you pass `--no-smbios` or provide your own values via `--smbios-serial`, `--smbios-uuid`, `--smbios-model`.
+
+The generated values are visible in the dry-run output as a `qm set --smbios1` step.
+
+### 📝 Additional Setup for Apple Services
+
+1. **Verify** NVRAM is writable and persists across reboots
+2. **Boot macOS** and confirm date/time are correct and network/DNS works
+3. **Sign in order:** Apple ID (System Settings) first, then Messages, then FaceTime
+4. **Reboot** once after login to confirm session persistence
 
 ### ✅ Checklist
 
-- [ ] SMBIOS values are unique to this VM
+- [x] SMBIOS values are unique to this VM (auto-generated)
 - [ ] MAC address is stable (not regenerated each boot)
 - [ ] Same OpenCore EFI is always used
 - [ ] NVRAM reset is not triggered on every boot
@@ -303,6 +321,7 @@ src/osx_proxmox_next/
   preflight.py    # Host capability checks
   rollback.py     # VM snapshot/rollback hints
   diagnostics.py  # Log bundling + recovery guidance
+  smbios.py       # SMBIOS identity generation (serial, UUID, model)
   profiles.py     # VM config profile management
   infrastructure.py # Proxmox command adapter
 ```
