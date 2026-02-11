@@ -101,3 +101,13 @@ def test_build_plan_uses_storage_iso_refs(monkeypatch) -> None:
     installer = next(step for step in steps if step.title == "Attach macOS recovery ISO")
     assert "wd2tb:iso/opencore-tahoe.iso,media=cdrom" in opencore.command
     assert "wd2tb:iso/macos-tahoe-full.iso" in installer.command
+
+
+def test_smbios_model_fallback():
+    cfg = _cfg("sequoia")
+    cfg.smbios_serial = "TESTSERIAL12"
+    cfg.smbios_uuid = "12345678-1234-1234-1234-123456789ABC"
+    cfg.smbios_model = ""  # empty model triggers fallback
+    steps = build_plan(cfg)
+    smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
+    assert "iMacPro1,1" in smbios_step.command
