@@ -55,11 +55,19 @@ src/osx_proxmox_next/
 
 1. Create a feature branch from `main`: `git checkout -b feat/description`
 2. Implement changes, commit with conventional commits
-3. Bump version in `pyproject.toml` (patch for fixes, minor for features)
-4. Push branch, create PR to `main`
-5. On merge → GitHub Actions auto-creates a release with the new version tag
+3. Push branch, create PR to `main`
+4. On merge → CI auto-bumps version, creates tag + GitHub release
 
-**Version is the trigger:** the CI only creates a release when the version in `pyproject.toml` changes (new tag doesn't exist yet).
+**Versioning is fully automatic (semver):**
+
+| Commit Type | Bump | Example |
+|-------------|------|---------|
+| `fix:` | patch (0.0.1 → 0.0.2) | `fix(assets): handle missing ISO` |
+| `feat:` | minor (0.0.2 → 0.1.0) | `feat(cli): add snapshot flag` |
+| `feat!:` / `BREAKING CHANGE` | major (0.1.0 → 1.0.0) | `feat!: new config format` |
+| `docs:` / `chore:` / `ci:` | no release | `docs: update README` |
+
+**Never manually edit the version in `pyproject.toml`** — the CI handles it.
 
 ## Code Conventions
 
