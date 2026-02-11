@@ -30,3 +30,19 @@ def test_validate_config_rejects_invalid_values() -> None:
     assert len(issues) >= 7
     assert any("VMID" in issue for issue in issues)
     assert any("macOS version" in issue for issue in issues)
+
+
+def test_validate_tahoe_requires_installer():
+    cfg = VmConfig(
+        vmid=900,
+        name="macos-tahoe",
+        macos="tahoe",
+        cores=8,
+        memory_mb=16384,
+        disk_gb=160,
+        bridge="vmbr0",
+        storage="local-lvm",
+        installer_path="",
+    )
+    issues = validate_config(cfg)
+    assert any("Tahoe requires installer_path" in i for i in issues)

@@ -600,8 +600,6 @@ class NextApp(App):
         self._set_input_value("#disk", str(default_disk_gb(macos)))
         self._set_input_value("#bridge", DEFAULT_BRIDGE)
         self._set_input_value("#storage", DEFAULT_STORAGE)
-        if self.query_one("#name", Input).value.startswith("macos-"):
-            self._set_input_value("#name", f"macos-{macos}")
         after = {
             "vmid": self.query_one("#vmid", Input).value,
             "name": self.query_one("#name", Input).value,
@@ -742,7 +740,7 @@ class NextApp(App):
                     return vmid
             parsed = json.loads(output)
             if isinstance(parsed, int) and 100 <= parsed <= 999999:
-                return parsed
+                return parsed  # pragma: no cover – isdigit() already handles pure-digit strings
         except Exception:
             pass
 
