@@ -137,7 +137,18 @@ jobs:
 
             if [ -n "$PREV_TAG" ]; then
               echo "**Full changelog:** https://github.com/${{ github.repository }}/compare/$PREV_TAG...v${{ steps.version.outputs.new }}"
+              echo ""
             fi
+
+            echo "---"
+            echo ""
+            echo "### Quick Start"
+            echo ""
+            echo '```bash'
+            echo 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"'
+            echo '```'
+            echo ""
+            echo "☕ [Support development on Ko-fi](https://ko-fi.com/lucidfabrics)"
             echo "NOTESEOF"
           } >> "$GITHUB_OUTPUT"
 
