@@ -14,51 +14,138 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get version from pyproject.toml
-        id: version
+      - name: Get current version
+        id: current
         run: |
           VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/version = "//;s/"//')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Check if tag exists
+      - name: Determine version bump from commits
+        id: bump
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            COMMITS=$(git log --format="%s" --no-decorate)
+          else
+            COMMITS=$(git log --format="%s" --no-decorate "$PREV_TAG"..HEAD)
+          fi
+
+          BUMP="none"
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$msg" | grep -qi 'BREAKING CHANGE'; then
+              BUMP="major"
+              break
+            elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
+              BUMP="minor"
+            elif echo "$msg" | grep -qE '^fix(\(.+\))?:' && [ "$BUMP" != "minor" ]; then
+              BUMP="patch"
+            fi
+          done <<< "$COMMITS"
+
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "Detected bump: $BUMP"
+
+      - name: Calculate new version
+        if: steps.bump.outputs.bump != 'none'
+        id: version
+        run: |
+          CURRENT="${{ steps.current.outputs.version }}"
+          BUMP="${{ steps.bump.outputs.bump }}"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW="$MAJOR.$MINOR.$PATCH"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+          echo "Version: $CURRENT → $NEW ($BUMP)"
+
+      - name: Check if tag already exists
+        if: steps.bump.outputs.bump != 'none'
         id: check
         run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+          if git rev-parse "v${{ steps.version.outputs.new }}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Update pyproject.toml version
+        if: steps.bump.outputs.bump != 'none' && steps.check.outputs.exists == 'false'
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${{ steps.version.outputs.new }}\"/" pyproject.toml
+
+      - name: Commit version bump
+        if: steps.bump.outputs.bump != 'none' && steps.check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore(release): v${{ steps.version.outputs.new }}" --no-verify
+          git push origin main
+
+      - name: Create tag
+        if: steps.bump.outputs.bump != 'none' && steps.check.outputs.exists == 'false'
+        run: |
+          git tag "v${{ steps.version.outputs.new }}"
+          git push origin "v${{ steps.version.outputs.new }}"
+
       - name: Generate release notes
-        if: steps.check.outputs.exists == 'false'
+        if: steps.bump.outputs.bump != 'none' && steps.check.outputs.exists == 'false'
         id: notes
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
           if [ -z "$PREV_TAG" ]; then
-            COMMITS=$(git log --oneline --no-decorate)
+            RANGE=""
           else
-            COMMITS=$(git log --oneline --no-decorate "$PREV_TAG"..HEAD)
+            RANGE="$PREV_TAG..HEAD"
           fi
 
           {
-            echo "notes<<EOF"
-            echo "## Changes"
-            echo ""
-            echo "$COMMITS" | while read -r line; do
-              echo "- $line"
-            done
-            echo ""
-            echo "**Full changelog:** https://github.com/${{ github.repository }}/compare/${PREV_TAG:-$(git rev-list --max-parents=0 HEAD | head -1)}..v${{ steps.version.outputs.version }}"
-            echo "EOF"
+            echo "notes<<NOTESEOF"
+
+            # Features
+            FEATS=$(git log --format="- %s" --no-decorate $RANGE | grep -E '^\- feat' || true)
+            if [ -n "$FEATS" ]; then
+              echo "### Features"
+              echo "$FEATS"
+              echo ""
+            fi
+
+            # Fixes
+            FIXES=$(git log --format="- %s" --no-decorate $RANGE | grep -E '^\- fix' || true)
+            if [ -n "$FIXES" ]; then
+              echo "### Bug Fixes"
+              echo "$FIXES"
+              echo ""
+            fi
+
+            # Other
+            OTHER=$(git log --format="- %s" --no-decorate $RANGE | grep -vE '^\- (feat|fix)' || true)
+            if [ -n "$OTHER" ]; then
+              echo "### Other Changes"
+              echo "$OTHER"
+              echo ""
+            fi
+
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Full changelog:** https://github.com/${{ github.repository }}/compare/$PREV_TAG...v${{ steps.version.outputs.new }}"
+            fi
+            echo "NOTESEOF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create release
-        if: steps.check.outputs.exists == 'false'
+        if: steps.bump.outputs.bump != 'none' && steps.check.outputs.exists == 'false'
         run: |
-          gh release create "v${{ steps.version.outputs.version }}" \
-            --title "v${{ steps.version.outputs.version }}" \
+          gh release create "v${{ steps.version.outputs.new }}" \
+            --title "v${{ steps.version.outputs.new }}" \
             --notes "${{ steps.notes.outputs.notes }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
