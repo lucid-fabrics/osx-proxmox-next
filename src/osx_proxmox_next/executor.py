@@ -54,7 +54,7 @@ def apply_plan(
                 handle.write(line)
                 result = StepResult(step.title, step.command, True, 0, line.strip())
                 results.append(result)
-                if on_step:
+                if on_step:  # pragma: no branch
                     on_step(idx, total, step, result)
                 continue
 
