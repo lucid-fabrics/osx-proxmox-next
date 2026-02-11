@@ -356,7 +356,7 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 This project is free and open source. Sponsors keep it alive and shape what gets built next.
 
 <p align="center">
-  <a href="https://github.com/sponsors/wmehanna">
+  <a href="https://github.com/sponsors/lucid-fabrics">
     <img src="https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=github&logoColor=white" alt="Sponsor on GitHub">
   </a>
   &nbsp;
