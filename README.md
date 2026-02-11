@@ -51,6 +51,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/wmehanna/osx-proxmox-nex
 
 This clones the repo, sets up a Python venv, and launches the TUI wizard.
 
+> Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/lucidfabrics). ☕
+
 ### 🪄 Wizard Walkthrough
 
 | Step | What Happens |
@@ -348,10 +350,11 @@ This project is for **testing, lab use, and learning**. Respect Apple licensing 
 ---
 
 <p align="center">
-  If this tool saved you time, consider supporting development:<br><br>
+  This project is built and maintained solo. No company, no team — just one dev who got tired of manual <code>qm</code> configs.<br>
+  If it saved you time, a coffee keeps it going:<br><br>
   <a href="https://ko-fi.com/lucidfabrics">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">
   </a>
   <br><br>
-  ⭐ <a href="https://github.com/wmehanna/osx-proxmox-next">Star this repo</a> to help others find it.
+  ⭐ <a href="https://github.com/lucid-fabrics/osx-proxmox-next">Star this repo</a> to help others find it.
 </p>
