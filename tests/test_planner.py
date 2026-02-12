@@ -81,7 +81,7 @@ def test_build_plan_uses_provided_smbios() -> None:
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
     assert "TESTSERIAL12" in smbios_step.command
     assert "12345678-1234-1234-1234-123456789ABC" in smbios_step.command
-    assert "MacPro7,1" in smbios_step.command
+    assert "MacPro7%2C1" in smbios_step.command
 
 
 def test_build_plan_uses_storage_iso_refs(monkeypatch) -> None:
@@ -110,4 +110,17 @@ def test_smbios_model_fallback():
     cfg.smbios_model = ""  # empty model triggers fallback
     steps = build_plan(cfg)
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
-    assert "iMacPro1,1" in smbios_step.command
+    assert "iMacPro1%2C1" in smbios_step.command
+
+
+def test_smbios_product_comma_is_encoded():
+    """Commas in Apple model names must be URL-encoded for Proxmox smbios1 parsing."""
+    cfg = _cfg("tahoe")
+    cfg.installer_path = "/tmp/tahoe.iso"
+    cfg.smbios_serial = "TESTSERIAL12"
+    cfg.smbios_uuid = "12345678-1234-1234-1234-123456789ABC"
+    cfg.smbios_model = "MacPro7,1"
+    steps = build_plan(cfg)
+    smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
+    assert "product=MacPro7%2C1," in smbios_step.command
+    assert "MacPro7,1" not in smbios_step.command
