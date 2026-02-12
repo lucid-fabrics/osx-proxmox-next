@@ -13,6 +13,7 @@ class AssetCheck:
     path: Path
     ok: bool
     hint: str
+    downloadable: bool = False
 
 
 def required_assets(config: VmConfig) -> list[AssetCheck]:
@@ -26,6 +27,7 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
             path=opencore_path,
             ok=opencore_path.exists(),
             hint="Provide OpenCore ISO before apply mode.",
+            downloadable=True,
         )
     )
 
@@ -36,6 +38,7 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
             path=recovery_path,
             ok=recovery_path.exists(),
             hint="Tahoe should use a full installer image path.",
+            downloadable=(config.macos != "tahoe"),
         )
     )
     return checks
@@ -43,13 +46,18 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
 
 def suggested_fetch_commands(config: VmConfig) -> list[str]:
     iso_root = "/var/lib/vz/template/iso"
-    commands = [
-        f"# place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
-    ]
     if config.macos == "tahoe":
-        commands.append("# Tahoe: provide a full installer image and set installer_path")
+        commands = [
+            f"# OpenCore auto-download: osx-next-cli download --macos {config.macos} --opencore-only",
+            f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
+            "# Tahoe: provide a full installer image and set installer_path",
+        ]
     else:
-        commands.append(f"# place recovery image at {iso_root}/{config.macos}-recovery.iso")
+        commands = [
+            f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
+            f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
+            f"# Or place recovery image at {iso_root}/{config.macos}-recovery.iso",
+        ]
     return commands
 
 
@@ -76,7 +84,11 @@ def resolve_recovery_or_installer_path(config: VmConfig) -> Path:
         match = _find_iso(["*tahoe*full*.iso", "*tahoe*.iso", "*26*.iso", "*InstallAssistant*.iso"])
         if match:
             return match
-    match = _find_iso([f"{config.macos}-recovery.iso"])
+    match = _find_iso([
+        f"{config.macos}-recovery.iso",
+        f"{config.macos}-recovery.img",
+        f"{config.macos}-recovery.dmg",
+    ])
     if match:
         return match
     return Path("/var/lib/vz/template/iso") / f"{config.macos}-recovery.iso"

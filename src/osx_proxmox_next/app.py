@@ -13,6 +13,7 @@ from .assets import required_assets, suggested_fetch_commands
 from .defaults import DEFAULT_BRIDGE, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_memory_mb
 from .diagnostics import build_health_status
 from .domain import SUPPORTED_MACOS, VmConfig, validate_config
+from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
 from .planner import PlanStep, build_plan
 from .preflight import run_preflight
@@ -147,6 +148,7 @@ class NextApp(App):
         self.last_config: VmConfig | None = None
         self.last_steps: list[PlanStep] = []
         self.apply_running = False
+        self.download_running = False
         self.plan_output_text = ""
         self.wizard_status_text = "Step 1: Run Preflight."
         self.preflight_has_run = False
@@ -235,6 +237,7 @@ class NextApp(App):
                     yield Static("Step 3: Review and apply")
                     with Horizontal(classes="action_row"):
                         yield Button("Review Checks", id="validate")
+                        yield Button("Download Missing", id="download_missing")
                         yield Button("Apply Dry", id="apply_dry")
                         yield Button("Apply Live", id="apply_live")
                         yield Button("Back: Step 2", id="goto_step2")
@@ -277,6 +280,7 @@ class NextApp(App):
             "macos_tahoe": lambda: self._set_macos("tahoe"),
             "generate_smbios": self._generate_smbios,
             "validate": self._validate_only,
+            "download_missing": self._download_missing_assets,
             "apply_dry": self.action_apply_dry,
             "apply_live": self.action_apply_live,
         }
@@ -392,7 +396,17 @@ class NextApp(App):
             missing = [asset for asset in required_assets(config) if not asset.ok]
             if missing:
                 names = ", ".join(asset.name for asset in missing)
-                self._set_wizard_status(f"Live apply blocked: missing assets ({names}).")
+                downloadable = [a for a in missing if a.downloadable]
+                if downloadable:
+                    self._set_wizard_status(
+                        f"Live apply blocked: missing assets ({names}). "
+                        f"Click 'Download Missing' to auto-fetch."
+                    )
+                else:
+                    self._set_wizard_status(
+                        f"Live apply blocked: missing assets ({names}). "
+                        f"Provide path manually."
+                    )
                 self.notify("Missing required ISO assets for live apply", severity="error")
                 self._set_stage(3)
                 self._show_step_page(3)
@@ -464,20 +478,80 @@ class NextApp(App):
         config = self._read_form()
         if not config:
             return
-        missing = 0
-        first_hint = ""
-        for item in required_assets(config):
-            if not item.ok:
-                missing += 1
-                if not first_hint:
-                    first_hint = f"{item.name}: {item.hint}"
+        assets = required_assets(config)
+        missing = [a for a in assets if not a.ok]
+        downloadable = [a for a in missing if a.downloadable]
 
-        if missing == 0:
+        if not missing:
             self._set_wizard_status("Assets check OK. Ready for Apply Dry.")
+        elif downloadable:
+            self._set_wizard_status(
+                f"Assets missing: {len(missing)}. "
+                f"Click 'Download Missing' to auto-fetch ({len(downloadable)} downloadable)."
+            )
         else:
-            extra = suggested_fetch_commands(config)
-            tail = f" ({extra[0]})" if extra else ""
-            self._set_wizard_status(f"Assets missing: {missing}. {first_hint}{tail}")
+            first_hint = missing[0].hint if missing else ""
+            self._set_wizard_status(
+                f"Assets missing: {len(missing)}. {first_hint} Provide path manually."
+            )
+
+    def _download_missing_assets(self) -> None:
+        if self.download_running:
+            self._set_wizard_status("Download already running.")
+            return
+
+        config = self._read_form()
+        if not config:
+            return
+
+        assets = required_assets(config)
+        missing = [a for a in assets if not a.ok and a.downloadable]
+        if not missing:
+            self._set_wizard_status("No downloadable assets missing.")
+            return
+
+        self.download_running = True
+        self.query_one("#apply_progress").remove_class("hidden")
+        self.query_one("#apply_progress", ProgressBar).update(total=100, progress=0)
+        self._set_wizard_status("Downloading missing assets...")
+
+        dest_dir = Path("/var/lib/vz/template/iso")
+
+        def on_progress(p: DownloadProgress) -> None:
+            if p.total > 0:
+                pct = int(p.downloaded * 100 / p.total)
+                self.call_from_thread(self._update_download_progress, p.phase, pct)
+
+        def worker() -> None:
+            errors: list[str] = []
+            for asset in missing:
+                if "OpenCore" in asset.name:
+                    try:
+                        download_opencore(config.macos, dest_dir, on_progress=on_progress)
+                    except DownloadError as exc:
+                        errors.append(f"OpenCore: {exc}")
+                elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():  # pragma: no branch
+                    try:
+                        download_recovery(config.macos, dest_dir, on_progress=on_progress)
+                    except DownloadError as exc:
+                        errors.append(f"Recovery: {exc}")
+            self.call_from_thread(self._finish_download, errors)
+
+        Thread(target=worker, daemon=True).start()
+
+    def _update_download_progress(self, phase: str, pct: int) -> None:
+        self.query_one("#apply_progress", ProgressBar).update(total=100, progress=pct)
+        self._set_wizard_status(f"Downloading {phase}... {pct}%")
+
+    def _finish_download(self, errors: list[str]) -> None:
+        self.download_running = False
+        if errors:
+            self._set_wizard_status("Download errors: " + "; ".join(errors))
+            self.notify("Some downloads failed", severity="error")
+        else:
+            self._set_wizard_status("Downloads complete. Re-checking assets...")
+            self._check_assets()
+            self.notify("Assets downloaded successfully", severity="information")
 
     def _refresh_health(self) -> None:
         health = build_health_status()

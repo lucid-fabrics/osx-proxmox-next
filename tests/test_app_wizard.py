@@ -1566,3 +1566,357 @@ def test_detect_storage_empty_line(monkeypatch) -> None:
         assert "local-lvm" in targets  # inserted as default
 
     asyncio.run(_run())
+
+
+def test_apply_live_missing_downloadable_assets(monkeypatch) -> None:
+    """Live apply blocked with downloadable assets suggests Download Missing button."""
+    from osx_proxmox_next.assets import AssetCheck
+
+    monkeypatch.setattr(
+        app_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
+    )
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app.preflight_has_run = True
+            app.preflight_ok = True
+            app._apply(execute=True)
+            await pilot.pause()
+            assert "Download Missing" in app.wizard_status_text
+
+    asyncio.run(_run())
+
+
+def test_download_missing_assets_no_missing(monkeypatch) -> None:
+    """Download Missing button with no missing assets shows no-op message."""
+    from osx_proxmox_next.assets import AssetCheck
+
+    monkeypatch.setattr(
+        app_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
+    )
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app._download_missing_assets()
+            await pilot.pause()
+            assert "No downloadable assets missing" in app.wizard_status_text
+
+    asyncio.run(_run())
+
+
+def test_download_missing_already_running(monkeypatch) -> None:
+    """Download Missing button does nothing if download already running."""
+    from osx_proxmox_next.assets import AssetCheck
+
+    monkeypatch.setattr(
+        app_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
+    )
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app.download_running = True
+            app._download_missing_assets()
+            await pilot.pause()
+            assert "already running" in app.wizard_status_text.lower()
+
+    asyncio.run(_run())
+
+
+def test_download_missing_read_form_none() -> None:
+    """Download Missing button with invalid form returns early."""
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            app.query_one("#vmid", Input).value = "not-a-number"
+            app._download_missing_assets()
+            await pilot.pause()
+
+    asyncio.run(_run())
+
+
+def test_download_missing_triggers_worker(monkeypatch) -> None:
+    """Download Missing button triggers threaded download with progress."""
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.downloader import DownloadProgress
+    import time
+
+    download_calls = {"opencore": 0, "recovery": 0}
+
+    def fake_download_opencore(macos, dest, on_progress=None):
+        download_calls["opencore"] += 1
+        if on_progress:
+            on_progress(DownloadProgress(downloaded=500, total=1000, phase="opencore"))
+            # Also test total=0 path (unknown size)
+            on_progress(DownloadProgress(downloaded=800, total=0, phase="opencore"))
+        return dest / f"opencore-{macos}.iso"
+
+    def fake_download_recovery(macos, dest, on_progress=None):
+        download_calls["recovery"] += 1
+        if on_progress:
+            on_progress(DownloadProgress(downloaded=1000, total=1000, phase="recovery"))
+        return dest / f"{macos}-recovery.img"
+
+    monkeypatch.setattr(
+        app_module, "required_assets",
+        lambda cfg: [
+            AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True),
+            AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True),
+        ],
+    )
+    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(app_module, "download_recovery", fake_download_recovery)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app._download_missing_assets()
+            # Wait for background thread
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.download_running:
+                    break
+            assert download_calls["opencore"] == 1
+            assert download_calls["recovery"] == 1
+
+    asyncio.run(_run())
+
+
+def test_download_missing_with_errors(monkeypatch) -> None:
+    """Download Missing button handles OpenCore errors gracefully."""
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.downloader import DownloadError
+    import time
+
+    monkeypatch.setattr(
+        app_module, "required_assets",
+        lambda cfg: [
+            AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True),
+        ],
+    )
+
+    def fake_download_opencore(macos, dest, on_progress=None):
+        raise DownloadError("network failure")
+
+    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app._download_missing_assets()
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.download_running:
+                    break
+            assert "Download errors" in app.wizard_status_text
+
+    asyncio.run(_run())
+
+
+def test_download_missing_recovery_then_opencore(monkeypatch) -> None:
+    """Worker processes recovery before opencore — exercises loop-back branch."""
+    from osx_proxmox_next.assets import AssetCheck
+    import time
+
+    download_calls = {"opencore": 0, "recovery": 0}
+
+    def fake_download_opencore(macos, dest, on_progress=None):
+        download_calls["opencore"] += 1
+        return dest / f"opencore-{macos}.iso"
+
+    def fake_download_recovery(macos, dest, on_progress=None):
+        download_calls["recovery"] += 1
+        return dest / f"{macos}-recovery.img"
+
+    monkeypatch.setattr(
+        app_module, "required_assets",
+        lambda cfg: [
+            AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True),
+            AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True),
+        ],
+    )
+    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(app_module, "download_recovery", fake_download_recovery)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app._download_missing_assets()
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.download_running:
+                    break
+            assert download_calls["opencore"] == 1
+            assert download_calls["recovery"] == 1
+
+    asyncio.run(_run())
+
+
+def test_download_missing_recovery_error(monkeypatch) -> None:
+    """Download Missing button handles recovery errors gracefully."""
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.downloader import DownloadError
+    import time
+
+    monkeypatch.setattr(
+        app_module, "required_assets",
+        lambda cfg: [
+            AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True),
+        ],
+    )
+
+    def fake_download_recovery(macos, dest, on_progress=None):
+        raise DownloadError("recovery download failed")
+
+    monkeypatch.setattr(app_module, "download_recovery", fake_download_recovery)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app._download_missing_assets()
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.download_running:
+                    break
+            assert "Download errors" in app.wizard_status_text
+            assert "Recovery" in app.wizard_status_text
+
+    asyncio.run(_run())
+
+
+def test_update_download_progress() -> None:
+    """Cover _update_download_progress method."""
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            from textual.widgets import ProgressBar as PB
+            app.query_one("#apply_progress").remove_class("hidden")
+            app._update_download_progress("opencore", 50)
+            await pilot.pause()
+            assert "50%" in app.wizard_status_text
+
+    asyncio.run(_run())
+
+
+def test_finish_download_success() -> None:
+    """Cover _finish_download with no errors."""
+    from osx_proxmox_next.assets import AssetCheck
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app.download_running = True
+            app._finish_download([])
+            await pilot.pause()
+            assert not app.download_running
+
+    asyncio.run(_run())
+
+
+def test_finish_download_errors() -> None:
+    """Cover _finish_download with errors."""
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app.download_running = True
+            app._finish_download(["OpenCore: fail"])
+            await pilot.pause()
+            assert not app.download_running
+            assert "Download errors" in app.wizard_status_text
+
+    asyncio.run(_run())
+
+
+def test_check_assets_downloadable_message(monkeypatch) -> None:
+    """_check_assets shows download hint when assets are downloadable."""
+    from osx_proxmox_next.assets import AssetCheck
+
+    monkeypatch.setattr(
+        app_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
+    )
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app._check_assets()
+            assert "Download Missing" in app.wizard_status_text
+
+    asyncio.run(_run())
+
+
+def test_check_assets_non_downloadable_message(monkeypatch) -> None:
+    """_check_assets shows manual message when assets are not downloadable."""
+    from osx_proxmox_next.assets import AssetCheck
+
+    monkeypatch.setattr(
+        app_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "provide OC", downloadable=False)],
+    )
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.click("#nav_wizard")
+            await pilot.click("#goto_step2")
+            await pilot.click("#defaults")
+            await pilot.pause()
+            app._check_assets()
+            assert "Provide path manually" in app.wizard_status_text
+
+    asyncio.run(_run())

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from .assets import required_assets, suggested_fetch_commands
 from .diagnostics import export_log_bundle, recovery_guide
 from .domain import VmConfig, validate_config
+from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
 from .planner import build_plan, render_script
 from .preflight import run_preflight
@@ -32,6 +34,40 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
     )
 
 
+def _cli_progress(p: DownloadProgress) -> None:
+    mb_down = p.downloaded / (1024 * 1024)
+    if p.total > 0:
+        mb_total = p.total / (1024 * 1024)
+        pct = int(p.downloaded * 100 / p.total)
+        sys.stdout.write(f"\r[{p.phase}] {mb_down:.1f}/{mb_total:.1f} MB ({pct}%)")
+    else:
+        sys.stdout.write(f"\r[{p.phase}] {mb_down:.1f} MB")
+    sys.stdout.flush()
+
+
+def _auto_download_missing(config: VmConfig, dest_dir: Path) -> None:
+    assets = required_assets(config)
+    missing = [a for a in assets if not a.ok and a.downloadable]
+    if not missing:
+        return
+
+    for asset in missing:
+        if "OpenCore" in asset.name:
+            print(f"Downloading OpenCore image for {config.macos}...")
+            try:
+                path = download_opencore(config.macos, dest_dir, on_progress=_cli_progress)
+                print(f"\nDownloaded: {path}")
+            except DownloadError as exc:
+                print(f"\nOpenCore download failed: {exc}")
+        elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():
+            print(f"Downloading recovery image for {config.macos}...")
+            try:
+                path = download_recovery(config.macos, dest_dir, on_progress=_cli_progress)
+                print(f"\nDownloaded: {path}")
+            except DownloadError as exc:
+                print(f"\nRecovery download failed: {exc}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="osx-next-cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -41,6 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     guide = sub.add_parser("guide")
     guide.add_argument("reason", nargs="?", default="boot issue")
+
+    # Download subcommand
+    dl = sub.add_parser("download", help="Download OpenCore ISOs and macOS recovery images")
+    dl.add_argument("--macos", type=str, required=True, help="macOS target (sonoma, sequoia)")
+    dl.add_argument("--dest", type=str, default="/var/lib/vz/template/iso", help="Destination directory")
+    dl.add_argument("--opencore-only", action="store_true", help="Only download OpenCore ISO")
+    dl.add_argument("--recovery-only", action="store_true", help="Only download recovery image")
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--vmid", type=int, required=True)
@@ -58,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--smbios-rom", type=str, default="")
     common.add_argument("--smbios-model", type=str, default="")
     common.add_argument("--no-smbios", action="store_true", default=False)
+    common.add_argument("--no-download", action="store_true", default=False,
+                        help="Skip auto-download of missing assets")
 
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("--script-out", type=str, default="")
@@ -86,6 +131,9 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(line)
         return 0
 
+    if args.cmd == "download":
+        return _run_download(args)
+
     config = _config_from_args(args)
     issues = validate_config(config)
     if issues:
@@ -95,6 +143,14 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     assets = required_assets(config)
     missing = [a for a in assets if not a.ok]
+
+    if missing and not getattr(args, "no_download", False):
+        dest_dir = Path("/var/lib/vz/template/iso")
+        _auto_download_missing(config, dest_dir)
+        # Re-check after download
+        assets = required_assets(config)
+        missing = [a for a in assets if not a.ok]
+
     if missing:
         for item in missing:
             print(f"MISSING: {item.name}: {item.path}")
@@ -127,6 +183,33 @@ def run_cli(argv: list[str] | None = None) -> int:
     for hint in rollback_hints(snapshot):
         print(f"ROLLBACK: {hint}")
     return 4
+
+
+def _run_download(args: argparse.Namespace) -> int:
+    macos = args.macos
+    dest_dir = Path(args.dest)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ok = True
+
+    if not args.recovery_only:
+        print(f"Downloading OpenCore image for {macos}...")
+        try:
+            path = download_opencore(macos, dest_dir, on_progress=_cli_progress)
+            print(f"\nDownloaded: {path}")
+        except DownloadError as exc:
+            print(f"\nOpenCore download failed: {exc}")
+            ok = False
+
+    if not args.opencore_only:
+        print(f"Downloading recovery image for {macos}...")
+        try:
+            path = download_recovery(macos, dest_dir, on_progress=_cli_progress)
+            print(f"\nDownloaded: {path}")
+        except DownloadError as exc:
+            print(f"\nRecovery download failed: {exc}")
+            ok = False
+
+    return 0 if ok else 5
 
 
 if __name__ == "__main__":

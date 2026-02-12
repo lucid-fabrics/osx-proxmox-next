@@ -13,6 +13,7 @@ def test_cli_parser_has_expected_commands() -> None:
     assert "plan" in cmds
     assert "apply" in cmds
     assert "bundle" in cmds
+    assert "download" in cmds
 
 
 def test_cli_preflight(monkeypatch):
@@ -221,13 +222,12 @@ def test_cli_no_smbios():
 
 
 def test_cli_main_block(monkeypatch):
-    """Cover the if __name__ == '__main__' block (line 131)."""
+    """Cover the if __name__ == '__main__' block."""
     from osx_proxmox_next.preflight import PreflightCheck
     monkeypatch.setattr(
         cli_module, "run_preflight",
         lambda: [PreflightCheck("qm available", True, "/usr/sbin/qm")],
     )
-    # Simulate running cli module as __main__
     import runpy
     import sys
     monkeypatch.setattr(sys, "argv", ["osx-next-cli", "preflight"])
@@ -235,3 +235,260 @@ def test_cli_main_block(monkeypatch):
         runpy.run_module("osx_proxmox_next.cli", run_name="__main__")
     except SystemExit as e:
         assert e.code == 0
+
+
+def test_cli_progress_with_total():
+    from osx_proxmox_next.cli import _cli_progress
+    from osx_proxmox_next.downloader import DownloadProgress
+    p = DownloadProgress(downloaded=1048576, total=2097152, phase="opencore")
+    _cli_progress(p)
+
+
+def test_cli_progress_without_total():
+    from osx_proxmox_next.cli import _cli_progress
+    from osx_proxmox_next.downloader import DownloadProgress
+    p = DownloadProgress(downloaded=1048576, total=0, phase="recovery")
+    _cli_progress(p)
+
+
+def test_auto_download_missing_opencore(monkeypatch, tmp_path):
+    from osx_proxmox_next.cli import _auto_download_missing
+    from osx_proxmox_next.assets import AssetCheck
+
+    downloaded = []
+
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
+    )
+    monkeypatch.setattr(
+        cli_module, "download_opencore",
+        lambda macos, dest, on_progress=None: (downloaded.append("oc"), tmp_path / "oc.iso")[1],
+    )
+
+    from osx_proxmox_next.domain import VmConfig
+    cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
+                   memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    _auto_download_missing(cfg, tmp_path)
+    assert "oc" in downloaded
+
+
+def test_auto_download_missing_recovery(monkeypatch, tmp_path):
+    from osx_proxmox_next.cli import _auto_download_missing
+    from osx_proxmox_next.assets import AssetCheck
+
+    downloaded = []
+
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True)],
+    )
+    monkeypatch.setattr(
+        cli_module, "download_recovery",
+        lambda macos, dest, on_progress=None: (downloaded.append("rec"), tmp_path / "rec.img")[1],
+    )
+
+    from osx_proxmox_next.domain import VmConfig
+    cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
+                   memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    _auto_download_missing(cfg, tmp_path)
+    assert "rec" in downloaded
+
+
+def test_auto_download_missing_opencore_error(monkeypatch, tmp_path):
+    from osx_proxmox_next.cli import _auto_download_missing
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.downloader import DownloadError
+
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
+    )
+
+    def fail_download(macos, dest, on_progress=None):
+        raise DownloadError("network error")
+
+    monkeypatch.setattr(cli_module, "download_opencore", fail_download)
+
+    from osx_proxmox_next.domain import VmConfig
+    cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
+                   memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    _auto_download_missing(cfg, tmp_path)  # Should not raise
+
+
+def test_auto_download_missing_recovery_error(monkeypatch, tmp_path):
+    from osx_proxmox_next.cli import _auto_download_missing
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.downloader import DownloadError
+
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True)],
+    )
+
+    def fail_download(macos, dest, on_progress=None):
+        raise DownloadError("network error")
+
+    monkeypatch.setattr(cli_module, "download_recovery", fail_download)
+
+    from osx_proxmox_next.domain import VmConfig
+    cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
+                   memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    _auto_download_missing(cfg, tmp_path)  # Should not raise
+
+
+def test_auto_download_missing_unknown_asset_type(monkeypatch, tmp_path):
+    """Asset with unknown name is silently skipped."""
+    from osx_proxmox_next.cli import _auto_download_missing
+    from osx_proxmox_next.assets import AssetCheck
+
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("Unknown Asset", Path("/tmp/unknown"), False, "missing", downloadable=True)],
+    )
+
+    from osx_proxmox_next.domain import VmConfig
+    cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
+                   memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    _auto_download_missing(cfg, tmp_path)  # Should not raise, just skip
+
+
+def test_auto_download_missing_nothing_downloadable(monkeypatch, tmp_path):
+    from osx_proxmox_next.cli import _auto_download_missing
+    from osx_proxmox_next.assets import AssetCheck
+
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
+    )
+
+    from osx_proxmox_next.domain import VmConfig
+    cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
+                   memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    _auto_download_missing(cfg, tmp_path)  # No-op, nothing missing
+
+
+def test_cli_download_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        cli_module, "download_opencore",
+        lambda macos, dest, on_progress=None: tmp_path / f"opencore-{macos}.iso",
+    )
+    monkeypatch.setattr(
+        cli_module, "download_recovery",
+        lambda macos, dest, on_progress=None: tmp_path / f"{macos}-recovery.img",
+    )
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path)])
+    assert rc == 0
+
+
+def test_cli_download_opencore_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        cli_module, "download_opencore",
+        lambda macos, dest, on_progress=None: tmp_path / f"opencore-{macos}.iso",
+    )
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path), "--opencore-only"])
+    assert rc == 0
+
+
+def test_cli_download_recovery_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        cli_module, "download_recovery",
+        lambda macos, dest, on_progress=None: tmp_path / f"{macos}-recovery.img",
+    )
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path), "--recovery-only"])
+    assert rc == 0
+
+
+def test_cli_download_failure(monkeypatch, tmp_path):
+    from osx_proxmox_next.downloader import DownloadError
+    monkeypatch.setattr(
+        cli_module, "download_opencore",
+        lambda macos, dest, on_progress=None: (_ for _ in ()).throw(DownloadError("fail")),
+    )
+    monkeypatch.setattr(
+        cli_module, "download_recovery",
+        lambda macos, dest, on_progress=None: (_ for _ in ()).throw(DownloadError("fail")),
+    )
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path)])
+    assert rc == 5
+
+
+def test_cli_apply_no_download_flag(monkeypatch):
+    from osx_proxmox_next.assets import AssetCheck
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
+    )
+    monkeypatch.setattr(
+        cli_module, "suggested_fetch_commands",
+        lambda cfg: ["# fetch oc"],
+    )
+    rc = run_cli([
+        "apply",
+        "--vmid", "900",
+        "--name", "macos-sequoia",
+        "--macos", "sequoia",
+        "--cores", "8",
+        "--memory", "16384",
+        "--disk", "128",
+        "--bridge", "vmbr0",
+        "--storage", "local-lvm",
+        "--no-download",
+    ])
+    assert rc == 3
+
+
+def test_cli_download_both_exclusive_flags(monkeypatch, tmp_path):
+    """Passing both --opencore-only and --recovery-only results in no downloads."""
+    oc_called = []
+    rec_called = []
+    monkeypatch.setattr(
+        cli_module, "download_opencore",
+        lambda macos, dest, on_progress=None: oc_called.append(1),
+    )
+    monkeypatch.setattr(
+        cli_module, "download_recovery",
+        lambda macos, dest, on_progress=None: rec_called.append(1),
+    )
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path),
+                  "--opencore-only", "--recovery-only"])
+    assert rc == 0
+    assert oc_called == []
+    assert rec_called == []
+
+
+def test_cli_auto_download_on_missing(monkeypatch, tmp_path):
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    call_count = [0]
+
+    def fake_required_assets(cfg):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)]
+        return [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")]
+
+    monkeypatch.setattr(cli_module, "required_assets", fake_required_assets)
+    monkeypatch.setattr(cli_module, "_auto_download_missing", lambda cfg, dest: None)
+    monkeypatch.setattr(
+        cli_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli([
+        "apply",
+        "--vmid", "900",
+        "--name", "macos-sequoia",
+        "--macos", "sequoia",
+        "--cores", "8",
+        "--memory", "16384",
+        "--disk", "128",
+        "--bridge", "vmbr0",
+        "--storage", "local-lvm",
+    ])
+    assert rc == 0

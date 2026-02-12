@@ -148,6 +148,20 @@ def test_suggested_fetch_non_tahoe():
     assert not any("Tahoe" in c for c in cmds)
 
 
+def test_suggested_fetch_includes_download_hint():
+    cfg = _cfg("sequoia")
+    cmds = suggested_fetch_commands(cfg)
+    assert any("osx-next-cli download" in c for c in cmds)
+
+
+def test_suggested_fetch_tahoe_opencore_only_hint():
+    cfg = _cfg("tahoe")
+    cfg.disk_gb = 160
+    cmds = suggested_fetch_commands(cfg)
+    assert any("--opencore-only" in c for c in cmds)
+    assert not any("--macos tahoe\n" in c for c in cmds)  # no bare download for tahoe
+
+
 def test_resolve_recovery_tahoe_no_match_then_standard(monkeypatch):
     """tahoe with no match on tahoe patterns falls through to standard recovery search."""
     call_count = [0]
@@ -263,3 +277,55 @@ def test_find_iso_real_with_existing_root(tmp_path, monkeypatch):
     result4 = am._find_iso(["special.iso"])
     assert result4 is not None
     assert result4.name == "special.iso"
+
+
+def test_asset_check_downloadable_opencore(monkeypatch):
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
+    cfg = _cfg("sequoia")
+    checks = required_assets(cfg)
+    opencore = [c for c in checks if "OpenCore" in c.name][0]
+    assert opencore.downloadable is True
+
+
+def test_asset_check_downloadable_recovery(monkeypatch):
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
+    cfg = _cfg("sequoia")
+    checks = required_assets(cfg)
+    recovery = [c for c in checks if "recovery" in c.name.lower() or "installer" in c.name.lower()][0]
+    assert recovery.downloadable is True
+
+
+def test_asset_check_downloadable_tahoe_recovery(monkeypatch):
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
+    cfg = _cfg("tahoe", "/tmp/tahoe.iso")
+    cfg.disk_gb = 160
+    checks = required_assets(cfg)
+    recovery = [c for c in checks if "recovery" in c.name.lower() or "installer" in c.name.lower()][0]
+    assert recovery.downloadable is False
+
+
+def test_resolve_recovery_finds_img(tmp_path, monkeypatch):
+    """Recovery resolver finds .img files."""
+    call_count = [0]
+    def fake_find_iso(patterns):
+        call_count[0] += 1
+        # Should include .img pattern
+        if any(".img" in p for p in patterns):
+            return Path("/var/lib/vz/template/iso/sequoia-recovery.img")
+        return None
+    monkeypatch.setattr(assets_module, "_find_iso", fake_find_iso)
+    cfg = _cfg("sequoia")
+    result = resolve_recovery_or_installer_path(cfg)
+    assert result == Path("/var/lib/vz/template/iso/sequoia-recovery.img")
+
+
+def test_resolve_recovery_finds_dmg(tmp_path, monkeypatch):
+    """Recovery resolver finds .dmg files."""
+    def fake_find_iso(patterns):
+        if any(".dmg" in p for p in patterns):
+            return Path("/var/lib/vz/template/iso/sequoia-recovery.dmg")
+        return None
+    monkeypatch.setattr(assets_module, "_find_iso", fake_find_iso)
+    cfg = _cfg("sequoia")
+    result = resolve_recovery_or_installer_path(cfg)
+    assert result == Path("/var/lib/vz/template/iso/sequoia-recovery.dmg")
