@@ -17,6 +17,9 @@
   <a href="https://ko-fi.com/lucidfabrics">
     <img alt="Support on Ko-fi" src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white">
   </a>
+  <a href="https://buymeacoffee.com/lucidfabrics">
+    <img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black">
+  </a>
 </p>
 
 ---
@@ -51,7 +54,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/wmehanna/osx-proxmox-nex
 
 This clones the repo, sets up a Python venv, and launches the TUI wizard.
 
-> Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/lucidfabrics). ☕
+> Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/lucidfabrics) or a [coffee on BMC](https://buymeacoffee.com/lucidfabrics). ☕
 
 ### 🪄 Wizard Walkthrough
 
@@ -360,6 +363,10 @@ This project is free and open source. Sponsors keep it alive and shape what gets
     <img src="https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=github&logoColor=white" alt="Sponsor on GitHub">
   </a>
   &nbsp;
+  <a href="https://buymeacoffee.com/lucidfabrics">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee">
+  </a>
+  &nbsp;
   <a href="https://ko-fi.com/lucidfabrics">
     <img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
   </a>
@@ -380,6 +387,10 @@ This project is for **testing, lab use, and learning**. Respect Apple licensing 
   If it saved you time, a coffee keeps it going:<br><br>
   <a href="https://ko-fi.com/lucidfabrics">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://buymeacoffee.com/lucidfabrics">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee">
   </a>
   <br><br>
   ⭐ <a href="https://github.com/lucid-fabrics/osx-proxmox-next">Star this repo</a> to help others find it.

@@ -148,7 +148,7 @@ jobs:
             echo 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"'
             echo '```'
             echo ""
-            echo "☕ [Support development on Ko-fi](https://ko-fi.com/lucidfabrics)"
+            echo "☕ Support: [Ko-fi](https://ko-fi.com/lucidfabrics) | [Buy Me a Coffee](https://buymeacoffee.com/lucidfabrics)"
             echo "NOTESEOF"
           } >> "$GITHUB_OUTPUT"
 
