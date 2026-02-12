@@ -963,7 +963,7 @@ class NextApp(App):
             self._append_plan_output(f"Completed. Log: {log_path}")
             if execute:
                 self._append_plan_output("")
-                self._append_plan_output("If this saved you time: https://ko-fi.com/lucidfabrics")
+                self._append_plan_output("If this saved you time: https://ko-fi.com/lucidfabrics | https://buymeacoffee.com/lucidfabrics")
             self._set_stage(4 if not execute else 5)
             return
 

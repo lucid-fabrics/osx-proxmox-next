@@ -120,7 +120,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     if result.ok:
         print(f"Apply OK. Log: {result.log_path}")
         print()
-        print("If this saved you time: https://ko-fi.com/lucidfabrics")
+        print("If this saved you time: https://ko-fi.com/lucidfabrics | https://buymeacoffee.com/lucidfabrics")
         return 0
 
     print(f"Apply FAILED. Log: {result.log_path}")
