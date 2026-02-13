@@ -9,7 +9,7 @@ from .diagnostics import export_log_bundle, recovery_guide
 from .domain import VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
-from .planner import build_plan, render_script
+from .planner import build_plan, build_destroy_plan, fetch_vm_info, render_script
 from .preflight import run_preflight
 from .rollback import create_snapshot, rollback_hints
 
@@ -110,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     apply_cmd = sub.add_parser("apply", parents=[common])
     apply_cmd.add_argument("--execute", action="store_true")
 
+    # Uninstall subcommand
+    uninstall = sub.add_parser("uninstall", help="Destroy an existing macOS VM")
+    uninstall.add_argument("--vmid", type=int, required=True, help="VM ID to destroy")
+    uninstall.add_argument("--purge", action="store_true", help="Also delete all disk images")
+    uninstall.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
+
     return parser
 
 
@@ -133,6 +139,9 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if args.cmd == "download":
         return _run_download(args)
+
+    if args.cmd == "uninstall":
+        return _run_uninstall(args)
 
     config = _config_from_args(args)
     issues = validate_config(config)
@@ -183,6 +192,40 @@ def run_cli(argv: list[str] | None = None) -> int:
     for hint in rollback_hints(snapshot):
         print(f"ROLLBACK: {hint}")
     return 4
+
+
+def _run_uninstall(args: argparse.Namespace) -> int:
+    vmid = args.vmid
+    if vmid < 100 or vmid > 999999:
+        print("ERROR: VMID must be between 100 and 999999.")
+        return 2
+
+    if args.execute:
+        info = fetch_vm_info(vmid)
+        if info is None:
+            print(f"ERROR: VM {vmid} not found.")
+            return 2
+        print(f"VM {vmid}: {info.name} ({info.status})")
+        snapshot = create_snapshot(vmid)
+        print(f"Snapshot saved: {snapshot.path}")
+    else:
+        print(f"Target: VM {vmid}")
+
+    steps = build_destroy_plan(vmid, purge=args.purge)
+
+    if not args.execute:
+        for idx, step in enumerate(steps, start=1):
+            print(f"{idx:02d}. {step.title}")
+            print(f"    {step.command}")
+        return 0
+
+    result = apply_plan(steps, execute=True)
+    if result.ok:
+        print(f"Destroy OK. Log: {result.log_path}")
+        return 0
+
+    print(f"Destroy FAILED. Log: {result.log_path}")
+    return 6
 
 
 def _run_download(args: argparse.Namespace) -> int:

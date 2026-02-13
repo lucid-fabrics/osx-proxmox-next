@@ -1,5 +1,6 @@
 from osx_proxmox_next.domain import VmConfig
-from osx_proxmox_next.planner import build_plan, render_script
+from osx_proxmox_next.planner import build_plan, render_script, VmInfo, fetch_vm_info, build_destroy_plan
+from osx_proxmox_next.infrastructure import CommandResult
 
 
 def _cfg(macos: str) -> VmConfig:
@@ -195,3 +196,101 @@ def test_render_script_simple() -> None:
     assert "#!/usr/bin/env bash" in script
     assert "qm create 901" in script
     assert "Build OpenCore boot disk" in script
+
+
+# ── Destroy Plan Tests ─────────────────────────────────────────────
+
+
+def test_build_destroy_plan_basic() -> None:
+    steps = build_destroy_plan(106)
+    assert len(steps) == 2
+    assert steps[0].title == "Stop VM"
+    assert steps[1].title == "Destroy VM"
+    assert "qm stop 106" in steps[0].command
+    assert "qm destroy 106" in steps[1].command
+    assert "--purge" not in steps[1].command
+
+
+def test_build_destroy_plan_with_purge() -> None:
+    steps = build_destroy_plan(106, purge=True)
+    assert "--purge" in steps[1].command
+
+
+def test_build_destroy_plan_risk_levels() -> None:
+    steps = build_destroy_plan(200)
+    assert steps[0].risk == "warn"
+    assert steps[1].risk == "warn"
+
+
+def test_build_destroy_plan_vmid_in_commands() -> None:
+    steps = build_destroy_plan(42)
+    assert "42" in steps[0].command
+    assert "42" in steps[1].command
+
+
+def test_fetch_vm_info_exists() -> None:
+    class FakeAdapter:
+        def run(self, argv):
+            if argv[1] == "status":
+                return CommandResult(ok=True, returncode=0, output="status: running")
+            if argv[1] == "config":
+                return CommandResult(ok=True, returncode=0, output="name: macos-test\ncores: 8\nmemory: 16384")
+            return CommandResult(ok=False, returncode=1, output="")
+
+    info = fetch_vm_info(106, adapter=FakeAdapter())
+    assert info is not None
+    assert info.vmid == 106
+    assert info.name == "macos-test"
+    assert info.status == "running"
+    assert "cores: 8" in info.config_raw
+
+
+def test_fetch_vm_info_stopped() -> None:
+    class FakeAdapter:
+        def run(self, argv):
+            if argv[1] == "status":
+                return CommandResult(ok=True, returncode=0, output="status: stopped")
+            if argv[1] == "config":
+                return CommandResult(ok=True, returncode=0, output="name: macos-vm\ncores: 4")
+            return CommandResult(ok=False, returncode=1, output="")
+
+    info = fetch_vm_info(200, adapter=FakeAdapter())
+    assert info is not None
+    assert info.status == "stopped"
+    assert info.name == "macos-vm"
+
+
+def test_fetch_vm_info_not_found() -> None:
+    class FakeAdapter:
+        def run(self, argv):
+            return CommandResult(ok=False, returncode=255, output="Configuration file not found")
+
+    info = fetch_vm_info(999, adapter=FakeAdapter())
+    assert info is None
+
+
+def test_fetch_vm_info_config_failure() -> None:
+    class FakeAdapter:
+        def run(self, argv):
+            if argv[1] == "status":
+                return CommandResult(ok=True, returncode=0, output="status: stopped")
+            return CommandResult(ok=False, returncode=1, output="")
+
+    info = fetch_vm_info(300, adapter=FakeAdapter())
+    assert info is not None
+    assert info.config_raw == ""
+    assert info.name == ""
+
+
+def test_fetch_vm_info_no_name_in_config() -> None:
+    class FakeAdapter:
+        def run(self, argv):
+            if argv[1] == "status":
+                return CommandResult(ok=True, returncode=0, output="status: stopped")
+            if argv[1] == "config":
+                return CommandResult(ok=True, returncode=0, output="cores: 4\nmemory: 8192")
+            return CommandResult(ok=False, returncode=1, output="")
+
+    info = fetch_vm_info(400, adapter=FakeAdapter())
+    assert info is not None
+    assert info.name == ""

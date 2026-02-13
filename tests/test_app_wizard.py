@@ -9,6 +9,7 @@ from textual.widgets import Button, Input, Static
 from osx_proxmox_next import app as app_module
 from osx_proxmox_next.app import NextApp, WizardState
 from osx_proxmox_next.executor import ApplyResult
+from osx_proxmox_next.planner import PlanStep
 
 
 # ── Helper ──────────────────────────────────────────────────────────
@@ -1642,5 +1643,312 @@ def test_rebuild_plan_after_download_no_config(monkeypatch) -> None:
             assert app.state.config is old_config
 
     asyncio.run(_run())
+
+
+# ── Manage Mode Tests ───────────────────────────────────────────────
+
+
+def test_manage_mode_toggle() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            assert not app.state.manage_mode
+            assert not app.query_one("#create_panel").has_class("hidden")
+            assert app.query_one("#manage_panel").has_class("hidden")
+            # Switch to manage
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            assert app.state.manage_mode is True
+            assert app.query_one("#create_panel").has_class("hidden")
+            assert not app.query_one("#manage_panel").has_class("hidden")
+            assert app.query_one("#mode_manage").has_class("mode_active")
+            assert not app.query_one("#mode_create").has_class("mode_active")
+            # Switch back to create
+            await pilot.click("#mode_create")
+            await pilot.pause()
+            assert app.state.manage_mode is False
+            assert not app.query_one("#create_panel").has_class("hidden")
+            assert app.query_one("#manage_panel").has_class("hidden")
+
+    asyncio.run(_run())
+
+
+def test_manage_vm_list_populated(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        if cmd[0] == "qm" and cmd[1] == "list":
+            return "VMID  NAME          STATUS\n106   macos-test    running\n200   macos-dev     stopped\n"
+        raise Exception("not found")
+
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.uninstall_vm_list:
+                    break
+            display = str(app.query_one("#vm_list_display", Static).content)
+            assert "106" in display
+            assert "macos-test" in display
+
+    asyncio.run(_run())
+
+
+def test_manage_vm_list_empty(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        raise Exception("qm not found")
+
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+            display = str(app.query_one("#vm_list_display", Static).content)
+            assert "No VMs found" in display
+
+    asyncio.run(_run())
+
+
+def test_manage_vmid_input_enables_destroy() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            assert app.query_one("#manage_destroy_btn", Button).disabled is True
+            app.query_one("#manage_vmid", Input).value = "106"
+            await pilot.pause()
+            assert app.query_one("#manage_destroy_btn", Button).disabled is False
+
+    asyncio.run(_run())
+
+
+def test_manage_vmid_invalid_keeps_destroy_disabled() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "abc"
+            await pilot.pause()
+            assert app.query_one("#manage_destroy_btn", Button).disabled is True
+
+    asyncio.run(_run())
+
+
+def test_manage_vmid_out_of_range() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "5"
+            await pilot.pause()
+            assert app.query_one("#manage_destroy_btn", Button).disabled is True
+
+    asyncio.run(_run())
+
+
+def test_manage_purge_toggle() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            assert app.state.uninstall_purge is True
+            assert "ON" in str(app.query_one("#manage_purge_btn", Button).label)
+            # Toggle OFF
+            app._toggle_purge()
+            await pilot.pause()
+            assert app.state.uninstall_purge is False
+            assert "OFF" in str(app.query_one("#manage_purge_btn", Button).label)
+            # Toggle back ON
+            app._toggle_purge()
+            await pilot.pause()
+            assert app.state.uninstall_purge is True
+            assert "ON" in str(app.query_one("#manage_purge_btn", Button).label)
+
+    asyncio.run(_run())
+
+
+def test_manage_destroy_blocked_while_running() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.uninstall_running = True
+            app._run_destroy()
+            # No crash, early return
+
+    asyncio.run(_run())
+
+
+def test_manage_destroy_invalid_vmid_noop() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "abc"
+            app._run_destroy()
+            assert app.state.uninstall_running is False
+
+    asyncio.run(_run())
+
+
+def test_manage_destroy_vmid_out_of_range_noop() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "50"
+            app._run_destroy()
+            assert app.state.uninstall_running is False
+
+    asyncio.run(_run())
+
+
+def test_manage_destroy_success(monkeypatch) -> None:
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    monkeypatch.setattr(
+        app_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
+    )
+
+    def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
+        for idx, step in enumerate(steps, start=1):
+            if on_step:
+                on_step(idx, len(steps), step, None)
+                class _R:
+                    ok = True
+                    returncode = 0
+                on_step(idx, len(steps), step, _R())
+        return ApplyResult(ok=True, results=[], log_path=Path("/tmp/destroy.log"))
+
+    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "106"
+            await pilot.pause()
+            await pilot.click("#manage_destroy_btn")
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.uninstall_done:
+                    break
+            assert app.state.uninstall_ok is True
+            result_text = str(app.query_one("#manage_result", Static).content)
+            assert "successfully" in result_text
+
+    asyncio.run(_run())
+
+
+def test_manage_destroy_failure(monkeypatch) -> None:
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    monkeypatch.setattr(
+        app_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
+    )
+    monkeypatch.setattr(
+        app_module, "apply_plan",
+        lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(
+            ok=False, results=[], log_path=Path("/tmp/fail.log")
+        ),
+    )
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "106"
+            await pilot.pause()
+            await pilot.click("#manage_destroy_btn")
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.uninstall_done:
+                    break
+            assert app.state.uninstall_ok is False
+            result_text = str(app.query_one("#manage_result", Static).content)
+            assert "FAILED" in result_text
+
+    asyncio.run(_run())
+
+
+def test_manage_update_destroy_log() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_log").remove_class("hidden")
+            app._update_destroy_log(1, 2, "Stop VM", None)
+            log_text = str(app.query_one("#manage_log", Static).content)
+            assert "Running 1/2" in log_text
+
+            class FakeResult:
+                ok = True
+            app._update_destroy_log(2, 2, "Destroy VM", FakeResult())
+            log_text = str(app.query_one("#manage_log", Static).content)
+            assert "OK 2/2" in log_text
+
+    asyncio.run(_run())
+
+
+def test_manage_finish_destroy_refreshes_list(monkeypatch) -> None:
+    refresh_calls = []
+    monkeypatch.setattr(NextApp, "_refresh_vm_list", lambda self: refresh_calls.append(1))
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "106"
+            await pilot.pause()
+            app.state.uninstall_running = True
+            app._finish_destroy(ok=True, log_path=Path("/tmp/log.txt"))
+            assert app.state.uninstall_running is False
+            assert len(refresh_calls) > 0
+
+    asyncio.run(_run())
+
+
+def test_wizard_state_manage_defaults() -> None:
+    state = WizardState()
+    assert state.manage_mode is False
+    assert state.uninstall_vm_list == []
+    assert state.uninstall_purge is True
+    assert state.uninstall_running is False
+    assert state.uninstall_done is False
+    assert state.uninstall_ok is False
 
 

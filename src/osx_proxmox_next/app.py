@@ -16,7 +16,7 @@ from .defaults import DEFAULT_BRIDGE, DEFAULT_STORAGE, default_disk_gb, detect_c
 from .domain import SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
-from .planner import PlanStep, build_plan
+from .planner import PlanStep, build_plan, build_destroy_plan, fetch_vm_info
 from .preflight import run_preflight
 from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
 from .smbios import generate_smbios, SmbiosIdentity
@@ -63,6 +63,14 @@ class WizardState:
     live_ok: bool = False
     live_log: Path | None = None
     snapshot: RollbackSnapshot | None = None
+    # Manage mode
+    manage_mode: bool = False
+    uninstall_vm_list: list = field(default_factory=list)
+    uninstall_purge: bool = True
+    uninstall_log: list[str] = field(default_factory=list)
+    uninstall_running: bool = False
+    uninstall_done: bool = False
+    uninstall_ok: bool = False
 
 
 class NextApp(App):
@@ -178,6 +186,37 @@ class NextApp(App):
     }
 
     .hidden { display: none; }
+
+    .mode_btn { margin: 0 1 1 0; min-width: 18; }
+    .mode_active { border: heavy #2ec27e; background: #0f2a1a; }
+
+    #manage_panel { height: auto; padding: 1; }
+
+    #manage_vmid { width: 30; }
+
+    #vm_list_display {
+        background: #0d1722;
+        border: tall #1f4f7a;
+        padding: 1;
+        height: 8;
+        overflow: auto;
+    }
+
+    #manage_log {
+        background: #0d1722;
+        border: tall #1f4f7a;
+        padding: 1;
+        height: 8;
+        overflow: auto;
+    }
+
+    #manage_result {
+        border: heavy #2ec27e;
+        padding: 1;
+        height: auto;
+        margin-top: 1;
+    }
+    .manage_result_fail { border: heavy #d44f4f; }
     """
 
     BINDINGS = [
@@ -196,19 +235,37 @@ class NextApp(App):
         yield Static("", id="step_bar")
 
         with Container(id="body"):
-            # Step 1 — Choose OS
+            # Step 1 — Choose OS / Manage VMs
             with Vertical(id="step1", classes="step_container"):
-                yield Static("Choose macOS Version")
-                with Horizontal(id="os_cards"):
-                    for key, meta in SUPPORTED_MACOS.items():
-                        channel = "STABLE" if meta["channel"] == "stable" else "PREVIEW"
-                        yield Button(
-                            f"{meta['label']}\n{channel}",
-                            id=f"os_{key}",
-                            classes="os_card",
-                        )
-                with Horizontal(classes="nav_row"):
-                    yield Button("Next", id="next_btn", disabled=True)
+                with Horizontal(classes="action_row"):
+                    yield Button("Create VM", id="mode_create", classes="mode_btn mode_active")
+                    yield Button("Manage VMs", id="mode_manage", classes="mode_btn")
+                # Create panel
+                with Vertical(id="create_panel"):
+                    yield Static("Choose macOS Version")
+                    with Horizontal(id="os_cards"):
+                        for key, meta in SUPPORTED_MACOS.items():
+                            channel = "STABLE" if meta["channel"] == "stable" else "PREVIEW"
+                            yield Button(
+                                f"{meta['label']}\n{channel}",
+                                id=f"os_{key}",
+                                classes="os_card",
+                            )
+                    with Horizontal(classes="nav_row"):
+                        yield Button("Next", id="next_btn", disabled=True)
+                # Manage panel
+                with Vertical(id="manage_panel", classes="hidden"):
+                    yield Static("Manage VMs")
+                    yield Static("", id="vm_list_display")
+                    with Horizontal(classes="action_row"):
+                        yield Button("Refresh List", id="manage_refresh_btn")
+                    yield Static("VMID to destroy:", classes="label")
+                    yield Input(value="", id="manage_vmid", placeholder="e.g. 106")
+                    with Horizontal(classes="action_row"):
+                        yield Button("Purge disks: ON", id="manage_purge_btn")
+                        yield Button("Destroy VM", id="manage_destroy_btn", disabled=True)
+                    yield Static("", id="manage_log", classes="hidden")
+                    yield Static("", id="manage_result", classes="hidden")
 
             # Step 2 — Choose Storage
             with Vertical(id="step2", classes="step_container step_hidden"):
@@ -322,6 +379,11 @@ class NextApp(App):
             "smbios_btn": self._generate_smbios,
             "dry_run_btn": self._run_dry_apply,
             "install_btn": self._run_live_install,
+            "mode_create": lambda: self._toggle_mode("create"),
+            "mode_manage": lambda: self._toggle_mode("manage"),
+            "manage_refresh_btn": self._refresh_vm_list,
+            "manage_purge_btn": self._toggle_purge,
+            "manage_destroy_btn": self._run_destroy,
         }
         handler = handlers.get(bid)
         if handler:
@@ -331,6 +393,8 @@ class NextApp(App):
         target_ids = {"vmid", "name", "memory", "disk", "bridge", "storage_input", "installer_path"}
         if (event.input.id or "") in target_ids:
             self._validate_form(quiet=True)
+        if event.input.id == "manage_vmid":
+            self._validate_manage_vmid()
 
     # ── Navigation ──────────────────────────────────────────────────
 
@@ -769,6 +833,121 @@ class NextApp(App):
                 lines.extend(rollback_hints(snapshot))
             result_box.update("\n".join(lines))
             self.notify("Install failed", severity="error")
+
+    # ── Manage Mode ─────────────────────────────────────────────────
+
+    def _toggle_mode(self, mode: str) -> None:
+        is_manage = mode == "manage"
+        self.state.manage_mode = is_manage
+        create_btn = self.query_one("#mode_create", Button)
+        manage_btn = self.query_one("#mode_manage", Button)
+        create_panel = self.query_one("#create_panel")
+        manage_panel = self.query_one("#manage_panel")
+
+        if is_manage:
+            create_panel.add_class("hidden")
+            manage_panel.remove_class("hidden")
+            create_btn.remove_class("mode_active")
+            manage_btn.add_class("mode_active")
+            self._refresh_vm_list()
+        else:
+            manage_panel.add_class("hidden")
+            create_panel.remove_class("hidden")
+            manage_btn.remove_class("mode_active")
+            create_btn.add_class("mode_active")
+
+    def _refresh_vm_list(self) -> None:
+        Thread(target=self._vm_list_worker, daemon=True).start()
+
+    def _vm_list_worker(self) -> None:
+        try:
+            output = check_output(["qm", "list"], text=True, timeout=5.0)
+            lines = output.strip().splitlines()
+            self.call_from_thread(self._finish_vm_list, lines)
+        except Exception:
+            self.call_from_thread(self._finish_vm_list, [])
+
+    def _finish_vm_list(self, lines: list[str]) -> None:
+        self.state.uninstall_vm_list = lines
+        display = self.query_one("#vm_list_display", Static)
+        if lines:
+            display.update("\n".join(lines[:20]))
+        else:
+            display.update("No VMs found or qm not available.")
+
+    def _validate_manage_vmid(self) -> None:
+        text = self.query_one("#manage_vmid", Input).value.strip()
+        btn = self.query_one("#manage_destroy_btn", Button)
+        try:
+            vmid = int(text)
+            btn.disabled = vmid < 100 or vmid > 999999
+        except ValueError:
+            btn.disabled = True
+
+    def _toggle_purge(self) -> None:
+        self.state.uninstall_purge = not self.state.uninstall_purge
+        btn = self.query_one("#manage_purge_btn", Button)
+        if self.state.uninstall_purge:
+            btn.label = "Purge disks: ON"
+        else:
+            btn.label = "Purge disks: OFF"
+
+    def _run_destroy(self) -> None:
+        if self.state.uninstall_running:
+            return
+        text = self.query_one("#manage_vmid", Input).value.strip()
+        try:
+            vmid = int(text)
+        except ValueError:
+            return
+        if vmid < 100 or vmid > 999999:
+            return
+
+        self.state.uninstall_running = True
+        self.state.uninstall_done = False
+        self.state.uninstall_log = []
+        self.query_one("#manage_destroy_btn", Button).disabled = True
+        self.query_one("#manage_log").remove_class("hidden")
+        self.query_one("#manage_log", Static).update("Starting destroy...")
+        self.query_one("#manage_result").add_class("hidden")
+
+        Thread(target=self._destroy_worker, args=(vmid,), daemon=True).start()
+
+    def _destroy_worker(self, vmid: int) -> None:
+        snapshot = create_snapshot(vmid)
+        steps = build_destroy_plan(vmid, purge=self.state.uninstall_purge)
+
+        def on_step(idx: int, total: int, step: PlanStep, result: object) -> None:
+            self.call_from_thread(self._update_destroy_log, idx, total, step.title, result)
+
+        result = apply_plan(steps, execute=True, on_step=on_step)
+        self.call_from_thread(self._finish_destroy, result.ok, result.log_path)
+
+    def _update_destroy_log(self, idx: int, total: int, title: str, result: object) -> None:
+        if result is None:
+            self.state.uninstall_log.append(f"Running {idx}/{total}: {title}")
+        else:
+            ok = getattr(result, "ok", False)
+            self.state.uninstall_log.append(f"{'OK' if ok else 'FAIL'} {idx}/{total}: {title}")
+        visible = self.state.uninstall_log[-10:]
+        self.query_one("#manage_log", Static).update("\n".join(visible))
+
+    def _finish_destroy(self, ok: bool, log_path: Path) -> None:
+        self.state.uninstall_running = False
+        self.state.uninstall_done = True
+        self.state.uninstall_ok = ok
+        self._validate_manage_vmid()
+
+        result_box = self.query_one("#manage_result", Static)
+        result_box.remove_class("hidden")
+
+        if ok:
+            result_box.remove_class("manage_result_fail")
+            result_box.update(f"VM destroyed successfully.\nLog: {log_path}")
+            self._refresh_vm_list()
+        else:
+            result_box.add_class("manage_result_fail")
+            result_box.update(f"Destroy FAILED.\nLog: {log_path}")
 
     # ── Preflight Worker ────────────────────────────────────────────
 
