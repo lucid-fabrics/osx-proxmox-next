@@ -37,8 +37,6 @@ def validate_config(config: VmConfig) -> list[str]:
         issues.append("VM name must be at least 3 characters.")
     if config.macos not in SUPPORTED_MACOS:
         issues.append("macOS version must be one of: sonoma, sequoia, tahoe.")
-    if config.macos == "tahoe" and not config.installer_path:
-        issues.append("Tahoe requires installer_path to a full installer image.")
     if config.cores < 2:
         issues.append("At least 2 CPU cores are required.")
     if config.memory_mb < 4096:

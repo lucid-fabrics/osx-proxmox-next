@@ -247,7 +247,7 @@ def test_validate_form_branches() -> None:
     asyncio.run(_run())
 
 
-def test_validate_tahoe_no_installer() -> None:
+def test_validate_tahoe_no_installer_ok() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
@@ -255,9 +255,10 @@ def test_validate_tahoe_no_installer() -> None:
             await pilot.click("#goto_step2")
             app.query_one("#macos", Input).value = "tahoe"
             app.query_one("#installer_path", Input).value = ""
+            app.query_one("#disk", Input).value = "160"
             result = app._validate_form_inputs(quiet=False)
-            assert result is False
-            assert app.query_one("#installer_path", Input).has_class("invalid")
+            assert result is True
+            assert not app.query_one("#installer_path", Input).has_class("invalid")
 
     asyncio.run(_run())
 
@@ -550,16 +551,15 @@ def test_validate_only_flow(monkeypatch) -> None:
     asyncio.run(_run())
 
 
-def test_handle_validation_tahoe_toggle() -> None:
+def test_handle_validation_generic_issues_display() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
             await pilot.click("#nav_wizard")
             await pilot.click("#goto_step2")
-            app._handle_validation_issues(["Tahoe requires installer_path to a full installer image."])
+            app._handle_validation_issues(["VMID must be between 100 and 999999."])
             await pilot.pause()
-            assert not app.query_one("#advanced_section").has_class("hidden")
-            assert "Tahoe" in app.wizard_status_text
+            assert "Validation failed" in app.wizard_status_text
 
     asyncio.run(_run())
 
@@ -885,7 +885,7 @@ def test_generate_plan_read_form_none() -> None:
     asyncio.run(_run())
 
 
-def test_generate_plan_domain_validation_fails() -> None:
+def test_generate_plan_domain_validation_fails(monkeypatch) -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
@@ -893,11 +893,13 @@ def test_generate_plan_domain_validation_fails() -> None:
             await pilot.click("#goto_step2")
             await pilot.click("#defaults")
             await pilot.pause()
-            app.query_one("#macos", Input).value = "tahoe"
-            app.query_one("#installer_path", Input).value = ""
+            # Monkeypatch validate_config to return issues
+            monkeypatch.setattr(
+                app_module, "validate_config",
+                lambda cfg: ["Fake domain validation error."],
+            )
             app.action_generate_plan()
             await pilot.pause()
-            # Tahoe without installer triggers validation or domain error
             assert app.last_steps == []
 
     asyncio.run(_run())
@@ -937,7 +939,7 @@ def test_validate_only_read_form_none() -> None:
     asyncio.run(_run())
 
 
-def test_validate_only_with_issues() -> None:
+def test_validate_only_with_issues(monkeypatch) -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
@@ -945,11 +947,13 @@ def test_validate_only_with_issues() -> None:
             await pilot.click("#goto_step2")
             await pilot.click("#defaults")
             await pilot.pause()
-            app.query_one("#macos", Input).value = "tahoe"
-            app.query_one("#installer_path", Input).value = ""
+            monkeypatch.setattr(
+                app_module, "validate_config",
+                lambda cfg: ["Fake domain error."],
+            )
             app._validate_only()
             await pilot.pause()
-            assert "Tahoe" in app.wizard_status_text or "Validation" in app.wizard_status_text
+            assert "Validation failed" in app.wizard_status_text
 
     asyncio.run(_run())
 
@@ -961,27 +965,25 @@ def test_handle_validation_tahoe_autofill_success(monkeypatch) -> None:
             await pilot.click("#nav_wizard")
             await pilot.click("#goto_step2")
             app.query_one("#macos", Input).value = "tahoe"
+            # Pre-set installer path to simulate autofill finding a file
             app.query_one("#installer_path", Input).value = "/tmp/tahoe.iso"
-            app._handle_validation_issues(["Tahoe requires installer_path to a full installer image."])
+            result = app._autofill_tahoe_installer_path()
             await pilot.pause()
-            assert "Tahoe installer detected automatically" in app.wizard_status_text
+            # autofill returns True when installer_path is already set
+            assert result is True
 
     asyncio.run(_run())
 
 
-def test_handle_validation_tahoe_advanced_already_shown() -> None:
+def test_handle_validation_issues_shows_error() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
             await pilot.click("#nav_wizard")
             await pilot.click("#goto_step2")
-            # Show advanced first
-            app._toggle_advanced()
+            app._handle_validation_issues(["Some validation error."])
             await pilot.pause()
-            app.query_one("#macos", Input).value = "tahoe"
-            app._handle_validation_issues(["Tahoe requires installer_path to a full installer image."])
-            await pilot.pause()
-            assert "Tahoe" in app.wizard_status_text
+            assert "Validation failed" in app.wizard_status_text
 
     asyncio.run(_run())
 
@@ -1209,13 +1211,13 @@ def test_generate_plan_domain_issues(monkeypatch) -> None:
             await pilot.pause()
             monkeypatch.setattr(app, "_validate_form_inputs", lambda quiet=False: True)
             monkeypatch.setattr(app, "_read_form", lambda: VmConfig(
-                vmid=900, name="macos-tahoe", macos="tahoe", cores=8,
-                memory_mb=16384, disk_gb=160, bridge="vmbr0", storage="local-lvm",
+                vmid=900, name="macos-sequoia", macos="sequoia", cores=1,
+                memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm",
                 installer_path="",
             ))
             app.action_generate_plan()
             await pilot.pause()
-            assert app.last_steps == []  # plan not generated due to domain validation
+            assert app.last_steps == []  # plan not generated due to domain validation (cores < 2)
 
     asyncio.run(_run())
 

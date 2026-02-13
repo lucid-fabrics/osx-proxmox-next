@@ -575,24 +575,6 @@ class NextApp(App):
         self._show_step_page(3)
 
     def _handle_validation_issues(self, issues: list[str]) -> None:
-        joined = "\n".join(issues).lower()
-        tahoe_missing_installer = "tahoe requires installer_path" in joined
-        if tahoe_missing_installer:
-            if self._autofill_tahoe_installer_path():
-                self._set_wizard_status("Tahoe installer detected automatically. Retry Apply/Review.")
-                return
-            self._set_stage(2)
-            self._show_step_page(2)
-            section = self.query_one("#advanced_section")
-            if section.has_class("hidden"):
-                self._toggle_advanced()
-            self._set_wizard_status(
-                "Tahoe needs a full installer ISO. In Step 2 Advanced, set Installer Path "
-                "to a Tahoe full image (example: /var/lib/vz/template/iso/macos-tahoe-full.iso)."
-            )
-            self.notify("Set Tahoe Installer Path in Advanced options", severity="warning")
-            return
-
         self._set_wizard_status("Validation failed:\n" + "\n".join(f"- {issue}" for issue in issues))
         self.notify("Validation failed", severity="error")
 
@@ -944,9 +926,6 @@ class NextApp(App):
             invalid["#storage"] = True
             errors.append("Storage target is required.")
 
-        if macos_text == "tahoe" and not installer_text:
-            invalid["#installer_path"] = True
-            errors.append("Tahoe requires a full installer path.")
 
         for selector, is_invalid in invalid.items():
             widget = self.query_one(selector, Input)
