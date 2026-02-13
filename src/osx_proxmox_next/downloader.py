@@ -50,23 +50,33 @@ _MAX_RETRIES = 3
 _BACKOFF_SECONDS = [1, 2, 4]
 
 
+_OPENCORE_UNIVERSAL = "opencore-osx-proxmox-vm.iso"
+
+
 def download_opencore(
     macos: str,
     dest_dir: Path,
     on_progress: ProgressCallback = None,
 ) -> Path:
     version = __version__
-    asset_name = f"opencore-{macos}.iso"
-    dest = dest_dir / asset_name
-
-    if dest.exists():
-        return dest
+    # Try version-specific first, fall back to universal OC image
+    candidates = [f"opencore-{macos}.iso", _OPENCORE_UNIVERSAL]
+    for name in candidates:
+        dest = dest_dir / name
+        if dest.exists():
+            return dest
 
     release = _fetch_github_release(version)
-    browser_url = _find_release_asset(release, asset_name)
-
-    _download_file(browser_url, dest, on_progress, "opencore")
-    return dest
+    for name in candidates:
+        url = _find_release_asset(release, name, required=False)
+        if url:
+            dest = dest_dir / name
+            _download_file(url, dest, on_progress, "opencore")
+            return dest
+    raise DownloadError(
+        f"No OpenCore asset found in release '{release.get('tag_name', '?')}'. "
+        f"Tried: {', '.join(candidates)}"
+    )
 
 
 def download_recovery(
@@ -139,15 +149,17 @@ def _fetch_github_release(version: str) -> dict:
         ) from exc
 
 
-def _find_release_asset(release: dict, asset_name: str) -> str:
+def _find_release_asset(release: dict, asset_name: str, *, required: bool = True) -> str:
     for asset in release.get("assets", []):
         if asset.get("name") == asset_name:
             url = asset.get("browser_download_url", "")
             if url:
                 return url
-    raise DownloadError(
-        f"Asset '{asset_name}' not found in release '{release.get('tag_name', '?')}'."
-    )
+    if required:
+        raise DownloadError(
+            f"Asset '{asset_name}' not found in release '{release.get('tag_name', '?')}'."
+        )
+    return ""
 
 
 def _generate_id(length: int) -> str:

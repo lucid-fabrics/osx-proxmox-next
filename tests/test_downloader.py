@@ -119,8 +119,46 @@ class TestDownloadOpencore:
         monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: api_resp)
         monkeypatch.setattr(dl_module, "__version__", "0.3.0")
 
-        with pytest.raises(DownloadError, match="not found in release"):
+        with pytest.raises(DownloadError, match="No OpenCore asset found"):
             download_opencore("sequoia", tmp_path)
+
+    def test_fallback_to_universal(self, tmp_path, monkeypatch):
+        """When version-specific ISO missing, falls back to universal OC image."""
+        release_json = {
+            "tag_name": "v0.3.0",
+            "assets": [
+                {
+                    "name": "opencore-osx-proxmox-vm.iso",
+                    "browser_download_url": "https://example.com/opencore-osx-proxmox-vm.iso",
+                }
+            ],
+        }
+        api_resp = _make_response(json.dumps(release_json).encode())
+        file_data = b"universal-oc"
+        file_resp = _make_chunked_response([file_data], len(file_data))
+
+        call_count = [0]
+
+        def fake_urlopen(req, timeout=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return api_resp
+            return file_resp
+
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(dl_module, "__version__", "0.3.0")
+
+        result = download_opencore("tahoe", tmp_path)
+        assert result == tmp_path / "opencore-osx-proxmox-vm.iso"
+        assert result.exists()
+
+    def test_existing_universal_skips_download(self, tmp_path, monkeypatch):
+        """If universal OC image exists locally, skip download even for tahoe."""
+        existing = tmp_path / "opencore-osx-proxmox-vm.iso"
+        existing.write_text("already here")
+
+        result = download_opencore("tahoe", tmp_path)
+        assert result == existing
 
     def test_existing_file_skips_download(self, tmp_path, monkeypatch):
         existing = tmp_path / "opencore-sequoia.iso"
@@ -352,10 +390,15 @@ class TestFindReleaseAsset:
         url = _find_release_asset(release, "opencore-sequoia.iso")
         assert url == "https://dl.example.com/oc.iso"
 
-    def test_not_found(self):
+    def test_not_found_required(self):
         release = {"tag_name": "v0.3.0", "assets": []}
         with pytest.raises(DownloadError, match="not found in release"):
-            _find_release_asset(release, "opencore-sequoia.iso")
+            _find_release_asset(release, "opencore-sequoia.iso", required=True)
+
+    def test_not_found_optional(self):
+        release = {"tag_name": "v0.3.0", "assets": []}
+        result = _find_release_asset(release, "opencore-sequoia.iso", required=False)
+        assert result == ""
 
     def test_empty_url(self):
         release = {

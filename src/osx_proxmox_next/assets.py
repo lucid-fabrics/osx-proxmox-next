@@ -63,7 +63,7 @@ def resolve_opencore_path(macos: str) -> Path:
     )
     if match:
         return match
-    return Path("/var/lib/vz/template/iso") / f"opencore-{macos}.iso"
+    return Path("/var/lib/vz/template/iso") / "opencore-osx-proxmox-vm.iso"
 
 
 def resolve_recovery_or_installer_path(config: VmConfig) -> Path:

@@ -42,7 +42,7 @@ def test_suggested_fetch_commands_include_recovery_note() -> None:
 def test_resolve_opencore_path_default(monkeypatch):
     monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
     result = resolve_opencore_path("sequoia")
-    assert result == Path("/var/lib/vz/template/iso/opencore-sequoia.iso")
+    assert result == Path("/var/lib/vz/template/iso/opencore-osx-proxmox-vm.iso")
 
 
 def test_resolve_opencore_path_found(monkeypatch):
