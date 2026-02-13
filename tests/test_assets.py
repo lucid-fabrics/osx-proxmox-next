@@ -154,12 +154,12 @@ def test_suggested_fetch_includes_download_hint():
     assert any("osx-next-cli download" in c for c in cmds)
 
 
-def test_suggested_fetch_tahoe_opencore_only_hint():
+def test_suggested_fetch_tahoe_auto_download():
     cfg = _cfg("tahoe")
     cfg.disk_gb = 160
     cmds = suggested_fetch_commands(cfg)
-    assert any("--opencore-only" in c for c in cmds)
-    assert not any("--macos tahoe\n" in c for c in cmds)  # no bare download for tahoe
+    assert any("osx-next-cli download" in c for c in cmds)
+    assert any("16GB" in c for c in cmds)
 
 
 def test_resolve_recovery_tahoe_no_match_then_standard(monkeypatch):
@@ -301,7 +301,7 @@ def test_asset_check_downloadable_tahoe_recovery(monkeypatch):
     cfg.disk_gb = 160
     checks = required_assets(cfg)
     recovery = [c for c in checks if "recovery" in c.name.lower() or "installer" in c.name.lower()][0]
-    assert recovery.downloadable is False
+    assert recovery.downloadable is True
 
 
 def test_resolve_recovery_finds_img(tmp_path, monkeypatch):

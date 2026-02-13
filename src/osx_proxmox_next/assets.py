@@ -38,7 +38,7 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
             path=recovery_path,
             ok=recovery_path.exists(),
             hint="Tahoe should use a full installer image path.",
-            downloadable=(config.macos != "tahoe"),
+            downloadable=True,
         )
     )
     return checks
@@ -48,9 +48,9 @@ def suggested_fetch_commands(config: VmConfig) -> list[str]:
     iso_root = "/var/lib/vz/template/iso"
     if config.macos == "tahoe":
         commands = [
-            f"# OpenCore auto-download: osx-next-cli download --macos {config.macos} --opencore-only",
+            f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
             f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
-            "# Tahoe: provide a full installer image and set installer_path",
+            f"# Tahoe: full installer (~16GB) downloaded from Apple catalog",
         ]
     else:
         commands = [
@@ -66,8 +66,7 @@ def resolve_opencore_path(macos: str) -> Path:
         [
             "opencore-osx-proxmox-vm.iso",
             f"opencore-{macos}.iso",
-            f"opencore*{macos}*.iso",
-            "opencore*.iso",
+            f"opencore-{macos}-*.iso",
         ]
     )
     if match:
@@ -79,7 +78,20 @@ def resolve_recovery_or_installer_path(config: VmConfig) -> Path:
     if config.installer_path:
         return Path(config.installer_path)
     if config.macos == "tahoe":
-        match = _find_iso(["*tahoe*full*.iso", "*tahoe*.iso", "*26*.iso", "*InstallAssistant*.iso"])
+        match = _find_iso([
+            "tahoe-full-installer.img",
+            "tahoe-full-installer.iso",
+            "tahoe-installer.iso",
+            "tahoe-installer.img",
+            "macos-tahoe-full*.iso",
+            "macos-tahoe-full*.img",
+            "*tahoe*full*.iso",
+            "*tahoe*full*.img",
+            "*tahoe*.iso",
+            "*tahoe*.img",
+            "InstallAssistant-tahoe*.iso",
+            "InstallAssistant*.iso",
+        ])
         if match:
             return match
     match = _find_iso([

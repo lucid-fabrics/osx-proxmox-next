@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import gzip
+import plistlib
 import random
+import re
+import shutil
 import string
 import subprocess
 import time
@@ -43,6 +47,14 @@ _CHUNK_SIZE = 65536
 _MAX_RETRIES = 3
 _BACKOFF_SECONDS = [1, 2, 4]
 
+_SUCATALOG_URL = (
+    "https://swscan.apple.com/content/catalogs/others/"
+    "index-15-14-13-12-10.16-10.15-10.14-10.13-10.12-10.11-10.10-10.9-"
+    "mountainlion-lion-snowleopard-leopard.merged-1.sucatalog.gz"
+)
+_MACOS_TITLES: dict[str, str] = {"tahoe": "macOS Tahoe"}
+_MIN_INSTALLER_SIZE = 5_000_000_000  # 5 GB — filters small packages
+
 
 def download_opencore(
     macos: str,
@@ -69,10 +81,7 @@ def download_recovery(
     on_progress: ProgressCallback = None,
 ) -> Path:
     if macos == "tahoe":
-        raise DownloadError(
-            "Tahoe requires a full installer image. "
-            "Auto-download is not available for Tahoe recovery."
-        )
+        return _download_tahoe_installer(dest_dir, on_progress)
 
     if macos not in RECOVERY_BOARD_IDS:
         raise DownloadError(f"No recovery board ID for '{macos}'.")
@@ -101,6 +110,122 @@ def download_recovery(
     chunklist_path.unlink(missing_ok=True)
 
     return dest
+
+
+def _download_tahoe_installer(
+    dest_dir: Path,
+    on_progress: ProgressCallback = None,
+) -> Path:
+    dest = dest_dir / "tahoe-full-installer.img"
+    if dest.exists():
+        return dest
+
+    pkg_url = _find_installer_url("tahoe")
+    pkg_path = dest_dir / "tahoe-InstallAssistant.pkg"
+    _download_file(pkg_url, pkg_path, on_progress, "installer")
+
+    dmg_path = _extract_sharedsupport_dmg(pkg_path, dest_dir)
+
+    _build_recovery_image(dmg_path, dmg_path, dest)
+
+    pkg_path.unlink(missing_ok=True)
+    dmg_path.unlink(missing_ok=True)
+
+    return dest
+
+
+def _find_installer_url(macos: str) -> str:
+    title = _MACOS_TITLES.get(macos)
+    if not title:
+        raise DownloadError(f"No installer title mapping for '{macos}'.")
+
+    catalog_bytes = _http_get_bytes(_SUCATALOG_URL)
+    catalog_data = gzip.decompress(catalog_bytes)
+    catalog = plistlib.loads(catalog_data)
+
+    products = catalog.get("Products", {})
+    candidates: list[tuple[str, str]] = []  # (post_date_str, pkg_url)
+
+    for product_id, product in products.items():
+        packages = product.get("Packages", [])
+        pkg_url = ""
+        for pkg in packages:
+            url = pkg.get("URL", "")
+            size = pkg.get("Size", 0)
+            if "InstallAssistant.pkg" in url and size > _MIN_INSTALLER_SIZE:
+                pkg_url = url
+                break
+        if not pkg_url:
+            continue
+
+        dist_url = ""
+        distributions = product.get("Distributions", {})
+        dist_url = distributions.get("English") or distributions.get("en", "")
+        if not dist_url:
+            continue
+
+        try:
+            dist_data = _http_get_bytes(dist_url)
+            dist_text = dist_data.decode("utf-8", errors="replace")
+        except Exception:
+            continue
+
+        match = re.search(r"<title>(.*?)</title>", dist_text, re.IGNORECASE)
+        if not match:
+            continue
+
+        if title.lower() not in match.group(1).lower():
+            continue
+
+        post_date = str(product.get("PostDate", ""))
+        candidates.append((post_date, pkg_url))
+
+    if not candidates:
+        raise DownloadError(
+            f"No installer found for '{macos}' in Apple software catalog."
+        )
+
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def _http_get_bytes(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "osx-proxmox-next"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+    except Exception as exc:
+        raise DownloadError(f"Failed to fetch {url}: {exc}") from exc
+
+
+def _extract_sharedsupport_dmg(pkg_path: Path, dest_dir: Path) -> Path:
+    extract_dir = dest_dir / "tahoe-pkg-extract"
+    try:
+        subprocess.run(
+            ["7z", "x", str(pkg_path), f"-o{extract_dir}", "SharedSupport.dmg", "-r"],
+            check=True,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        raise DownloadError(
+            "7z is required but not installed. "
+            "Install it with: apt install p7zip-full"
+        )
+    except subprocess.CalledProcessError as exc:
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        raise DownloadError(f"Failed to extract installer package: {exc.stderr}") from exc
+
+    found = list(extract_dir.rglob("SharedSupport.dmg"))
+    if not found:
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        raise DownloadError("SharedSupport.dmg not found inside installer package.")
+
+    dmg_dest = dest_dir / "tahoe-SharedSupport.dmg"
+    shutil.move(str(found[0]), str(dmg_dest))
+    shutil.rmtree(extract_dir, ignore_errors=True)
+
+    return dmg_dest
 
 
 def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> None:
