@@ -1,68 +1,119 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from subprocess import check_output
 from threading import Thread
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
+from textual.reactive import reactive
 from textual.widgets import Button, Header, Input, ProgressBar, Static
 
-from .assets import required_assets, suggested_fetch_commands
+from .assets import required_assets
 from .defaults import DEFAULT_BRIDGE, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_memory_mb
-from .diagnostics import build_health_status
 from .domain import SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
-from .planner import PlanStep, build_plan
+from .planner import PlanStep, build_plan, build_destroy_plan, fetch_vm_info
 from .preflight import run_preflight
 from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
 from .smbios import generate_smbios, SmbiosIdentity
 
 
+@dataclass
+class WizardState:
+    selected_os: str = ""
+    selected_storage: str = ""
+    storage_targets: list[str] = field(default_factory=list)
+    # Form
+    vmid: int = 900
+    name: str = ""
+    cores: int = 8
+    memory_mb: int = 16384
+    disk_gb: int = 128
+    bridge: str = "vmbr0"
+    storage: str = "local-lvm"
+    installer_path: str = ""
+    smbios: SmbiosIdentity | None = None
+    form_errors: dict[str, str] = field(default_factory=dict)
+    # Preflight
+    preflight_done: bool = False
+    preflight_ok: bool = False
+    preflight_checks: list = field(default_factory=list)
+    # Downloads
+    download_running: bool = False
+    download_phase: str = ""
+    download_pct: int = 0
+    download_errors: list[str] = field(default_factory=list)
+    downloads_complete: bool = False
+    # Config + Plan
+    config: VmConfig | None = None
+    plan_steps: list = field(default_factory=list)
+    assets_ok: bool = False
+    assets_missing: list = field(default_factory=list)
+    # Dry run
+    dry_run_done: bool = False
+    dry_run_ok: bool = False
+    apply_running: bool = False
+    apply_log: list[str] = field(default_factory=list)
+    # Live install
+    live_done: bool = False
+    live_ok: bool = False
+    live_log: Path | None = None
+    snapshot: RollbackSnapshot | None = None
+    # Manage mode
+    manage_mode: bool = False
+    uninstall_vm_list: list = field(default_factory=list)
+    uninstall_purge: bool = True
+    uninstall_log: list[str] = field(default_factory=list)
+    uninstall_running: bool = False
+    uninstall_done: bool = False
+    uninstall_ok: bool = False
+
+
 class NextApp(App):
     CSS = """
     Screen { background: #0b1118; color: #f6f8fa; }
-    Header, Footer { background: #103252; color: #f6f8fa; }
+    Header { background: #103252; color: #f6f8fa; }
 
-    #topnav { dock: top; height: 3; padding: 0 1; background: #122033; border-bottom: heavy #2f6fa2; }
-    #topnav Button { margin: 0 1; min-width: 14; }
-
-    #body { height: 1fr; padding: 1; }
-    .panel { border: round #2f6fa2; padding: 1; height: 1fr; }
-    .hidden { display: none; }
-
-    #hero {
-        height: 7;
+    #step_bar {
+        dock: top;
+        height: 3;
+        padding: 0 2;
+        background: #0d1722;
+        border-bottom: heavy #2f6fa2;
         content-align: center middle;
-        border: heavy #2ec27e;
-        background: #102133;
-        margin-bottom: 1;
     }
 
-    .step {
-        border: round #1f4f7a;
-        padding: 1;
-        margin-bottom: 1;
-        height: auto;
-    }
+    #body { height: 1fr; padding: 1 2; overflow-y: auto; }
+
+    .step_container { height: auto; padding: 1; }
     .step_hidden { display: none; }
 
-    #wizard_view { overflow-y: hidden; }
+    .os_card {
+        border: round #1f4f7a;
+        padding: 1 2;
+        margin: 0 1 1 0;
+        min-width: 28;
+        height: 5;
+        content-align: center middle;
+    }
+    .os_card:hover { border: round #2f6fa2; background: #162433; }
+    .os_selected { border: heavy #2ec27e; background: #0f2a1a; }
 
-    #basic_grid, #advanced_grid {
+    .storage_btn { margin: 0 1 1 0; min-width: 18; }
+    .storage_selected { border: heavy #2ec27e; }
+
+    #config_grid {
         layout: grid;
         grid-size: 2;
-        grid-columns: 24 1fr;
-        grid-gutter: 0 2;
+        grid-columns: 20 1fr;
+        grid-gutter: 0 1;
         height: auto;
         width: 100%;
     }
-    #basic_grid {
-        margin-bottom: 1;
-    }
-
     .label { color: #9fc6e8; content-align: right middle; height: 1; }
     Input {
         height: 3;
@@ -70,581 +121,475 @@ class NextApp(App):
         background: #162433;
         border: tall #2f6fa2;
     }
-    Input:focus {
-        border: tall #2ec27e;
-        background: #1a2c3f;
-    }
-    .invalid {
-        border: tall #d44f4f;
-        background: #2a1717;
-    }
+    Input:focus { border: tall #2ec27e; background: #1a2c3f; }
+    .invalid { border: tall #d44f4f; background: #2a1717; }
 
-    #workflow_flow {
-        height: 3;
-        border: round #2ec27e;
-        padding: 0 1;
-        content-align: left middle;
+    #preflight_badge {
+        height: 1;
         margin-bottom: 1;
     }
 
-    .action_row { height: auto; }
-    .action_row Button { margin-right: 1; margin-bottom: 1; min-width: 14; }
-
-    #health_output, #preflight_output_alt {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: 1fr;
-        overflow: auto;
-    }
-    #plan_output {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: 5;
-        overflow: auto;
-    }
-    #preflight_summary {
-        height: 4;
-        border: tall #1f4f7a;
-        padding: 0 1;
-        content-align: left middle;
-    }
-
-    #home_status, #wizard_status {
-        height: 4;
-        border: round #2f6fa2;
-        padding: 0 1;
-        content-align: left middle;
-    }
-    #defaults_preview {
-        height: 3;
-        border: tall #1f4f7a;
-        padding: 0 1;
-        content-align: left middle;
-        margin-bottom: 1;
-    }
-    #form_validation {
+    #smbios_preview {
         height: auto;
+        margin-top: 1;
         border: tall #1f4f7a;
         padding: 0 1;
+    }
+
+    #config_summary {
+        background: #0d1722;
+        border: tall #1f4f7a;
+        padding: 1;
+        height: auto;
         margin-bottom: 1;
     }
+
+    #download_status {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #dry_log, #live_log {
+        background: #0d1722;
+        border: tall #1f4f7a;
+        padding: 1;
+        height: 12;
+        overflow: auto;
+    }
+
+    #result_box {
+        border: heavy #2ec27e;
+        padding: 1;
+        height: auto;
+        margin-top: 1;
+        content-align: center middle;
+    }
+    .result_fail { border: heavy #d44f4f; }
+
+    #install_btn {
+        height: 5;
+        min-width: 40;
+        border: heavy #2ec27e;
+        content-align: center middle;
+    }
+
+    .nav_row { height: auto; margin-top: 1; }
+    .nav_row Button { margin-right: 1; min-width: 14; }
+
+    .action_row { height: auto; margin-bottom: 1; }
+    .action_row Button { margin-right: 1; min-width: 14; }
+
+    #form_errors {
+        height: auto;
+        color: #d44f4f;
+        margin-bottom: 1;
+    }
+
+    .hidden { display: none; }
+
+    .mode_btn { margin: 0 1 1 0; min-width: 18; }
+    .mode_active { border: heavy #2ec27e; background: #0f2a1a; }
+
+    #manage_panel { height: auto; padding: 1; }
+
+    #manage_vmid { width: 30; }
+
+    #vm_list_display {
+        background: #0d1722;
+        border: tall #1f4f7a;
+        padding: 1;
+        height: 8;
+        overflow: auto;
+    }
+
+    #manage_log {
+        background: #0d1722;
+        border: tall #1f4f7a;
+        padding: 1;
+        height: 8;
+        overflow: auto;
+    }
+
+    #manage_result {
+        border: heavy #2ec27e;
+        padding: 1;
+        height: auto;
+        margin-top: 1;
+    }
+    .manage_result_fail { border: heavy #d44f4f; }
     """
 
     BINDINGS = [
-        ("h", "go_home", "Home"),
-        ("w", "go_wizard", "Wizard"),
-        ("p", "go_preflight", "Preflight"),
-        ("b", "prev_step", "Prev Step"),
-        ("n", "next_step", "Next Step"),
-        ("a", "apply_dry", "Apply Dry"),
-        ("A", "apply_live", "Apply Live"),
         ("q", "quit", "Quit"),
     ]
 
+    current_step: reactive[int] = reactive(1)
+
     def __init__(self) -> None:
         super().__init__()
-        self.last_config: VmConfig | None = None
-        self.last_steps: list[PlanStep] = []
-        self.apply_running = False
-        self.download_running = False
-        self.plan_output_text = ""
-        self.wizard_status_text = "Step 1: Run Preflight."
-        self.preflight_has_run = False
-        self.preflight_ok = False
-        self.workflow_stage = 1
-        self.step_page = 1
-        self.storage_targets = self._detect_storage_targets()
-        self.smbios_identity: SmbiosIdentity | None = None
+        self.state = WizardState()
+        self.state.storage_targets = self._detect_storage_targets()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Horizontal(id="topnav"):
-            yield Button("Home", id="nav_home")
-            yield Button("Wizard", id="nav_wizard")
-            yield Button("Preflight", id="nav_preflight")
+        yield Static("", id="step_bar")
 
         with Container(id="body"):
-            with Vertical(id="home_view", classes="panel"):
-                yield Static("OSX Proxmox Next", id="hero")
-                yield Static(
-                    "Beginner flow: 1) Preflight  2) Configure  3) Review  4) Dry Apply  5) Live Apply"
-                )
-                yield Static("Ready.", id="home_status")
-                yield Static("", id="health_output")
-
-            with Vertical(id="wizard_view", classes="panel hidden"):
-                yield Static("Guided Wizard")
-                yield Static("", id="workflow_flow")
+            # Step 1 — Choose OS / Manage VMs
+            with Vertical(id="step1", classes="step_container"):
                 with Horizontal(classes="action_row"):
-                    yield Button("Previous Step", id="prev_step")
-                    yield Button("Next Step", id="next_step")
-
-                with Vertical(id="step1_section", classes="step"):
-                    yield Static("Step 1: Check host readiness")
+                    yield Button("Create VM", id="mode_create", classes="mode_btn mode_active")
+                    yield Button("Manage VMs", id="mode_manage", classes="mode_btn")
+                # Create panel
+                with Vertical(id="create_panel"):
+                    yield Static("Choose macOS Version")
+                    with Horizontal(id="os_cards"):
+                        for key, meta in SUPPORTED_MACOS.items():
+                            channel = "STABLE" if meta["channel"] == "stable" else "PREVIEW"
+                            yield Button(
+                                f"{meta['label']}\n{channel}",
+                                id=f"os_{key}",
+                                classes="os_card",
+                            )
+                    with Horizontal(classes="nav_row"):
+                        yield Button("Next", id="next_btn", disabled=True)
+                # Manage panel
+                with Vertical(id="manage_panel", classes="hidden"):
+                    yield Static("Manage VMs")
+                    yield Static("", id="vm_list_display")
                     with Horizontal(classes="action_row"):
-                        yield Button("Run Preflight", id="run_preflight")
-                    yield Static("Preflight not run yet.", id="preflight_summary")
+                        yield Button("Refresh List", id="manage_refresh_btn")
+                    yield Static("VMID to destroy:", classes="label")
+                    yield Input(value="", id="manage_vmid", placeholder="e.g. 106")
                     with Horizontal(classes="action_row"):
-                        yield Button("Next: Step 2", id="goto_step2")
+                        yield Button("Purge disks: ON", id="manage_purge_btn")
+                        yield Button("Destroy VM", id="manage_destroy_btn", disabled=True)
+                    yield Static("", id="manage_log", classes="hidden")
+                    yield Static("", id="manage_result", classes="hidden")
 
-                with Vertical(id="step2_section", classes="step step_hidden"):
-                    yield Static("Step 2: Basic VM setup")
-                    with Horizontal(classes="action_row", id="step2_macos_row"):
-                        yield Button("Sonoma 14", id="macos_sonoma")
-                        yield Button("Sequoia 15", id="macos_sequoia")
-                        yield Button("Tahoe 26", id="macos_tahoe")
-                    with Container(id="basic_grid"):
-                        yield Static("VMID", classes="label")
-                        yield Input(value=str(self._detect_next_vmid()), id="vmid")
-                        yield Static("VM Name", classes="label")
-                        yield Input(value="macos-sequoia", id="name")
-                        yield Static("macOS", classes="label")
-                        yield Input(value="sequoia", id="macos", disabled=True)
-                    with Horizontal(classes="action_row", id="storage_buttons"):
-                        for idx, target in enumerate(self.storage_targets):
-                            yield Button(target, id=f"storage_pick_{idx}")
-                    with Horizontal(classes="action_row", id="step2_actions_basic"):
-                        yield Button("Use Recommended", id="defaults")
-                        yield Button("Show Advanced", id="toggle_advanced")
-                        yield Button("Back: Step 1", id="goto_step1")
-                        yield Button("Next: Step 3", id="goto_step3")
-                    yield Static("Recommended values not applied yet.", id="defaults_preview")
-                    yield Static("Form validation: pending.", id="form_validation")
+            # Step 2 — Choose Storage
+            with Vertical(id="step2", classes="step_container step_hidden"):
+                yield Static("Choose Storage Target")
+                with Horizontal(id="storage_row"):
+                    for idx, target in enumerate(self.state.storage_targets):
+                        cls = "storage_btn storage_selected" if idx == 0 else "storage_btn"
+                        yield Button(target, id=f"storage_{idx}", classes=cls)
+                with Horizontal(classes="nav_row"):
+                    yield Button("Back", id="back_btn")
+                    yield Button("Next", id="next_btn_2")
 
-                    with Container(id="advanced_section", classes="hidden"):
-                        with Horizontal(classes="action_row"):
-                            yield Button("Back To Basic", id="back_basic")
-                        with Container(id="advanced_grid"):
-                            yield Static("CPU Cores (locked)", classes="label")
-                            yield Input(value="8", id="cores", disabled=True)
-                            yield Static("Memory MB", classes="label")
-                            yield Input(value="16384", id="memory")
-                            yield Static("Disk GB", classes="label")
-                            yield Input(value="128", id="disk")
-                            yield Static("Bridge", classes="label")
-                            yield Input(value=DEFAULT_BRIDGE, id="bridge")
-                            yield Static("Storage", classes="label")
-                            yield Input(value=DEFAULT_STORAGE, id="storage")
-                            yield Static("Installer Path", classes="label")
-                            yield Input(value="", id="installer_path")
-                        with Horizontal(classes="action_row"):
-                            yield Button("Generate SMBIOS", id="generate_smbios")
-                        yield Static("SMBIOS: not generated yet.", id="smbios_preview")
+            # Step 3 — Configuration
+            with Vertical(id="step3", classes="step_container step_hidden"):
+                yield Static("VM Configuration")
+                yield Static("", id="preflight_badge")
+                with Container(id="config_grid"):
+                    yield Static("VMID", classes="label")
+                    yield Input(value="900", id="vmid")
+                    yield Static("VM Name", classes="label")
+                    yield Input(value="", id="name")
+                    yield Static("CPU Cores", classes="label")
+                    yield Input(value="8", id="cores", disabled=True)
+                    yield Static("Memory MB", classes="label")
+                    yield Input(value="16384", id="memory")
+                    yield Static("Disk GB", classes="label")
+                    yield Input(value="128", id="disk")
+                    yield Static("Bridge", classes="label")
+                    yield Input(value=DEFAULT_BRIDGE, id="bridge")
+                    yield Static("Storage", classes="label")
+                    yield Input(value=DEFAULT_STORAGE, id="storage_input")
+                    yield Static("Installer Path", classes="label")
+                    yield Input(value="", id="installer_path")
+                yield Static("", id="form_errors")
+                with Horizontal(classes="action_row"):
+                    yield Button("Suggest Defaults", id="suggest_btn")
+                    yield Button("Generate SMBIOS", id="smbios_btn")
+                yield Static("SMBIOS: not generated yet.", id="smbios_preview")
+                with Horizontal(classes="nav_row"):
+                    yield Button("Back", id="back_btn_3")
+                    yield Button("Next", id="next_btn_3")
 
-                with Vertical(id="step3_section", classes="step step_hidden"):
-                    yield Static("Step 3: Review and apply")
-                    with Horizontal(classes="action_row"):
-                        yield Button("Review Checks", id="validate")
-                        yield Button("Download Missing", id="download_missing")
-                        yield Button("Apply Dry", id="apply_dry")
-                        yield Button("Apply Live", id="apply_live")
-                        yield Button("Back: Step 2", id="goto_step2")
-                    yield ProgressBar(total=1, show_eta=False, id="apply_progress", classes="hidden")
-                    yield Static("", id="plan_output", classes="hidden")
+            # Step 4 — Review & Dry Run
+            with Vertical(id="step4", classes="step_container step_hidden"):
+                yield Static("Review & Dry Run")
+                yield Static("", id="config_summary")
+                yield Static("", id="download_status")
+                yield ProgressBar(total=100, show_eta=False, id="download_progress", classes="hidden")
+                with Horizontal(classes="action_row"):
+                    yield Button("Run Dry Apply", id="dry_run_btn", disabled=True)
+                yield ProgressBar(total=1, show_eta=False, id="dry_progress", classes="hidden")
+                yield Static("", id="dry_log", classes="hidden")
+                with Horizontal(classes="nav_row"):
+                    yield Button("Back", id="back_btn_4")
+                    yield Button("Next: Install", id="next_btn_4", disabled=True)
 
-                yield Static(self.wizard_status_text, id="wizard_status")
-
-            with Vertical(id="preflight_view", classes="panel hidden"):
-                yield Static("Host Preflight")
-                yield Button("Run Preflight", id="run_preflight_alt")
-                yield Static("", id="preflight_output_alt")
+            # Step 5 — Install
+            with Vertical(id="step5", classes="step_container step_hidden"):
+                yield Static("Install macOS")
+                yield Button("Install", id="install_btn", classes="hidden")
+                yield ProgressBar(total=1, show_eta=False, id="live_progress", classes="hidden")
+                yield Static("", id="live_log", classes="hidden")
+                yield Static("", id="result_box", classes="hidden")
+                with Horizontal(classes="nav_row"):
+                    yield Button("Back", id="back_btn_5")
 
     def on_mount(self) -> None:
-        self._show("home_view")
-        self._apply_host_defaults(silent=True)
-        self._update_defaults_preview()
-        self._refresh_health()
-        self._set_stage(1)
-        self._update_step_nav()
+        self._update_step_bar()
+        if self.state.storage_targets:
+            self.state.selected_storage = self.state.storage_targets[0]
+        Thread(target=self._preflight_worker, daemon=True).start()
+
+    def watch_current_step(self, old_value: int, new_value: int) -> None:
+        for step_num in range(1, 6):
+            container = self.query_one(f"#step{step_num}")
+            if step_num == new_value:
+                container.remove_class("step_hidden")
+            else:
+                container.add_class("step_hidden")
+        self._update_step_bar()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
-        mapping = {
-            "nav_home": self.action_go_home,
-            "nav_wizard": self.action_go_wizard,
-            "nav_preflight": self.action_go_preflight,
-            "run_preflight": self._run_preflight,
-            "run_preflight_alt": self._run_preflight_alt,
-            "prev_step": self.action_prev_step,
-            "next_step": self.action_next_step,
-            "goto_step1": lambda: self._show_step_page(1),
-            "goto_step2": lambda: self._show_step_page(2),
-            "goto_step3": self.action_goto_step3,
-            "defaults": self._apply_host_defaults,
-            "toggle_advanced": self._toggle_advanced,
-            "back_basic": self._toggle_advanced,
-            "macos_sonoma": lambda: self._set_macos("sonoma"),
-            "macos_sequoia": lambda: self._set_macos("sequoia"),
-            "macos_tahoe": lambda: self._set_macos("tahoe"),
-            "generate_smbios": self._generate_smbios,
-            "validate": self._validate_only,
-            "download_missing": self._download_missing_assets,
-            "apply_dry": self.action_apply_dry,
-            "apply_live": self.action_apply_live,
-        }
-        if bid.startswith("storage_pick_"):
-            try:
-                idx = int(bid.split("_")[-1])
-                self._set_storage_target(self.storage_targets[idx])
-            except (ValueError, IndexError):
-                self._set_wizard_status("Invalid storage target selection.")
+
+        # OS selection
+        if bid.startswith("os_"):
+            os_key = bid[3:]
+            if os_key in SUPPORTED_MACOS:
+                self._select_os(os_key)
             return
-        handler = mapping.get(bid)
+
+        # Storage selection
+        if bid.startswith("storage_"):
+            try:
+                idx = int(bid.split("_")[1])
+                self._select_storage(self.state.storage_targets[idx])
+            except (ValueError, IndexError):
+                pass
+            return
+
+        handlers = {
+            "next_btn": lambda: self._go_next(),
+            "next_btn_2": lambda: self._go_next(),
+            "next_btn_3": lambda: self._go_next(),
+            "next_btn_4": lambda: self._go_next(),
+            "back_btn": lambda: self._go_back(),
+            "back_btn_3": lambda: self._go_back(),
+            "back_btn_4": lambda: self._go_back(),
+            "back_btn_5": lambda: self._go_back(),
+            "suggest_btn": self._apply_host_defaults,
+            "smbios_btn": self._generate_smbios,
+            "dry_run_btn": self._run_dry_apply,
+            "install_btn": self._run_live_install,
+            "mode_create": lambda: self._toggle_mode("create"),
+            "mode_manage": lambda: self._toggle_mode("manage"),
+            "manage_refresh_btn": self._refresh_vm_list,
+            "manage_purge_btn": self._toggle_purge,
+            "manage_destroy_btn": self._run_destroy,
+        }
+        handler = handlers.get(bid)
         if handler:
             handler()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        target_ids = {"vmid", "name", "memory", "disk", "bridge", "storage", "installer_path"}
+        target_ids = {"vmid", "name", "memory", "disk", "bridge", "storage_input", "installer_path"}
         if (event.input.id or "") in target_ids:
-            self._validate_form_inputs(quiet=True)
+            self._validate_form(quiet=True)
+        if event.input.id == "manage_vmid":
+            self._validate_manage_vmid()
 
-    def action_go_home(self) -> None:
-        self._show("home_view")
-        self._refresh_health()
+    # ── Navigation ──────────────────────────────────────────────────
 
-    def action_go_wizard(self) -> None:
-        self._show("wizard_view")
-        if not self.preflight_has_run:
-            self._run_preflight()
-        self._set_stage(self.workflow_stage)
-        page = 1 if self.workflow_stage <= 1 else 2 if self.workflow_stage <= 3 else 3
-        self._show_step_page(page)
-
-    def action_go_preflight(self) -> None:
-        self._show("preflight_view")
-        self._run_preflight_alt()
-
-    def action_prev_step(self) -> None:
-        self._show("wizard_view")
-        self._show_step_page(max(1, self.step_page - 1))
-
-    def action_next_step(self) -> None:
-        self._show("wizard_view")
-        if self.step_page == 2:
-            self.action_goto_step3()
-            return
-        self._show_step_page(min(3, self.step_page + 1))
-
-    def action_goto_step3(self) -> None:
-        self._show("wizard_view")
-        if not self._validate_form_inputs(quiet=False):
-            self._set_wizard_status("Fix highlighted fields before continuing.")
-            return
-        self._show_step_page(3)
-
-    def action_generate_plan(self) -> None:
-        self._autofill_tahoe_installer_path()
-        if not self._validate_form_inputs(quiet=False):
-            self._set_wizard_status("Fix highlighted fields before review/apply.")
-            self._set_stage(2)
-            self._show_step_page(2)
-            return
-        config = self._read_form()
-        if not config:
-            return
-
-        issues = validate_config(config)
-        if issues:
-            self._handle_validation_issues(issues)
-            return
-
-        self.last_config = config
-        self.last_steps = build_plan(config)
-
-        meta = SUPPORTED_MACOS[config.macos]
-        lines = [f"Target: {meta['label']} ({meta['channel']})", f"VM: {config.vmid} / {config.name}", ""]
-        for idx, step in enumerate(self.last_steps, start=1):
-            prefix = "!" if step.risk in {"warn", "action"} else "-"
-            lines.append(f"{idx:02d}. {prefix} {step.title}")
-            lines.append(f"    {step.command}")
-
-        self._set_plan_output("\n".join(lines))
-        self.query_one("#apply_progress").remove_class("hidden")
-        self.query_one("#plan_output").remove_class("hidden")
-        self._set_wizard_status("Review complete. Next: run Apply Dry.")
-        self._set_stage(3)
-        self._show_step_page(3)
-        self._check_assets()
-
-    def action_apply_dry(self) -> None:
-        self._apply(execute=False)
-
-    def action_apply_live(self) -> None:
-        self._apply(execute=True)
-
-    def _apply(self, execute: bool) -> None:
-        if self.apply_running:
-            self._set_wizard_status("Apply already running.")
-            return
-
-        if not self.preflight_has_run:
-            self._run_preflight()
-        if execute and not self.preflight_ok:
-            self._set_wizard_status("Live apply blocked: preflight has failures. Fix those first.")
-            return
-        if not self._validate_form_inputs(quiet=False):
-            self._set_wizard_status("Fix highlighted fields before apply.")
-            self._set_stage(2)
-            self._show_step_page(2)
-            return
-        config = self._read_form()
-        if not config:
-            return
-        if execute:
-            missing = [asset for asset in required_assets(config) if not asset.ok]
-            if missing:
-                names = ", ".join(asset.name for asset in missing)
-                downloadable = [a for a in missing if a.downloadable]
-                if downloadable:
-                    self._set_wizard_status(
-                        f"Live apply blocked: missing assets ({names}). "
-                        f"Click 'Download Missing' to auto-fetch."
-                    )
-                else:
-                    self._set_wizard_status(
-                        f"Live apply blocked: missing assets ({names}). "
-                        f"Provide path manually."
-                    )
-                self.notify("Missing required ISO assets for live apply", severity="error")
-                self._set_stage(3)
-                self._show_step_page(3)
+    def _go_next(self) -> None:
+        step = self.current_step
+        if step == 1:
+            if not self.state.selected_os:
                 return
-
-        if not self.last_config or not self.last_steps:
-            self.action_generate_plan()
-            if not self.last_config or not self.last_steps:
+            self.current_step = 2
+        elif step == 2:
+            if not self.state.selected_storage:
                 return
+            self._prefill_form()
+            self.current_step = 3
+        elif step == 3:
+            if not self._validate_form(quiet=False):
+                return
+            config = self._read_form()
+            if not config:
+                return
+            issues = validate_config(config)
+            if issues:
+                self._show_form_errors(issues)
+                return
+            self.state.config = config
+            self.state.plan_steps = build_plan(config)
+            self._render_config_summary()
+            self.current_step = 4
+            self._check_and_download_assets()
+        elif step == 4:
+            if not self.state.dry_run_ok:
+                return
+            self._prepare_install_step()
+            self.current_step = 5
 
-        self.apply_running = True
-        self.query_one("#apply_progress").remove_class("hidden")
-        self.query_one("#plan_output").remove_class("hidden")
-        self.query_one("#apply_progress", ProgressBar).update(total=len(self.last_steps), progress=0)
-        self._set_plan_output("")
-        self._set_wizard_status(f"Running {'live' if execute else 'dry'} apply...")
+    def _go_back(self) -> None:
+        self.current_step = max(1, self.current_step - 1)
 
-        def callback(idx: int, total: int, step: PlanStep, result: object) -> None:
-            self.call_from_thread(self._update_apply_progress, idx, total, step.title, result)
+    # ── Step 1: OS Selection ────────────────────────────────────────
 
-        def worker() -> None:
-            snapshot: RollbackSnapshot | None = None
-            if execute and self.last_config:
-                snapshot = create_snapshot(self.last_config.vmid)
-            result = apply_plan(self.last_steps, execute=execute, on_step=callback)
-            self.call_from_thread(self._finish_apply, execute, result.ok, result.log_path, snapshot)
+    def _select_os(self, key: str) -> None:
+        self.state.selected_os = key
+        self.state.smbios = generate_smbios(key)
+        # Update card styles
+        for os_key in SUPPORTED_MACOS:
+            card = self.query_one(f"#os_{os_key}")
+            if os_key == key:
+                card.add_class("os_selected")
+            else:
+                card.remove_class("os_selected")
+        # Enable Next
+        self.query_one("#next_btn", Button).disabled = False
 
-        Thread(target=worker, daemon=True).start()
+    # ── Step 2: Storage Selection ───────────────────────────────────
 
-    def _toggle_advanced(self) -> None:
-        section = self.query_one("#advanced_section")
-        button = self.query_one("#toggle_advanced", Button)
-        basic_grid = self.query_one("#basic_grid")
-        basic_actions = self.query_one("#step2_actions_basic")
-        basic_macos = self.query_one("#step2_macos_row")
-        basic_storage = self.query_one("#storage_buttons")
-        preview = self.query_one("#defaults_preview")
-        if section.has_class("hidden"):
-            section.remove_class("hidden")
-            basic_grid.add_class("hidden")
-            basic_actions.add_class("hidden")
-            basic_macos.add_class("hidden")
-            basic_storage.add_class("hidden")
-            preview.add_class("hidden")
-            button.label = "Hide Advanced"
-            self._set_wizard_status("Advanced options shown. You can keep defaults if unsure.")
-        else:
-            section.add_class("hidden")
-            basic_grid.remove_class("hidden")
-            basic_actions.remove_class("hidden")
-            basic_macos.remove_class("hidden")
-            basic_storage.remove_class("hidden")
-            preview.remove_class("hidden")
-            button.label = "Show Advanced"
-            self._set_wizard_status("Advanced options hidden.")
+    def _select_storage(self, target: str) -> None:
+        self.state.selected_storage = target
+        for idx in range(len(self.state.storage_targets)):
+            btn = self.query_one(f"#storage_{idx}", Button)
+            if self.state.storage_targets[idx] == target:
+                btn.add_class("storage_selected")
+            else:
+                btn.remove_class("storage_selected")
 
-    def _set_macos(self, macos: str) -> None:
-        self.query_one("#macos", Input).value = macos
-        if self.query_one("#name", Input).value.startswith("macos-"):
-            self.query_one("#name", Input).value = f"macos-{macos}"
-        self.smbios_identity = generate_smbios(macos)
+    # ── Step 3: Configuration ───────────────────────────────────────
+
+    def _prefill_form(self) -> None:
+        macos = self.state.selected_os
+        self._set_input_value("#vmid", str(self._detect_next_vmid()))
+        self._set_input_value("#name", f"macos-{macos}")
+        self._set_input_value("#cores", str(detect_cpu_cores()))
+        self._set_input_value("#memory", str(detect_memory_mb()))
+        self._set_input_value("#disk", str(default_disk_gb(macos)))
+        self._set_input_value("#bridge", DEFAULT_BRIDGE)
+        self._set_input_value("#storage_input", self.state.selected_storage)
+        self._set_input_value("#installer_path", "")
         self._update_smbios_preview()
-        self._apply_host_defaults(silent=True)
-        self._update_defaults_preview()
-        self._autofill_tahoe_installer_path()
-        self._set_wizard_status(f"macOS target set to {SUPPORTED_MACOS[macos]['label']}.")
+        self._update_preflight_badge()
 
-    def _check_assets(self) -> None:
-        config = self._read_form()
-        if not config:
-            return
-        assets = required_assets(config)
-        missing = [a for a in assets if not a.ok]
-        downloadable = [a for a in missing if a.downloadable]
+    def _apply_host_defaults(self) -> None:
+        macos = self.state.selected_os or "sequoia"
+        self._set_input_value("#vmid", str(self._detect_next_vmid()))
+        self._set_input_value("#name", f"macos-{macos}")
+        self._set_input_value("#cores", str(detect_cpu_cores()))
+        self._set_input_value("#memory", str(detect_memory_mb()))
+        self._set_input_value("#disk", str(default_disk_gb(macos)))
+        self._set_input_value("#bridge", DEFAULT_BRIDGE)
+        self._set_input_value("#storage_input", self.state.selected_storage or DEFAULT_STORAGE)
+        if not self.state.smbios:
+            self.state.smbios = generate_smbios(macos)
+        self._update_smbios_preview()
 
-        if not missing:
-            self._set_wizard_status("Assets check OK. Ready for Apply Dry.")
-        elif downloadable:
-            self._set_wizard_status(
-                f"Assets missing: {len(missing)}. "
-                f"Click 'Download Missing' to auto-fetch ({len(downloadable)} downloadable)."
-            )
+    def _generate_smbios(self) -> None:
+        macos = self.state.selected_os or "sequoia"
+        self.state.smbios = generate_smbios(macos)
+        self._update_smbios_preview()
+
+    def _update_smbios_preview(self) -> None:
+        smbios = self.state.smbios
+        if smbios:
+            text = f"SMBIOS: serial={smbios.serial}  uuid={smbios.uuid}  model={smbios.model}"
         else:
-            first_hint = missing[0].hint if missing else ""
-            self._set_wizard_status(
-                f"Assets missing: {len(missing)}. {first_hint} Provide path manually."
-            )
+            text = "SMBIOS: not generated yet."
+        self.query_one("#smbios_preview", Static).update(text)
 
-    def _download_missing_assets(self) -> None:
-        if self.download_running:
-            self._set_wizard_status("Download already running.")
-            return
+    def _update_preflight_badge(self) -> None:
+        if not self.state.preflight_done:
+            text = "Preflight: running..."
+        elif self.state.preflight_ok:
+            text = "Host Ready"
+        else:
+            fail_names = [c.name for c in self.state.preflight_checks if not c.ok]
+            text = f"Preflight: {len(fail_names)} checks failed — {', '.join(fail_names[:3])}"
+        self.query_one("#preflight_badge", Static).update(text)
 
-        config = self._read_form()
-        if not config:
-            return
+    def _validate_form(self, quiet: bool = False) -> bool:
+        errors: dict[str, str] = {}
 
-        assets = required_assets(config)
-        missing = [a for a in assets if not a.ok and a.downloadable]
-        if not missing:
-            self._set_wizard_status("No downloadable assets missing.")
-            return
+        vmid_text = self.query_one("#vmid", Input).value.strip()
+        name_text = self.query_one("#name", Input).value.strip()
+        memory_text = self.query_one("#memory", Input).value.strip()
+        disk_text = self.query_one("#disk", Input).value.strip()
+        bridge_text = self.query_one("#bridge", Input).value.strip()
+        storage_text = self.query_one("#storage_input", Input).value.strip()
 
-        self.download_running = True
-        self.query_one("#apply_progress").remove_class("hidden")
-        self.query_one("#apply_progress", ProgressBar).update(total=100, progress=0)
-        self._set_wizard_status("Downloading missing assets...")
+        try:
+            vmid_val = int(vmid_text)
+            if vmid_val < 100 or vmid_val > 999999:
+                raise ValueError
+        except ValueError:
+            errors["vmid"] = "VMID must be 100-999999."
 
-        dest_dir = Path("/var/lib/vz/template/iso")
+        if len(name_text) < 3:
+            errors["name"] = "VM Name must be at least 3 chars."
 
-        def on_progress(p: DownloadProgress) -> None:
-            if p.total > 0:
-                pct = int(p.downloaded * 100 / p.total)
-                self.call_from_thread(self._update_download_progress, p.phase, pct)
+        try:
+            mem_val = int(memory_text)
+            if mem_val < 4096:
+                raise ValueError
+        except ValueError:
+            errors["memory"] = "Memory must be >= 4096 MB."
 
-        def worker() -> None:
-            errors: list[str] = []
-            for asset in missing:
-                if "OpenCore" in asset.name:
-                    try:
-                        download_opencore(config.macos, dest_dir, on_progress=on_progress)
-                    except DownloadError as exc:
-                        errors.append(f"OpenCore: {exc}")
-                elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():  # pragma: no branch
-                    try:
-                        download_recovery(config.macos, dest_dir, on_progress=on_progress)
-                    except DownloadError as exc:
-                        errors.append(f"Recovery: {exc}")
-            self.call_from_thread(self._finish_download, errors)
+        try:
+            disk_val = int(disk_text)
+            if disk_val < 64:
+                raise ValueError
+        except ValueError:
+            errors["disk"] = "Disk must be >= 64 GB."
 
-        Thread(target=worker, daemon=True).start()
+        if not bridge_text.startswith("vmbr"):
+            errors["bridge"] = "Bridge should look like vmbr0."
 
-    def _update_download_progress(self, phase: str, pct: int) -> None:
-        self.query_one("#apply_progress", ProgressBar).update(total=100, progress=pct)
-        self._set_wizard_status(f"Downloading {phase}... {pct}%")
+        if not storage_text:
+            errors["storage_input"] = "Storage target is required."
 
-    def _finish_download(self, errors: list[str]) -> None:
-        self.download_running = False
+        # Apply invalid classes
+        for field_id in ("vmid", "name", "memory", "disk", "bridge", "storage_input"):
+            widget = self.query_one(f"#{field_id}", Input)
+            if field_id in errors:
+                widget.add_class("invalid")
+            else:
+                widget.remove_class("invalid")
+
+        self.state.form_errors = errors
         if errors:
-            self._set_wizard_status("Download errors: " + "; ".join(errors))
-            self.notify("Some downloads failed", severity="error")
-        else:
-            self._set_wizard_status("Downloads complete. Re-checking assets...")
-            self._check_assets()
-            self.notify("Assets downloaded successfully", severity="information")
+            self.query_one("#form_errors", Static).update(" ".join(errors.values()))
+            if not quiet:
+                self.notify("Fix form errors before continuing", severity="warning")
+            return False
 
-    def _refresh_health(self) -> None:
-        health = build_health_status()
-        checks = run_preflight()
-        self.query_one("#health_output", Static).update(self._render_health_dashboard(health.summary, checks))
-        self.query_one("#home_status", Static).update("Use Wizard to start.")
+        self.query_one("#form_errors", Static).update("")
+        return True
 
-    def _validate_only(self) -> None:
-        config = self._read_form()
-        if not config:
-            return
-        issues = validate_config(config)
-        if issues:
-            self._handle_validation_issues(issues)
-            return
-        self._check_assets()
-        self.action_generate_plan()
-        self._set_wizard_status("Validation OK. Review prepared automatically. Next: Apply Dry.")
-        self._set_stage(3)
-        self._show_step_page(3)
-
-    def _handle_validation_issues(self, issues: list[str]) -> None:
-        joined = "\n".join(issues).lower()
-        tahoe_missing_installer = "tahoe requires installer_path" in joined
-        if tahoe_missing_installer:
-            if self._autofill_tahoe_installer_path():
-                self._set_wizard_status("Tahoe installer detected automatically. Retry Apply/Review.")
-                return
-            self._set_stage(2)
-            self._show_step_page(2)
-            section = self.query_one("#advanced_section")
-            if section.has_class("hidden"):
-                self._toggle_advanced()
-            self._set_wizard_status(
-                "Tahoe needs a full installer ISO. In Step 2 Advanced, set Installer Path "
-                "to a Tahoe full image (example: /var/lib/vz/template/iso/macos-tahoe-full.iso)."
-            )
-            self.notify("Set Tahoe Installer Path in Advanced options", severity="warning")
-            return
-
-        self._set_wizard_status("Validation failed:\n" + "\n".join(f"- {issue}" for issue in issues))
+    def _show_form_errors(self, issues: list[str]) -> None:
+        self.query_one("#form_errors", Static).update(" ".join(issues))
         self.notify("Validation failed", severity="error")
 
-    def _run_preflight(self) -> None:
-        checks = run_preflight()
-        self.preflight_has_run = True
-        self.preflight_ok = all(c.ok for c in checks)
-        ok_count = sum(1 for c in checks if c.ok)
-        fail_names = [c.name for c in checks if not c.ok]
-        if fail_names:
-            summary = f"{ok_count}/{len(checks)} passed. Failing: {', '.join(fail_names[:2])}"
-        else:
-            summary = f"{ok_count}/{len(checks)} passed. Host ready."
-        self.query_one("#preflight_summary", Static).update(summary)
-
-        lines = [f"Preflight: {ok_count}/{len(checks)} checks passed", ""]
-        for check in checks:
-            lines.append(f"[{'OK' if check.ok else 'FAIL'}] {check.name}")
-            lines.append(f"  {check.details}")
-        if self.preflight_ok:
-            self._set_wizard_status("Step 1 complete. Step 2: configure VM fields.")
-            self._set_stage(2)
-            self._show_step_page(2)
-        else:
-            self._set_wizard_status("Preflight has failures. Fix those before Apply Live.")
-            self._set_stage(1)
-
-    def _run_preflight_alt(self) -> None:
-        checks = run_preflight()
-        self.query_one("#preflight_output_alt", Static).update(self._render_preflight_report(checks))
-
     def _read_form(self) -> VmConfig | None:
-        self._autofill_tahoe_installer_path()
         try:
             vmid = int(self.query_one("#vmid", Input).value.strip())
         except ValueError:
-            self._set_wizard_status("VMID must be a number.")
             return None
 
-        cores = int(self.query_one("#cores", Input).value.strip() or "8")
-        memory_mb = int(self.query_one("#memory", Input).value.strip() or "16384")
-        disk_gb = int(self.query_one("#disk", Input).value.strip() or "128")
+        macos = self.state.selected_os or "sequoia"
+        smbios = self.state.smbios
 
-        smbios = self.smbios_identity
         return VmConfig(
             vmid=vmid,
             name=self.query_one("#name", Input).value.strip(),
-            macos=self.query_one("#macos", Input).value.strip().lower(),
-            cores=cores,
-            memory_mb=memory_mb,
-            disk_gb=disk_gb,
+            macos=macos,
+            cores=int(self.query_one("#cores", Input).value.strip() or "8"),
+            memory_mb=int(self.query_one("#memory", Input).value.strip() or "16384"),
+            disk_gb=int(self.query_one("#disk", Input).value.strip() or "128"),
             bridge=self.query_one("#bridge", Input).value.strip() or DEFAULT_BRIDGE,
-            storage=self.query_one("#storage", Input).value.strip() or DEFAULT_STORAGE,
+            storage=self.query_one("#storage_input", Input).value.strip() or DEFAULT_STORAGE,
             installer_path=self.query_one("#installer_path", Input).value.strip(),
             smbios_serial=smbios.serial if smbios else "",
             smbios_uuid=smbios.uuid if smbios else "",
@@ -653,145 +598,376 @@ class NextApp(App):
             smbios_model=smbios.model if smbios else "",
         )
 
-    def _apply_host_defaults(self, silent: bool = False) -> None:
-        before = {
-            "vmid": self.query_one("#vmid", Input).value,
-            "name": self.query_one("#name", Input).value,
-            "macos": self.query_one("#macos", Input).value,
-            "cores": self.query_one("#cores", Input).value,
-            "memory": self.query_one("#memory", Input).value,
-            "disk": self.query_one("#disk", Input).value,
-            "bridge": self.query_one("#bridge", Input).value,
-            "storage": self.query_one("#storage", Input).value,
-        }
-        macos = self.query_one("#macos", Input).value.strip().lower() or "sequoia"
-        self._set_input_value("#vmid", str(self._detect_next_vmid()))
-        self._set_input_value("#macos", macos)
-        self._set_input_value("#name", f"macos-{macos}")
+    # ── Step 4: Review & Dry Run ────────────────────────────────────
 
-        self._set_input_value("#cores", str(detect_cpu_cores()))
-        self._set_input_value("#memory", str(detect_memory_mb()))
-        self._set_input_value("#disk", str(default_disk_gb(macos)))
-        self._set_input_value("#bridge", DEFAULT_BRIDGE)
-        self._set_input_value("#storage", DEFAULT_STORAGE)
-        after = {
-            "vmid": self.query_one("#vmid", Input).value,
-            "name": self.query_one("#name", Input).value,
-            "macos": self.query_one("#macos", Input).value,
-            "cores": self.query_one("#cores", Input).value,
-            "memory": self.query_one("#memory", Input).value,
-            "disk": self.query_one("#disk", Input).value,
-            "bridge": self.query_one("#bridge", Input).value,
-            "storage": self.query_one("#storage", Input).value,
-        }
-        changed = [k for k in after if after[k] != before[k]]
-        if not self.smbios_identity:
-            self.smbios_identity = generate_smbios(macos)
-            self._update_smbios_preview()
-        self._update_defaults_preview()
-        if not silent:
-            labels = {
-                "vmid": "VMID",
-                "name": "VM Name",
-                "macos": "macOS",
-                "cores": "CPU",
-                "memory": "Memory",
-                "disk": "Disk",
-                "bridge": "Bridge",
-                "storage": "Storage",
-            }
-            if changed:
-                details = ", ".join(labels[key] for key in changed)
-                self._set_wizard_status(f"Recommended settings applied: {details}. Next: Validate.")
-            else:
-                self._set_wizard_status("Recommended settings already active. Next: Validate.")
-            self.notify("Recommended settings applied")
-            self._set_stage(2)
+    def _render_config_summary(self) -> None:
+        config = self.state.config
+        if not config:
+            return
+        meta = SUPPORTED_MACOS.get(config.macos, {})
+        lines = [
+            f"Target: {meta.get('label', config.macos)} ({meta.get('channel', '?')})",
+            f"VM: {config.vmid} / {config.name}",
+            f"CPU: {config.cores} cores | Memory: {config.memory_mb} MB | Disk: {config.disk_gb} GB",
+            f"Storage: {config.storage} | Bridge: {config.bridge}",
+        ]
+        if config.installer_path:
+            lines.append(f"Installer: {config.installer_path}")
+        lines.append("")
+        lines.append(f"Plan: {len(self.state.plan_steps)} steps")
+        for idx, step in enumerate(self.state.plan_steps, start=1):
+            prefix = "!" if step.risk in {"warn", "action"} else "-"
+            lines.append(f"  {idx:02d}. {prefix} {step.title}")
+        self.query_one("#config_summary", Static).update("\n".join(lines))
 
-    def _update_defaults_preview(self) -> None:
-        preview = (
-            f"Applied: vmid={self.query_one('#vmid', Input).value.strip()}  "
-            f"name={self.query_one('#name', Input).value.strip()}  "
-            f"macos={self.query_one('#macos', Input).value.strip()}  "
-            f"cpu={self.query_one('#cores', Input).value.strip()}  "
-            f"mem={self.query_one('#memory', Input).value.strip()}MB  "
-            f"disk={self.query_one('#disk', Input).value.strip()}GB  "
-            f"storage={self.query_one('#storage', Input).value.strip()}"
-        )
-        self.query_one("#defaults_preview", Static).update(preview)
+    def _check_and_download_assets(self) -> None:
+        config = self.state.config
+        if not config:
+            return
+        assets = required_assets(config)
+        missing = [a for a in assets if not a.ok]
+        downloadable = [a for a in missing if a.downloadable]
 
-    def _generate_smbios(self) -> None:
-        macos = self.query_one("#macos", Input).value.strip().lower() or "sequoia"
-        self.smbios_identity = generate_smbios(macos)
-        self._update_smbios_preview()
-        self._set_wizard_status("SMBIOS identity generated.")
+        if not missing:
+            self.state.assets_ok = True
+            self.state.assets_missing = []
+            self.state.downloads_complete = True
+            self.query_one("#download_status", Static).update("Assets: OK")
+            self.query_one("#dry_run_btn", Button).disabled = False
+            return
 
-    def _update_smbios_preview(self) -> None:
-        if self.smbios_identity:
-            text = (
-                f"SMBIOS: serial={self.smbios_identity.serial}  "
-                f"uuid={self.smbios_identity.uuid}  "
-                f"model={self.smbios_identity.model}"
-            )
+        self.state.assets_ok = False
+        self.state.assets_missing = missing
+
+        if downloadable:
+            names = ", ".join(a.name for a in downloadable)
+            self.query_one("#download_status", Static).update(f"Downloading: {names}...")
+            self.query_one("#download_progress").remove_class("hidden")
+            self.query_one("#download_progress", ProgressBar).update(total=100, progress=0)
+            self.state.download_running = True
+            Thread(target=self._download_worker, args=(config, missing), daemon=True).start()
         else:
-            text = "SMBIOS: not generated yet."
-        self.query_one("#smbios_preview", Static).update(text)
+            self.query_one("#download_status", Static).update(
+                f"Missing assets: {', '.join(a.name for a in missing)}. Provide path manually."
+            )
 
-    def _set_input_value(self, selector: str, value: str) -> None:
-        widget = self.query_one(selector, Input)
-        widget.value = value
-        widget.cursor_position = len(value)
-        widget.refresh(layout=True)
+    def _download_worker(self, config: VmConfig, missing: list) -> None:
+        dest_dir = Path("/var/lib/vz/template/iso")
+        errors: list[str] = []
 
-    def _set_storage_target(self, target: str) -> None:
-        self._set_input_value("#storage", target)
-        self._update_defaults_preview()
-        self._validate_form_inputs(quiet=True)
-        self._set_wizard_status(f"Storage target set to {target}.")
+        def on_progress(p: DownloadProgress) -> None:
+            if p.total > 0:
+                pct = int(p.downloaded * 100 / p.total)
+                self.call_from_thread(self._update_download_progress, p.phase, pct)
 
-    def _autofill_tahoe_installer_path(self) -> bool:
-        if self.query_one("#macos", Input).value.strip().lower() != "tahoe":
-            return False
-        current = self.query_one("#installer_path", Input).value.strip()
-        if current:
-            return True
-        candidate = self._find_tahoe_installer_path()
-        if not candidate:
-            return False
-        self._set_input_value("#installer_path", candidate)
-        self._set_wizard_status(f"Tahoe installer auto-detected: {candidate}")
-        return True
-
-    def _find_tahoe_installer_path(self) -> str:
-        search_dirs = [
-            Path("/var/lib/vz/template/iso"),
-            Path("/var/lib/vz/snippets"),
-        ]
-        mnt_pve = Path("/mnt/pve")
-        if mnt_pve.exists():
-            for entry in sorted(mnt_pve.iterdir()):
-                iso_path = entry / "template" / "iso"
-                if iso_path.exists():
-                    search_dirs.append(iso_path)
-        patterns = [
-            "*tahoe*full*.iso",
-            "*tahoe*.iso",
-            "*26*.iso",
-            "*InstallAssistant*.iso",
-        ]
-        for root in search_dirs:
-            if not root.exists():
+        for asset in missing:
+            if not asset.downloadable:
                 continue
-            for pattern in patterns:
-                matches = sorted(root.glob(pattern))
-                for path in matches:
-                    if path.is_file():
-                        return str(path)
-        return ""
+            if "OpenCore" in asset.name:
+                try:
+                    download_opencore(config.macos, dest_dir, on_progress=on_progress)
+                except DownloadError as exc:
+                    errors.append(f"OpenCore: {exc}")
+            elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():  # pragma: no branch
+                try:
+                    download_recovery(config.macos, dest_dir, on_progress=on_progress)
+                except DownloadError as exc:
+                    errors.append(f"Recovery: {exc}")
+
+        self.call_from_thread(self._finish_download, errors)
+
+    def _update_download_progress(self, phase: str, pct: int) -> None:
+        self.state.download_pct = pct
+        self.state.download_phase = phase
+        self.query_one("#download_progress", ProgressBar).update(total=100, progress=pct)
+        if pct >= 100:
+            self.query_one("#download_status", Static).update(f"Finalizing {phase}...")
+        else:
+            self.query_one("#download_status", Static).update(f"Downloading {phase}... {pct}%")
+
+    def _finish_download(self, errors: list[str]) -> None:
+        self.state.download_running = False
+        self.query_one("#download_progress").add_class("hidden")
+        if errors:
+            self.state.download_errors = errors
+            self.query_one("#download_status", Static).update(
+                "Download errors: " + "; ".join(errors)
+            )
+            self.notify("Some downloads failed", severity="error")
+        else:
+            self.state.downloads_complete = True
+            # Rebuild plan now that downloaded assets exist on disk
+            self._rebuild_plan_after_download()
+            self.query_one("#download_status", Static).update("Assets: downloaded and ready")
+            self.query_one("#dry_run_btn", Button).disabled = False
+            self.notify("Assets downloaded", severity="information")
+
+    def _rebuild_plan_after_download(self) -> None:
+        """Rebuild config and plan so asset paths resolve to newly downloaded files."""
+        config = self._read_form()
+        if config:
+            self.state.config = config
+            self.state.plan_steps = build_plan(config)
+            self._render_config_summary()
+
+    def _run_dry_apply(self) -> None:
+        if self.state.apply_running:
+            return
+        if not self.state.plan_steps:
+            return
+        self.state.apply_running = True
+        self.state.apply_log = []
+        self.query_one("#dry_progress").remove_class("hidden")
+        self.query_one("#dry_log").remove_class("hidden")
+        self.query_one("#dry_progress", ProgressBar).update(total=len(self.state.plan_steps), progress=0)
+        self.query_one("#dry_log", Static).update("Starting dry run...")
+        self.query_one("#dry_run_btn", Button).disabled = True
+
+        def callback(idx: int, total: int, step: PlanStep, result: object) -> None:
+            self.call_from_thread(self._update_dry_progress, idx, total, step.title, result)
+
+        def worker() -> None:
+            result = apply_plan(self.state.plan_steps, execute=False, on_step=callback)
+            self.call_from_thread(self._finish_dry_apply, result.ok, result.log_path)
+
+        Thread(target=worker, daemon=True).start()
+
+    def _update_dry_progress(self, idx: int, total: int, title: str, result: object) -> None:
+        self.query_one("#dry_progress", ProgressBar).update(total=total, progress=idx)
+        if result is None:
+            self._append_log("#dry_log", f"Running {idx}/{total}: {title}")
+        else:
+            ok = getattr(result, "ok", False)
+            rc = getattr(result, "returncode", 0)
+            self._append_log("#dry_log", f"{'OK' if ok else 'FAIL'} {idx}/{total}: {title} (rc={rc})")
+
+    def _finish_dry_apply(self, ok: bool, log_path: Path) -> None:
+        self.state.apply_running = False
+        self.state.dry_run_done = True
+        self.state.dry_run_ok = ok
+        if ok:
+            self._append_log("#dry_log", f"Dry run complete. Log: {log_path}")
+            self.query_one("#next_btn_4", Button).disabled = False
+            self.notify("Dry run passed", severity="information")
+        else:
+            self._append_log("#dry_log", f"Dry run FAILED. Log: {log_path}")
+            self.query_one("#dry_run_btn", Button).disabled = False
+            self.notify("Dry run failed", severity="error")
+
+    # ── Step 5: Live Install ────────────────────────────────────────
+
+    def _prepare_install_step(self) -> None:
+        config = self.state.config
+        if not config:
+            return
+        meta = SUPPORTED_MACOS.get(config.macos, {})
+        label = meta.get("label", config.macos)
+        self.query_one("#install_btn", Button).label = f"Install {label}"
+        self.query_one("#install_btn").remove_class("hidden")
+
+    def _run_live_install(self) -> None:
+        if self.state.apply_running:
+            return
+        if not self.state.config or not self.state.plan_steps:
+            return
+        if not self.state.preflight_ok:
+            self.notify("Preflight has failures. Fix before install.", severity="error")
+            return
+
+        self.state.apply_running = True
+        self.state.apply_log = []
+        self.query_one("#install_btn").add_class("hidden")
+        self.query_one("#live_progress").remove_class("hidden")
+        self.query_one("#live_log").remove_class("hidden")
+        self.query_one("#live_progress", ProgressBar).update(
+            total=len(self.state.plan_steps), progress=0
+        )
+        self.query_one("#live_log", Static).update("Starting live install...")
+
+        def callback(idx: int, total: int, step: PlanStep, result: object) -> None:
+            self.call_from_thread(self._update_live_progress, idx, total, step.title, result)
+
+        def worker() -> None:
+            snapshot = create_snapshot(self.state.config.vmid)
+            self.state.snapshot = snapshot
+            result = apply_plan(self.state.plan_steps, execute=True, on_step=callback)
+            self.call_from_thread(self._finish_live_install, result.ok, result.log_path, snapshot)
+
+        Thread(target=worker, daemon=True).start()
+
+    def _update_live_progress(self, idx: int, total: int, title: str, result: object) -> None:
+        self.query_one("#live_progress", ProgressBar).update(total=total, progress=idx)
+        if result is None:
+            self._append_log("#live_log", f"Running {idx}/{total}: {title}")
+        else:
+            ok = getattr(result, "ok", False)
+            rc = getattr(result, "returncode", 0)
+            self._append_log("#live_log", f"{'OK' if ok else 'FAIL'} {idx}/{total}: {title} (rc={rc})")
+
+    def _finish_live_install(
+        self, ok: bool, log_path: Path, snapshot: RollbackSnapshot | None
+    ) -> None:
+        self.state.apply_running = False
+        self.state.live_done = True
+        self.state.live_ok = ok
+        self.state.live_log = log_path
+
+        result_box = self.query_one("#result_box", Static)
+        result_box.remove_class("hidden")
+
+        if ok:
+            result_box.remove_class("result_fail")
+            lines = [
+                "Install completed successfully!",
+                f"Log: {log_path}",
+                "",
+                "If this saved you time: https://ko-fi.com/lucidfabrics",
+            ]
+            result_box.update("\n".join(lines))
+            self.notify("macOS VM created", severity="information")
+        else:
+            result_box.add_class("result_fail")
+            lines = ["Install FAILED.", f"Log: {log_path}"]
+            if snapshot:
+                lines.append("")
+                lines.extend(rollback_hints(snapshot))
+            result_box.update("\n".join(lines))
+            self.notify("Install failed", severity="error")
+
+    # ── Manage Mode ─────────────────────────────────────────────────
+
+    def _toggle_mode(self, mode: str) -> None:
+        is_manage = mode == "manage"
+        self.state.manage_mode = is_manage
+        create_btn = self.query_one("#mode_create", Button)
+        manage_btn = self.query_one("#mode_manage", Button)
+        create_panel = self.query_one("#create_panel")
+        manage_panel = self.query_one("#manage_panel")
+
+        if is_manage:
+            create_panel.add_class("hidden")
+            manage_panel.remove_class("hidden")
+            create_btn.remove_class("mode_active")
+            manage_btn.add_class("mode_active")
+            self._refresh_vm_list()
+        else:
+            manage_panel.add_class("hidden")
+            create_panel.remove_class("hidden")
+            manage_btn.remove_class("mode_active")
+            create_btn.add_class("mode_active")
+
+    def _refresh_vm_list(self) -> None:
+        Thread(target=self._vm_list_worker, daemon=True).start()
+
+    def _vm_list_worker(self) -> None:
+        try:
+            output = check_output(["qm", "list"], text=True, timeout=5.0)
+            lines = output.strip().splitlines()
+            self.call_from_thread(self._finish_vm_list, lines)
+        except Exception:
+            self.call_from_thread(self._finish_vm_list, [])
+
+    def _finish_vm_list(self, lines: list[str]) -> None:
+        self.state.uninstall_vm_list = lines
+        display = self.query_one("#vm_list_display", Static)
+        if lines:
+            display.update("\n".join(lines[:20]))
+        else:
+            display.update("No VMs found or qm not available.")
+
+    def _validate_manage_vmid(self) -> None:
+        text = self.query_one("#manage_vmid", Input).value.strip()
+        btn = self.query_one("#manage_destroy_btn", Button)
+        try:
+            vmid = int(text)
+            btn.disabled = vmid < 100 or vmid > 999999
+        except ValueError:
+            btn.disabled = True
+
+    def _toggle_purge(self) -> None:
+        self.state.uninstall_purge = not self.state.uninstall_purge
+        btn = self.query_one("#manage_purge_btn", Button)
+        if self.state.uninstall_purge:
+            btn.label = "Purge disks: ON"
+        else:
+            btn.label = "Purge disks: OFF"
+
+    def _run_destroy(self) -> None:
+        if self.state.uninstall_running:
+            return
+        text = self.query_one("#manage_vmid", Input).value.strip()
+        try:
+            vmid = int(text)
+        except ValueError:
+            return
+        if vmid < 100 or vmid > 999999:
+            return
+
+        self.state.uninstall_running = True
+        self.state.uninstall_done = False
+        self.state.uninstall_log = []
+        self.query_one("#manage_destroy_btn", Button).disabled = True
+        self.query_one("#manage_log").remove_class("hidden")
+        self.query_one("#manage_log", Static).update("Starting destroy...")
+        self.query_one("#manage_result").add_class("hidden")
+
+        Thread(target=self._destroy_worker, args=(vmid,), daemon=True).start()
+
+    def _destroy_worker(self, vmid: int) -> None:
+        snapshot = create_snapshot(vmid)
+        steps = build_destroy_plan(vmid, purge=self.state.uninstall_purge)
+
+        def on_step(idx: int, total: int, step: PlanStep, result: object) -> None:
+            self.call_from_thread(self._update_destroy_log, idx, total, step.title, result)
+
+        result = apply_plan(steps, execute=True, on_step=on_step)
+        self.call_from_thread(self._finish_destroy, result.ok, result.log_path)
+
+    def _update_destroy_log(self, idx: int, total: int, title: str, result: object) -> None:
+        if result is None:
+            self.state.uninstall_log.append(f"Running {idx}/{total}: {title}")
+        else:
+            ok = getattr(result, "ok", False)
+            self.state.uninstall_log.append(f"{'OK' if ok else 'FAIL'} {idx}/{total}: {title}")
+        visible = self.state.uninstall_log[-10:]
+        self.query_one("#manage_log", Static).update("\n".join(visible))
+
+    def _finish_destroy(self, ok: bool, log_path: Path) -> None:
+        self.state.uninstall_running = False
+        self.state.uninstall_done = True
+        self.state.uninstall_ok = ok
+        self._validate_manage_vmid()
+
+        result_box = self.query_one("#manage_result", Static)
+        result_box.remove_class("hidden")
+
+        if ok:
+            result_box.remove_class("manage_result_fail")
+            result_box.update(f"VM destroyed successfully.\nLog: {log_path}")
+            self._refresh_vm_list()
+        else:
+            result_box.add_class("manage_result_fail")
+            result_box.update(f"Destroy FAILED.\nLog: {log_path}")
+
+    # ── Preflight Worker ────────────────────────────────────────────
+
+    def _preflight_worker(self) -> None:
+        checks = run_preflight()
+        self.call_from_thread(self._finish_preflight, checks)
+
+    def _finish_preflight(self, checks: list) -> None:
+        self.state.preflight_done = True
+        self.state.preflight_checks = checks
+        self.state.preflight_ok = all(c.ok for c in checks)
+        self._update_preflight_badge()
+
+    # ── Detection Helpers ───────────────────────────────────────────
 
     def _detect_storage_targets(self) -> list[str]:
         try:
-            output = check_output(["pvesm", "status", "-content", "images"], text=True, timeout=2.0)
+            output = check_output(
+                ["pvesm", "status", "-content", "images"], text=True, timeout=2.0
+            )
         except Exception:
             return [DEFAULT_STORAGE, "local"]
         targets: list[str] = []
@@ -807,14 +983,16 @@ class NextApp(App):
 
     def _detect_next_vmid(self) -> int:
         try:
-            output = check_output(["pvesh", "get", "/cluster/nextid"], text=True, timeout=2.0).strip()
+            output = check_output(
+                ["pvesh", "get", "/cluster/nextid"], text=True, timeout=2.0
+            ).strip()
             if output.isdigit():
                 vmid = int(output)
                 if 100 <= vmid <= 999999:
                     return vmid
             parsed = json.loads(output)
             if isinstance(parsed, int) and 100 <= parsed <= 999999:
-                return parsed  # pragma: no cover – isdigit() already handles pure-digit strings
+                return parsed  # pragma: no cover
         except Exception:
             pass
 
@@ -834,226 +1012,34 @@ class NextApp(App):
         except Exception:
             return 900
 
-    def _render_health_dashboard(self, summary: str, checks: list[object]) -> str:
-        ok_count = sum(1 for c in checks if getattr(c, "ok", False))
-        total = len(checks) or 1
-        ratio = ok_count / total
-        meter_width = 28
-        filled = int(ratio * meter_width)
-        meter = f"[{'#' * filled}{'.' * (meter_width - filled)}]"
-        grade = "READY" if ok_count == total else "ATTENTION"
-        lines = [
-            "Host Health Dashboard",
-            "",
-            f"Status : {grade}",
-            f"Score  : {ok_count}/{total} {meter}",
-            f"Summary: {summary}",
-            "",
-            "Checks",
-            "------",
-        ]
-        for c in checks:
-            mark = "PASS" if getattr(c, "ok", False) else "FAIL"
-            name = getattr(c, "name", "unknown")
-            details = getattr(c, "details", "")
-            lines.append(f"{mark:<4} | {name}")
-            lines.append(f"      {details}")
-        return "\n".join(lines)
+    # ── UI Helpers ──────────────────────────────────────────────────
 
-    def _render_preflight_report(self, checks: list[object]) -> str:
-        ok_count = sum(1 for c in checks if getattr(c, "ok", False))
-        total = len(checks)
-        lines = [
-            "Preflight Report",
-            "",
-            f"Result: {ok_count}/{total} checks passed",
-            "",
-            "Detailed Results",
-            "----------------",
-        ]
-        for idx, check in enumerate(checks, start=1):
-            mark = "PASS" if getattr(check, "ok", False) else "FAIL"
-            name = getattr(check, "name", "unknown")
-            details = getattr(check, "details", "")
-            lines.append(f"{idx:02d}. {mark}  {name}")
-            lines.append(f"    {details}")
-        return "\n".join(lines)
+    def _set_input_value(self, selector: str, value: str) -> None:
+        widget = self.query_one(selector, Input)
+        widget.value = value
+        widget.cursor_position = len(value)
+        widget.refresh(layout=True)
 
-    def _set_wizard_status(self, text: str) -> None:
-        self.wizard_status_text = text
-        self.query_one("#wizard_status", Static).update(text)
-
-    def _validate_form_inputs(self, quiet: bool = False) -> bool:
-        self._autofill_tahoe_installer_path()
-        errors: list[str] = []
-
-        vmid_text = self.query_one("#vmid", Input).value.strip()
-        name_text = self.query_one("#name", Input).value.strip()
-        memory_text = self.query_one("#memory", Input).value.strip()
-        disk_text = self.query_one("#disk", Input).value.strip()
-        bridge_text = self.query_one("#bridge", Input).value.strip()
-        storage_text = self.query_one("#storage", Input).value.strip()
-        installer_text = self.query_one("#installer_path", Input).value.strip()
-        macos_text = self.query_one("#macos", Input).value.strip().lower()
-
-        invalid: dict[str, bool] = {
-            "#vmid": False,
-            "#name": False,
-            "#memory": False,
-            "#disk": False,
-            "#bridge": False,
-            "#storage": False,
-            "#installer_path": False,
-        }
-
-        try:
-            vmid_value = int(vmid_text)
-            if vmid_value < 100 or vmid_value > 999999:
-                raise ValueError
-        except ValueError:
-            invalid["#vmid"] = True
-            errors.append("VMID must be 100-999999.")
-
-        if len(name_text) < 3:
-            invalid["#name"] = True
-            errors.append("VM Name must be at least 3 chars.")
-
-        try:
-            memory_value = int(memory_text)
-            if memory_value < 4096:
-                raise ValueError
-        except ValueError:
-            invalid["#memory"] = True
-            errors.append("Memory must be >= 4096 MB.")
-
-        try:
-            disk_value = int(disk_text)
-            if disk_value < 64:
-                raise ValueError
-        except ValueError:
-            invalid["#disk"] = True
-            errors.append("Disk must be >= 64 GB.")
-
-        if not bridge_text.startswith("vmbr"):
-            invalid["#bridge"] = True
-            errors.append("Bridge should look like vmbr0.")
-
-        if not storage_text:
-            invalid["#storage"] = True
-            errors.append("Storage target is required.")
-
-        if macos_text == "tahoe" and not installer_text:
-            invalid["#installer_path"] = True
-            errors.append("Tahoe requires a full installer path.")
-
-        for selector, is_invalid in invalid.items():
-            widget = self.query_one(selector, Input)
-            if is_invalid:
-                widget.add_class("invalid")
+    def _update_step_bar(self) -> None:
+        step_labels = ["OS", "Storage", "Config", "Dry Run", "Install"]
+        parts: list[str] = []
+        for idx, label in enumerate(range(1, 6)):
+            num = idx + 1
+            name = step_labels[idx]
+            if num < self.current_step:
+                parts.append(f"[x] {num}.{name}")
+            elif num == self.current_step:
+                parts.append(f"[>] {num}.{name}")
             else:
-                widget.remove_class("invalid")
+                parts.append(f"[ ] {num}.{name}")
+        self.query_one("#step_bar", Static).update("  ".join(parts))
 
-        if errors:
-            self.query_one("#form_validation", Static).update("Form validation: " + " ".join(errors))
-            if not quiet:
-                self.notify("Form has invalid fields", severity="warning")
-            return False
-
-        self.query_one("#form_validation", Static).update("Form validation: OK.")
-        return True
-
-    def _set_plan_output(self, text: str) -> None:
-        self.plan_output_text = text
-        self.query_one("#plan_output", Static).update(text)
-
-    def _append_plan_output(self, line: str) -> None:
-        lines = [ln for ln in self.plan_output_text.splitlines() if ln.strip()]
-        lines.append(line)
-        # Keep a short rolling window so users always see latest progress.
-        self.plan_output_text = "\n".join(lines[-12:])
-        self.query_one("#plan_output", Static).update(self.plan_output_text)
-
-    def _set_stage(self, stage: int) -> None:
-        self.workflow_stage = stage
-        labels = [
-            "1 Preflight",
-            "2 Configure",
-            "3 Review",
-            "4 Dry",
-            "5 Live",
-        ]
-        chips: list[str] = []
-        for idx, label in enumerate(labels, start=1):
-            if idx < stage:
-                chips.append(f"[x] {label}")
-            elif idx == stage:
-                chips.append(f"[>] {label}")
-            else:
-                chips.append(f"[ ] {label}")
-        self.query_one("#workflow_flow", Static).update("  ".join(chips))
-
-    def _show_step_page(self, step_page: int) -> None:
-        self.step_page = step_page
-        sections = {
-            1: self.query_one("#step1_section"),
-            2: self.query_one("#step2_section"),
-            3: self.query_one("#step3_section"),
-        }
-        for key, widget in sections.items():
-            if key == step_page:
-                widget.remove_class("step_hidden")
-            else:
-                widget.add_class("step_hidden")
-        self._update_step_nav()
-
-    def _update_step_nav(self) -> None:
-        prev_button = self.query_one("#prev_step", Button)
-        next_button = self.query_one("#next_step", Button)
-        prev_button.disabled = self.step_page <= 1
-        next_button.disabled = self.step_page >= 3
-
-    def _update_apply_progress(self, idx: int, total: int, title: str, result: object) -> None:
-        self.query_one("#apply_progress", ProgressBar).update(total=total, progress=idx)
-        if result is None:
-            self._set_wizard_status(f"Running {idx}/{total}: {title}")
-        else:
-            ok = getattr(result, "ok", False)
-            returncode = getattr(result, "returncode", 0)
-            self._append_plan_output(f"{'OK' if ok else 'FAIL'} {idx}/{total}: {title} (rc={returncode})")
-
-    def _finish_apply(
-        self,
-        execute: bool,
-        ok: bool,
-        log_path: Path,
-        snapshot: RollbackSnapshot | None,
-    ) -> None:
-        self.apply_running = False
-        if ok:
-            self._set_wizard_status(
-                f"{'Live' if execute else 'Dry'} apply completed. Log: {log_path}."
-            )
-            self._append_plan_output("All steps completed successfully.")
-            self._append_plan_output(f"Completed. Log: {log_path}")
-            if execute:
-                self._append_plan_output("")
-                self._append_plan_output("If this saved you time: https://ko-fi.com/lucidfabrics | https://buymeacoffee.com/lucidfabrics")
-            self._set_stage(4 if not execute else 5)
-            return
-
-        hints = ""
-        if snapshot is not None:
-            hints = "\n".join(rollback_hints(snapshot))
-        self._set_wizard_status(f"Apply failed. Log: {log_path}\n{hints}")
-        self._append_plan_output(f"FAILED. Log: {log_path}")
-
-    def _show(self, visible_id: str) -> None:
-        for view_id in ("home_view", "wizard_view", "preflight_view"):
-            view = self.query_one(f"#{view_id}")
-            if view_id == visible_id:
-                view.remove_class("hidden")
-            else:
-                view.add_class("hidden")
+    def _append_log(self, selector: str, line: str) -> None:
+        self.state.apply_log.append(line)
+        widget = self.query_one(selector, Static)
+        # Keep rolling window
+        visible = self.state.apply_log[-15:]
+        widget.update("\n".join(visible))
 
 
 def run() -> None:

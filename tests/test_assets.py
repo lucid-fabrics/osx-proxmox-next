@@ -32,17 +32,17 @@ def test_required_assets_respects_installer_path() -> None:
     assert any(c.path == Path("/tmp/tahoe.iso") for c in checks)
 
 
-def test_suggested_fetch_commands_include_tahoe_note() -> None:
+def test_suggested_fetch_commands_include_recovery_note() -> None:
     cfg = _cfg("tahoe")
     cfg.disk_gb = 160
     cmds = suggested_fetch_commands(cfg)
-    assert any("Tahoe" in c for c in cmds)
+    assert any("recovery" in c for c in cmds)
 
 
 def test_resolve_opencore_path_default(monkeypatch):
     monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
     result = resolve_opencore_path("sequoia")
-    assert result == Path("/var/lib/vz/template/iso/opencore-sequoia.iso")
+    assert result == Path("/var/lib/vz/template/iso/opencore-osx-proxmox-vm.iso")
 
 
 def test_resolve_opencore_path_found(monkeypatch):
@@ -61,17 +61,14 @@ def test_resolve_recovery_installer_path():
 
 
 def test_resolve_recovery_tahoe_found(monkeypatch):
-    call_count = [0]
-    def fake_find_iso(patterns):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return Path("/tmp/tahoe-full.iso")
-        return None
-    monkeypatch.setattr(assets_module, "_find_iso", fake_find_iso)
+    monkeypatch.setattr(
+        assets_module, "_find_iso",
+        lambda patterns: Path("/var/lib/vz/template/iso/tahoe-recovery.img"),
+    )
     cfg = _cfg("tahoe")
     cfg.disk_gb = 160
     result = resolve_recovery_or_installer_path(cfg)
-    assert result == Path("/tmp/tahoe-full.iso")
+    assert result == Path("/var/lib/vz/template/iso/tahoe-recovery.img")
 
 
 def test_resolve_recovery_standard_found(monkeypatch):
@@ -145,7 +142,6 @@ def test_suggested_fetch_non_tahoe():
     cfg = _cfg("sequoia")
     cmds = suggested_fetch_commands(cfg)
     assert any("recovery" in c for c in cmds)
-    assert not any("Tahoe" in c for c in cmds)
 
 
 def test_suggested_fetch_includes_download_hint():
@@ -154,27 +150,17 @@ def test_suggested_fetch_includes_download_hint():
     assert any("osx-next-cli download" in c for c in cmds)
 
 
-def test_suggested_fetch_tahoe_opencore_only_hint():
+def test_suggested_fetch_tahoe_auto_download():
     cfg = _cfg("tahoe")
     cfg.disk_gb = 160
     cmds = suggested_fetch_commands(cfg)
-    assert any("--opencore-only" in c for c in cmds)
-    assert not any("--macos tahoe\n" in c for c in cmds)  # no bare download for tahoe
+    assert any("osx-next-cli download" in c for c in cmds)
+    assert any("recovery" in c for c in cmds)
 
 
-def test_resolve_recovery_tahoe_no_match_then_standard(monkeypatch):
-    """tahoe with no match on tahoe patterns falls through to standard recovery search."""
-    call_count = [0]
-    def fake_find_iso(patterns):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            # tahoe-specific search returns nothing
-            return None
-        if call_count[0] == 2:
-            # standard recovery search also returns nothing
-            return None
-        return None
-    monkeypatch.setattr(assets_module, "_find_iso", fake_find_iso)
+def test_resolve_recovery_tahoe_fallback(monkeypatch):
+    """tahoe with no recovery file falls back to default path."""
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
     cfg = _cfg("tahoe")
     cfg.disk_gb = 160
     result = resolve_recovery_or_installer_path(cfg)
@@ -291,7 +277,7 @@ def test_asset_check_downloadable_recovery(monkeypatch):
     monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
     cfg = _cfg("sequoia")
     checks = required_assets(cfg)
-    recovery = [c for c in checks if "recovery" in c.name.lower() or "installer" in c.name.lower()][0]
+    recovery = [c for c in checks if "Recovery" in c.name][0]
     assert recovery.downloadable is True
 
 
@@ -300,8 +286,8 @@ def test_asset_check_downloadable_tahoe_recovery(monkeypatch):
     cfg = _cfg("tahoe", "/tmp/tahoe.iso")
     cfg.disk_gb = 160
     checks = required_assets(cfg)
-    recovery = [c for c in checks if "recovery" in c.name.lower() or "installer" in c.name.lower()][0]
-    assert recovery.downloadable is False
+    recovery = [c for c in checks if "Recovery" in c.name][0]
+    assert recovery.downloadable is True
 
 
 def test_resolve_recovery_finds_img(tmp_path, monkeypatch):

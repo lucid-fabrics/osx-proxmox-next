@@ -492,3 +492,129 @@ def test_cli_auto_download_on_missing(monkeypatch, tmp_path):
         "--storage", "local-lvm",
     ])
     assert rc == 0
+
+
+# ── Uninstall Tests ─────────────────────────────────────────────────
+
+
+def test_cli_parser_has_uninstall_command() -> None:
+    from osx_proxmox_next.cli import build_parser
+    parser = build_parser()
+    cmds = parser._subparsers._group_actions[0].choices  # type: ignore[attr-defined]
+    assert "uninstall" in cmds
+
+
+def test_cli_uninstall_dry_run():
+    rc = run_cli(["uninstall", "--vmid", "106"])
+    assert rc == 0
+
+
+def test_cli_uninstall_dry_run_with_purge():
+    rc = run_cli(["uninstall", "--vmid", "106", "--purge"])
+    assert rc == 0
+
+
+def test_cli_uninstall_invalid_vmid():
+    rc = run_cli(["uninstall", "--vmid", "5"])
+    assert rc == 2
+
+
+def test_cli_uninstall_invalid_vmid_high():
+    rc = run_cli(["uninstall", "--vmid", "9999999"])
+    assert rc == 2
+
+
+def test_cli_uninstall_vm_not_found(monkeypatch):
+    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid: None)
+    rc = run_cli(["uninstall", "--vmid", "106", "--execute"])
+    assert rc == 2
+
+
+def test_cli_uninstall_execute_success(monkeypatch, tmp_path):
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid: VmInfo(vmid=vmid, name="macos-test", status="running", config_raw="cores: 8"),
+    )
+    monkeypatch.setattr(
+        cli_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["uninstall", "--vmid", "106", "--execute"])
+    assert rc == 0
+
+
+def test_cli_uninstall_execute_failure(monkeypatch, tmp_path):
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
+    )
+    monkeypatch.setattr(
+        cli_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=False, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["uninstall", "--vmid", "106", "--execute"])
+    assert rc == 6
+
+
+def test_cli_uninstall_execute_with_purge(monkeypatch, tmp_path):
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    captured_steps = []
+
+    def fake_apply(steps, execute=False):
+        captured_steps.extend(steps)
+        return ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt")
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
+    )
+    monkeypatch.setattr(
+        cli_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
+    )
+    monkeypatch.setattr(cli_module, "apply_plan", fake_apply)
+    rc = run_cli(["uninstall", "--vmid", "106", "--purge", "--execute"])
+    assert rc == 0
+    assert any("--purge" in step.command for step in captured_steps)
+
+
+def test_cli_uninstall_vm_info_displayed(monkeypatch, tmp_path, capsys):
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid: VmInfo(vmid=vmid, name="my-macos", status="running", config_raw="cores: 8"),
+    )
+    monkeypatch.setattr(
+        cli_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    run_cli(["uninstall", "--vmid", "106", "--execute"])
+    captured = capsys.readouterr()
+    assert "my-macos" in captured.out
+    assert "running" in captured.out

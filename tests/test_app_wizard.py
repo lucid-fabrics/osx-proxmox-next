@@ -1,142 +1,343 @@
 import asyncio
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
-from textual.widgets import Input, Static
+from textual.widgets import Button, Input, Static
 
 from osx_proxmox_next import app as app_module
-from osx_proxmox_next.app import NextApp
+from osx_proxmox_next.app import NextApp, WizardState
 from osx_proxmox_next.executor import ApplyResult
+from osx_proxmox_next.planner import PlanStep
 
 
-def test_wizard_starts_with_guided_status() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(90, 28)) as pilot:
-            await pilot.click("#nav_wizard")
-            assert (
-                "Step 1" in app.wizard_status_text
-                or "Preflight has failures" in app.wizard_status_text
-            )
+# ── Helper ──────────────────────────────────────────────────────────
 
-    asyncio.run(_run())
-
-
-def test_apply_dry_does_not_create_snapshot(monkeypatch) -> None:
-    calls = {"snapshots": 0}
-
-    def fake_snapshot(_vmid: int):
-        calls["snapshots"] += 1
-        raise AssertionError("dry apply must not snapshot")
-
-    def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):  # type: ignore[no-untyped-def]
-        for idx, step in enumerate(steps, start=1):
-            if on_step:
-                on_step(idx, len(steps), step, None)
-                class _R:
-                    ok = True
-                    returncode = 0
-                on_step(idx, len(steps), step, _R())
-        return ApplyResult(ok=True, results=[], log_path=Path("/tmp/fake.log"))
-
-    monkeypatch.setattr(app_module, "create_snapshot", fake_snapshot)
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(90, 28)) as pilot:
-            await pilot.click("#nav_wizard")
-            app.preflight_has_run = True
-            await pilot.press("a")
-            await pilot.pause()
-            await pilot.pause()
-
-    asyncio.run(_run())
-    assert calls["snapshots"] == 0
+async def _advance_to_step(pilot, app, target_step, monkeypatch=None):
+    """Advance the wizard to the given step by selecting defaults."""
+    if target_step >= 2:
+        await pilot.click("#os_sequoia")
+        await pilot.pause()
+        await pilot.click("#next_btn")
+        await pilot.pause()
+    if target_step >= 3:
+        await pilot.click("#next_btn_2")
+        await pilot.pause()
+    if target_step >= 4:
+        if monkeypatch:
+            monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+            monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+        await pilot.click("#next_btn_3")
+        await pilot.pause()
 
 
-def test_use_recommended_populates_empty_fields() -> None:
+# ── Navigation Tests ────────────────────────────────────────────────
+
+def test_wizard_starts_at_step1() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#vmid").value = ""
-            app.query_one("#name").value = ""
-            app.query_one("#macos").value = ""
-            await pilot.click("#defaults")
             await pilot.pause()
-            assert app.query_one("#vmid").value.strip() == "900"
-            assert app.query_one("#name").value.strip() == "macos-sequoia"
-            assert app.query_one("#macos").value.strip() == "sequoia"
+            assert app.current_step == 1
+            assert not app.query_one("#step1").has_class("step_hidden")
+            assert app.query_one("#step2").has_class("step_hidden")
 
     asyncio.run(_run())
 
 
-def test_locked_fields_and_storage_quick_select() -> None:
+def test_next_blocked_without_os_selection() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            assert app.query_one("#macos").disabled is True
-            await pilot.click("#toggle_advanced")
-            assert app.query_one("#cores").disabled is True
-            await pilot.click("#back_basic")
-            await pilot.click("#storage_pick_0")
-            assert app.query_one("#storage").value.strip() != ""
+            await pilot.pause()
+            assert app.query_one("#next_btn", Button).disabled is True
+            app._go_next()
+            assert app.current_step == 1
 
     asyncio.run(_run())
 
 
-def test_invalid_form_blocks_step3_navigation() -> None:
+def test_forward_backward_navigation() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#vmid").value = "abc"
-            await pilot.click("#goto_step3")
             await pilot.pause()
-            assert app.step_page == 2
-            assert app.query_one("#vmid").has_class("invalid")
-            assert "Fix highlighted fields" in app.wizard_status_text
+            # Select OS → step 2
+            await pilot.click("#os_sequoia")
+            await pilot.pause()
+            await pilot.click("#next_btn")
+            await pilot.pause()
+            assert app.current_step == 2
+            # Back → step 1
+            await pilot.click("#back_btn")
+            await pilot.pause()
+            assert app.current_step == 1
 
     asyncio.run(_run())
 
 
-def test_use_recommended_uses_next_available_vmid(monkeypatch) -> None:
-    monkeypatch.setattr(NextApp, "_detect_next_vmid", lambda self: 1234)
-
+def test_back_at_step1_stays() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
             await pilot.pause()
-            assert app.query_one("#vmid").value.strip() == "1234"
+            app._go_back()
+            assert app.current_step == 1
 
     asyncio.run(_run())
 
 
-def test_macos_switch() -> None:
+def test_step2_next_without_storage_blocked() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#macos_sonoma")
             await pilot.pause()
-            assert app.query_one("#macos", Input).value == "sonoma"
-            assert app.query_one("#name", Input).value == "macos-sonoma"
-            assert app.smbios_identity is not None
-            assert app.smbios_identity.model == "iMacPro1,1"
-            await pilot.click("#macos_tahoe")
+            await pilot.click("#os_sequoia")
             await pilot.pause()
-            assert app.query_one("#macos", Input).value == "tahoe"
-            assert app.smbios_identity.model == "MacPro7,1"
+            await pilot.click("#next_btn")
+            await pilot.pause()
+            app.state.selected_storage = ""
+            app._go_next()
+            assert app.current_step == 2
+
+    asyncio.run(_run())
+
+
+def test_step4_next_requires_dry_run() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            # Force to step 4 directly
+            app.current_step = 4
+            await pilot.pause()
+            app.state.dry_run_ok = False
+            app._go_next()
+            assert app.current_step == 4
+
+    asyncio.run(_run())
+
+
+def test_step_bar_updates() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            bar_text = app.query_one("#step_bar", Static).content
+            assert "[>] 1.OS" in bar_text
+            await pilot.click("#os_sequoia")
+            await pilot.pause()
+            await pilot.click("#next_btn")
+            await pilot.pause()
+            bar_text = app.query_one("#step_bar", Static).content
+            assert "[>] 2.Storage" in bar_text
+            assert "[x] 1.OS" in bar_text
+
+    asyncio.run(_run())
+
+
+def test_step_visibility_toggles() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.current_step = 3
+            await pilot.pause()
+            assert not app.query_one("#step3").has_class("step_hidden")
+            assert app.query_one("#step1").has_class("step_hidden")
+            assert app.query_one("#step2").has_class("step_hidden")
+            assert app.query_one("#step4").has_class("step_hidden")
+            assert app.query_one("#step5").has_class("step_hidden")
+
+    asyncio.run(_run())
+
+
+# ── Step 1: OS Selection ────────────────────────────────────────────
+
+def test_select_os_sonoma() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#os_sonoma")
+            await pilot.pause()
+            assert app.state.selected_os == "sonoma"
+            assert app.state.smbios is not None
+            assert app.state.smbios.model == "iMacPro1,1"
+            assert app.query_one("#os_sonoma").has_class("os_selected")
+            assert not app.query_one("#os_sequoia").has_class("os_selected")
+
+    asyncio.run(_run())
+
+
+def test_select_os_sequoia() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#os_sequoia")
+            await pilot.pause()
+            assert app.state.selected_os == "sequoia"
+            assert app.query_one("#next_btn", Button).disabled is False
+
+    asyncio.run(_run())
+
+
+def test_select_os_tahoe() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#os_tahoe")
+            await pilot.pause()
+            assert app.state.selected_os == "tahoe"
+            assert app.state.smbios.model == "MacPro7,1"
+
+    asyncio.run(_run())
+
+
+def test_switch_os_deselects_previous() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#os_sonoma")
+            await pilot.pause()
+            assert app.query_one("#os_sonoma").has_class("os_selected")
+            await pilot.click("#os_tahoe")
+            await pilot.pause()
+            assert not app.query_one("#os_sonoma").has_class("os_selected")
+            assert app.query_one("#os_tahoe").has_class("os_selected")
+
+    asyncio.run(_run())
+
+
+def test_os_invalid_key_ignored() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            # Simulate button with unknown os key
+            class FakeEvent:
+                class button:
+                    id = "os_bogus"
+            app.on_button_pressed(FakeEvent())
+            assert app.state.selected_os == ""
+
+    asyncio.run(_run())
+
+
+# ── Step 2: Storage Selection ───────────────────────────────────────
+
+def test_storage_preselected() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            assert app.state.selected_storage == app.state.storage_targets[0]
+
+    asyncio.run(_run())
+
+
+def test_storage_click_selects() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#os_sequoia")
+            await pilot.pause()
+            await pilot.click("#next_btn")
+            await pilot.pause()
+            assert app.current_step == 2
+            await pilot.click("#storage_0")
+            await pilot.pause()
+            assert app.state.selected_storage == app.state.storage_targets[0]
+
+    asyncio.run(_run())
+
+
+def test_storage_invalid_index_ignored() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            class FakeEvent:
+                class button:
+                    id = "storage_999"
+            app.on_button_pressed(FakeEvent())
+            # No crash, storage unchanged
+
+    asyncio.run(_run())
+
+
+def test_storage_non_numeric_ignored() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            class FakeEvent:
+                class button:
+                    id = "storage_abc"
+            app.on_button_pressed(FakeEvent())
+
+    asyncio.run(_run())
+
+
+def test_storage_selection_updates_buttons() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#os_sequoia")
+            await pilot.pause()
+            await pilot.click("#next_btn")
+            await pilot.pause()
+            if len(app.state.storage_targets) >= 2:
+                await pilot.click("#storage_1")
+                await pilot.pause()
+                assert app.query_one("#storage_1").has_class("storage_selected")
+                assert not app.query_one("#storage_0").has_class("storage_selected")
+
+    asyncio.run(_run())
+
+
+def test_detect_storage_fallback() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        targets = app.state.storage_targets
+        assert len(targets) >= 1
+        assert targets[0] in ("local-lvm", "local")
+
+    asyncio.run(_run())
+
+
+# ── Step 3: Configuration ──────────────────────────────────────────
+
+def test_prefill_form_on_step2_next() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            assert app.query_one("#name", Input).value == "macos-sequoia"
+            assert app.query_one("#storage_input", Input).value != ""
+
+    asyncio.run(_run())
+
+
+def test_suggest_defaults_button() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            app.query_one("#vmid", Input).value = ""
+            app.query_one("#name", Input).value = ""
+            await pilot.click("#suggest_btn")
+            await pilot.pause()
+            assert app.query_one("#vmid", Input).value.strip() == "900"
+            assert app.query_one("#name", Input).value.strip() == "macos-sequoia"
 
     asyncio.run(_run())
 
@@ -145,340 +346,835 @@ def test_generate_smbios_button() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
             await pilot.pause()
-            await pilot.click("#goto_step2")
+            await _advance_to_step(pilot, app, 3)
+            old_serial = app.state.smbios.serial if app.state.smbios else ""
+            await pilot.click("#smbios_btn")
             await pilot.pause()
-            app._toggle_advanced()
-            await pilot.pause()
-            app._generate_smbios()
-            await pilot.pause()
-            assert app.smbios_identity is not None
-            assert app.smbios_identity.serial != ""
-            assert "SMBIOS identity generated" in app.wizard_status_text
+            assert app.state.smbios is not None
+            # May be same or different, but must be set
+            assert app.state.smbios.serial != ""
 
     asyncio.run(_run())
 
 
-def test_advanced_toggle_visibility() -> None:
+def test_smbios_preview_none() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            section = app.query_one("#advanced_section")
-            assert section.has_class("hidden")
-            await pilot.click("#toggle_advanced")
             await pilot.pause()
-            assert not section.has_class("hidden")
-            assert app.query_one("#basic_grid").has_class("hidden")
-            await pilot.click("#back_basic")
+            await _advance_to_step(pilot, app, 3)
+            app.state.smbios = None
+            app._update_smbios_preview()
             await pilot.pause()
-            assert section.has_class("hidden")
-            assert not app.query_one("#basic_grid").has_class("hidden")
+            text = app.query_one("#smbios_preview", Static).content
+            assert "not generated" in str(text)
 
     asyncio.run(_run())
 
 
-def test_step_nav_prev_next() -> None:
+def test_validate_form_all_invalid() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            assert app.step_page == 1
-            await pilot.click("#goto_step2")
-            assert app.step_page == 2
-            await pilot.click("#goto_step1")
-            assert app.step_page == 1
-            # prev at step 1 stays at 1
-            await pilot.press("b")
-            assert app.step_page == 1
-
-    asyncio.run(_run())
-
-
-def test_apply_blocked_during_run() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            app.apply_running = True
-            app._apply(execute=False)
-            assert "already running" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_apply_live_blocked_no_preflight() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            app.preflight_has_run = True
-            app.preflight_ok = False
-            app._apply(execute=True)
-            assert "preflight has failures" in app.wizard_status_text.lower()
-
-    asyncio.run(_run())
-
-
-def test_validate_form_branches() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            # Set all invalid
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
             app.query_one("#vmid", Input).value = "abc"
             app.query_one("#name", Input).value = "x"
             app.query_one("#memory", Input).value = "100"
             app.query_one("#disk", Input).value = "10"
             app.query_one("#bridge", Input).value = "eth0"
-            app.query_one("#storage", Input).value = ""
-            result = app._validate_form_inputs(quiet=False)
+            app.query_one("#storage_input", Input).value = ""
+            result = app._validate_form(quiet=False)
             assert result is False
             assert app.query_one("#vmid", Input).has_class("invalid")
             assert app.query_one("#name", Input).has_class("invalid")
             assert app.query_one("#memory", Input).has_class("invalid")
             assert app.query_one("#disk", Input).has_class("invalid")
             assert app.query_one("#bridge", Input).has_class("invalid")
-            assert app.query_one("#storage", Input).has_class("invalid")
+            assert app.query_one("#storage_input", Input).has_class("invalid")
 
     asyncio.run(_run())
 
 
-def test_validate_tahoe_no_installer() -> None:
+def test_validate_form_valid() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#macos", Input).value = "tahoe"
-            app.query_one("#installer_path", Input).value = ""
-            result = app._validate_form_inputs(quiet=False)
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            result = app._validate_form(quiet=True)
+            assert result is True
+            assert not app.query_one("#vmid", Input).has_class("invalid")
+
+    asyncio.run(_run())
+
+
+def test_validate_form_quiet_no_notification() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            app.query_one("#vmid", Input).value = "abc"
+            result = app._validate_form(quiet=True)
             assert result is False
-            assert app.query_one("#installer_path", Input).has_class("invalid")
 
     asyncio.run(_run())
 
 
-def test_plan_generation_output(monkeypatch) -> None:
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [],
-    )
-
+def test_input_changed_triggers_validation() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
             await pilot.pause()
-            app.action_generate_plan()
+            await _advance_to_step(pilot, app, 3)
+            app.query_one("#vmid", Input).value = "5"
             await pilot.pause()
-            assert app.plan_output_text != ""
-            assert "Create VM shell" in app.plan_output_text
+            assert app.query_one("#vmid", Input).has_class("invalid")
 
     asyncio.run(_run())
 
 
-def test_input_changed_validation() -> None:
+def test_step3_next_validation_blocks() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            vmid_input = app.query_one("#vmid", Input)
-            vmid_input.value = "5"
-            # Trigger on_input_changed by setting value which fires Changed
             await pilot.pause()
-            # The on_input_changed handler calls _validate_form_inputs(quiet=True)
-            # which should mark vmid as invalid
-            assert vmid_input.has_class("invalid")
+            await _advance_to_step(pilot, app, 3)
+            app.query_one("#vmid", Input).value = "abc"
+            await pilot.click("#next_btn_3")
+            await pilot.pause()
+            assert app.current_step == 3
 
     asyncio.run(_run())
 
 
-def test_render_health_dashboard() -> None:
+def test_step3_next_read_form_fails() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            # Make _validate_form pass but _read_form fail
+            from unittest.mock import patch
+            with patch.object(app, "_validate_form", return_value=True):
+                with patch.object(app, "_read_form", return_value=None):
+                    app._go_next()
+            assert app.current_step == 3
+
+    asyncio.run(_run())
+
+
+def test_step3_next_domain_validation_fails(monkeypatch) -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            monkeypatch.setattr(
+                app_module, "validate_config",
+                lambda cfg: ["Fake domain error."],
+            )
+            await pilot.click("#next_btn_3")
+            await pilot.pause()
+            assert app.current_step == 3
+            errors_text = str(app.query_one("#form_errors", Static).content)
+            assert "Fake domain error" in errors_text
+
+    asyncio.run(_run())
+
+
+def test_read_form_invalid_vmid() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            app.query_one("#vmid", Input).value = "not-a-number"
+            result = app._read_form()
+            assert result is None
+
+    asyncio.run(_run())
+
+
+def test_read_form_success() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            config = app._read_form()
+            assert config is not None
+            assert config.macos == "sequoia"
+            assert config.vmid == 900
+
+    asyncio.run(_run())
+
+
+def test_read_form_no_smbios() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            app.state.smbios = None
+            config = app._read_form()
+            assert config is not None
+            assert config.smbios_serial == ""
+
+    asyncio.run(_run())
+
+
+def test_preflight_badge_running() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.preflight_done = False
+            app._update_preflight_badge()
+            text = str(app.query_one("#preflight_badge", Static).content)
+            assert "running" in text
+
+    asyncio.run(_run())
+
+
+def test_preflight_badge_ok() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.preflight_done = True
+            app.state.preflight_ok = True
+            app._update_preflight_badge()
+            text = str(app.query_one("#preflight_badge", Static).content)
+            assert "Host Ready" in text
+
+    asyncio.run(_run())
+
+
+def test_preflight_badge_failed() -> None:
     from osx_proxmox_next.preflight import PreflightCheck
 
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
             await pilot.pause()
-            checks = [
-                PreflightCheck("qm available", True, "/usr/sbin/qm"),
-                PreflightCheck("/dev/kvm present", False, "not found"),
+            app.state.preflight_done = True
+            app.state.preflight_ok = False
+            app.state.preflight_checks = [
+                PreflightCheck("qm available", False, "not found"),
+                PreflightCheck("Root privileges", False, "not root"),
             ]
-            result = app._render_health_dashboard("Health 1/2", checks)
-            assert "Host Health Dashboard" in result
-            assert "ATTENTION" in result
-            assert "PASS" in result
-            assert "FAIL" in result
+            app._update_preflight_badge()
+            text = str(app.query_one("#preflight_badge", Static).content)
+            assert "2 checks failed" in text
 
     asyncio.run(_run())
 
 
-def test_render_preflight_report() -> None:
+# ── Step 4: Review & Dry Run ───────────────────────────────────────
+
+def test_step3_to_step4_with_assets_ok(monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4, monkeypatch)
+            assert app.current_step == 4
+            assert app.state.assets_ok is True
+            assert app.query_one("#dry_run_btn", Button).disabled is False
+
+    asyncio.run(_run())
+
+
+def test_config_summary_displayed(monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4, monkeypatch)
+            summary = str(app.query_one("#config_summary", Static).content)
+            assert "Sequoia" in summary or "sequoia" in summary
+            assert "Create VM shell" in summary
+
+    asyncio.run(_run())
+
+
+def test_config_summary_with_installer_path(monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            app.query_one("#installer_path", Input).value = "/tmp/test.iso"
+            monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+            await pilot.click("#next_btn_3")
+            await pilot.pause()
+            summary = str(app.query_one("#config_summary", Static).content)
+            assert "Installer" in summary
+
+    asyncio.run(_run())
+
+
+def test_render_config_summary_no_config() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.config = None
+            app._render_config_summary()
+            # No crash
+
+    asyncio.run(_run())
+
+
+def test_check_assets_missing_not_downloadable(monkeypatch) -> None:
+    from osx_proxmox_next.assets import AssetCheck
+
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            monkeypatch.setattr(
+                app_module, "required_assets",
+                lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=False)],
+            )
+            await pilot.click("#next_btn_3")
+            await pilot.pause()
+            status = str(app.query_one("#download_status", Static).content)
+            assert "Provide path manually" in status
+
+    asyncio.run(_run())
+
+
+def test_check_assets_no_config() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.config = None
+            app._check_and_download_assets()
+            # No crash
+
+    asyncio.run(_run())
+
+
+def test_download_worker_success(monkeypatch) -> None:
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.downloader import DownloadProgress
+
+    download_calls = {"opencore": 0, "recovery": 0}
+
+    def fake_download_opencore(macos, dest, on_progress=None):
+        download_calls["opencore"] += 1
+        if on_progress:
+            on_progress(DownloadProgress(downloaded=500, total=1000, phase="opencore"))
+            on_progress(DownloadProgress(downloaded=800, total=0, phase="opencore"))
+        return dest / f"opencore-{macos}.iso"
+
+    def fake_download_recovery(macos, dest, on_progress=None):
+        download_calls["recovery"] += 1
+        if on_progress:
+            on_progress(DownloadProgress(downloaded=1000, total=1000, phase="recovery"))
+        return dest / f"{macos}-recovery.img"
+
+    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(app_module, "download_recovery", fake_download_recovery)
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            # Set required_assets AFTER _advance_to_step (which doesn't use it for step 3)
+            monkeypatch.setattr(
+                app_module, "required_assets",
+                lambda cfg: [
+                    AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "", downloadable=True),
+                    AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "", downloadable=True),
+                ],
+            )
+            await pilot.click("#next_btn_3")
+            await pilot.pause()
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.state.download_running:
+                    break
+            assert download_calls["opencore"] == 1
+            assert download_calls["recovery"] == 1
+            assert app.state.downloads_complete is True
+
+    asyncio.run(_run())
+
+
+def test_download_worker_opencore_error(monkeypatch) -> None:
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.downloader import DownloadError
+
+    def raise_dl_error(*a, **kw):
+        raise DownloadError("fail")
+
+    monkeypatch.setattr(app_module, "download_opencore", raise_dl_error)
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            monkeypatch.setattr(
+                app_module, "required_assets",
+                lambda cfg: [
+                    AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "", downloadable=True),
+                ],
+            )
+            await pilot.click("#next_btn_3")
+            await pilot.pause()
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.state.download_running:
+                    break
+            assert len(app.state.download_errors) > 0
+            status = str(app.query_one("#download_status", Static).content)
+            assert "Download errors" in status
+
+    asyncio.run(_run())
+
+
+def test_download_worker_recovery_error(monkeypatch) -> None:
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.downloader import DownloadError
+
+    def raise_dl_error(*a, **kw):
+        raise DownloadError("recovery fail")
+
+    monkeypatch.setattr(app_module, "download_recovery", raise_dl_error)
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            monkeypatch.setattr(
+                app_module, "required_assets",
+                lambda cfg: [
+                    AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "", downloadable=True),
+                ],
+            )
+            await pilot.click("#next_btn_3")
+            await pilot.pause()
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.state.download_running:
+                    break
+            status = str(app.query_one("#download_status", Static).content)
+            assert "Download errors" in status
+
+    asyncio.run(_run())
+
+
+def test_update_download_progress() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.query_one("#download_progress").remove_class("hidden")
+            app._update_download_progress("opencore", 50)
+            await pilot.pause()
+            status = str(app.query_one("#download_status", Static).content)
+            assert "50%" in status
+            # At 100%, show "Finalizing"
+            app._update_download_progress("opencore", 100)
+            await pilot.pause()
+            status = str(app.query_one("#download_status", Static).content)
+            assert "Finalizing" in status
+
+    asyncio.run(_run())
+
+
+def test_finish_download_success() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.download_running = True
+            app._finish_download([])
+            assert app.state.download_running is False
+            assert app.state.downloads_complete is True
+
+    asyncio.run(_run())
+
+
+def test_finish_download_errors() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.download_running = True
+            app._finish_download(["OpenCore: network error"])
+            assert app.state.download_running is False
+            assert len(app.state.download_errors) > 0
+
+    asyncio.run(_run())
+
+
+def test_dry_run_blocked_while_running() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.apply_running = True
+            app._run_dry_apply()
+            # No crash, early return
+
+    asyncio.run(_run())
+
+
+def test_dry_run_blocked_no_plan() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.plan_steps = []
+            app._run_dry_apply()
+            assert app.state.apply_running is False
+
+    asyncio.run(_run())
+
+
+def test_dry_run_success(monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
+    def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
+        for idx, step in enumerate(steps, start=1):
+            if on_step:
+                on_step(idx, len(steps), step, None)
+                class _R:
+                    ok = True
+                    returncode = 0
+                on_step(idx, len(steps), step, _R())
+        return ApplyResult(ok=True, results=[], log_path=Path("/tmp/dry.log"))
+
+    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4, monkeypatch)
+            await pilot.click("#dry_run_btn")
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.state.apply_running:
+                    break
+            assert app.state.dry_run_ok is True
+            assert app.query_one("#next_btn_4", Button).disabled is False
+
+    asyncio.run(_run())
+
+
+def test_dry_run_failure(monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
+    def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
+        return ApplyResult(ok=False, results=[], log_path=Path("/tmp/dry-fail.log"))
+
+    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4, monkeypatch)
+            await pilot.click("#dry_run_btn")
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.state.apply_running:
+                    break
+            assert app.state.dry_run_ok is False
+            assert app.query_one("#dry_run_btn", Button).disabled is False
+
+    asyncio.run(_run())
+
+
+def test_update_dry_progress_before_result() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.query_one("#dry_progress").remove_class("hidden")
+            app.query_one("#dry_log").remove_class("hidden")
+            app._update_dry_progress(1, 3, "Test Step", None)
+            log_text = str(app.query_one("#dry_log", Static).content)
+            assert "Running 1/3" in log_text
+
+    asyncio.run(_run())
+
+
+def test_update_dry_progress_after_result() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.query_one("#dry_progress").remove_class("hidden")
+            app.query_one("#dry_log").remove_class("hidden")
+
+            class FakeResult:
+                ok = True
+                returncode = 0
+
+            app._update_dry_progress(1, 3, "Test Step", FakeResult())
+            log_text = str(app.query_one("#dry_log", Static).content)
+            assert "OK 1/3" in log_text
+
+    asyncio.run(_run())
+
+
+# ── Step 5: Install ────────────────────────────────────────────────
+
+def test_prepare_install_step() -> None:
+    from osx_proxmox_next.domain import VmConfig
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.config = VmConfig(
+                vmid=900, name="test", macos="sequoia",
+                cores=8, memory_mb=16384, disk_gb=128,
+                bridge="vmbr0", storage="local-lvm",
+            )
+            app._prepare_install_step()
+            label = str(app.query_one("#install_btn", Button).label)
+            assert "Sequoia" in label
+            assert not app.query_one("#install_btn").has_class("hidden")
+
+    asyncio.run(_run())
+
+
+def test_prepare_install_no_config() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.config = None
+            app._prepare_install_step()
+            # No crash
+
+    asyncio.run(_run())
+
+
+def test_live_install_blocked_while_running() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.apply_running = True
+            app._run_live_install()
+            # No crash, early return
+
+    asyncio.run(_run())
+
+
+def test_live_install_blocked_no_config() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.config = None
+            app._run_live_install()
+            assert app.state.apply_running is False
+
+    asyncio.run(_run())
+
+
+def test_live_install_blocked_no_preflight() -> None:
+    from osx_proxmox_next.domain import VmConfig
+    from osx_proxmox_next.planner import PlanStep
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.config = VmConfig(
+                vmid=900, name="test", macos="sequoia",
+                cores=8, memory_mb=16384, disk_gb=128,
+                bridge="vmbr0", storage="local-lvm",
+            )
+            app.state.plan_steps = [PlanStep("Echo", ["echo", "hi"])]
+            app.state.preflight_ok = False
+            app._run_live_install()
+            assert app.state.apply_running is False
+
+    asyncio.run(_run())
+
+
+def test_live_install_success(monkeypatch) -> None:
     from osx_proxmox_next.preflight import PreflightCheck
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.pause()
-            checks = [
-                PreflightCheck("qm available", True, "/usr/sbin/qm"),
-            ]
-            result = app._render_preflight_report(checks)
-            assert "Preflight Report" in result
-            assert "1/1" in result
-            assert "PASS" in result
-
-    asyncio.run(_run())
-
-
-def test_check_assets_ok(monkeypatch) -> None:
-    from osx_proxmox_next.assets import AssetCheck
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
-    )
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app._check_assets()
-            assert "Assets check OK" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_check_assets_missing(monkeypatch) -> None:
-    from osx_proxmox_next.assets import AssetCheck
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "provide OC")],
-    )
-    monkeypatch.setattr(
-        app_module, "suggested_fetch_commands",
-        lambda cfg: ["# place OC image"],
-    )
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app._check_assets()
-            assert "missing" in app.wizard_status_text.lower()
-
-    asyncio.run(_run())
-
-
-def test_storage_pick_invalid() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            # Simulate invalid storage_pick button
-            from textual.widgets import Button as Btn
-            class FakeEvent:
-                class button:
-                    id = "storage_pick_999"
-            app.on_button_pressed(FakeEvent())
-            assert "Invalid storage" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_home_nav() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#nav_home")
-            await pilot.pause()
-            assert not app.query_one("#home_view").has_class("hidden")
-            assert app.query_one("#wizard_view").has_class("hidden")
-
-    asyncio.run(_run())
-
-
-def test_preflight_nav() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_preflight")
-            await pilot.pause()
-            assert not app.query_one("#preflight_view").has_class("hidden")
-
-    asyncio.run(_run())
-
-
-def test_stage_labels() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            # _set_stage stores the text in the widget via update()
-            # Verify stage was set by checking the workflow_stage variable
-            assert app.workflow_stage >= 1
-
-    asyncio.run(_run())
-
-
-def test_finish_apply_ok() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#plan_output").remove_class("hidden")
-            app._finish_apply(execute=False, ok=True, log_path=Path("/tmp/log.txt"), snapshot=None)
-            assert "Dry" in app.wizard_status_text
-            assert "completed" in app.wizard_status_text.lower()
-
-    asyncio.run(_run())
-
-
-def test_finish_apply_fail_with_rollback() -> None:
+    from osx_proxmox_next.domain import VmConfig
+    from osx_proxmox_next.planner import PlanStep
     from osx_proxmox_next.rollback import RollbackSnapshot
 
+    monkeypatch.setattr(
+        app_module, "run_preflight",
+        lambda: [PreflightCheck("qm", True, "ok"), PreflightCheck("root", True, "ok")],
+    )
+
+    def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
+        for idx, step in enumerate(steps, start=1):
+            if on_step:
+                on_step(idx, len(steps), step, None)
+                class _R:
+                    ok = True
+                    returncode = 0
+                on_step(idx, len(steps), step, _R())
+        return ApplyResult(ok=True, results=[], log_path=Path("/tmp/live.log"))
+
+    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(app_module, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
+
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#plan_output").remove_class("hidden")
-            snap = RollbackSnapshot(vmid=900, path=Path("/tmp/snap.conf"))
-            app._finish_apply(execute=True, ok=False, log_path=Path("/tmp/log.txt"), snapshot=snap)
-            assert "failed" in app.wizard_status_text.lower()
-            assert "qm destroy 900" in app.wizard_status_text
+            # Wait for preflight to complete with all-ok mocked checks
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.preflight_done:
+                    break
+            assert app.state.preflight_ok is True
+            app.state.config = VmConfig(
+                vmid=900, name="test", macos="sequoia",
+                cores=8, memory_mb=16384, disk_gb=128,
+                bridge="vmbr0", storage="local-lvm",
+            )
+            app.state.plan_steps = [PlanStep("Echo", ["echo", "hi"])]
+            app._run_live_install()
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.live_done:
+                    break
+            assert app.state.live_ok is True
+            result_text = str(app.query_one("#result_box", Static).content)
+            assert "completed successfully" in result_text
+            assert "ko-fi" in result_text
 
     asyncio.run(_run())
 
 
-def test_detect_storage_fallback() -> None:
+def test_live_install_failure(monkeypatch) -> None:
+    from osx_proxmox_next.preflight import PreflightCheck
+    from osx_proxmox_next.domain import VmConfig
+    from osx_proxmox_next.planner import PlanStep
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    monkeypatch.setattr(
+        app_module, "run_preflight",
+        lambda: [PreflightCheck("qm", True, "ok"), PreflightCheck("root", True, "ok")],
+    )
+    monkeypatch.setattr(app_module, "apply_plan", lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(ok=False, results=[], log_path=Path("/tmp/fail.log")))
+    monkeypatch.setattr(app_module, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
+
     async def _run() -> None:
         app = NextApp()
-        # storage_targets already set in __init__, verify fallback behavior
-        assert len(app.storage_targets) >= 1
-        assert app.storage_targets[0] in ("local-lvm", "local")
+        async with app.run_test(size=(120, 44)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.preflight_done:
+                    break
+            assert app.state.preflight_ok is True
+            app.state.config = VmConfig(
+                vmid=900, name="test", macos="sequoia",
+                cores=8, memory_mb=16384, disk_gb=128,
+                bridge="vmbr0", storage="local-lvm",
+            )
+            app.state.plan_steps = [PlanStep("Echo", ["echo", "hi"])]
+            app._run_live_install()
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.live_done:
+                    break
+            assert app.state.live_ok is False
+            result_text = str(app.query_one("#result_box", Static).content)
+            assert "FAILED" in result_text
+            assert "qm destroy 900" in result_text
 
     asyncio.run(_run())
 
 
-def test_detect_vmid_pvesh(monkeypatch) -> None:
-    from subprocess import check_output as real_check_output
+def test_finish_live_install_ok_no_snapshot() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app._finish_live_install(ok=True, log_path=Path("/tmp/log.txt"), snapshot=None)
+            assert app.state.live_ok is True
+            result_text = str(app.query_one("#result_box", Static).content)
+            assert "completed" in result_text
 
+    asyncio.run(_run())
+
+
+def test_finish_live_install_fail_no_snapshot() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app._finish_live_install(ok=False, log_path=Path("/tmp/log.txt"), snapshot=None)
+            assert app.state.live_ok is False
+            result_text = str(app.query_one("#result_box", Static).content)
+            assert "FAILED" in result_text
+            assert "qm destroy" not in result_text
+
+    asyncio.run(_run())
+
+
+def test_update_live_progress() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.query_one("#live_progress").remove_class("hidden")
+            app.query_one("#live_log").remove_class("hidden")
+            app._update_live_progress(1, 3, "Step1", None)
+            log_text = str(app.query_one("#live_log", Static).content)
+            assert "Running 1/3" in log_text
+
+            class FakeResult:
+                ok = False
+                returncode = 1
+            app._update_live_progress(2, 3, "Step2", FakeResult())
+            log_text = str(app.query_one("#live_log", Static).content)
+            assert "FAIL 2/3" in log_text
+
+    asyncio.run(_run())
+
+
+# ── Detection Tests ─────────────────────────────────────────────────
+
+def test_detect_vmid_pvesh(monkeypatch) -> None:
     def fake_check_output(cmd, **kw):
         if cmd[0] == "pvesh":
             return "910\n"
@@ -494,10 +1190,7 @@ def test_detect_vmid_pvesh(monkeypatch) -> None:
 
 
 def test_detect_vmid_qm_list(monkeypatch) -> None:
-    call_count = [0]
-
     def fake_check_output(cmd, **kw):
-        call_count[0] += 1
         if cmd[0] == "pvesh":
             raise Exception("not found")
         if cmd[0] == "qm":
@@ -508,14 +1201,25 @@ def test_detect_vmid_qm_list(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        result = app._detect_next_vmid()
-        assert result == 906
+        assert app._detect_next_vmid() == 906
 
     asyncio.run(_run())
 
 
 def test_detect_vmid_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "check_output", lambda cmd, **kw: (_ for _ in ()).throw(Exception("no")))
+
+    async def _run() -> None:
+        app = NextApp()
+        assert app._detect_next_vmid() == 900
+
+    asyncio.run(_run())
+
+
+def test_detect_vmid_pvesh_non_digit(monkeypatch) -> None:
     def fake_check_output(cmd, **kw):
+        if cmd[0] == "pvesh":
+            return "not-a-number\n"
         raise Exception("not found")
 
     monkeypatch.setattr(app_module, "check_output", fake_check_output)
@@ -527,494 +1231,105 @@ def test_detect_vmid_fallback(monkeypatch) -> None:
     asyncio.run(_run())
 
 
-def test_validate_only_flow(monkeypatch) -> None:
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [],
-    )
+def test_detect_vmid_pvesh_out_of_range(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        if cmd[0] == "pvesh":
+            return "50"
+        raise Exception("not found")
+
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            await pilot.click("#goto_step3")
-            await pilot.pause()
-            assert app.step_page == 3
-            await pilot.click("#validate")
-            await pilot.pause()
-            assert app.plan_output_text != ""
+        assert app._detect_next_vmid() == 900
 
     asyncio.run(_run())
 
 
-def test_handle_validation_tahoe_toggle() -> None:
+def test_detect_vmid_pvesh_json_object(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        if cmd[0] == "pvesh":
+            return '{"data": 200}'
+        raise Exception("not found")
+
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app._handle_validation_issues(["Tahoe requires installer_path to a full installer image."])
-            await pilot.pause()
-            assert not app.query_one("#advanced_section").has_class("hidden")
-            assert "Tahoe" in app.wizard_status_text
+        assert app._detect_next_vmid() == 900
 
     asyncio.run(_run())
 
 
-def test_goto_step3_blocks_invalid() -> None:
+def test_detect_vmid_qm_list_empty(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        if cmd[0] == "pvesh":
+            raise Exception("not found")
+        if cmd[0] == "qm":
+            return "VMID  NAME\n"
+        raise Exception("unknown")
+
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#vmid", Input).value = "abc"
-            app.action_goto_step3()
-            await pilot.pause()
-            assert app.step_page != 3
+        assert app._detect_next_vmid() == 900
 
     asyncio.run(_run())
 
 
-def test_apply_dry_generates_plan_if_missing(monkeypatch) -> None:
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [],
-    )
+def test_detect_vmid_qm_list_non_digit(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        if cmd[0] == "pvesh":
+            raise Exception("not found")
+        if cmd[0] == "qm":
+            return "VMID  NAME\n900   test\n      \nstatus running\n"
+        raise Exception("unknown")
 
-    def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
-        for idx, step in enumerate(steps, start=1):
-            if on_step:
-                on_step(idx, len(steps), step, None)
-                class _R:
-                    ok = True
-                    returncode = 0
-                on_step(idx, len(steps), step, _R())
-        return ApplyResult(ok=True, results=[], log_path=Path("/tmp/fake.log"))
-
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.preflight_has_run = True
-            app.preflight_ok = True
-            # Clear any existing plan
-            app.last_config = None
-            app.last_steps = []
-            app._apply(execute=False)
-            await pilot.pause()
-            await pilot.pause()
-            await pilot.pause()
-            # Plan should have been auto-generated
-            assert app.last_steps or app.plan_output_text
+        assert app._detect_next_vmid() == 901
 
     asyncio.run(_run())
 
 
-def test_next_step_from_step2_validates() -> None:
+def test_detect_vmid_boundary_low(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        if cmd[0] == "pvesh":
+            raise Exception("not found")
+        if cmd[0] == "qm":
+            return "VMID  NAME\n50    test\n"
+        raise Exception("unknown")
+
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#vmid", Input).value = "abc"
-            app.step_page = 2
-            app.action_next_step()
-            await pilot.pause()
-            # Should not advance to step 3 due to validation
-            assert app.step_page != 3
+        assert app._detect_next_vmid() == 100
 
     asyncio.run(_run())
 
 
-def test_handle_validation_generic_issues() -> None:
+def test_detect_vmid_boundary_high(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        if cmd[0] == "pvesh":
+            raise Exception("not found")
+        if cmd[0] == "qm":
+            return "VMID  NAME\n999999 test\n"
+        raise Exception("unknown")
+
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app._handle_validation_issues(["VM name must be at least 3 characters."])
-            await pilot.pause()
-            assert "Validation failed" in app.wizard_status_text
+        assert app._detect_next_vmid() == 999999
 
     asyncio.run(_run())
 
 
-def test_read_form_invalid_vmid() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#vmid", Input).value = "not-a-number"
-            result = app._read_form()
-            assert result is None
-            assert "VMID must be a number" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_action_go_wizard_runs_preflight_first_time() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            app.preflight_has_run = False
-            await pilot.click("#nav_wizard")
-            await pilot.pause()
-            assert app.preflight_has_run is True
-
-    asyncio.run(_run())
-
-
-def test_show_hides_other_views() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.pause()
-            app._show("wizard_view")
-            await pilot.pause()
-            assert not app.query_one("#wizard_view").has_class("hidden")
-            assert app.query_one("#home_view").has_class("hidden")
-            assert app.query_one("#preflight_view").has_class("hidden")
-
-    asyncio.run(_run())
-
-
-def test_set_stage_marks_completed() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.pause()
-            app._set_stage(3)
-            assert app.workflow_stage == 3
-
-    asyncio.run(_run())
-
-
-def test_finish_apply_live_ok_sets_stage5() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#plan_output").remove_class("hidden")
-            app._finish_apply(execute=True, ok=True, log_path=Path("/tmp/log.txt"), snapshot=None)
-            assert app.workflow_stage == 5
-            assert "Live" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_update_apply_progress_before_and_after() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#apply_progress").remove_class("hidden")
-            app.query_one("#plan_output").remove_class("hidden")
-            # Before result
-            app._update_apply_progress(1, 2, "Test Step", None)
-            assert "Running 1/2" in app.wizard_status_text
-            # After result
-            class FakeResult:
-                ok = True
-                returncode = 0
-            app._update_apply_progress(1, 2, "Test Step", FakeResult())
-            assert "OK 1/2" in app.plan_output_text
-
-    asyncio.run(_run())
-
-
-def test_run_preflight_ok() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            # Preflight runs automatically, check state
-            assert app.preflight_has_run is True
-
-    asyncio.run(_run())
-
-
-def test_action_apply_live(monkeypatch) -> None:
-    from osx_proxmox_next.assets import AssetCheck
-
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
-    )
-
-    def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
-        for idx, step in enumerate(steps, start=1):
-            if on_step:
-                on_step(idx, len(steps), step, None)
-                class _R:
-                    ok = True
-                    returncode = 0
-                on_step(idx, len(steps), step, _R())
-        return ApplyResult(ok=True, results=[], log_path=Path("/tmp/fake.log"))
-
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
-    monkeypatch.setattr(app_module, "create_snapshot", lambda vmid: None)
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.preflight_has_run = True
-            app.preflight_ok = True
-            app.action_apply_live()
-            await pilot.pause()
-            await pilot.pause()
-            await pilot.pause()
-
-    asyncio.run(_run())
-
-
-def test_apply_not_preflight_run() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.preflight_has_run = False
-            app._apply(execute=False)
-            await pilot.pause()
-            # Should have run preflight automatically
-            assert app.preflight_has_run is True
-
-    asyncio.run(_run())
-
-
-def test_apply_validation_fail() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#vmid", Input).value = "abc"
-            app.preflight_has_run = True
-            app._apply(execute=False)
-            await pilot.pause()
-            assert "Fix highlighted fields" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_apply_read_form_none() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.query_one("#vmid", Input).value = "not-a-number"
-            app.preflight_has_run = True
-            app._apply(execute=False)
-            await pilot.pause()
-            assert "Fix highlighted fields" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_apply_live_missing_assets(monkeypatch) -> None:
-    from osx_proxmox_next.assets import AssetCheck
-
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing")],
-    )
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.preflight_has_run = True
-            app.preflight_ok = True
-            app._apply(execute=True)
-            await pilot.pause()
-            assert "missing assets" in app.wizard_status_text.lower()
-
-    asyncio.run(_run())
-
-
-def test_generate_plan_validation_fail() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#vmid", Input).value = "abc"
-            app.action_generate_plan()
-            await pilot.pause()
-            assert "Fix highlighted fields" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_generate_plan_read_form_none() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.query_one("#vmid", Input).value = "not-a-number"
-            app.action_generate_plan()
-            await pilot.pause()
-            assert "Fix highlighted fields" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_generate_plan_domain_validation_fails() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.query_one("#macos", Input).value = "tahoe"
-            app.query_one("#installer_path", Input).value = ""
-            app.action_generate_plan()
-            await pilot.pause()
-            # Tahoe without installer triggers validation or domain error
-            assert app.last_steps == []
-
-    asyncio.run(_run())
-
-
-def test_set_macos_name_not_prefixed() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            # Set a custom name that doesn't start with "macos-"
-            app.query_one("#name", Input).value = "custom-vm"
-            app._set_macos("sonoma")
-            await pilot.pause()
-            # _set_macos checks name.startswith("macos-") at line 454
-            # "custom-vm" doesn't match, so line 455 is skipped (branch coverage)
-            # But _apply_host_defaults resets it. We verify the branch was hit.
-            assert app.query_one("#macos", Input).value == "sonoma"
-
-    asyncio.run(_run())
-
-
-def test_validate_only_read_form_none() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.query_one("#vmid", Input).value = "not-a-number"
-            app._validate_only()
-            await pilot.pause()
-            assert "VMID must be a number" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_validate_only_with_issues() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.query_one("#macos", Input).value = "tahoe"
-            app.query_one("#installer_path", Input).value = ""
-            app._validate_only()
-            await pilot.pause()
-            assert "Tahoe" in app.wizard_status_text or "Validation" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_handle_validation_tahoe_autofill_success(monkeypatch) -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#macos", Input).value = "tahoe"
-            app.query_one("#installer_path", Input).value = "/tmp/tahoe.iso"
-            app._handle_validation_issues(["Tahoe requires installer_path to a full installer image."])
-            await pilot.pause()
-            assert "Tahoe installer detected automatically" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_handle_validation_tahoe_advanced_already_shown() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            # Show advanced first
-            app._toggle_advanced()
-            await pilot.pause()
-            app.query_one("#macos", Input).value = "tahoe"
-            app._handle_validation_issues(["Tahoe requires installer_path to a full installer image."])
-            await pilot.pause()
-            assert "Tahoe" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_smbios_preview_none() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.smbios_identity = None
-            app._update_smbios_preview()
-            await pilot.pause()
-            assert app.smbios_identity is None  # remains None, preview cleared
-
-    asyncio.run(_run())
-
-
-def test_autofill_tahoe_current_set() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#macos", Input).value = "tahoe"
-            app.query_one("#installer_path", Input).value = "/tmp/existing.iso"
-            result = app._autofill_tahoe_installer_path()
-            assert result is True
-
-    asyncio.run(_run())
-
-
-def test_detect_storage_targets_success(monkeypatch) -> None:
+def test_detect_storage_success(monkeypatch) -> None:
     def fake_check_output(cmd, **kw):
         return "Name      Type  Status\nlocal-lvm dir   active\nnfs-store nfs   active\n"
 
@@ -1029,7 +1344,7 @@ def test_detect_storage_targets_success(monkeypatch) -> None:
     asyncio.run(_run())
 
 
-def test_detect_storage_targets_no_default(monkeypatch) -> None:
+def test_detect_storage_no_default(monkeypatch) -> None:
     def fake_check_output(cmd, **kw):
         return "Name     Type  Status\ncustom1  dir   active\n"
 
@@ -1044,131 +1359,106 @@ def test_detect_storage_targets_no_default(monkeypatch) -> None:
     asyncio.run(_run())
 
 
-def test_detect_vmid_pvesh_non_digit(monkeypatch) -> None:
-    """pvesh returns non-digit, non-JSON output."""
+def test_detect_storage_dedup(monkeypatch) -> None:
     def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesh":
-            return "not-a-number\n"
-        raise Exception("not found")
+        return "Name      Type\nlocal-lvm dir\nlocal-lvm dir\ncustom1   nfs\n"
 
     monkeypatch.setattr(app_module, "check_output", fake_check_output)
 
     async def _run() -> None:
         app = NextApp()
-        result = app._detect_next_vmid()
-        assert result == 900
+        targets = app._detect_storage_targets()
+        assert targets.count("local-lvm") == 1
 
     asyncio.run(_run())
 
 
-def test_detect_vmid_qm_list_empty(monkeypatch) -> None:
-    """qm list returns no VMs → 900."""
+def test_detect_storage_empty_line(monkeypatch) -> None:
     def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesh":
-            raise Exception("not found")
-        if cmd[0] == "qm":
-            return "VMID  NAME\n"
-        raise Exception("unknown")
+        return "Name  Type\n\n   \nlocal dir\n"
 
     monkeypatch.setattr(app_module, "check_output", fake_check_output)
 
     async def _run() -> None:
         app = NextApp()
-        result = app._detect_next_vmid()
-        assert result == 900
+        targets = app._detect_storage_targets()
+        assert "local-lvm" in targets
 
     asyncio.run(_run())
 
 
-def test_finish_apply_fail_no_snapshot() -> None:
+# ── Preflight Worker ────────────────────────────────────────────────
+
+def test_preflight_runs_on_mount() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#plan_output").remove_class("hidden")
-            app._finish_apply(execute=False, ok=False, log_path=Path("/tmp/log.txt"), snapshot=None)
-            assert "failed" in app.wizard_status_text.lower()
+            # Give preflight thread time to complete
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.preflight_done:
+                    break
+            assert app.state.preflight_done is True
 
     asyncio.run(_run())
 
 
-def test_next_step_from_step1() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            app.step_page = 1
-            app.action_next_step()
-            await pilot.pause()
-            assert app.step_page == 2
+def test_finish_preflight_all_ok(monkeypatch) -> None:
+    from osx_proxmox_next.preflight import PreflightCheck
 
-    asyncio.run(_run())
-
-
-def test_next_step_from_step3() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            app.step_page = 3
-            app.action_next_step()
-            await pilot.pause()
-            # Should stay at 3 (max)
-            assert app.step_page == 3
-
-    asyncio.run(_run())
-
-
-def test_on_button_pressed_unmapped() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
             await pilot.pause()
-            status_before = app.wizard_status_text
+            checks = [
+                PreflightCheck("qm available", True, "/usr/sbin/qm"),
+                PreflightCheck("Root privileges", True, "uid=0"),
+            ]
+            app._finish_preflight(checks)
+            assert app.state.preflight_ok is True
+
+    asyncio.run(_run())
+
+
+def test_finish_preflight_some_fail(monkeypatch) -> None:
+    from osx_proxmox_next.preflight import PreflightCheck
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            checks = [
+                PreflightCheck("qm available", True, "/usr/sbin/qm"),
+                PreflightCheck("Root privileges", False, "not root"),
+            ]
+            app._finish_preflight(checks)
+            assert app.state.preflight_ok is False
+
+    asyncio.run(_run())
+
+
+# ── Edge Cases ──────────────────────────────────────────────────────
+
+def test_unmapped_button_pressed() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+
             class FakeEvent:
                 class button:
-                    id = "unknown_button_id"
+                    id = "totally_unknown_button"
+
             app.on_button_pressed(FakeEvent())
-            # Unmapped button should not change state
-            assert app.wizard_status_text == status_before
-
-    asyncio.run(_run())
-
-
-def test_check_assets_read_form_none() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#vmid", Input).value = "not-a-number"
-            app._check_assets()
-            await pilot.pause()
-            assert "VMID must be a number" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_action_go_wizard_already_run() -> None:
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            app.preflight_has_run = True
-            app.workflow_stage = 4
-            app.action_go_wizard()
-            await pilot.pause()
-            # stage 4 → page=3 (since workflow_stage > 3)
-            assert app.step_page == 3
+            # No crash
 
     asyncio.run(_run())
 
 
 def test_run_function(monkeypatch) -> None:
-    """Cover the run() function at line 985."""
     from osx_proxmox_next import app as app_mod
     called = [False]
-    original_run = NextApp.run
 
     def fake_run(self):
         called[0] = True
@@ -1178,324 +1468,370 @@ def test_run_function(monkeypatch) -> None:
     assert called[0] is True
 
 
-def test_generate_plan_form_valid_but_read_fails(monkeypatch) -> None:
-    """action_generate_plan: validation passes but _read_form returns None (line 342)."""
+def test_wizard_state_defaults() -> None:
+    state = WizardState()
+    assert state.selected_os == ""
+    assert state.vmid == 900
+    assert state.preflight_done is False
+    assert state.dry_run_ok is False
+    assert state.live_ok is False
+
+
+def test_append_log_rolling_window() -> None:
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
             await pilot.pause()
-            monkeypatch.setattr(app, "_validate_form_inputs", lambda quiet=False: True)
-            monkeypatch.setattr(app, "_read_form", lambda: None)
-            app.action_generate_plan()
-            await pilot.pause()
-            assert app.last_config is None  # plan was not generated
+            app.query_one("#dry_log").remove_class("hidden")
+            for i in range(20):
+                app._append_log("#dry_log", f"line {i}")
+            log_text = str(app.query_one("#dry_log", Static).content)
+            assert "line 19" in log_text
+            assert "line 0" not in log_text
 
     asyncio.run(_run())
 
 
-def test_generate_plan_domain_issues(monkeypatch) -> None:
-    """action_generate_plan: form valid, read_form ok, but domain validation fails (lines 346-347)."""
+def test_on_mount_no_storage_targets(monkeypatch) -> None:
+    monkeypatch.setattr(NextApp, "_detect_storage_targets", lambda self: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            assert app.state.selected_storage == ""
+
+    asyncio.run(_run())
+
+
+def test_suggest_defaults_generates_smbios_if_missing() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            app.state.smbios = None
+            app._apply_host_defaults()
+            assert app.state.smbios is not None
+
+    asyncio.run(_run())
+
+
+def test_suggest_defaults_keeps_existing_smbios() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 3)
+            original = app.state.smbios
+            app._apply_host_defaults()
+            assert app.state.smbios is original
+
+    asyncio.run(_run())
+
+
+def test_go_next_step5_noop() -> None:
+    """_go_next at step 5 does nothing (no step 6)."""
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.current_step = 5
+            await pilot.pause()
+            app._go_next()
+            assert app.current_step == 5
+
+    asyncio.run(_run())
+
+
+def test_step4_to_step5_transition(monkeypatch) -> None:
+    """Dry run OK → Next: Install transitions to step 5."""
     from osx_proxmox_next.domain import VmConfig
 
+    monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
             await pilot.pause()
-            monkeypatch.setattr(app, "_validate_form_inputs", lambda quiet=False: True)
-            monkeypatch.setattr(app, "_read_form", lambda: VmConfig(
-                vmid=900, name="macos-tahoe", macos="tahoe", cores=8,
-                memory_mb=16384, disk_gb=160, bridge="vmbr0", storage="local-lvm",
-                installer_path="",
-            ))
-            app.action_generate_plan()
+            await _advance_to_step(pilot, app, 4, monkeypatch)
+            # Simulate dry run passing
+            app.state.dry_run_ok = True
+            app.query_one("#next_btn_4", Button).disabled = False
+            await pilot.click("#next_btn_4")
             await pilot.pause()
-            assert app.last_steps == []  # plan not generated due to domain validation
+            assert app.current_step == 5
+            label = str(app.query_one("#install_btn", Button).label)
+            assert "Sequoia" in label
 
     asyncio.run(_run())
 
 
-def test_apply_form_valid_but_read_fails(monkeypatch) -> None:
-    """_apply: validation passes but _read_form returns None (line 390)."""
+def test_download_worker_skips_non_downloadable(monkeypatch) -> None:
+    """Download worker skips assets with downloadable=False."""
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.downloader import DownloadProgress
+
+    download_calls = {"opencore": 0}
+
+    def fake_download_opencore(macos, dest, on_progress=None):
+        download_calls["opencore"] += 1
+        return dest / f"opencore-{macos}.iso"
+
+    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
             await pilot.pause()
-            app.preflight_has_run = True
-            app.preflight_ok = True
-            monkeypatch.setattr(app, "_validate_form_inputs", lambda quiet=False: True)
-            monkeypatch.setattr(app, "_read_form", lambda: None)
-            app._apply(execute=False)
+            await _advance_to_step(pilot, app, 3)
+            # Mix of downloadable and non-downloadable
+            monkeypatch.setattr(
+                app_module, "required_assets",
+                lambda cfg: [
+                    AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "", downloadable=True),
+                    AssetCheck("Extra thing", Path("/tmp/extra"), False, "", downloadable=False),
+                ],
+            )
+            await pilot.click("#next_btn_3")
             await pilot.pause()
-            assert app.apply_running is False  # apply did not start
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.state.download_running:
+                    break
+            assert download_calls["opencore"] == 1
 
     asyncio.run(_run())
 
 
-def test_apply_plan_generation_fails(monkeypatch) -> None:
-    """_apply: plan generation returns no steps (lines 401-404)."""
+def test_rebuild_plan_after_download(monkeypatch) -> None:
+    """After downloads complete, plan is rebuilt with correct asset paths."""
+    monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
             await pilot.pause()
-            app.preflight_has_run = True
-            app.preflight_ok = True
-            app.last_config = None
-            app.last_steps = []
-            monkeypatch.setattr(app, "action_generate_plan", lambda: None)
-            app._apply(execute=False)
-            await pilot.pause()
-            assert app.apply_running is False  # apply aborted, plan was empty
+            await _advance_to_step(pilot, app, 4, monkeypatch)
+            assert app.state.plan_steps
+            old_steps = list(app.state.plan_steps)
+            # Simulate a rebuild
+            app._rebuild_plan_after_download()
+            # Plan was rebuilt (new list object)
+            assert app.state.plan_steps is not old_steps
 
     asyncio.run(_run())
 
 
-def test_run_preflight_all_ok(monkeypatch) -> None:
-    """Cover lines 533, 541-543 when all preflight checks pass."""
-    from osx_proxmox_next.preflight import PreflightCheck
+def test_rebuild_plan_after_download_no_config(monkeypatch) -> None:
+    """Rebuild gracefully handles invalid form (returns None)."""
+    monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4, monkeypatch)
+            old_config = app.state.config
+            # Break the form so _read_form returns None
+            app.query_one("#vmid", Input).value = "invalid"
+            app._rebuild_plan_after_download()
+            # Config unchanged since form was invalid
+            assert app.state.config is old_config
+
+    asyncio.run(_run())
+
+
+# ── Manage Mode Tests ───────────────────────────────────────────────
+
+
+def test_manage_mode_toggle() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            assert not app.state.manage_mode
+            assert not app.query_one("#create_panel").has_class("hidden")
+            assert app.query_one("#manage_panel").has_class("hidden")
+            # Switch to manage
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            assert app.state.manage_mode is True
+            assert app.query_one("#create_panel").has_class("hidden")
+            assert not app.query_one("#manage_panel").has_class("hidden")
+            assert app.query_one("#mode_manage").has_class("mode_active")
+            assert not app.query_one("#mode_create").has_class("mode_active")
+            # Switch back to create
+            await pilot.click("#mode_create")
+            await pilot.pause()
+            assert app.state.manage_mode is False
+            assert not app.query_one("#create_panel").has_class("hidden")
+            assert app.query_one("#manage_panel").has_class("hidden")
+
+    asyncio.run(_run())
+
+
+def test_manage_vm_list_populated(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        if cmd[0] == "qm" and cmd[1] == "list":
+            return "VMID  NAME          STATUS\n106   macos-test    running\n200   macos-dev     stopped\n"
+        raise Exception("not found")
+
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.uninstall_vm_list:
+                    break
+            display = str(app.query_one("#vm_list_display", Static).content)
+            assert "106" in display
+            assert "macos-test" in display
+
+    asyncio.run(_run())
+
+
+def test_manage_vm_list_empty(monkeypatch) -> None:
+    def fake_check_output(cmd, **kw):
+        raise Exception("qm not found")
+
+    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            for _ in range(20):
+                await pilot.pause()
+                time.sleep(0.05)
+            display = str(app.query_one("#vm_list_display", Static).content)
+            assert "No VMs found" in display
+
+    asyncio.run(_run())
+
+
+def test_manage_vmid_input_enables_destroy() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            assert app.query_one("#manage_destroy_btn", Button).disabled is True
+            app.query_one("#manage_vmid", Input).value = "106"
+            await pilot.pause()
+            assert app.query_one("#manage_destroy_btn", Button).disabled is False
+
+    asyncio.run(_run())
+
+
+def test_manage_vmid_invalid_keeps_destroy_disabled() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "abc"
+            await pilot.pause()
+            assert app.query_one("#manage_destroy_btn", Button).disabled is True
+
+    asyncio.run(_run())
+
+
+def test_manage_vmid_out_of_range() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "5"
+            await pilot.pause()
+            assert app.query_one("#manage_destroy_btn", Button).disabled is True
+
+    asyncio.run(_run())
+
+
+def test_manage_purge_toggle() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            assert app.state.uninstall_purge is True
+            assert "ON" in str(app.query_one("#manage_purge_btn", Button).label)
+            # Toggle OFF
+            app._toggle_purge()
+            await pilot.pause()
+            assert app.state.uninstall_purge is False
+            assert "OFF" in str(app.query_one("#manage_purge_btn", Button).label)
+            # Toggle back ON
+            app._toggle_purge()
+            await pilot.pause()
+            assert app.state.uninstall_purge is True
+            assert "ON" in str(app.query_one("#manage_purge_btn", Button).label)
+
+    asyncio.run(_run())
+
+
+def test_manage_destroy_blocked_while_running() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            app.state.uninstall_running = True
+            app._run_destroy()
+            # No crash, early return
+
+    asyncio.run(_run())
+
+
+def test_manage_destroy_invalid_vmid_noop() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "abc"
+            app._run_destroy()
+            assert app.state.uninstall_running is False
+
+    asyncio.run(_run())
+
+
+def test_manage_destroy_vmid_out_of_range_noop() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "50"
+            app._run_destroy()
+            assert app.state.uninstall_running is False
+
+    asyncio.run(_run())
+
+
+def test_manage_destroy_success(monkeypatch) -> None:
+    from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "run_preflight",
-        lambda: [
-            PreflightCheck("qm available", True, "/usr/sbin/qm"),
-            PreflightCheck("pvesm available", True, "/usr/sbin/pvesm"),
-            PreflightCheck("pvesh available", True, "/usr/sbin/pvesh"),
-            PreflightCheck("qemu-img available", True, "/usr/bin/qemu-img"),
-            PreflightCheck("/dev/kvm present", True, "hardware acceleration ok"),
-            PreflightCheck("Root privileges", True, "uid=0"),
-        ],
+        app_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
     )
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.pause()
-            app._run_preflight()
-            await pilot.pause()
-            assert app.preflight_ok is True
-            assert "Step 1 complete" in app.wizard_status_text
-            assert app.step_page == 2
-
-    asyncio.run(_run())
-
-
-def test_autofill_tahoe_finds_candidate(monkeypatch) -> None:
-    """Cover lines 689-691: _autofill_tahoe_installer_path finds a candidate."""
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#macos", Input).value = "tahoe"
-            app.query_one("#installer_path", Input).value = ""
-            monkeypatch.setattr(app, "_find_tahoe_installer_path", lambda: "/tmp/tahoe-full.iso")
-            result = app._autofill_tahoe_installer_path()
-            assert result is True
-            assert "auto-detected" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_find_tahoe_installer_no_match(monkeypatch, tmp_path) -> None:
-    """Cover return '', loop exhaustion (713→710), and dir-skip (716→715)."""
-    iso_dir = tmp_path / "iso_empty"
-    iso_dir.mkdir()
-    # Existing dir but no matching files — exhausts all patterns
-    (iso_dir / "unrelated.txt").write_text("not an iso")
-    # Directory matching a tahoe pattern (is_file() → False, covers 716→715)
-    (iso_dir / "tahoe-fakedir.iso").mkdir()
-
-    real_path = Path
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.pause()
-
-            def fake_path(p):
-                if p == "/mnt/pve":
-                    return tmp_path / "no_mnt_pve"  # doesn't exist
-                if p == "/var/lib/vz/template/iso":
-                    return iso_dir
-                if p == "/var/lib/vz/snippets":
-                    return tmp_path / "nonexistent"
-                return real_path(p)
-
-            monkeypatch.setattr(app_module, "Path", fake_path)
-            result = app._find_tahoe_installer_path()
-            assert result == ""
-
-    asyncio.run(_run())
-
-
-def test_find_tahoe_installer_mnt_pve(monkeypatch, tmp_path) -> None:
-    """Cover _find_tahoe_installer_path: mnt_pve iteration, iso_path exists/not, pattern match/miss."""
-    mnt_pve = tmp_path / "mnt_pve"
-    mnt_pve.mkdir()
-    # Storage with valid template/iso containing a match
-    storage_ok = mnt_pve / "wd2tb"
-    iso_dir = storage_ok / "template" / "iso"
-    iso_dir.mkdir(parents=True)
-    (iso_dir / "macos-tahoe-full.iso").write_text("fake")
-    # Dir with matching name (should be skipped by is_file check)
-    (iso_dir / "tahoe-dir.iso").mkdir()
-    # Storage WITHOUT template/iso (covers iso_path.exists() False → back to loop)
-    storage_no_iso = mnt_pve / "noiso"
-    storage_no_iso.mkdir()
-
-    real_path = Path
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.pause()
-
-            def fake_path(p):
-                if p == "/mnt/pve":
-                    return mnt_pve
-                if p == "/var/lib/vz/template/iso":
-                    return tmp_path / "nonexistent1"
-                if p == "/var/lib/vz/snippets":
-                    return tmp_path / "nonexistent2"
-                return real_path(p)
-
-            monkeypatch.setattr(app_module, "Path", fake_path)
-            result = app._find_tahoe_installer_path()
-            assert "tahoe" in result
-            assert result.endswith(".iso")
-
-    asyncio.run(_run())
-
-
-def test_detect_storage_targets_with_output(monkeypatch) -> None:
-    """Cover lines 725-734: successful pvesm output parsing."""
-    def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesm":
-            return "Name      Type     Status\nlocal-lvm dir      active\nnfs-data  nfs      active\nceph1     rbd      active\n"
-        raise Exception("not found")
-
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
-
-    async def _run() -> None:
-        app = NextApp()
-        targets = app._detect_storage_targets()
-        assert "local-lvm" in targets
-        assert "nfs-data" in targets
-        assert "ceph1" in targets
-
-    asyncio.run(_run())
-
-
-def test_detect_vmid_pvesh_out_of_range_digit(monkeypatch) -> None:
-    """Cover line 741→743: pvesh returns digit but out of valid range."""
-    def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesh":
-            return "50"  # isdigit=True, int=50, but < 100 → falls to json.loads
-        raise Exception("not found")
-
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
-
-    async def _run() -> None:
-        app = NextApp()
-        result = app._detect_next_vmid()
-        # 50 is out of range for both digit and JSON paths → qm list → fallback
-        assert result == 900
-
-    asyncio.run(_run())
-
-
-def test_detect_vmid_pvesh_json_object(monkeypatch) -> None:
-    """pvesh returns non-digit string that parses as non-int JSON."""
-    def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesh":
-            return '{"data": 200}'  # not an int when parsed as JSON
-        raise Exception("not found")
-
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
-
-    async def _run() -> None:
-        app = NextApp()
-        result = app._detect_next_vmid()
-        # JSON parsed but not an int → falls through to qm list
-        assert result == 900
-
-    asyncio.run(_run())
-
-
-def test_detect_vmid_qm_list_non_digit_line(monkeypatch) -> None:
-    """Cover 754→752: qm list line where parts[0] is not a digit."""
-    def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesh":
-            raise Exception("not found")
-        if cmd[0] == "qm":
-            return "VMID  NAME\n900   test\n      \nstatus running\n"
-        raise Exception("unknown")
-
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
-
-    async def _run() -> None:
-        app = NextApp()
-        result = app._detect_next_vmid()
-        assert result == 901
-
-    asyncio.run(_run())
-
-
-def test_detect_vmid_boundary_low(monkeypatch) -> None:
-    """Cover line 758: next_vmid < 100 → returns 100."""
-    def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesh":
-            raise Exception("not found")
-        if cmd[0] == "qm":
-            # Return VM with ID 50 → next would be 51 which is < 100
-            return "VMID  NAME\n50    test\n"
-        raise Exception("unknown")
-
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
-
-    async def _run() -> None:
-        app = NextApp()
-        result = app._detect_next_vmid()
-        assert result == 100
-
-    asyncio.run(_run())
-
-
-def test_detect_vmid_boundary_high(monkeypatch) -> None:
-    """Cover line 760: next_vmid > 999999 → returns 999999."""
-    def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesh":
-            raise Exception("not found")
-        if cmd[0] == "qm":
-            return "VMID  NAME\n999999 test\n"
-        raise Exception("unknown")
-
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
-
-    async def _run() -> None:
-        app = NextApp()
-        result = app._detect_next_vmid()
-        assert result == 999999
-
-    asyncio.run(_run())
-
-
-def test_apply_with_existing_plan(monkeypatch) -> None:
-    """Cover 401→406: _apply when last_config and last_steps are already set."""
-    from osx_proxmox_next.domain import VmConfig
-    from osx_proxmox_next.planner import PlanStep
 
     def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
         for idx, step in enumerate(steps, start=1):
@@ -1505,418 +1841,114 @@ def test_apply_with_existing_plan(monkeypatch) -> None:
                     ok = True
                     returncode = 0
                 on_step(idx, len(steps), step, _R())
-        return ApplyResult(ok=True, results=[], log_path=Path("/tmp/fake.log"))
+        return ApplyResult(ok=True, results=[], log_path=Path("/tmp/destroy.log"))
 
     monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
 
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
             await pilot.pause()
-            app.preflight_has_run = True
-            app.preflight_ok = True
-            # Pre-set last_config and last_steps so line 401 is False → jumps to 406
-            app.last_config = VmConfig(
-                vmid=900, name="macos-sequoia", macos="sequoia",
-                cores=8, memory_mb=16384, disk_gb=128,
-                bridge="vmbr0", storage="local-lvm",
-            )
-            app.last_steps = [PlanStep("Echo", ["echo", "hello"])]
-            app._apply(execute=False)
+            await pilot.click("#mode_manage")
             await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "106"
             await pilot.pause()
-            await pilot.pause()
-
-    asyncio.run(_run())
-
-
-def test_detect_storage_dedup(monkeypatch) -> None:
-    """Cover line 730→726: name already in targets (dedup branch)."""
-    def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesm":
-            return "Name      Type\nlocal-lvm dir\nlocal-lvm dir\ncustom1   nfs\n"
-        raise Exception("not found")
-
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
-
-    async def _run() -> None:
-        app = NextApp()
-        targets = app._detect_storage_targets()
-        # local-lvm should appear only once
-        assert targets.count("local-lvm") == 1
-
-    asyncio.run(_run())
-
-
-def test_detect_storage_empty_line(monkeypatch) -> None:
-    """Cover line 728→726: empty parts in line."""
-    def fake_check_output(cmd, **kw):
-        if cmd[0] == "pvesm":
-            return "Name  Type\n\n   \nlocal dir\n"
-        raise Exception("not found")
-
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
-
-    async def _run() -> None:
-        app = NextApp()
-        targets = app._detect_storage_targets()
-        assert "local-lvm" in targets  # inserted as default
-
-    asyncio.run(_run())
-
-
-def test_apply_live_missing_downloadable_assets(monkeypatch) -> None:
-    """Live apply blocked with downloadable assets suggests Download Missing button."""
-    from osx_proxmox_next.assets import AssetCheck
-
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
-    )
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.preflight_has_run = True
-            app.preflight_ok = True
-            app._apply(execute=True)
-            await pilot.pause()
-            assert "Download Missing" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_download_missing_assets_no_missing(monkeypatch) -> None:
-    """Download Missing button with no missing assets shows no-op message."""
-    from osx_proxmox_next.assets import AssetCheck
-
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
-    )
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app._download_missing_assets()
-            await pilot.pause()
-            assert "No downloadable assets missing" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_download_missing_already_running(monkeypatch) -> None:
-    """Download Missing button does nothing if download already running."""
-    from osx_proxmox_next.assets import AssetCheck
-
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
-    )
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.download_running = True
-            app._download_missing_assets()
-            await pilot.pause()
-            assert "already running" in app.wizard_status_text.lower()
-
-    asyncio.run(_run())
-
-
-def test_download_missing_read_form_none() -> None:
-    """Download Missing button with invalid form returns early."""
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            app.query_one("#vmid", Input).value = "not-a-number"
-            app._download_missing_assets()
-            await pilot.pause()
-
-    asyncio.run(_run())
-
-
-def test_download_missing_triggers_worker(monkeypatch) -> None:
-    """Download Missing button triggers threaded download with progress."""
-    from osx_proxmox_next.assets import AssetCheck
-    from osx_proxmox_next.downloader import DownloadProgress
-    import time
-
-    download_calls = {"opencore": 0, "recovery": 0}
-
-    def fake_download_opencore(macos, dest, on_progress=None):
-        download_calls["opencore"] += 1
-        if on_progress:
-            on_progress(DownloadProgress(downloaded=500, total=1000, phase="opencore"))
-            # Also test total=0 path (unknown size)
-            on_progress(DownloadProgress(downloaded=800, total=0, phase="opencore"))
-        return dest / f"opencore-{macos}.iso"
-
-    def fake_download_recovery(macos, dest, on_progress=None):
-        download_calls["recovery"] += 1
-        if on_progress:
-            on_progress(DownloadProgress(downloaded=1000, total=1000, phase="recovery"))
-        return dest / f"{macos}-recovery.img"
-
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [
-            AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True),
-            AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True),
-        ],
-    )
-    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
-    monkeypatch.setattr(app_module, "download_recovery", fake_download_recovery)
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app._download_missing_assets()
-            # Wait for background thread
-            for _ in range(20):
+            await pilot.click("#manage_destroy_btn")
+            for _ in range(30):
                 await pilot.pause()
                 time.sleep(0.05)
-                if not app.download_running:
+                if app.state.uninstall_done:
                     break
-            assert download_calls["opencore"] == 1
-            assert download_calls["recovery"] == 1
+            assert app.state.uninstall_ok is True
+            result_text = str(app.query_one("#manage_result", Static).content)
+            assert "successfully" in result_text
 
     asyncio.run(_run())
 
 
-def test_download_missing_with_errors(monkeypatch) -> None:
-    """Download Missing button handles OpenCore errors gracefully."""
-    from osx_proxmox_next.assets import AssetCheck
-    from osx_proxmox_next.downloader import DownloadError
-    import time
+def test_manage_destroy_failure(monkeypatch) -> None:
+    from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [
-            AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True),
-        ],
+        app_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
     )
-
-    def fake_download_opencore(macos, dest, on_progress=None):
-        raise DownloadError("network failure")
-
-    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(
+        app_module, "apply_plan",
+        lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(
+            ok=False, results=[], log_path=Path("/tmp/fail.log")
+        ),
+    )
 
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
             await pilot.pause()
-            app._download_missing_assets()
-            for _ in range(20):
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "106"
+            await pilot.pause()
+            await pilot.click("#manage_destroy_btn")
+            for _ in range(30):
                 await pilot.pause()
                 time.sleep(0.05)
-                if not app.download_running:
+                if app.state.uninstall_done:
                     break
-            assert "Download errors" in app.wizard_status_text
+            assert app.state.uninstall_ok is False
+            result_text = str(app.query_one("#manage_result", Static).content)
+            assert "FAILED" in result_text
 
     asyncio.run(_run())
 
 
-def test_download_missing_recovery_then_opencore(monkeypatch) -> None:
-    """Worker processes recovery before opencore — exercises loop-back branch."""
-    from osx_proxmox_next.assets import AssetCheck
-    import time
+def test_manage_update_destroy_log() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_log").remove_class("hidden")
+            app._update_destroy_log(1, 2, "Stop VM", None)
+            log_text = str(app.query_one("#manage_log", Static).content)
+            assert "Running 1/2" in log_text
 
-    download_calls = {"opencore": 0, "recovery": 0}
+            class FakeResult:
+                ok = True
+            app._update_destroy_log(2, 2, "Destroy VM", FakeResult())
+            log_text = str(app.query_one("#manage_log", Static).content)
+            assert "OK 2/2" in log_text
 
-    def fake_download_opencore(macos, dest, on_progress=None):
-        download_calls["opencore"] += 1
-        return dest / f"opencore-{macos}.iso"
+    asyncio.run(_run())
 
-    def fake_download_recovery(macos, dest, on_progress=None):
-        download_calls["recovery"] += 1
-        return dest / f"{macos}-recovery.img"
 
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [
-            AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True),
-            AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True),
-        ],
-    )
-    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
-    monkeypatch.setattr(app_module, "download_recovery", fake_download_recovery)
+def test_manage_finish_destroy_refreshes_list(monkeypatch) -> None:
+    refresh_calls = []
+    monkeypatch.setattr(NextApp, "_refresh_vm_list", lambda self: refresh_calls.append(1))
 
     async def _run() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
             await pilot.pause()
-            app._download_missing_assets()
-            for _ in range(20):
-                await pilot.pause()
-                time.sleep(0.05)
-                if not app.download_running:
-                    break
-            assert download_calls["opencore"] == 1
-            assert download_calls["recovery"] == 1
+            await pilot.click("#mode_manage")
+            await pilot.pause()
+            app.query_one("#manage_vmid", Input).value = "106"
+            await pilot.pause()
+            app.state.uninstall_running = True
+            app._finish_destroy(ok=True, log_path=Path("/tmp/log.txt"))
+            assert app.state.uninstall_running is False
+            assert len(refresh_calls) > 0
 
     asyncio.run(_run())
 
 
-def test_download_missing_recovery_error(monkeypatch) -> None:
-    """Download Missing button handles recovery errors gracefully."""
-    from osx_proxmox_next.assets import AssetCheck
-    from osx_proxmox_next.downloader import DownloadError
-    import time
-
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [
-            AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True),
-        ],
-    )
-
-    def fake_download_recovery(macos, dest, on_progress=None):
-        raise DownloadError("recovery download failed")
-
-    monkeypatch.setattr(app_module, "download_recovery", fake_download_recovery)
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app._download_missing_assets()
-            for _ in range(20):
-                await pilot.pause()
-                time.sleep(0.05)
-                if not app.download_running:
-                    break
-            assert "Download errors" in app.wizard_status_text
-            assert "Recovery" in app.wizard_status_text
-
-    asyncio.run(_run())
+def test_wizard_state_manage_defaults() -> None:
+    state = WizardState()
+    assert state.manage_mode is False
+    assert state.uninstall_vm_list == []
+    assert state.uninstall_purge is True
+    assert state.uninstall_running is False
+    assert state.uninstall_done is False
+    assert state.uninstall_ok is False
 
 
-def test_update_download_progress() -> None:
-    """Cover _update_download_progress method."""
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            from textual.widgets import ProgressBar as PB
-            app.query_one("#apply_progress").remove_class("hidden")
-            app._update_download_progress("opencore", 50)
-            await pilot.pause()
-            assert "50%" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_finish_download_success() -> None:
-    """Cover _finish_download with no errors."""
-    from osx_proxmox_next.assets import AssetCheck
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.download_running = True
-            app._finish_download([])
-            await pilot.pause()
-            assert not app.download_running
-
-    asyncio.run(_run())
-
-
-def test_finish_download_errors() -> None:
-    """Cover _finish_download with errors."""
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app.download_running = True
-            app._finish_download(["OpenCore: fail"])
-            await pilot.pause()
-            assert not app.download_running
-            assert "Download errors" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_check_assets_downloadable_message(monkeypatch) -> None:
-    """_check_assets shows download hint when assets are downloadable."""
-    from osx_proxmox_next.assets import AssetCheck
-
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
-    )
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app._check_assets()
-            assert "Download Missing" in app.wizard_status_text
-
-    asyncio.run(_run())
-
-
-def test_check_assets_non_downloadable_message(monkeypatch) -> None:
-    """_check_assets shows manual message when assets are not downloadable."""
-    from osx_proxmox_next.assets import AssetCheck
-
-    monkeypatch.setattr(
-        app_module, "required_assets",
-        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "provide OC", downloadable=False)],
-    )
-
-    async def _run() -> None:
-        app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
-            await pilot.click("#nav_wizard")
-            await pilot.click("#goto_step2")
-            await pilot.click("#defaults")
-            await pilot.pause()
-            app._check_assets()
-            assert "Provide path manually" in app.wizard_status_text
-
-    asyncio.run(_run())

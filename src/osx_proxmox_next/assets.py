@@ -34,11 +34,11 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
     recovery_path = resolve_recovery_or_installer_path(config)
     checks.append(
         AssetCheck(
-            name="Installer / recovery image",
+            name="Recovery image",
             path=recovery_path,
             ok=recovery_path.exists(),
-            hint="Tahoe should use a full installer image path.",
-            downloadable=(config.macos != "tahoe"),
+            hint="Provide recovery image or run auto-download.",
+            downloadable=True,
         )
     )
     return checks
@@ -46,44 +46,29 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
 
 def suggested_fetch_commands(config: VmConfig) -> list[str]:
     iso_root = "/var/lib/vz/template/iso"
-    if config.macos == "tahoe":
-        commands = [
-            f"# OpenCore auto-download: osx-next-cli download --macos {config.macos} --opencore-only",
-            f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
-            "# Tahoe: provide a full installer image and set installer_path",
-        ]
-    else:
-        commands = [
-            f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
-            f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
-            f"# Or place recovery image at {iso_root}/{config.macos}-recovery.iso",
-        ]
-    return commands
+    return [
+        f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
+        f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
+        f"# Or place recovery image at {iso_root}/{config.macos}-recovery.iso",
+    ]
 
 
 def resolve_opencore_path(macos: str) -> Path:
     match = _find_iso(
         [
-            "OpenCore-v21.iso",
-            "opencore-v21.iso",
             "opencore-osx-proxmox-vm.iso",
             f"opencore-{macos}.iso",
-            f"opencore*{macos}*.iso",
-            "opencore*.iso",
+            f"opencore-{macos}-*.iso",
         ]
     )
     if match:
         return match
-    return Path("/var/lib/vz/template/iso") / f"opencore-{macos}.iso"
+    return Path("/var/lib/vz/template/iso") / "opencore-osx-proxmox-vm.iso"
 
 
 def resolve_recovery_or_installer_path(config: VmConfig) -> Path:
     if config.installer_path:
         return Path(config.installer_path)
-    if config.macos == "tahoe":
-        match = _find_iso(["*tahoe*full*.iso", "*tahoe*.iso", "*26*.iso", "*InstallAssistant*.iso"])
-        if match:
-            return match
     match = _find_iso([
         f"{config.macos}-recovery.iso",
         f"{config.macos}-recovery.img",
@@ -97,21 +82,20 @@ def resolve_recovery_or_installer_path(config: VmConfig) -> Path:
 def _find_iso(patterns: list[str]) -> Path | None:
     roots = [
         Path("/var/lib/vz/template/iso"),
-        Path("/root/OSX-PROXMOX/EFI"),
-        Path("/root/OSX-PROXMOX-fork/EFI"),
     ]
     mnt_pve = Path("/mnt/pve")
     if mnt_pve.exists():
         for entry in sorted(mnt_pve.iterdir()):
             roots.append(entry / "template" / "iso")
-    for root in roots:
-        if not root.exists():
-            continue
-        lowered = [p.lower() for p in patterns]
-        for candidate in sorted(root.iterdir()):
-            if not candidate.is_file():
+    # Try patterns in priority order so exact names match before globs
+    lowered = [p.lower() for p in patterns]
+    for pattern in lowered:
+        for root in roots:
+            if not root.exists():
                 continue
-            name = candidate.name.lower()
-            if any(fnmatch(name, pattern) for pattern in lowered):
-                return candidate
+            for candidate in sorted(root.iterdir()):
+                if not candidate.is_file():
+                    continue
+                if fnmatch(candidate.name.lower(), pattern):
+                    return candidate
     return None

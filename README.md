@@ -29,14 +29,37 @@
 This tool automates macOS virtual machine creation on Proxmox VE 9. It handles VMID selection, CPU/RAM detection, OpenCore bootloader setup, and the full `qm` command sequence — so you don't have to.
 
 **You get:**
-- 🧙 A step-by-step TUI wizard: **Preflight > Configure > Review > Dry Run > Live Apply**
+- 🧙 A 5-step TUI wizard: **OS > Storage > Config > Dry Run > Install**
 - 🔍 Auto-detected hardware defaults (CPU cores, RAM, storage targets)
-- 💿 Automatic OpenCore and recovery/installer ISO detection
+- 💿 Automatic OpenCore and recovery/installer download — no manual file placement
 - 🆔 Auto-generated SMBIOS identity (serial, UUID, model) — no OpenCore editing needed
-- 🛡️ Safe dry-run mode to preview every command before execution
-- 🚫 Validation that blocks live apply when required assets are missing
+- 🛡️ Mandatory dry-run before live install previews every command
+- 🚫 Real-time form validation with inline error feedback
 
-![Wizard Screenshot](docs/images/wizard-step2.png)
+### TUI Preview
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/step1-os-selection.png" alt="Step 1: OS Selection" width="400"><br>
+      <strong>Step 1:</strong> OS Selection
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/step2-storage-selection.png" alt="Step 2: Storage Selection" width="400"><br>
+      <strong>Step 2:</strong> Storage Selection
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/step3-vm-configuration.png" alt="Step 3: VM Configuration" width="400"><br>
+      <strong>Step 3:</strong> VM Configuration
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/step4-review-dry-run.png" alt="Step 4: Review & Dry Run" width="400"><br>
+      <strong>Step 4:</strong> Review & Dry Run
+    </td>
+  </tr>
+</table>
 
 ![macOS Desktop via VNC](docs/images/macos-vnc-desktop.png)
 
@@ -60,13 +83,13 @@ This clones the repo, sets up a Python venv, and launches the TUI wizard.
 
 | Step | What Happens |
 |------|-------------|
-| **1️⃣ Preflight** | Checks for `qm`, `pvesm`, `/dev/kvm`, and root access |
-| **2️⃣ Configure** | Pick macOS version, storage target, and review auto-detected CPU/RAM/VMID |
-| **3️⃣ Review** | Validates config and checks that OpenCore + installer ISOs exist |
-| **4️⃣ Dry Run** | Shows every `qm` command that will run — nothing is executed yet |
-| **5️⃣ Live Apply** | Creates the VM for real |
+| **1️⃣ Choose OS** | Pick macOS version (Sonoma, Sequoia, Tahoe) — SMBIOS auto-generated |
+| **2️⃣ Storage** | Select storage target from auto-detected Proxmox storage pools |
+| **3️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk) with auto-filled defaults |
+| **4️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
+| **5️⃣ Install** | Creates the VM, builds OpenCore, imports disks, and starts the VM |
 
-**Most users:** click **Use Recommended** in step 2, pick your macOS version, pick your storage, then click through to **Live Apply**.
+**Most users:** pick your macOS version, pick your storage, click through to **Install**. Preflight runs automatically in the background.
 
 ---
 
@@ -105,7 +128,7 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 |-------|---------|-------|
 | **Sonoma 14** | ✅ Stable | Best tested, most reliable |
 | **Sequoia 15** | ✅ Stable | Fully supported |
-| **Tahoe 26** | 🧪 Preview | Requires full installer ISO (not just recovery) |
+| **Tahoe 26** | 🧪 Preview | Uses recovery image via osrecovery (auto-downloaded) |
 
 ---
 
@@ -114,6 +137,9 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 For scripting or headless use, the CLI bypasses the TUI entirely:
 
 ```bash
+# Download OpenCore + recovery images
+osx-next-cli download --macos sonoma
+
 # Check host readiness
 osx-next-cli preflight
 
@@ -162,16 +188,17 @@ In the macOS installer:
 <details>
 <summary>🚫 <strong>Live apply is blocked — missing assets</strong></summary>
 
-The tool requires OpenCore and recovery/installer ISOs in your Proxmox ISO storage. It scans `/var/lib/vz/template/iso` and `/mnt/pve/*/template/iso` for:
-- `opencore-v21.iso` or `opencore-{version}.iso`
-- `{version}-recovery.iso`
-- For Tahoe: a full installer ISO matching `*tahoe*full*.iso` or `*InstallAssistant*.iso`
+The tool requires OpenCore and recovery/installer images. It scans `/var/lib/vz/template/iso` and `/mnt/pve/*/template/iso` for:
+- `opencore-osx-proxmox-vm.iso` or `opencore-{version}.iso`
+- `{version}-recovery.img` or `{version}-recovery.iso`
+
+Use `osx-next-cli download --macos sonoma` to auto-fetch missing assets. The TUI wizard auto-downloads missing assets in step 4.
 </details>
 
 <details>
 <summary>🐚 <strong>I see UEFI Shell instead of macOS boot</strong></summary>
 
-Boot media path or order mismatch. Ensure OpenCore is on `ide2` and recovery/installer on `ide3`, with boot order set to `ide2;ide3;sata0`.
+Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on `ide2`, with boot order set to `ide2;sata0;ide0`.
 </details>
 
 <details>
@@ -202,7 +229,7 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 
 - 💿 Use **SSD/NVMe-backed storage** for VM disks
 - 🧠 Don't overcommit host CPU or RAM
-- 🔧 Keep the main macOS disk on `sata0`, OpenCore on `ide2`, recovery on `ide3`
+- 🔧 Keep the main macOS disk on `sata0`, OpenCore on `ide0`, recovery on `ide2`
 - 🖥️ Use `vga: std` during installation (switch after)
 - 📏 Change one setting at a time and measure the impact
 
@@ -281,7 +308,7 @@ Apple services require a clean, unique SMBIOS identity and stable network/time c
 
 This tool **automatically generates** a unique SMBIOS identity (serial, UUID, model) for each VM and applies it via Proxmox's native `--smbios1` flag. No manual OpenCore config editing required.
 
-- **TUI:** SMBIOS is auto-generated when you click **Use Recommended** or switch macOS versions. Click **Generate SMBIOS** in Advanced options to regenerate.
+- **TUI:** SMBIOS is auto-generated when you select a macOS version in step 1. Click **Generate SMBIOS** in step 3 to regenerate.
 - **CLI:** SMBIOS is auto-generated unless you pass `--no-smbios` or provide your own values via `--smbios-serial`, `--smbios-uuid`, `--smbios-model`.
 
 The generated values are visible in the dry-run output as a `qm set --smbios1` step.
@@ -316,16 +343,16 @@ The generated values are visible in the dry-run output as a `qm set --smbios1` s
 
 ```
 src/osx_proxmox_next/
-  app.py          # TUI wizard (Textual)
+  app.py          # TUI wizard (Textual) — 5-step reactive state machine
   cli.py          # Non-interactive CLI
   domain.py       # VM config model + validation
   planner.py      # qm command generation
   executor.py     # Dry-run and live execution engine
   assets.py       # OpenCore/installer ISO detection
+  downloader.py   # Auto-download OpenCore + recovery images
   defaults.py     # Host-aware hardware defaults
   preflight.py    # Host capability checks
   rollback.py     # VM snapshot/rollback hints
-  diagnostics.py  # Log bundling + recovery guidance
   smbios.py       # SMBIOS identity generation (serial, UUID, model)
   profiles.py     # VM config profile management
   infrastructure.py # Proxmox command adapter
