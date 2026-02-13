@@ -105,7 +105,7 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 |-------|---------|-------|
 | **Sonoma 14** | ✅ Stable | Best tested, most reliable |
 | **Sequoia 15** | ✅ Stable | Fully supported |
-| **Tahoe 26** | 🧪 Preview | Requires full installer ISO (not just recovery) |
+| **Tahoe 26** | 🧪 Preview | Uses recovery image via osrecovery (auto-downloaded) |
 
 ---
 
@@ -168,7 +168,6 @@ In the macOS installer:
 The tool requires OpenCore and recovery/installer images. It scans `/var/lib/vz/template/iso` and `/mnt/pve/*/template/iso` for:
 - `opencore-osx-proxmox-vm.iso` or `opencore-{version}.iso`
 - `{version}-recovery.img` or `{version}-recovery.iso`
-- For Tahoe: a full installer ISO matching `*tahoe*full*.iso` or `*InstallAssistant*.iso`
 
 Use `osx-next-cli download --macos sonoma` to auto-fetch missing assets. The TUI wizard auto-downloads missing assets in step 4.
 </details>
