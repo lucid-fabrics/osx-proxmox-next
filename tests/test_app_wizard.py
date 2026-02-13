@@ -1351,7 +1351,7 @@ def test_find_tahoe_installer_mnt_pve(monkeypatch, tmp_path) -> None:
     (iso_dir / "macos-tahoe-full.iso").write_text("fake")
     # Dir with matching name (should be skipped by is_file check)
     (iso_dir / "tahoe-dir.iso").mkdir()
-    # Storage WITHOUT template/iso (covers iso_path.exists() False → back to loop)
+    # Storage WITHOUT template/iso (covers iso_path.exists() False -> back to loop)
     storage_no_iso = mnt_pve / "noiso"
     storage_no_iso.mkdir()
 
@@ -1367,14 +1367,35 @@ def test_find_tahoe_installer_mnt_pve(monkeypatch, tmp_path) -> None:
                     return mnt_pve
                 if p == "/var/lib/vz/template/iso":
                     return tmp_path / "nonexistent1"
-                if p == "/var/lib/vz/snippets":
-                    return tmp_path / "nonexistent2"
                 return real_path(p)
 
             monkeypatch.setattr(app_module, "Path", fake_path)
             result = app._find_tahoe_installer_path()
             assert "tahoe" in result
             assert result.endswith(".iso")
+
+    asyncio.run(_run())
+
+
+def test_find_tahoe_installer_not_found(monkeypatch, tmp_path) -> None:
+    """Cover _find_tahoe_installer_path: returns empty when no installer exists."""
+    real_path = Path
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause()
+
+            def fake_path(p):
+                if p == "/mnt/pve":
+                    return tmp_path / "no_mnt_pve"
+                if p == "/var/lib/vz/template/iso":
+                    return tmp_path / "nonexistent1"
+                return real_path(p)
+
+            monkeypatch.setattr(app_module, "Path", fake_path)
+            result = app._find_tahoe_installer_path()
+            assert result == ""
 
     asyncio.run(_run())
 

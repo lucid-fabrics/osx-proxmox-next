@@ -84,7 +84,10 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "bash", "-c",
                 f"REF=$(qm importdisk {vmid} {oc_disk} {config.storage} 2>&1 | "
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
-                f"qm set {vmid} --ide0 $REF,media=disk",
+                f"qm set {vmid} --ide0 $REF,media=disk && "
+                # Fix GPT header corruption from thin-provisioned LVM importdisk
+                "DEV=$(pvesm path $REF) && "
+                f"dd if={oc_disk} of=$DEV bs=512 count=2048 conv=notrunc 2>/dev/null",
             ],
         ),
         PlanStep(
@@ -152,7 +155,8 @@ def _build_oc_disk_script(opencore_path: Path, recovery_path: Path, dest: Path) 
         f"SRC_LOOP=$(losetup --find --show {opencore_path}) && "
         "mkdir -p /tmp/oc-src && mount $SRC_LOOP /tmp/oc-src && "
         # Format and mount dest ESP
-        f"DEST_LOOP=$(losetup --find --show -P {dest}) && "
+        f"DEST_LOOP=$(losetup --find --show {dest}) && "
+        "partprobe $DEST_LOOP && sleep 1 && "
         "mkfs.fat -F 32 ${DEST_LOOP}p1 && "
         "mkdir -p /tmp/oc-dest && mount ${DEST_LOOP}p1 /tmp/oc-dest && "
         # Copy OpenCore files

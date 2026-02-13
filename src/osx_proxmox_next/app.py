@@ -764,9 +764,8 @@ class NextApp(App):
         return True
 
     def _find_tahoe_installer_path(self) -> str:
-        search_dirs = [
+        search_dirs: list[Path] = [
             Path("/var/lib/vz/template/iso"),
-            Path("/var/lib/vz/snippets"),
         ]
         mnt_pve = Path("/mnt/pve")
         if mnt_pve.exists():
@@ -775,17 +774,19 @@ class NextApp(App):
                 if iso_path.exists():
                     search_dirs.append(iso_path)
         patterns = [
+            "tahoe-full-installer.iso",
+            "tahoe-installer.iso",
+            "macos-tahoe-full*.iso",
             "*tahoe*full*.iso",
             "*tahoe*.iso",
-            "*26*.iso",
-            "*InstallAssistant*.iso",
+            "InstallAssistant-tahoe*.iso",
+            "InstallAssistant*.iso",
         ]
-        for root in search_dirs:
-            if not root.exists():
-                continue
-            for pattern in patterns:
-                matches = sorted(root.glob(pattern))
-                for path in matches:
+        for pattern in patterns:
+            for root in search_dirs:
+                if not root.exists():
+                    continue
+                for path in sorted(root.glob(pattern)):
                     if path.is_file():
                         return str(path)
         return ""

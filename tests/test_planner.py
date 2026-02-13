@@ -106,6 +106,8 @@ def test_build_plan_uses_importdisk_for_opencore(monkeypatch) -> None:
     assert "qm importdisk" in oc.command
     assert "opencore-tahoe-vm901.img" in oc.command
     assert "media=disk" in oc.command
+    assert "pvesm path" in oc.command
+    assert "dd if=" in oc.command
 
 
 def test_build_plan_uses_importdisk_for_recovery(monkeypatch) -> None:
