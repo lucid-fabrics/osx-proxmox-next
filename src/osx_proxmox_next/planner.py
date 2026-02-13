@@ -75,7 +75,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             title="Build OpenCore boot disk",
             argv=[
                 "bash", "-c",
-                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk),
+                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk, config.macos),
             ],
         ),
         PlanStep(
@@ -144,30 +144,33 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
     return "\n".join(lines)
 
 
-def _build_oc_disk_script(opencore_path: Path, recovery_path: Path, dest: Path) -> str:
+def _build_oc_disk_script(opencore_path: Path, recovery_path: Path, dest: Path, macos: str) -> str:
     """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
+    meta = SUPPORTED_MACOS.get(macos, {})
+    macos_label = meta.get("label", f"macOS {macos.title()}")
     return (
         # Create 1GB GPT disk with EFI System Partition
         f"dd if=/dev/zero of={dest} bs=1M count=1024 && "
         f"sgdisk -Z {dest} && "
-        f"sgdisk -n 1:0:0 -t 1:EF00 {dest} && "
+        f"sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {dest} && "
         # Mount source OpenCore (raw FAT32 — no partition table)
         f"SRC_LOOP=$(losetup --find --show {opencore_path}) && "
         "mkdir -p /tmp/oc-src && mount $SRC_LOOP /tmp/oc-src && "
-        # Format and mount dest ESP
+        # Format and mount dest ESP — label the volume OPENCORE
         f"DEST_LOOP=$(losetup --find --show {dest}) && "
         "partprobe $DEST_LOOP && sleep 1 && "
-        "mkfs.fat -F 32 ${DEST_LOOP}p1 && "
+        "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
         "mkdir -p /tmp/oc-dest && mount ${DEST_LOOP}p1 /tmp/oc-dest && "
         # Copy OpenCore files
         "cp -a /tmp/oc-src/* /tmp/oc-dest/ && "
-        # Patch config.plist with plistlib
+        # Patch config.plist: security, boot labels, hide auxiliary entries
         "python3 -c '"
         "import plistlib; "
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
         "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
         "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
         "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
+        "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x26\\x0f\\x00\\x00\"; "
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "print(\"config.plist patched\")' && "
