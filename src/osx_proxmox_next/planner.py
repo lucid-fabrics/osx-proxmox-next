@@ -171,8 +171,11 @@ def _build_oc_disk_script(
         serialized = serialize_patches(cores)
         amd_patch_block = (
             serialize_preamble()
-            + "patches=" + serialized + "; "
-            "p.setdefault(\"Kernel\",{}).setdefault(\"Patch\",[]).extend(patches); "
+            # Replace all kernel patches — the shipped OC ISO has Intel-oriented
+            # patches that conflict with AMD_Vanilla's complete set.
+            + "p.setdefault(\"Kernel\",{}); "
+            "patches=" + serialized + "; "
+            "p[\"Kernel\"][\"Patch\"]=patches; "
         )
 
     return (
@@ -199,6 +202,7 @@ def _build_oc_disk_script(
         "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x26\\x0f\\x00\\x00\"; "
+        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 -v\"; "
         + amd_patch_block +
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "print(\"config.plist patched\")' && "
