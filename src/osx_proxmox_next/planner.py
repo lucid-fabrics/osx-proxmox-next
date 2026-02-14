@@ -45,15 +45,43 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "--net0", f"virtio,bridge={config.bridge}",
             ],
         ),
+        import re
+        import platform
+        from typing import List
+
+        def get_cpu_name() -> str:
+            cpu_name: str = platform.processor()
+            if not cpu_name or cpu_name == "":
+                with open(file="/proc/cpuinfo", mode="r") as file:
+                    cpu_info_lines: List[str] = file.readlines()
+                    for line in cpu_info_lines:
+                        if "model name" in line:
+                            cpu_name = re.sub(pattern=r"model name\s+:\s+", repl="", string=line)
+                            cpu_name = re.sub(pattern=r"\s+", repl=" ", string=cpu_name).strip()
+                            break
+
         PlanStep(
             title="Apply macOS hardware profile",
+            if "AMD" in cpu_name:
             argv=[
                 "qm", "set", vmid,
                 "--args",
                 '-device isa-applesmc,osk="ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc" '
                 "-smbios type=2 -device qemu-xhci -device usb-kbd -device usb-tablet "
                 "-global nec-usb-xhci.msi=off -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
-                "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc",
+                "-cpu Haswell-noTSX,vendor=GenuineIntel,+invtsc,+hypervisor,kvm=on,vmware-cpuid-freq=on",
+                "--vga", "std",
+                "--tablet", "1",
+                "--scsihw", "virtio-scsi-pci",
+            ],
+            if "Intel" in cpu_name:
+            argv=[
+                "qm", "set", vmid,
+                "--args",
+                '-device isa-applesmc,osk="ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc" '
+                "-smbios type=2 -device qemu-xhci -device usb-kbd -device usb-tablet "
+                "-global nec-usb-xhci.msi=off -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
+                "-cpu host,vendor=GenuineIntel,+invtsc,+hypervisor,kvm=on,vmware-cpuid-freq=on",
                 "--vga", "std",
                 "--tablet", "1",
                 "--scsihw", "virtio-scsi-pci",
