@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from osx_proxmox_next.defaults import default_disk_gb, detect_cpu_cores, detect_memory_mb
+from osx_proxmox_next.defaults import default_disk_gb, detect_cpu_cores, detect_cpu_vendor, detect_memory_mb
 
 
 def test_detect_defaults_return_sane_values() -> None:
@@ -67,3 +67,22 @@ def test_detect_memory_meminfo_short_parts(monkeypatch, tmp_path):
     fake_meminfo.write_text("MemTotal:\n")
     monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_meminfo if p == "/proc/meminfo" else Path(p))
     assert detect_memory_mb() == 8192
+
+
+def test_detect_cpu_vendor_amd(monkeypatch, tmp_path):
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text("vendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 9\n")
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    assert detect_cpu_vendor() == "AMD"
+
+
+def test_detect_cpu_vendor_intel(monkeypatch, tmp_path):
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text("vendor_id\t: GenuineIntel\nmodel name\t: Intel Xeon\n")
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    assert detect_cpu_vendor() == "Intel"
+
+
+def test_detect_cpu_vendor_missing(monkeypatch):
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: Path("/nonexistent/cpuinfo"))
+    assert detect_cpu_vendor() == "Intel"

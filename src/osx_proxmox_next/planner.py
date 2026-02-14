@@ -6,6 +6,7 @@ from pathlib import Path
 from shlex import join
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
+from .defaults import detect_cpu_vendor
 from .domain import SUPPORTED_MACOS, VmConfig
 from .infrastructure import ProxmoxAdapter
 from .smbios import generate_smbios, model_for_macos
@@ -22,6 +23,13 @@ class PlanStep:
         return join(self.argv)
 
 
+def _cpu_args() -> str:
+    """Return QEMU -cpu flag tailored to host CPU vendor."""
+    if detect_cpu_vendor() == "AMD":
+        return "-cpu Haswell-noTSX,vendor=GenuineIntel,+invtsc,+hypervisor,kvm=on,vmware-cpuid-freq=on"
+    return "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc,vmware-cpuid-freq=on"
+
+
 def build_plan(config: VmConfig) -> list[PlanStep]:
     meta = SUPPORTED_MACOS[config.macos]
     vmid = str(config.vmid)
@@ -29,6 +37,8 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     recovery_raw = resolve_recovery_or_installer_path(config)
     opencore_path = resolve_opencore_path(config.macos)
     oc_disk = opencore_path.parent / f"opencore-{config.macos}-vm{vmid}.img"
+
+    cpu_flag = _cpu_args()
 
     steps = [
         PlanStep(
@@ -53,7 +63,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 '-device isa-applesmc,osk="ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc" '
                 "-smbios type=2 -device qemu-xhci -device usb-kbd -device usb-tablet "
                 "-global nec-usb-xhci.msi=off -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
-                "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc",
+                f"{cpu_flag}",
                 "--vga", "std",
                 "--tablet", "1",
                 "--scsihw", "virtio-scsi-pci",
