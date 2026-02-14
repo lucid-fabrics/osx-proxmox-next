@@ -220,8 +220,12 @@ def _build_oc_disk_script(
         "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
         "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
-        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x26\\x0f\\x00\\x00\"; "
+        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x67\\x0f\\x00\\x00\"; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 debug=0x100 -v\"; "
+        # Ensure NVRAM Delete purges stale values so our Add entries take effect
+        "nv_del=p.setdefault(\"NVRAM\",{}).setdefault(\"Delete\",{}); "
+        "nv_del[\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"]=[\"csr-active-config\",\"boot-args\"]; "
+        "p[\"NVRAM\"][\"WriteFlash\"]=True; "
         # Enable VirtualSMC — shipped OC ISO has it disabled
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
         + amd_patch_block +
