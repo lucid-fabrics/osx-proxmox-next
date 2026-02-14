@@ -1,5 +1,5 @@
 from osx_proxmox_next.domain import VmConfig
-from osx_proxmox_next.planner import build_plan, render_script, VmInfo, fetch_vm_info, build_destroy_plan
+from osx_proxmox_next.planner import build_plan, render_script, _cpu_args, VmInfo, fetch_vm_info, build_destroy_plan
 from osx_proxmox_next.infrastructure import CommandResult
 
 
@@ -195,6 +195,47 @@ def test_render_script_simple() -> None:
     assert "#!/usr/bin/env bash" in script
     assert "qm create 901" in script
     assert "Build OpenCore boot disk" in script
+
+
+# ── CPU Vendor Detection Tests ─────────────────────────────────────
+
+
+def test_cpu_args_intel(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    args = _cpu_args()
+    assert "-cpu host," in args
+    assert "vendor=GenuineIntel" in args
+    assert "+kvm_pv_unhalt" in args
+    assert "vmware-cpuid-freq=on" in args
+
+
+def test_cpu_args_amd(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    args = _cpu_args()
+    assert "Haswell-noTSX" in args
+    assert "vendor=GenuineIntel" in args
+    assert "vmware-cpuid-freq=on" in args
+    assert "host" not in args
+
+
+def test_build_plan_amd_uses_haswell(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    steps = build_plan(_cfg("sequoia"))
+    profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
+    assert "Haswell-noTSX" in profile.command
+    assert "vendor=GenuineIntel" in profile.command
+
+
+def test_build_plan_intel_uses_host(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    steps = build_plan(_cfg("sequoia"))
+    profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
+    assert "-cpu host," in profile.command
+    assert "vendor=GenuineIntel" in profile.command
 
 
 # ── Destroy Plan Tests ─────────────────────────────────────────────
