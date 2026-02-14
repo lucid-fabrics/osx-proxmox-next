@@ -192,6 +192,9 @@ def _build_oc_disk_script(
             "kq[\"PanicNoKextDump\"]=True; "
             "kq[\"PowerTimeoutKernelPanic\"]=True; "
             "kq[\"ProvideCurrentCpuInfo\"]=True; "
+            "kq[\"ForceSecureBootScheme\"]=False; "
+            # Disable vector acceleration — Haswell-noTSX emulation may not support AVX properly
+            "p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{})[\"EnableVectorAcceleration\"]=False; "
         )
 
     return (
