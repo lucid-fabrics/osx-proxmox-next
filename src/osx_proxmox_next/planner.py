@@ -183,9 +183,9 @@ def _build_oc_disk_script(
             "bq[\"EnableWriteUnprotector\"]=False; "
             "bq[\"ProvideCustomSlide\"]=True; "
             "bq[\"RebuildAppleMemoryMap\"]=True; "
-            "bq[\"SetupVirtualMap\"]=True; "
+            "bq[\"SetupVirtualMap\"]=False; "
             "bq[\"SyncRuntimePermissions\"]=True; "
-            "bq[\"DevirtualiseMmio\"]=False; "
+            "bq[\"DevirtualiseMmio\"]=True; "
             # AMD Kernel quirks (Dortania Zen guide)
             "kq=p.setdefault(\"Kernel\",{}).setdefault(\"Quirks\",{}); "
             "kq[\"DummyPowerManagement\"]=True; "
