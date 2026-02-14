@@ -4,6 +4,7 @@ from osx_proxmox_next.amd_patches import (
     _PATCHES,
     get_kernel_patches,
     serialize_patches,
+    serialize_preamble,
 )
 
 
@@ -46,13 +47,20 @@ def test_all_patches_have_required_keys() -> None:
 
 
 def test_serialize_roundtrip() -> None:
+    preamble = serialize_preamble()
     serialized = serialize_patches(8)
-    result = eval(serialized)  # noqa: S307 — intentional, testing our own output
+    # Execute preamble to define __b64, then eval the patches
+    ns: dict = {}
+    exec(preamble, ns)  # noqa: S102
+    result = eval(serialized, ns)  # noqa: S307
     assert isinstance(result, list)
     assert len(result) == 25
     assert result[0]["Replace"][_CORE_BYTE_OFFSET] == 8
 
 
-def test_serialize_produces_valid_python() -> None:
+def test_serialize_is_shell_safe() -> None:
+    """Serialized output must not contain backslash escapes that bash would mangle."""
     serialized = serialize_patches(4)
-    compile(serialized, "<test>", "eval")
+    assert "\\x" not in serialized
+    assert "\\n" not in serialized
+    assert "\\t" not in serialized

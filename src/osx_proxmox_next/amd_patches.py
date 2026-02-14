@@ -440,16 +440,19 @@ def get_kernel_patches(cores: int) -> list[dict]:
 def serialize_patches(cores: int) -> str:
     """Return patches as a Python expression string for embedding in bash scripts.
 
-    The result can be passed to ``eval()`` on the Proxmox host to reconstruct
-    the patch list without importing this module.
+    Uses ``import base64; base64.b64decode(...)`` for bytes fields so the output
+    survives bash shell quoting (no backslash escapes).
     """
+    import base64 as _b64
+
     patches = get_kernel_patches(cores)
     parts = []
     for p in patches:
         items = []
         for k, v in p.items():
             if isinstance(v, bytes):
-                items.append(f'"{k}": {repr(v)}')
+                encoded = _b64.b64encode(v).decode()
+                items.append(f'"{k}": __b64("{encoded}")')
             elif isinstance(v, bool):
                 items.append(f'"{k}": {v}')
             elif isinstance(v, int):
@@ -458,3 +461,11 @@ def serialize_patches(cores: int) -> str:
                 items.append(f'"{k}": "{v}"')
         parts.append("{" + ", ".join(items) + "}")
     return "[" + ", ".join(parts) + "]"
+
+
+def serialize_preamble() -> str:
+    """Return the Python preamble needed before eval-ing ``serialize_patches()`` output.
+
+    Defines the ``__b64`` helper used by the serialized patch dicts.
+    """
+    return "import base64 as _b64; __b64=lambda s: _b64.b64decode(s); "

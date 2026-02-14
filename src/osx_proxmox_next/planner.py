@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from shlex import join
 
-from .amd_patches import serialize_patches
+from .amd_patches import serialize_patches, serialize_preamble
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import detect_cpu_vendor
 from .domain import SUPPORTED_MACOS, VmConfig
@@ -170,7 +170,8 @@ def _build_oc_disk_script(
     if is_amd:
         serialized = serialize_patches(cores)
         amd_patch_block = (
-            "patches=" + serialized + "; "
+            serialize_preamble()
+            + "patches=" + serialized + "; "
             "p.setdefault(\"Kernel\",{}).setdefault(\"Patch\",[]).extend(patches); "
         )
 
