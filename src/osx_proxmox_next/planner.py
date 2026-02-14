@@ -176,13 +176,22 @@ def _build_oc_disk_script(
             + "p.setdefault(\"Kernel\",{}); "
             "patches=" + serialized + "; "
             "p[\"Kernel\"][\"Patch\"]=patches; "
-            # AMD Booter quirks: WriteUnprotector off, RebuildAppleMemoryMap on
+            # AMD Booter quirks (Dortania Zen guide)
             "bq=p.setdefault(\"Booter\",{}).setdefault(\"Quirks\",{}); "
+            "bq[\"AvoidRuntimeDefrag\"]=True; "
+            "bq[\"EnableSafeModeSlide\"]=True; "
             "bq[\"EnableWriteUnprotector\"]=False; "
+            "bq[\"ProvideCustomSlide\"]=True; "
             "bq[\"RebuildAppleMemoryMap\"]=True; "
+            "bq[\"SetupVirtualMap\"]=True; "
             "bq[\"SyncRuntimePermissions\"]=True; "
-            "bq[\"SetupVirtualMap\"]=False; "
-            "bq[\"DevirtualiseMmio\"]=True; "
+            "bq[\"DevirtualiseMmio\"]=False; "
+            # AMD Kernel quirks (Dortania Zen guide)
+            "kq=p.setdefault(\"Kernel\",{}).setdefault(\"Quirks\",{}); "
+            "kq[\"DummyPowerManagement\"]=True; "
+            "kq[\"PanicNoKextDump\"]=True; "
+            "kq[\"PowerTimeoutKernelPanic\"]=True; "
+            "kq[\"ProvideCurrentCpuInfo\"]=True; "
         )
 
     return (
@@ -209,7 +218,7 @@ def _build_oc_disk_script(
         "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x26\\x0f\\x00\\x00\"; "
-        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 -v\"; "
+        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 debug=0x100 -v\"; "
         # Enable VirtualSMC — shipped OC ISO has it disabled
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
         + amd_patch_block +
