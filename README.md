@@ -79,6 +79,16 @@ This clones the repo, sets up a Python venv, and launches the TUI wizard.
 
 > Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/lucidfabrics) or a [coffee on BMC](https://buymeacoffee.com/lucidfabrics). ☕
 
+### 🐚 Bash Alternative (community-scripts)
+
+Prefer a standalone bash script with no Python dependency? Use the [community-scripts](https://github.com/community-scripts/ProxmoxVE) version:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/vm/macos-vm.sh)"
+```
+
+Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv needed.
+
 ### 🪄 Wizard Walkthrough
 
 | Step | What Happens |
@@ -128,7 +138,7 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 |-------|---------|-------|
 | **Sonoma 14** | ✅ Stable | Best tested, most reliable |
 | **Sequoia 15** | ✅ Stable | Fully supported |
-| **Tahoe 26** | 🧪 Preview | Uses recovery image via osrecovery (auto-downloaded) |
+| **Tahoe 26** | ✅ Stable | Fully supported |
 
 ---
 

@@ -29,12 +29,11 @@ def test_build_plan_includes_core_steps() -> None:
     assert any(step.command.startswith("qm start") for step in steps)
 
 
-def test_build_plan_marks_tahoe_preview() -> None:
+def test_build_plan_tahoe_no_preview_warning() -> None:
     cfg = _cfg("tahoe")
     cfg.installer_path = "/tmp/tahoe.iso"
     steps = build_plan(cfg)
-    assert steps[0].title == "Preview warning"
-    assert steps[0].risk == "warn"
+    assert steps[0].title != "Preview warning"
 
 
 def test_render_script_contains_metadata() -> None:

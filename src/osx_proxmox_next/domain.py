@@ -6,7 +6,7 @@ from dataclasses import dataclass
 SUPPORTED_MACOS = {
     "sonoma": {"label": "macOS Sonoma 14", "major": 14, "channel": "stable"},
     "sequoia": {"label": "macOS Sequoia 15", "major": 15, "channel": "stable"},
-    "tahoe": {"label": "macOS Tahoe 26", "major": 26, "channel": "preview"},
+    "tahoe": {"label": "macOS Tahoe 26", "major": 26, "channel": "stable"},
 }
 
 
