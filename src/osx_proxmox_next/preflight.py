@@ -32,15 +32,36 @@ def _is_root() -> bool:
         return False
 
 
+_PROXMOX_BINARIES = ("qm", "pvesm", "pvesh", "qemu-img")
+
+_BUILD_BINARIES: dict[str, str] = {
+    "dmg2img": "apt install dmg2img",
+    "sgdisk": "apt install gdisk",
+    "partprobe": "apt install parted",
+    "losetup": "apt install mount",
+    "mkfs.fat": "apt install dosfstools",
+}
+
+
 def run_preflight() -> list[PreflightCheck]:
     checks: list[PreflightCheck] = []
-    for cmd in ("qm", "pvesm", "pvesh", "qemu-img"):
+    for cmd in _PROXMOX_BINARIES:
         binary = _find_binary(cmd)
         checks.append(
             PreflightCheck(
                 name=f"{cmd} available",
                 ok=bool(binary),
                 details=binary or f"{cmd} not found in PATH or common system paths",
+            )
+        )
+
+    for cmd, install_hint in _BUILD_BINARIES.items():
+        binary = _find_binary(cmd)
+        checks.append(
+            PreflightCheck(
+                name=f"{cmd} available",
+                ok=bool(binary),
+                details=binary or f"Not found. Install with: {install_hint}",
             )
         )
 
