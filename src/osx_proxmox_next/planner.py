@@ -186,9 +186,8 @@ def _build_oc_disk_script(
             "bq[\"SetupVirtualMap\"]=False; "
             "bq[\"SyncRuntimePermissions\"]=True; "
             "bq[\"DevirtualiseMmio\"]=True; "
-            # AMD Kernel quirks (Dortania Zen guide)
+            # AMD Kernel quirks — only set keys that exist in shipped OC schema
             "kq=p.setdefault(\"Kernel\",{}).setdefault(\"Quirks\",{}); "
-            "kq[\"DummyPowerManagement\"]=True; "
             "kq[\"PanicNoKextDump\"]=True; "
             "kq[\"PowerTimeoutKernelPanic\"]=True; "
             "kq[\"ProvideCurrentCpuInfo\"]=True; "
