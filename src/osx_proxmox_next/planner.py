@@ -25,9 +25,26 @@ class PlanStep:
 
 
 def _cpu_args() -> str:
-    """Return QEMU -cpu flag tailored to host CPU vendor."""
+    """Return QEMU -cpu flag tailored to host CPU vendor.
+
+    AMD uses Cascadelake-Server with AVX-512/TSX/PCID disabled — this presents
+    a convincing Intel server CPUID to macOS while avoiding instructions AMD
+    CPUs lack.  Combined with AMD_Vanilla kernel patches this covers all
+    Sonoma+ macOS versions reliably.
+
+    Ref: luchina-gabriel/OSX-PROXMOX (battle-tested on ~5k installs).
+    """
     if detect_cpu_vendor() == "AMD":
-        return "-cpu Haswell-noTSX,vendor=GenuineIntel,+invtsc,+hypervisor,kvm=on,vmware-cpuid-freq=on"
+        return (
+            "-cpu Cascadelake-Server,"
+            "vendor=GenuineIntel,"
+            "+invtsc,"
+            "-pcid,"
+            "-hle,-rtm,"
+            "-avx512f,-avx512dq,-avx512cd,-avx512bw,-avx512vl,-avx512vnni,"
+            "kvm=on,"
+            "vmware-cpuid-freq=on"
+        )
     return "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc,vmware-cpuid-freq=on"
 
 
@@ -196,9 +213,14 @@ def _build_oc_disk_script(
             "kq[\"PowerTimeoutKernelPanic\"]=True; "
             "kq[\"ProvideCurrentCpuInfo\"]=True; "
             "kq[\"ForceSecureBootScheme\"]=False; "
-            # Disable vector acceleration — Haswell-noTSX emulation may not support AVX properly
+            # Disable vector acceleration — Cascadelake-Server with AVX-512 stripped may confuse OC
             "uq=p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{}); "
             "uq[\"EnableVectorAcceleration\"]=False; "
+            # AMD kernel patches modify the kernel — secure boot can't validate it.
+            # SecureBootModel=Disabled + DmgLoading=Any required or Err(0xE) on
+            # BootKernelExtensions.kc.development.
+            "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
+            "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
         )
 
     return (

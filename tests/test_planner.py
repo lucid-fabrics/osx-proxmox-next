@@ -214,18 +214,20 @@ def test_cpu_args_amd(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
     args = _cpu_args()
-    assert "Haswell-noTSX" in args
+    assert "Cascadelake-Server" in args
     assert "vendor=GenuineIntel" in args
     assert "vmware-cpuid-freq=on" in args
+    assert "-avx512f" in args
+    assert "-pcid" in args
     assert "host" not in args
 
 
-def test_build_plan_amd_uses_haswell(monkeypatch) -> None:
+def test_build_plan_amd_uses_cascadelake(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
     steps = build_plan(_cfg("sequoia"))
     profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
-    assert "Haswell-noTSX" in profile.command
+    assert "Cascadelake-Server" in profile.command
     assert "vendor=GenuineIntel" in profile.command
 
 
@@ -246,6 +248,9 @@ def test_build_plan_amd_injects_kernel_patches(monkeypatch) -> None:
     assert "Kernel" in build.command
     assert "Patch" in build.command
     assert "cpuid_cores_per_package" in build.command
+    # AMD must disable secure boot (kernel patches invalidate signature chain)
+    assert 'SecureBootModel\"]=\"Disabled\"' in build.command
+    assert 'DmgLoading\"]=\"Any\"' in build.command
 
 
 def test_build_plan_intel_no_kernel_patches(monkeypatch) -> None:
