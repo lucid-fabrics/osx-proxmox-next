@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from shlex import join
 
-from .amd_patches import serialize_patches, serialize_preamble
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import detect_cpu_vendor
 from .domain import SUPPORTED_MACOS, VmConfig
@@ -182,31 +181,20 @@ def _build_oc_disk_script(
     meta = SUPPORTED_MACOS.get(macos, {})
     macos_label = meta.get("label", f"macOS {macos.title()}")
 
-    # AMD needs kernel patches (AMD_Vanilla) to fix Intel-specific XNU
-    # instructions that cause silent hangs.  Cascadelake-Server CPU emulation
-    # handles CPUID but not rdmsr/wrmsr/cpufamily checks in the kernel.
-    #
-    # Security settings stay at SecureBootModel=Default + DmgLoading=Signed
-    # (base config).  The Err(0xE) on .kc.development is benign — OC falls
-    # through to .kc (production) which loads fine.
+    # AMD VM config — follows luchina-gabriel/OSX-PROXMOX's proven approach:
+    # Cascadelake-Server handles CPUID emulation, only minimal PENRYN kernel
+    # patches are needed (not the full AMD_Vanilla set which is for bare-metal).
+    # SecureBootModel=Disabled + DmgLoading=Signed (NOT Any — Any breaks
+    # OS.dmg.root_hash loading).
     amd_patch_block = ""
     if is_amd:
-        serialized = serialize_patches(cores)
         amd_patch_block = (
-            serialize_preamble()
-            # Replace kernel patches — shipped OC has Intel-oriented patches
-            # (CPUFAMILY_INTEL_PENRYN, SurPlus, FileVault) that conflict with
-            # AMD_Vanilla's complete set.
-            + "patches=" + serialized + "; "
-            "p[\"Kernel\"][\"Patch\"]=patches; "
+            # SecureBootModel=Disabled so OC applies kernel patches
+            "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
             # Flip power management locks for AMD
             "kq=p[\"Kernel\"][\"Quirks\"]; "
             "kq[\"AppleCpuPmCfgLock\"]=True; "
             "kq[\"AppleXcpmCfgLock\"]=True; "
-            # SecureBootModel must be Disabled so OC applies kernel patches
-            # to the unsealed kernel cache.  DmgLoading=Any required to pair.
-            "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
-            "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
         )
 
     return (

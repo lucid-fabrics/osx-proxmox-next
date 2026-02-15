@@ -240,30 +240,28 @@ def test_build_plan_intel_uses_host(monkeypatch) -> None:
     assert "vendor=GenuineIntel" in profile.command
 
 
-def test_build_plan_amd_injects_kernel_patches(monkeypatch) -> None:
+def test_build_plan_amd_config(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
-    # AMD_Vanilla kernel patches appended
-    assert "cpuid_cores_per_package" in build.command
-    assert "Kernel" in build.command
-    assert "Patch" in build.command
-    # Power management locks flipped
+    # Power management locks flipped for AMD
     assert "AppleCpuPmCfgLock" in build.command
     assert "AppleXcpmCfgLock" in build.command
-    # SecureBootModel=Disabled so patches apply to unsealed kernel
+    # SecureBootModel=Disabled so shipped PENRYN patches apply
     assert 'SecureBootModel\"]=\"Disabled\"' in build.command
-    assert 'DmgLoading\"]=\"Any\"' in build.command
+    # No full AMD_Vanilla patches (Cascadelake-Server handles CPUID)
+    assert "cpuid_cores_per_package" not in build.command
 
 
-def test_build_plan_intel_no_amd_patches(monkeypatch) -> None:
+def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
-    assert "cpuid_cores_per_package" not in build.command
     assert "AppleCpuPmCfgLock" not in build.command
+    # Intel keeps SecureBootModel=Default (no Disabled override)
+    assert 'SecureBootModel\"]=\"Disabled\"' not in build.command
 
 
 # ── Destroy Plan Tests ─────────────────────────────────────────────
