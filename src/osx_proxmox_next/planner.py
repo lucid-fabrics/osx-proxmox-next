@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from shlex import join
 
-from .amd_patches import serialize_patches, serialize_preamble
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import detect_cpu_vendor
 from .domain import SUPPORTED_MACOS, VmConfig
@@ -182,44 +181,18 @@ def _build_oc_disk_script(
     meta = SUPPORTED_MACOS.get(macos, {})
     macos_label = meta.get("label", f"macOS {macos.title()}")
 
-    # AMD kernel patch injection — serialized as a Python literal for the inline script
+    # AMD config adjustments — no kernel patches needed.
+    # Cascadelake-Server CPU emulation (set in _cpu_args) presents a convincing
+    # Intel CPUID to macOS.  Combined with the shipped OC's existing quirks
+    # (DummyPowerManagement, CryptexFixup, etc.) this is sufficient.
+    # Ref: luchina-gabriel/OSX-PROXMOX — same approach, ~5k installs, no kernel patches.
     amd_patch_block = ""
     if is_amd:
-        serialized = serialize_patches(cores)
         amd_patch_block = (
-            serialize_preamble()
-            # Replace all kernel patches — the shipped OC ISO has Intel-oriented
-            # patches that conflict with AMD_Vanilla's complete set.
-            + "p.setdefault(\"Kernel\",{}); "
-            "patches=" + serialized + "; "
-            "p[\"Kernel\"][\"Patch\"]=patches; "
-            # AMD Booter quirks — only flip existing keys in shipped OC plist
-            "bq=p[\"Booter\"][\"Quirks\"]; "
-            "bq[\"AvoidRuntimeDefrag\"]=True; "
-            "bq[\"EnableSafeModeSlide\"]=True; "
-            "bq[\"EnableWriteUnprotector\"]=False; "
-            "bq[\"ProvideCustomSlide\"]=True; "
-            "bq[\"RebuildAppleMemoryMap\"]=True; "
-            "bq[\"SetupVirtualMap\"]=False; "
-            "bq[\"SyncRuntimePermissions\"]=True; "
-            "bq[\"DevirtualiseMmio\"]=True; "
-            # AMD Kernel quirks — only flip existing keys, never add new ones
-            # (adding unknown keys causes "No schema for X" OC errors).
-            # Shipped OC already has DummyPowerManagement=True, PanicNoKextDump=True,
-            # PowerTimeoutKernelPanic=True, ProvideCurrentCpuInfo=True.
+            # Flip power management locks for AMD
             "kq=p[\"Kernel\"][\"Quirks\"]; "
             "kq[\"AppleCpuPmCfgLock\"]=True; "
             "kq[\"AppleXcpmCfgLock\"]=True; "
-            # Disable vector acceleration
-            "p[\"UEFI\"][\"Quirks\"][\"EnableVectorAcceleration\"]=False; "
-            # OC rejects SecureBootModel != Disabled with DmgLoading=Any.
-            # Use Disabled + revpatch=sbvmm boot-arg so CryptexFixup still
-            # handles cryptex/root_hash verification via its VMM shim.
-            "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
-            "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
-            # Append revpatch=sbvmm to boot-args
-            "ba=p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"].get(\"boot-args\",\"\"); "
-            "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=ba+\" revpatch=sbvmm\" if \"revpatch=sbvmm\" not in ba else ba; "
         )
 
     return (
