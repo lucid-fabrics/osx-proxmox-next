@@ -240,23 +240,26 @@ def test_build_plan_intel_uses_host(monkeypatch) -> None:
     assert "vendor=GenuineIntel" in profile.command
 
 
-def test_build_plan_amd_flips_power_quirks(monkeypatch) -> None:
+def test_build_plan_amd_injects_kernel_patches(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
-    # AMD flips power management locks — no kernel patches needed
+    # AMD_Vanilla kernel patches appended
+    assert "cpuid_cores_per_package" in build.command
+    assert "Kernel" in build.command
+    assert "Patch" in build.command
+    # Power management locks flipped
     assert "AppleCpuPmCfgLock" in build.command
     assert "AppleXcpmCfgLock" in build.command
-    # No AMD_Vanilla kernel patches (Cascadelake-Server handles CPUID)
-    assert "cpuid_cores_per_package" not in build.command
 
 
-def test_build_plan_intel_no_amd_quirks(monkeypatch) -> None:
+def test_build_plan_intel_no_amd_patches(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "cpuid_cores_per_package" not in build.command
     assert "AppleCpuPmCfgLock" not in build.command
 
 

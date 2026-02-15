@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from shlex import join
 
+from .amd_patches import serialize_patches, serialize_preamble
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import detect_cpu_vendor
 from .domain import SUPPORTED_MACOS, VmConfig
@@ -181,14 +182,21 @@ def _build_oc_disk_script(
     meta = SUPPORTED_MACOS.get(macos, {})
     macos_label = meta.get("label", f"macOS {macos.title()}")
 
-    # AMD config adjustments — no kernel patches needed.
-    # Cascadelake-Server CPU emulation (set in _cpu_args) presents a convincing
-    # Intel CPUID to macOS.  Combined with the shipped OC's existing quirks
-    # (DummyPowerManagement, CryptexFixup, etc.) this is sufficient.
-    # Ref: luchina-gabriel/OSX-PROXMOX — same approach, ~5k installs, no kernel patches.
+    # AMD needs kernel patches (AMD_Vanilla) to fix Intel-specific XNU
+    # instructions that cause silent hangs.  Cascadelake-Server CPU emulation
+    # handles CPUID but not rdmsr/wrmsr/cpufamily checks in the kernel.
+    #
+    # Security settings stay at SecureBootModel=Default + DmgLoading=Signed
+    # (base config).  The Err(0xE) on .kc.development is benign — OC falls
+    # through to .kc (production) which loads fine.
     amd_patch_block = ""
     if is_amd:
+        serialized = serialize_patches(cores)
         amd_patch_block = (
+            serialize_preamble()
+            # Append AMD_Vanilla patches to existing Kernel.Patch list
+            + "patches=" + serialized + "; "
+            "p[\"Kernel\"][\"Patch\"]=p.get(\"Kernel\",{}).get(\"Patch\",[]) + patches; "
             # Flip power management locks for AMD
             "kq=p[\"Kernel\"][\"Quirks\"]; "
             "kq[\"AppleCpuPmCfgLock\"]=True; "
