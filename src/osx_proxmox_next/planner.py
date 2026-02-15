@@ -217,7 +217,7 @@ def _build_oc_disk_script(
         "import plistlib; "
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
         "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
-        "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
+        "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Signed\"; "
         "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Default\"; "
         "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
