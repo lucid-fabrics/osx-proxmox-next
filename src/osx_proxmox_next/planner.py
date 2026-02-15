@@ -216,11 +216,14 @@ def _build_oc_disk_script(
             # Disable vector acceleration — Cascadelake-Server with AVX-512 stripped may confuse OC
             "uq=p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{}); "
             "uq[\"EnableVectorAcceleration\"]=False; "
-            # AMD kernel patches modify the kernel — secure boot can't validate it.
-            # SecureBootModel=Disabled + DmgLoading=Any required or Err(0xE) on
-            # BootKernelExtensions.kc.development.
-            "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
+            # CryptexFixup needs SecureBootModel != Disabled to hook the cryptex
+            # loading path — keep Default from base config.  But DmgLoading must
+            # be Any because AMD kernel patches break DMG signature validation.
             "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
+            # Append revpatch=sbvmm to boot-args — forces CryptexFixup VMM shim
+            # so it handles the OS.dmg.root_hash cryptex verification on AMD.
+            "ba=p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"].get(\"boot-args\",\"\"); "
+            "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=ba+\" revpatch=sbvmm\" if \"revpatch=sbvmm\" not in ba else ba; "
         )
 
     return (
