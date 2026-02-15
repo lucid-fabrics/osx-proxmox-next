@@ -194,9 +194,11 @@ def _build_oc_disk_script(
         serialized = serialize_patches(cores)
         amd_patch_block = (
             serialize_preamble()
-            # Append AMD_Vanilla patches to existing Kernel.Patch list
+            # Replace kernel patches — shipped OC has Intel-oriented patches
+            # (CPUFAMILY_INTEL_PENRYN, SurPlus, FileVault) that conflict with
+            # AMD_Vanilla's complete set.
             + "patches=" + serialized + "; "
-            "p[\"Kernel\"][\"Patch\"]=p.get(\"Kernel\",{}).get(\"Patch\",[]) + patches; "
+            "p[\"Kernel\"][\"Patch\"]=patches; "
             # Flip power management locks for AMD
             "kq=p[\"Kernel\"][\"Quirks\"]; "
             "kq[\"AppleCpuPmCfgLock\"]=True; "
