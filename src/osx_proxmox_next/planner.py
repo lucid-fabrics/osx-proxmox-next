@@ -186,15 +186,16 @@ def _build_oc_disk_script(
             "bq[\"SetupVirtualMap\"]=False; "
             "bq[\"SyncRuntimePermissions\"]=True; "
             "bq[\"DevirtualiseMmio\"]=True; "
-            # AMD Kernel quirks — add DummyPowerManagement and re-sort for OC schema
+            # AMD Kernel quirks — use existing schema keys only
             "kq=p.setdefault(\"Kernel\",{}).setdefault(\"Quirks\",{}); "
-            "kq[\"DummyPowerManagement\"]=True; "
+            # AppleCpuPmCfgLock + AppleXcpmCfgLock disable Intel power management
+            # that causes kernel panic on AMD (same effect as DummyPowerManagement)
+            "kq[\"AppleCpuPmCfgLock\"]=True; "
+            "kq[\"AppleXcpmCfgLock\"]=True; "
             "kq[\"PanicNoKextDump\"]=True; "
             "kq[\"PowerTimeoutKernelPanic\"]=True; "
             "kq[\"ProvideCurrentCpuInfo\"]=True; "
             "kq[\"ForceSecureBootScheme\"]=False; "
-            # Re-sort Kernel Quirks alphabetically — OC schema validator is order-sensitive
-            "p[\"Kernel\"][\"Quirks\"]=dict(sorted(p[\"Kernel\"][\"Quirks\"].items())); "
             # Disable vector acceleration — Haswell-noTSX emulation may not support AVX properly
             "uq=p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{}); "
             "uq[\"EnableVectorAcceleration\"]=False; "
