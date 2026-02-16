@@ -43,21 +43,21 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 <table>
   <tr>
     <td align="center">
-      <img src="docs/screenshots/step1-os-selection.png" alt="Step 1: OS Selection" width="400"><br>
-      <strong>Step 1:</strong> OS Selection
+      <img src="docs/screenshots/step1-preflight.svg" alt="Step 1: Preflight Checks" width="400"><br>
+      <strong>Step 1:</strong> Preflight Checks
     </td>
     <td align="center">
-      <img src="docs/screenshots/step2-storage-selection.png" alt="Step 2: Storage Selection" width="400"><br>
-      <strong>Step 2:</strong> Storage Selection
+      <img src="docs/screenshots/step2-choose-os.svg" alt="Step 2: OS Selection" width="400"><br>
+      <strong>Step 2:</strong> OS Selection
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="docs/screenshots/step3-vm-configuration.png" alt="Step 3: VM Configuration" width="400"><br>
+      <img src="docs/screenshots/step4-config-filled.svg" alt="Step 3: VM Configuration" width="400"><br>
       <strong>Step 3:</strong> VM Configuration
     </td>
     <td align="center">
-      <img src="docs/screenshots/step4-review-dry-run.png" alt="Step 4: Review & Dry Run" width="400"><br>
+      <img src="docs/screenshots/step5-review.svg" alt="Step 4: Review & Dry Run" width="400"><br>
       <strong>Step 4:</strong> Review & Dry Run
     </td>
   </tr>
