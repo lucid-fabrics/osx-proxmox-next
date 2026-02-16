@@ -7,11 +7,39 @@ name = "osx-proxmox-next"
 version = "0.6.0"
 description = "Independent TUI-first macOS on Proxmox automation"
 readme = "README.md"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
+keywords = [
+  "proxmox",
+  "macos",
+  "hackintosh",
+  "opencore",
+  "virtualization",
+  "qemu",
+  "kvm",
+  "homelab",
+  "tui",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Systems Administration",
+  "Topic :: System :: Installation/Setup",
+]
 dependencies = [
   "textual>=0.60",
   "rich>=13.7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/lucid-fabrics/osx-proxmox-next"
+Repository = "https://github.com/lucid-fabrics/osx-proxmox-next"
+Issues = "https://github.com/lucid-fabrics/osx-proxmox-next/issues"
+Discussions = "https://github.com/lucid-fabrics/osx-proxmox-next/discussions"
 
 [project.scripts]
 osx-next = "osx_proxmox_next.app:run"
