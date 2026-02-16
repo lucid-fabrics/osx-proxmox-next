@@ -27,6 +27,7 @@ class VmConfig:
     smbios_rom: str = ""
     smbios_model: str = ""
     no_smbios: bool = False
+    verbose_boot: bool = False
 
 
 def validate_config(config: VmConfig) -> list[str]:

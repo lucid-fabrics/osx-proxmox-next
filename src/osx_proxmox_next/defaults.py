@@ -8,6 +8,18 @@ DEFAULT_STORAGE = "local-lvm"
 DEFAULT_BRIDGE = "vmbr0"
 
 
+def detect_cpu_vendor() -> str:
+    """Return 'AMD' or 'Intel' based on /proc/cpuinfo (default: Intel)."""
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.exists():
+        for line in cpuinfo.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("vendor_id"):
+                if "AuthenticAMD" in line:
+                    return "AMD"
+                return "Intel"
+    return "Intel"
+
+
 def detect_cpu_cores() -> int:
     count = os.cpu_count() or 4
     # Keep host responsive and avoid overcommit by default.

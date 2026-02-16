@@ -6,6 +6,7 @@ from pathlib import Path
 from shlex import join
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
+from .defaults import detect_cpu_vendor
 from .domain import SUPPORTED_MACOS, VmConfig
 from .infrastructure import ProxmoxAdapter
 from .smbios import generate_smbios, model_for_macos
@@ -22,6 +23,30 @@ class PlanStep:
         return join(self.argv)
 
 
+def _cpu_args() -> str:
+    """Return QEMU -cpu flag tailored to host CPU vendor.
+
+    AMD uses Cascadelake-Server with AVX-512/TSX/PCID disabled — this presents
+    a convincing Intel server CPUID to macOS while avoiding instructions AMD
+    CPUs lack.  Combined with AMD_Vanilla kernel patches this covers all
+    Sonoma+ macOS versions reliably.
+
+    Ref: luchina-gabriel/OSX-PROXMOX (battle-tested on ~5k installs).
+    """
+    if detect_cpu_vendor() == "AMD":
+        return (
+            "-cpu Cascadelake-Server,"
+            "vendor=GenuineIntel,"
+            "+invtsc,"
+            "-pcid,"
+            "-hle,-rtm,"
+            "-avx512f,-avx512dq,-avx512cd,-avx512bw,-avx512vl,-avx512vnni,"
+            "kvm=on,"
+            "vmware-cpuid-freq=on"
+        )
+    return "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc,vmware-cpuid-freq=on"
+
+
 def build_plan(config: VmConfig) -> list[PlanStep]:
     meta = SUPPORTED_MACOS[config.macos]
     vmid = str(config.vmid)
@@ -29,6 +54,10 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     recovery_raw = resolve_recovery_or_installer_path(config)
     opencore_path = resolve_opencore_path(config.macos)
     oc_disk = opencore_path.parent / f"opencore-{config.macos}-vm{vmid}.img"
+
+    macos_label = meta["label"]
+    cpu_flag = _cpu_args()
+    is_amd = detect_cpu_vendor() == "AMD"
 
     steps = [
         PlanStep(
@@ -53,7 +82,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 '-device isa-applesmc,osk="ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc" '
                 "-smbios type=2 -device qemu-xhci -device usb-kbd -device usb-tablet "
                 "-global nec-usb-xhci.msi=off -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
-                "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc",
+                f"{cpu_flag}",
                 "--vga", "std",
                 "--tablet", "1",
                 "--scsihw", "virtio-scsi-pci",
@@ -76,7 +105,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             title="Build OpenCore boot disk",
             argv=[
                 "bash", "-c",
-                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk, config.macos),
+                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk, config.macos, is_amd, config.cores, config.verbose_boot),
             ],
         ),
         PlanStep(
@@ -89,6 +118,40 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 # Fix GPT header corruption from thin-provisioned LVM importdisk
                 "DEV=$(pvesm path $REF) && "
                 f"dd if={oc_disk} of=$DEV bs=512 count=2048 conv=notrunc 2>/dev/null",
+            ],
+        ),
+        PlanStep(
+            title="Stamp recovery with Apple icon flavour",
+            argv=[
+                "bash", "-c",
+                # Fix HFS+ dirty/lock flags so Linux mounts read-write,
+                # then write OpenCore .contentFlavour + .contentDetails
+                "python3 -c '"
+                "import struct,subprocess; "
+                f"img=\"{recovery_raw}\"; "
+                "out=subprocess.check_output([\"sgdisk\",\"-i\",\"1\",img],text=True); "
+                "start=int([l for l in out.splitlines() if \"First sector\" in l][0].split(\":\")[1].split(\"(\")[0].strip()); "
+                "off=start*512+1024+4; "
+                "f=open(img,\"r+b\"); f.seek(off); "
+                "a=struct.unpack(\">I\",f.read(4))[0]; "
+                "a=(a|0x100)&~0x800; "
+                "f.seek(off); f.write(struct.pack(\">I\",a)); "
+                "f.close(); print(\"HFS+ flags fixed\")' && "
+                f"RLOOP=$(losetup --find --show {recovery_raw}) && "
+                "partprobe $RLOOP && sleep 1 && "
+                "mkdir -p /tmp/oc-recovery && "
+                "mount -t hfsplus -o rw ${RLOOP}p1 /tmp/oc-recovery && "
+                # Set custom name via .contentDetails in blessed directory
+                "rm -f /tmp/oc-recovery/System/Library/CoreServices/.contentDetails 2>/dev/null; "
+                f"printf '{macos_label}' > /tmp/oc-recovery/System/Library/CoreServices/.contentDetails && "
+                # Copy macOS installer icon as .VolumeIcon.icns for boot picker
+                "ICON=$(find /tmp/oc-recovery -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1) && "
+                "if [ -n \"$ICON\" ]; then "
+                "rm -f /tmp/oc-recovery/.VolumeIcon.icns; "
+                "cp \"$ICON\" /tmp/oc-recovery/.VolumeIcon.icns && "
+                "echo \"Volume icon set from $ICON\"; "
+                "else echo \"No InstallAssistant.icns found, using default icon\"; fi && "
+                "umount /tmp/oc-recovery && losetup -d $RLOOP",
             ],
         ),
         PlanStep(
@@ -145,10 +208,30 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
     return "\n".join(lines)
 
 
-def _build_oc_disk_script(opencore_path: Path, recovery_path: Path, dest: Path, macos: str) -> str:
+def _build_oc_disk_script(
+    opencore_path: Path, recovery_path: Path, dest: Path, macos: str,
+    is_amd: bool = False, cores: int = 4, verbose_boot: bool = False,
+) -> str:
     """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
     meta = SUPPORTED_MACOS.get(macos, {})
     macos_label = meta.get("label", f"macOS {macos.title()}")
+
+    # AMD VM config — follows luchina-gabriel/OSX-PROXMOX's proven approach:
+    # Cascadelake-Server handles CPUID emulation, only minimal PENRYN kernel
+    # patches are needed (not the full AMD_Vanilla set which is for bare-metal).
+    # SecureBootModel=Disabled + DmgLoading=Signed (NOT Any — Any breaks
+    # OS.dmg.root_hash loading).
+    amd_patch_block = ""
+    if is_amd:
+        amd_patch_block = (
+            # SecureBootModel=Disabled so OC applies kernel patches
+            "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
+            # Flip power management locks for AMD
+            "kq=p[\"Kernel\"][\"Quirks\"]; "
+            "kq[\"AppleCpuPmCfgLock\"]=True; "
+            "kq[\"AppleXcpmCfgLock\"]=True; "
+        )
+
     return (
         # Create 1GB GPT disk with EFI System Partition
         f"dd if=/dev/zero of={dest} bs=1M count=1024 && "
@@ -169,12 +252,27 @@ def _build_oc_disk_script(opencore_path: Path, recovery_path: Path, dest: Path, 
         "import plistlib; "
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
         "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
-        "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
-        "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
+        "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Signed\"; "
+        "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Default\"; "
+        "p[\"Misc\"][\"Boot\"][\"Timeout\"]=15; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
-        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x26\\x0f\\x00\\x00\"; "
+        "p[\"Misc\"][\"Boot\"][\"HideAuxiliary\"]=True; "
+        "p[\"Misc\"][\"Boot\"][\"PickerMode\"]=\"External\"; "
+        "p[\"Misc\"][\"Boot\"][\"PickerVariant\"]=\"Acidanthera\\\\Syrah\"; "
+        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x67\\x0f\\x00\\x00\"; "
+        f"p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 debug=0x100{' -v' if verbose_boot else ''}\"; "
+        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"prev-lang:kbd\"]=\"en-US:0\".encode(); "
+        # Ensure NVRAM Delete purges stale values so our Add entries take effect
+        "nv_del=p.setdefault(\"NVRAM\",{}).setdefault(\"Delete\",{}); "
+        "nv_del[\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"]=[\"csr-active-config\",\"boot-args\",\"prev-lang:kbd\"]; "
+        "p[\"NVRAM\"][\"WriteFlash\"]=True; "
+        # Enable VirtualSMC — shipped OC ISO has it disabled
+        "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
+        + amd_patch_block +
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "print(\"config.plist patched\")' && "
+        # Hide OC partition from boot picker (shown only when user presses Space)
+        "echo Auxiliary > /tmp/oc-dest/.contentVisibility && "
         # Cleanup mounts
         "umount /tmp/oc-src && losetup -d $SRC_LOOP && "
         "umount /tmp/oc-dest && losetup -d $DEST_LOOP"

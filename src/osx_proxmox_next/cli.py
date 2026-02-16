@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from .assets import required_assets, suggested_fetch_commands
+from .defaults import detect_cpu_vendor
 from .diagnostics import export_log_bundle, recovery_guide
 from .domain import VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
@@ -31,6 +32,7 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
         smbios_rom=args.smbios_rom or "",
         smbios_model=args.smbios_model or "",
         no_smbios=args.no_smbios,
+        verbose_boot=args.verbose_boot,
     )
 
 
@@ -103,6 +105,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--no-smbios", action="store_true", default=False)
     common.add_argument("--no-download", action="store_true", default=False,
                         help="Skip auto-download of missing assets")
+    common.add_argument("--verbose-boot", action="store_true", default=False,
+                        help="Show verbose kernel log instead of Apple logo during boot")
 
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("--script-out", type=str, default="")
@@ -166,6 +170,10 @@ def run_cli(argv: list[str] | None = None) -> int:
         for cmd in suggested_fetch_commands(config):
             print(cmd)
         return 3
+
+    vendor = detect_cpu_vendor()
+    cpu_mode = "Cascadelake-Server emulation" if vendor == "AMD" else "native host passthrough"
+    print(f"CPU: {vendor} ({cpu_mode})")
 
     steps = build_plan(config)
 

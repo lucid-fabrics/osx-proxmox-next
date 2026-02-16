@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import shutil
 
+from .defaults import detect_cpu_vendor
+
 
 @dataclass
 class PreflightCheck:
@@ -65,6 +67,14 @@ def run_preflight() -> list[PreflightCheck]:
             )
         )
 
+    vendor = detect_cpu_vendor()
+    checks.append(
+        PreflightCheck(
+            name="CPU vendor",
+            ok=True,
+            details=f"{vendor} — {'Cascadelake-Server emulation' if vendor == 'AMD' else 'native host passthrough'}",
+        )
+    )
     checks.append(
         PreflightCheck(
             name="/dev/kvm present",

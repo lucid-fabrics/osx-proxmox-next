@@ -29,10 +29,12 @@
 This tool automates macOS virtual machine creation on Proxmox VE 9. It handles VMID selection, CPU/RAM detection, OpenCore bootloader setup, and the full `qm` command sequence — so you don't have to.
 
 **You get:**
-- 🧙 A 5-step TUI wizard: **OS > Storage > Config > Dry Run > Install**
-- 🔍 Auto-detected hardware defaults (CPU cores, RAM, storage targets)
+- 🧙 A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
+- 🔍 Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
+- 🖥️ Intel and AMD CPU support — auto-detected, zero configuration needed
 - 💿 Automatic OpenCore and recovery/installer download — no manual file placement
 - 🆔 Auto-generated SMBIOS identity (serial, UUID, model) — no OpenCore editing needed
+- 🍎 Graphical boot picker with Apple icons — auto-boots the installer
 - 🛡️ Mandatory dry-run before live install previews every command
 - 🚫 Real-time form validation with inline error feedback
 
@@ -93,13 +95,14 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 
 | Step | What Happens |
 |------|-------------|
-| **1️⃣ Choose OS** | Pick macOS version (Sonoma, Sequoia, Tahoe) — SMBIOS auto-generated |
-| **2️⃣ Storage** | Select storage target from auto-detected Proxmox storage pools |
-| **3️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk) with auto-filled defaults |
-| **4️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
-| **5️⃣ Install** | Creates the VM, builds OpenCore, imports disks, and starts the VM |
+| **1️⃣ Preflight** | Auto-detects CPU vendor (Intel/AMD), checks host readiness |
+| **2️⃣ Choose OS** | Pick macOS version (Sonoma, Sequoia, Tahoe) — SMBIOS auto-generated |
+| **3️⃣ Storage** | Select storage target from auto-detected Proxmox storage pools |
+| **4️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk) with auto-filled defaults |
+| **5️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
+| **6️⃣ Install** | Creates the VM, builds OpenCore, imports disks, and starts the VM |
 
-**Most users:** pick your macOS version, pick your storage, click through to **Install**. Preflight runs automatically in the background.
+**Most users:** pick your macOS version, pick your storage, click through to **Install**. Preflight and CPU detection run automatically.
 
 ---
 
@@ -109,10 +112,12 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| 🧠 CPU | 4 cores, VT-x/AMD-V | 8+ cores |
+| 🧠 CPU | 4 cores, VT-x/AMD-V (Intel or AMD) | 8+ cores |
 | 💾 RAM | 8 GB host (4 GB to VM) | 16+ GB host |
 | 💽 Storage | 64 GB free | 128+ GB SSD/NVMe |
 | 🎮 GPU | Integrated | Discrete (for passthrough) |
+
+> **AMD CPUs** are fully supported. The tool auto-detects your CPU vendor and applies the correct configuration (Cascadelake-Server emulation for AMD, native host passthrough for Intel).
 
 ### 🏠 Host
 
@@ -161,6 +166,12 @@ osx-next-cli apply \
 
 # Execute for real
 osx-next-cli apply --execute \
+  --vmid 910 --name macos-sequoia --macos sequoia \
+  --cores 8 --memory 16384 --disk 128 \
+  --bridge vmbr0 --storage local-lvm
+
+# Enable verbose kernel log (shows text instead of Apple logo during boot)
+osx-next-cli apply --execute --verbose-boot \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm
@@ -217,6 +228,18 @@ Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on 
 Boot/display profile mismatch during early boot. Use `vga: std` for stable noVNC during installation.
 </details>
 
+<details>
+<summary>🐢 <strong>macOS is slow on AMD CPU</strong></summary>
+
+Expected behavior. AMD hosts use `Cascadelake-Server` CPU emulation instead of native passthrough (`-cpu host`). This adds overhead but is required for macOS compatibility. Intel hosts get native performance.
+</details>
+
+<details>
+<summary>🔤 <strong>I want to see verbose kernel log instead of Apple logo</strong></summary>
+
+Use `--verbose-boot` flag in CLI: `osx-next-cli apply --verbose-boot ...`. This adds `-v` to OpenCore boot arguments. Useful for debugging boot issues.
+</details>
+
 ---
 
 ## 🎮 GPU Passthrough
@@ -242,6 +265,8 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 - 🔧 Keep the main macOS disk on `sata0`, OpenCore on `ide0`, recovery on `ide2`
 - 🖥️ Use `vga: std` during installation (switch after)
 - 📏 Change one setting at a time and measure the impact
+- ⚡ **Intel CPUs** get native host passthrough — best performance
+- 🔄 **AMD CPUs** use Cascadelake-Server emulation — functional but slower due to CPU translation overhead
 
 ---
 
@@ -409,7 +434,8 @@ This project is free and open source. Sponsors keep it alive and shape what gets
   </a>
 </p>
 
-> 🪑 *Your name here* — become a backer to get listed.
+**Sponsors:**
+- ❤️ [SuperDooper](https://github.com/superdooper86)
 
 ---
 
@@ -426,8 +452,12 @@ This project is for **testing, lab use, and learning**. Respect Apple licensing 
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">
   </a>
   &nbsp;&nbsp;
+  <a href="https://github.com/sponsors/lucid-fabrics">
+    <img src="https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=github&logoColor=white" alt="Sponsor on GitHub">
+  </a>
+  &nbsp;&nbsp;
   <a href="https://buymeacoffee.com/lucidfabrics">
-    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee">
   </a>
   <br><br>
   ⭐ <a href="https://github.com/lucid-fabrics/osx-proxmox-next">Star this repo</a> to help others find it.
