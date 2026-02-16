@@ -1,5 +1,5 @@
 from osx_proxmox_next.domain import VmConfig
-from osx_proxmox_next.planner import build_plan, render_script, VmInfo, fetch_vm_info, build_destroy_plan
+from osx_proxmox_next.planner import build_plan, render_script, _cpu_args, VmInfo, fetch_vm_info, build_destroy_plan
 from osx_proxmox_next.infrastructure import CommandResult
 
 
@@ -24,6 +24,7 @@ def test_build_plan_includes_core_steps() -> None:
     assert "Apply macOS hardware profile" in titles
     assert "Build OpenCore boot disk" in titles
     assert "Import and attach OpenCore disk" in titles
+    assert "Stamp recovery with Apple icon flavour" in titles
     assert "Import and attach macOS recovery" in titles
     assert "Set boot order" in titles
     assert any(step.command.startswith("qm start") for step in steps)
@@ -195,6 +196,118 @@ def test_render_script_simple() -> None:
     assert "#!/usr/bin/env bash" in script
     assert "qm create 901" in script
     assert "Build OpenCore boot disk" in script
+
+
+# ── CPU Vendor Detection Tests ─────────────────────────────────────
+
+
+def test_cpu_args_intel(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    args = _cpu_args()
+    assert "-cpu host," in args
+    assert "vendor=GenuineIntel" in args
+    assert "+kvm_pv_unhalt" in args
+    assert "vmware-cpuid-freq=on" in args
+
+
+def test_cpu_args_amd(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    args = _cpu_args()
+    assert "Cascadelake-Server" in args
+    assert "vendor=GenuineIntel" in args
+    assert "vmware-cpuid-freq=on" in args
+    assert "-avx512f" in args
+    assert "-pcid" in args
+    assert "host" not in args
+
+
+def test_build_plan_amd_uses_cascadelake(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    steps = build_plan(_cfg("sequoia"))
+    profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
+    assert "Cascadelake-Server" in profile.command
+    assert "vendor=GenuineIntel" in profile.command
+
+
+def test_build_plan_intel_uses_host(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    steps = build_plan(_cfg("sequoia"))
+    profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
+    assert "-cpu host," in profile.command
+    assert "vendor=GenuineIntel" in profile.command
+
+
+def test_build_plan_amd_config(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    # Power management locks flipped for AMD
+    assert "AppleCpuPmCfgLock" in build.command
+    assert "AppleXcpmCfgLock" in build.command
+    # SecureBootModel=Disabled so shipped PENRYN patches apply
+    assert 'SecureBootModel\"]=\"Disabled\"' in build.command
+    # No full AMD_Vanilla patches (Cascadelake-Server handles CPUID)
+    assert "cpuid_cores_per_package" not in build.command
+
+
+def test_build_plan_default_no_verbose(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    cfg = _cfg("sequoia")
+    steps = build_plan(cfg)
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert " -v" not in build.command
+
+
+def test_build_plan_verbose_boot(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    cfg = _cfg("sequoia")
+    cfg.verbose_boot = True
+    steps = build_plan(cfg)
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "-v" in build.command
+
+
+def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "AppleCpuPmCfgLock" not in build.command
+    # Intel keeps SecureBootModel=Default (no Disabled override)
+    assert 'SecureBootModel\"]=\"Disabled\"' not in build.command
+
+
+def test_build_plan_oc_disk_hides_opencore_entry(monkeypatch) -> None:
+    """OC ESP must have .contentVisibility=Auxiliary to hide from picker."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert ".contentVisibility" in build.command
+    assert "Auxiliary" in build.command
+    assert "HideAuxiliary" in build.command
+
+
+def test_build_plan_stamps_recovery_flavour(monkeypatch) -> None:
+    """Recovery must be stamped with custom name and volume icon."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    steps = build_plan(_cfg("sequoia"))
+    stamp = next(step for step in steps if step.title == "Stamp recovery with Apple icon flavour")
+    assert ".contentDetails" in stamp.command
+    assert "InstallAssistant.icns" in stamp.command
+    assert ".VolumeIcon.icns" in stamp.command
+    assert "hfsplus" in stamp.command
+    # Stamp must come before import
+    titles = [s.title for s in steps]
+    assert titles.index("Stamp recovery with Apple icon flavour") < titles.index("Import and attach macOS recovery")
 
 
 # ── Destroy Plan Tests ─────────────────────────────────────────────
