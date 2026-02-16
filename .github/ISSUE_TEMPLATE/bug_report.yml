@@ -1,0 +1,69 @@
+name: Bug Report
+description: Report a bug with osx-proxmox
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please fill in the details below.
+  - type: input
+    id: version
+    attributes:
+      label: osx-proxmox version
+      description: Run `osx-proxmox --version`
+      placeholder: "0.6.0"
+    validations:
+      required: true
+  - type: input
+    id: proxmox-version
+    attributes:
+      label: Proxmox VE version
+      description: Run `pveversion`
+      placeholder: "pve-manager/8.3.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: macos-version
+    attributes:
+      label: macOS version
+      options:
+        - Sonoma 14
+        - Sequoia 15
+        - Tahoe 26
+    validations:
+      required: true
+  - type: dropdown
+    id: cpu-type
+    attributes:
+      label: CPU type
+      options:
+        - Intel
+        - AMD
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Which stage failed?
+      options:
+        - plan (generating config)
+        - apply (creating VM)
+        - boot (VM won't start)
+        - install (macOS installer)
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug clearly.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste terminal output or error messages.
+      render: shell
