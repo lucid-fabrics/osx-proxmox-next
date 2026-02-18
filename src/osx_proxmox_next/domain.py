@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 
 SUPPORTED_MACOS = {
+    "ventura": {"label": "macOS Ventura 13", "major": 13, "channel": "stable"},
     "sonoma": {"label": "macOS Sonoma 14", "major": 14, "channel": "stable"},
     "sequoia": {"label": "macOS Sequoia 15", "major": 15, "channel": "stable"},
     "tahoe": {"label": "macOS Tahoe 26", "major": 26, "channel": "stable"},
@@ -37,7 +38,7 @@ def validate_config(config: VmConfig) -> list[str]:
     if not config.name or len(config.name) < 3:
         issues.append("VM name must be at least 3 characters.")
     if config.macos not in SUPPORTED_MACOS:
-        issues.append("macOS version must be one of: sonoma, sequoia, tahoe.")
+        issues.append(f"macOS version must be one of: {', '.join(SUPPORTED_MACOS)}.")
     if config.cores < 2:
         issues.append("At least 2 CPU cores are required.")
     if config.memory_mb < 4096:

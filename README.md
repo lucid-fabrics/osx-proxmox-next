@@ -13,7 +13,7 @@
   <a href="https://github.com/wmehanna/osx-proxmox-next">
     <img alt="Proxmox" src="https://img.shields.io/badge/Proxmox-9%20Ready-E57000?logo=proxmox&logoColor=white">
   </a>
-  <img alt="macOS" src="https://img.shields.io/badge/macOS-Sonoma%2014%20%7C%20Sequoia%2015%20%7C%20Tahoe%2026-111111?logo=apple&logoColor=white">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-Ventura%2013%20%7C%20Sonoma%2014%20%7C%20Sequoia%2015%20%7C%20Tahoe%2026-111111?logo=apple&logoColor=white">
   <a href="https://ko-fi.com/lucidfabrics">
     <img alt="Support on Ko-fi" src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white">
   </a>
@@ -29,14 +29,14 @@
 This tool automates macOS virtual machine creation on Proxmox VE 9. It handles VMID selection, CPU/RAM detection, OpenCore bootloader setup, and the full `qm` command sequence — so you don't have to.
 
 **You get:**
-- 🧙 A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
-- 🔍 Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
-- 🖥️ Intel and AMD CPU support — auto-detected, zero configuration needed
-- 💿 Automatic OpenCore and recovery/installer download — no manual file placement
-- 🆔 Auto-generated SMBIOS identity (serial, UUID, model) — no OpenCore editing needed
-- 🍎 Graphical boot picker with Apple icons — auto-boots the installer
-- 🛡️ Mandatory dry-run before live install previews every command
-- 🚫 Real-time form validation with inline error feedback
+- A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
+- Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
+- Intel and AMD CPU support — auto-detected, zero configuration needed
+- Automatic OpenCore and recovery/installer download — no manual file placement
+- Auto-generated SMBIOS identity (serial, UUID, model) — no OpenCore editing needed
+- Graphical boot picker with Apple icons — auto-boots the installer
+- Mandatory dry-run before live install previews every command
+- Real-time form validation with inline error feedback
 
 ### TUI Preview
 
@@ -96,7 +96,7 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | Step | What Happens |
 |------|-------------|
 | **1️⃣ Preflight** | Auto-detects CPU vendor (Intel/AMD), checks host readiness |
-| **2️⃣ Choose OS** | Pick macOS version (Sonoma, Sequoia, Tahoe) — SMBIOS auto-generated |
+| **2️⃣ Choose OS** | Pick macOS version (Ventura, Sonoma, Sequoia, Tahoe) — SMBIOS auto-generated |
 | **3️⃣ Storage** | Select storage target from auto-detected Proxmox storage pools |
 | **4️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk) with auto-filled defaults |
 | **5️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
@@ -108,24 +108,24 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 
 ## 📋 Requirements
 
-### 🖥️ Hardware
+### Hardware
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| 🧠 CPU | 4 cores, VT-x/AMD-V (Intel or AMD) | 8+ cores |
-| 💾 RAM | 8 GB host (4 GB to VM) | 16+ GB host |
-| 💽 Storage | 64 GB free | 128+ GB SSD/NVMe |
-| 🎮 GPU | Integrated | Discrete (for passthrough) |
+| CPU | 4 cores, VT-x/AMD-V (Intel or AMD) | 8+ cores |
+| RAM | 8 GB host (4 GB to VM) | 16+ GB host |
+| Storage | 64 GB free | 128+ GB SSD/NVMe |
+| GPU | Integrated | Discrete (for passthrough) |
 
 > **AMD CPUs** are fully supported. The tool auto-detects your CPU vendor and applies the correct configuration (Cascadelake-Server emulation for AMD, native host passthrough for Intel).
 
-### 🏠 Host
+### Host
 
 - Proxmox VE 9 with root shell access
 - Internet access (for bootstrap + dependencies)
 - ISO storage available (e.g. `/var/lib/vz/template/iso`)
 
-### ⏱️ TSC Check (Recommended)
+### TSC Check (Recommended)
 
 Stable TSC flags reduce clock drift and VM lag. Check with:
 
@@ -141,6 +141,7 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 
 | macOS | Channel | Notes |
 |-------|---------|-------|
+| **Ventura 13** | ✅ Stable | Lightweight, great for older hardware |
 | **Sonoma 14** | ✅ Stable | Best tested, most reliable |
 | **Sequoia 15** | ✅ Stable | Fully supported |
 | **Tahoe 26** | ✅ Stable | Fully supported |
@@ -153,7 +154,7 @@ For scripting or headless use, the CLI bypasses the TUI entirely:
 
 ```bash
 # Download OpenCore + recovery images
-osx-next-cli download --macos sonoma
+osx-next-cli download --macos ventura
 
 # Check host readiness
 osx-next-cli preflight
@@ -196,7 +197,7 @@ osx-next-cli apply --execute \
 ## 🔧 Troubleshooting
 
 <details>
-<summary>💽 <strong>macOS installer doesn't show my disk</strong></summary>
+<summary><strong>macOS installer doesn't show my disk</strong></summary>
 
 In the macOS installer:
 1. Open **Disk Utility**
@@ -207,35 +208,35 @@ In the macOS installer:
 </details>
 
 <details>
-<summary>🚫 <strong>Live apply is blocked — missing assets</strong></summary>
+<summary><strong>Live apply is blocked — missing assets</strong></summary>
 
 The tool requires OpenCore and recovery/installer images. It scans `/var/lib/vz/template/iso` and `/mnt/pve/*/template/iso` for:
 - `opencore-osx-proxmox-vm.iso` or `opencore-{version}.iso`
 - `{version}-recovery.img` or `{version}-recovery.iso`
 
-Use `osx-next-cli download --macos sonoma` to auto-fetch missing assets. The TUI wizard auto-downloads missing assets in step 4.
+Use `osx-next-cli download --macos <version>` to auto-fetch missing assets. The TUI wizard auto-downloads missing assets in step 4.
 </details>
 
 <details>
-<summary>🐚 <strong>I see UEFI Shell instead of macOS boot</strong></summary>
+<summary><strong>I see UEFI Shell instead of macOS boot</strong></summary>
 
 Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on `ide2`, with boot order set to `ide2;sata0;ide0`.
 </details>
 
 <details>
-<summary>🖥️ <strong>"Guest has not initialized the display"</strong></summary>
+<summary><strong>"Guest has not initialized the display"</strong></summary>
 
 Boot/display profile mismatch during early boot. Use `vga: std` for stable noVNC during installation.
 </details>
 
 <details>
-<summary>🐢 <strong>macOS is slow on AMD CPU</strong></summary>
+<summary><strong>macOS is slow on AMD CPU</strong></summary>
 
 Expected behavior. AMD hosts use `Cascadelake-Server` CPU emulation instead of native passthrough (`-cpu host`). This adds overhead but is required for macOS compatibility. Intel hosts get native performance.
 </details>
 
 <details>
-<summary>🔤 <strong>I want to see verbose kernel log instead of Apple logo</strong></summary>
+<summary><strong>I want to see verbose kernel log instead of Apple logo</strong></summary>
 
 Use `--verbose-boot` flag in CLI: `osx-next-cli apply --verbose-boot ...`. This adds `-v` to OpenCore boot arguments. Useful for debugging boot issues.
 </details>
@@ -260,13 +261,13 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 
 ## ⚡ Performance Tips
 
-- 💿 Use **SSD/NVMe-backed storage** for VM disks
-- 🧠 Don't overcommit host CPU or RAM
-- 🔧 Keep the main macOS disk on `sata0`, OpenCore on `ide0`, recovery on `ide2`
-- 🖥️ Use `vga: std` during installation (switch after)
-- 📏 Change one setting at a time and measure the impact
-- ⚡ **Intel CPUs** get native host passthrough — best performance
-- 🔄 **AMD CPUs** use Cascadelake-Server emulation — functional but slower due to CPU translation overhead
+- Use **SSD/NVMe-backed storage** for VM disks
+- Don't overcommit host CPU or RAM
+- Keep the main macOS disk on `sata0`, OpenCore on `ide0`, recovery on `ide2`
+- Use `vga: std` during installation (switch after)
+- Change one setting at a time and measure the impact
+- **Intel CPUs** get native host passthrough — best performance
+- **AMD CPUs** use Cascadelake-Server emulation — functional but slower due to CPU translation overhead
 
 ---
 
@@ -274,43 +275,43 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 
 These are **optional shell scripts that run inside the macOS guest** to tune responsiveness. They are not part of this project and are not required — use them only if you understand what they change.
 
-### 🔥 Blazing Profile
+### Blazing Profile
 
 Optimized for **maximum UI speed** in the VM. Best for general use where you want the snappiest experience.
 
 | What It Changes | Setting |
 |----------------|---------|
-| 🎞️ UI animations | Disabled (window resize, Mission Control, Dock) |
-| 🪟 Transparency effects | Disabled (reduces compositing overhead) |
-| 🔎 Spotlight indexing | **Disabled** (`mdutil -a -i off`) — frees CPU/IO |
-| 😴 Sleep on AC power | Disabled (sleep, display sleep, disk sleep, Power Nap all off) |
-| 🔄 Dock/Finder/SystemUIServer | Restarted to apply changes |
+| UI animations | Disabled (window resize, Mission Control, Dock) |
+| Transparency effects | Disabled (reduces compositing overhead) |
+| Spotlight indexing | **Disabled** (`mdutil -a -i off`) — frees CPU/IO |
+| Sleep on AC power | Disabled (sleep, display sleep, disk sleep, Power Nap all off) |
+| Dock/Finder/SystemUIServer | Restarted to apply changes |
 
 ⚠️ **Trade-off:** No Spotlight search (Finder search, Siri suggestions, and in-app search won't index new files).
 
-### 🛠️ Xcode Profile
+### Xcode Profile
 
 Optimized for **development workflows** (Xcode, SourceKit, code search). Similar UI optimizations as Blazing, but keeps Spotlight alive.
 
 | What It Changes | Setting |
 |----------------|---------|
-| 🎞️ UI animations | Disabled (same as Blazing) |
-| 🪟 Transparency effects | Disabled (same as Blazing) |
-| 🔎 Spotlight indexing | **Kept ON** — required for Xcode code completion and search |
-| 😴 System sleep | Disabled, but display sleep is allowed (longer coding sessions) |
-| 🔄 Dock/Finder/SystemUIServer | Restarted to apply changes |
+| UI animations | Disabled (same as Blazing) |
+| Transparency effects | Disabled (same as Blazing) |
+| Spotlight indexing | **Kept ON** — required for Xcode code completion and search |
+| System sleep | Disabled, but display sleep is allowed (longer coding sessions) |
+| Dock/Finder/SystemUIServer | Restarted to apply changes |
 
 ⚠️ **Trade-off:** Slightly more background CPU/IO from Spotlight, but Xcode features work fully.
 
-### 🤔 Which Profile Should I Use?
+### Which Profile Should I Use?
 
 | Use Case | Profile |
 |----------|---------|
-| 🌐 General browsing, testing apps | **Blazing** |
-| 💻 Xcode / SwiftUI / iOS development | **Xcode** |
-| 🤷 Don't know / want defaults | **Neither** — skip this section |
+| General browsing, testing apps | **Blazing** |
+| Xcode / SwiftUI / iOS development | **Xcode** |
+| Don't know / want defaults | **Neither** — skip this section |
 
-### ▶️ Usage
+### Usage
 
 ```bash
 # Apply blazing profile
@@ -326,7 +327,7 @@ bash scripts/profiles/apply_xcode_profile.sh
 bash scripts/profiles/revert_xcode_profile.sh
 ```
 
-### 🛡️ Safety Notes
+### Safety Notes
 
 - **Snapshot your VM before applying** any profile
 - Apply only one profile at a time
@@ -339,7 +340,7 @@ bash scripts/profiles/revert_xcode_profile.sh
 
 Apple services require a clean, unique SMBIOS identity and stable network/time configuration.
 
-### 🆔 SMBIOS Identity (Auto-Generated)
+### SMBIOS Identity (Auto-Generated)
 
 This tool **automatically generates** a unique SMBIOS identity (serial, UUID, model) for each VM and applies it via Proxmox's native `--smbios1` flag. No manual OpenCore config editing required.
 
@@ -348,21 +349,21 @@ This tool **automatically generates** a unique SMBIOS identity (serial, UUID, mo
 
 The generated values are visible in the dry-run output as a `qm set --smbios1` step.
 
-### 📝 Additional Setup for Apple Services
+### Additional Setup for Apple Services
 
 1. **Verify** NVRAM is writable and persists across reboots
 2. **Boot macOS** and confirm date/time are correct and network/DNS works
 3. **Sign in order:** Apple ID (System Settings) first, then Messages, then FaceTime
 4. **Reboot** once after login to confirm session persistence
 
-### ✅ Checklist
+### Checklist
 
 - [x] SMBIOS values are unique to this VM (auto-generated)
 - [ ] MAC address is stable (not regenerated each boot)
 - [ ] Same OpenCore EFI is always used
 - [ ] NVRAM reset is not triggered on every boot
 
-### 🩺 Common Issues
+### Common Issues
 
 | Problem | Fix |
 |---------|-----|

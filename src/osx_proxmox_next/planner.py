@@ -29,7 +29,7 @@ def _cpu_args() -> str:
     AMD uses Cascadelake-Server with AVX-512/TSX/PCID disabled — this presents
     a convincing Intel server CPUID to macOS while avoiding instructions AMD
     CPUs lack.  Combined with AMD_Vanilla kernel patches this covers all
-    Sonoma+ macOS versions reliably.
+    all supported macOS versions reliably.
 
     Ref: luchina-gabriel/OSX-PROXMOX (battle-tested on ~5k installs).
     """
@@ -219,13 +219,12 @@ def _build_oc_disk_script(
     # AMD VM config — follows luchina-gabriel/OSX-PROXMOX's proven approach:
     # Cascadelake-Server handles CPUID emulation, only minimal PENRYN kernel
     # patches are needed (not the full AMD_Vanilla set which is for bare-metal).
-    # SecureBootModel=Disabled + DmgLoading=Signed (NOT Any — Any breaks
-    # OS.dmg.root_hash loading).
+    # SecureBootModel=Disabled + DmgLoading=Any — required because dmg2img-converted
+    # recovery images are not Apple-signed. SecureBootModel must be Disabled
+    # when DmgLoading=Any (OpenCore enforces this constraint).
     amd_patch_block = ""
     if is_amd:
         amd_patch_block = (
-            # SecureBootModel=Disabled so OC applies kernel patches
-            "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
             # Flip power management locks for AMD
             "kq=p[\"Kernel\"][\"Quirks\"]; "
             "kq[\"AppleCpuPmCfgLock\"]=True; "
@@ -252,8 +251,8 @@ def _build_oc_disk_script(
         "import plistlib; "
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
         "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
-        "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Signed\"; "
-        "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Default\"; "
+        "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
+        "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
         "p[\"Misc\"][\"Boot\"][\"Timeout\"]=15; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
         "p[\"Misc\"][\"Boot\"][\"HideAuxiliary\"]=True; "

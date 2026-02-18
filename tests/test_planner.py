@@ -280,8 +280,6 @@ def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
     assert "AppleCpuPmCfgLock" not in build.command
-    # Intel keeps SecureBootModel=Default (no Disabled override)
-    assert 'SecureBootModel\"]=\"Disabled\"' not in build.command
 
 
 def test_build_plan_oc_disk_hides_opencore_entry(monkeypatch) -> None:

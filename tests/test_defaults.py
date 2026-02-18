@@ -45,6 +45,10 @@ def test_default_disk_sonoma():
     assert default_disk_gb("sonoma") == 96
 
 
+def test_default_disk_ventura():
+    assert default_disk_gb("ventura") == 80
+
+
 def test_detect_memory_meminfo_no_memtotal(monkeypatch, tmp_path):
     """meminfo exists but no MemTotal line → fallback."""
     fake_meminfo = tmp_path / "meminfo"

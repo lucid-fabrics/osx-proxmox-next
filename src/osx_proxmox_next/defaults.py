@@ -49,4 +49,6 @@ def default_disk_gb(macos: str) -> int:
         return 160
     if macos == "sequoia":
         return 128
-    return 96
+    if macos == "sonoma":
+        return 96
+    return 80

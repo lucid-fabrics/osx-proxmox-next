@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 
 SMBIOS_MODELS: dict[str, str] = {
+    "ventura": "iMacPro1,1",
     "sonoma": "iMacPro1,1",
     "sequoia": "iMacPro1,1",
     "tahoe": "MacPro7,1",

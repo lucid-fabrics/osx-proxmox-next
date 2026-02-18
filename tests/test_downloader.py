@@ -701,6 +701,28 @@ class TestRecoveryOsType:
         download_recovery("sonoma", tmp_path)
         assert captured[0] == "default"
 
+    def test_ventura_uses_default(self, tmp_path, monkeypatch):
+        """Ventura uses os=default for osrecovery."""
+        captured = []
+
+        def spy_get_info(session, board_id, os_type="default"):
+            captured.append(os_type)
+            return {
+                "AU": "https://oscdn.apple.com/img",
+                "AT": "T", "CU": "https://oscdn.apple.com/cl", "CT": "T",
+            }
+
+        monkeypatch.setattr(dl_module, "_get_recovery_image_info", spy_get_info)
+        monkeypatch.setattr(dl_module, "_get_recovery_session", lambda: "session=X")
+        monkeypatch.setattr(dl_module, "_download_file_with_token",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(dl_module, "_build_recovery_image",
+                            lambda dmg, cl, dest: dest.write_bytes(b"img"))
+        monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
+
+        download_recovery("ventura", tmp_path)
+        assert captured[0] == "default"
+
     def test_tahoe_uses_latest(self, tmp_path, monkeypatch):
         """Tahoe uses os=latest for osrecovery to get macOS 26."""
         captured = []

@@ -32,6 +32,20 @@ def test_validate_config_rejects_invalid_values() -> None:
     assert any("macOS version" in issue for issue in issues)
 
 
+def test_validate_config_accepts_ventura() -> None:
+    cfg = VmConfig(
+        vmid=900,
+        name="macos-ventura",
+        macos="ventura",
+        cores=4,
+        memory_mb=8192,
+        disk_gb=80,
+        bridge="vmbr0",
+        storage="local-lvm",
+    )
+    assert validate_config(cfg) == []
+
+
 def test_validate_tahoe_no_installer_path_ok():
     cfg = VmConfig(
         vmid=900,

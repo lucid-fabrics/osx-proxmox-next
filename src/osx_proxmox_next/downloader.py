@@ -30,6 +30,7 @@ class DownloadError(Exception):
 
 
 RECOVERY_BOARD_IDS: dict[str, str] = {
+    "ventura": "Mac-4B682C642B45593E",
     "sonoma": "Mac-827FAC58A8FDFA22",
     "sequoia": "Mac-27AD2F918AE68F61",
     "tahoe": "Mac-27AD2F918AE68F61",  # Sequoia board ID + os=latest → returns Tahoe

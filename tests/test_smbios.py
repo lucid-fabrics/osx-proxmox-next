@@ -36,6 +36,7 @@ def test_rom_format() -> None:
 
 
 def test_model_for_known_macos() -> None:
+    assert model_for_macos("ventura") == "iMacPro1,1"
     assert model_for_macos("sonoma") == "iMacPro1,1"
     assert model_for_macos("sequoia") == "iMacPro1,1"
     assert model_for_macos("tahoe") == "MacPro7,1"
