@@ -29,7 +29,7 @@ def _cpu_args() -> str:
     AMD uses Cascadelake-Server with AVX-512/TSX/PCID disabled — this presents
     a convincing Intel server CPUID to macOS while avoiding instructions AMD
     CPUs lack.  Combined with AMD_Vanilla kernel patches this covers all
-    Sonoma+ macOS versions reliably.
+    all supported macOS versions reliably.
 
     Ref: luchina-gabriel/OSX-PROXMOX (battle-tested on ~5k installs).
     """
