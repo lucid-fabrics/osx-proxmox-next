@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osx-proxmox-next"
-version = "0.6.0"
+version = "0.7.0"
 description = "Independent TUI-first macOS on Proxmox automation"
 readme = "README.md"
 license = {text = "Apache-2.0"}
