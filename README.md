@@ -112,7 +112,7 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| CPU | 4 cores, VT-x/AMD-V (Intel or AMD) | 8+ cores |
+| CPU | 4 cores (power of 2), VT-x/AMD-V (Intel or AMD) | 8+ cores |
 | RAM | 8 GB host (4 GB to VM) | 16+ GB host |
 | Storage | 64 GB free | 128+ GB SSD/NVMe |
 | GPU | Integrated | Discrete (for passthrough) |
@@ -233,6 +233,12 @@ Boot/display profile mismatch during early boot. Use `vga: std` for stable noVNC
 <summary><strong>macOS is slow on AMD CPU</strong></summary>
 
 Expected behavior. AMD hosts use `Cascadelake-Server` CPU emulation instead of native passthrough (`-cpu host`). This adds overhead but is required for macOS compatibility. Intel hosts get native performance.
+</details>
+
+<details>
+<summary><strong>Stuck on Apple logo (no progress, flat CPU)</strong></summary>
+
+macOS requires power-of-2 CPU core counts (2, 4, 8, 16). Non-power-of-2 values like 6 or 12 can cause the kernel to hang at the Apple logo. The tool defaults to safe values, but if you overrode the core count manually, try reducing to 4 or 8.
 </details>
 
 <details>
