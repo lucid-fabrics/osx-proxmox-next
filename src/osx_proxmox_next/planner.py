@@ -232,15 +232,19 @@ def _build_oc_disk_script(
         )
 
     return (
+        # Cleanup stale mounts/loops from any previous failed run
+        "umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
+        f"for lo in $(losetup -j {opencore_path} -O NAME --noheadings 2>/dev/null); do losetup -d $lo; done; "
         # Create 1GB GPT disk with EFI System Partition
         f"dd if=/dev/zero of={dest} bs=1M count=1024 && "
         f"sgdisk -Z {dest} && "
         f"sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {dest} && "
-        # Mount source OpenCore (raw FAT32 — no partition table)
-        f"SRC_LOOP=$(losetup --find --show {opencore_path}) && "
-        "mkdir -p /tmp/oc-src && mount $SRC_LOOP /tmp/oc-src && "
+        # Mount source OpenCore — handle both raw FAT32 and MBR/GPT partitioned ISOs
+        f"SRC_LOOP=$(losetup -P --find --show {opencore_path}) && "
+        "mkdir -p /tmp/oc-src && "
+        "(mount ${SRC_LOOP}p1 /tmp/oc-src 2>/dev/null || mount $SRC_LOOP /tmp/oc-src) && "
         # Format and mount dest ESP — label the volume OPENCORE
-        f"DEST_LOOP=$(losetup --find --show {dest}) && "
+        f"DEST_LOOP=$(losetup -P --find --show {dest}) && "
         "partprobe $DEST_LOOP && sleep 1 && "
         "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
         "mkdir -p /tmp/oc-dest && mount ${DEST_LOOP}p1 /tmp/oc-dest && "
