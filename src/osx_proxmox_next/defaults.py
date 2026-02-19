@@ -20,10 +20,21 @@ def detect_cpu_vendor() -> str:
     return "Intel"
 
 
+def _round_down_power_of_2(n: int) -> int:
+    """Round down to the nearest power of 2 (minimum 2)."""
+    p = 1
+    while p * 2 <= n:
+        p *= 2
+    return max(2, p)
+
+
 def detect_cpu_cores() -> int:
     count = os.cpu_count() or 4
     # Keep host responsive and avoid overcommit by default.
-    return max(2, min(16, count // 2 if count >= 8 else count))
+    half = max(2, min(16, count // 2 if count >= 8 else count))
+    # macOS expects power-of-2 core counts matching real Mac topology;
+    # odd counts (e.g. 6) can hang at the Apple logo during boot.
+    return _round_down_power_of_2(half)
 
 
 def detect_memory_mb() -> int:
