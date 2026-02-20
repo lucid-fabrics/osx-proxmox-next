@@ -240,10 +240,16 @@ def _build_oc_disk_script(
         f"dd if=/dev/zero of={dest} bs=1M count=1024 && "
         f"sgdisk -Z {dest} && "
         f"sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {dest} && "
-        # Mount source OpenCore — handle both raw FAT32 and MBR/GPT partitioned ISOs
+        # Mount source OpenCore — detect FAT32 partition by filesystem type, not position.
+        # blkid probes all loop partitions and returns the one with TYPE=vfat, handling
+        # any partition table layout (raw FAT32, MBR p1, GPT p2, etc.).
         f"SRC_LOOP=$(losetup -P --find --show {opencore_path}) && "
+        "partprobe $SRC_LOOP 2>/dev/null; sleep 1 && "
         "mkdir -p /tmp/oc-src && "
-        "(mount ${SRC_LOOP}p1 /tmp/oc-src 2>/dev/null || mount $SRC_LOOP /tmp/oc-src) && "
+        "SRC_PART=$(blkid -o device $SRC_LOOP ${SRC_LOOP}p* 2>/dev/null "
+        "| xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' "
+        "| head -1) && "
+        "[ -n \"$SRC_PART\" ] && mount \"$SRC_PART\" /tmp/oc-src || mount $SRC_LOOP /tmp/oc-src && "
         # Format and mount dest ESP — label the volume OPENCORE
         f"DEST_LOOP=$(losetup -P --find --show {dest}) && "
         "partprobe $DEST_LOOP && sleep 1 && "

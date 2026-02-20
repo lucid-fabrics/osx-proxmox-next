@@ -145,6 +145,9 @@ def test_build_plan_includes_build_oc_step() -> None:
     assert "Build OpenCore boot disk" in titles
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
     assert "losetup" in build.command
+    assert "blkid" in build.command
+    assert "vfat" in build.command
+    assert "SRC_PART" in build.command
     assert "ScanPolicy" in build.command
     assert "DmgLoading" in build.command
     assert "sgdisk" in build.command
