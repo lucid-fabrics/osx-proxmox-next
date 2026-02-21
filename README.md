@@ -90,7 +90,7 @@ This clones the repo, sets up a Python venv, and launches the TUI wizard.
 Prefer a standalone bash script with no Python dependency?
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/community-scripts/vm/macos-vm.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh)"
 ```
 
 Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv needed.
