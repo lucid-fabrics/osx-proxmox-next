@@ -11,7 +11,7 @@
   "website": "https://github.com/lucid-fabrics/osx-proxmox-next",
   "logo": "https://cdn.jsdelivr.net/gh/selfhst/icons@main/webp/apple.webp",
   "config_path": "",
-  "description": "This script creates a macOS Virtual Machine on Proxmox VE using the OpenCore bootloader. It auto-detects Intel/AMD CPUs, downloads a recovery image directly from Apple, builds a GPT-formatted OpenCore boot disk with all required kexts and drivers, generates a unique SMBIOS identity, and configures the VM with macOS-compatible hardware settings. Features a graphical boot picker with Apple icons and auto-boot. Supports macOS Sonoma 14, Sequoia 15, and Tahoe 26.",
+  "description": "This script creates a macOS Virtual Machine on Proxmox VE using the OpenCore bootloader. It auto-detects Intel/AMD CPUs, downloads a recovery image directly from Apple, builds a GPT-formatted OpenCore boot disk with all required kexts and drivers, generates a unique SMBIOS identity, and configures the VM with macOS-compatible hardware settings. Features a graphical boot picker with Apple icons and auto-boot. Supports macOS Ventura 13, Sonoma 14, Sequoia 15, and Tahoe 26.",
   "install_methods": [
     {
       "type": "default",

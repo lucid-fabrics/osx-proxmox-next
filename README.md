@@ -36,6 +36,7 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 - Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
 - Intel and AMD CPU support — auto-detected, zero configuration needed
 - Automatic OpenCore and recovery/installer download — no manual file placement
+- Shared storage support — download ISOs to NAS or any Proxmox storage pool (`--iso-dir`)
 - Auto-generated SMBIOS identity (serial, UUID, model) — no OpenCore editing needed
 - Graphical boot picker with Apple icons — auto-boots the installer
 - Mandatory dry-run before live install previews every command
@@ -126,7 +127,7 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 
 - Proxmox VE 9 with root shell access
 - Internet access (for bootstrap + dependencies)
-- ISO storage available (e.g. `/var/lib/vz/template/iso`)
+- ISO storage available (e.g. `/var/lib/vz/template/iso` or shared NAS via `/mnt/pve/*/template/iso`)
 
 ### TSC Check (Recommended)
 
@@ -179,6 +180,13 @@ osx-next-cli apply --execute --verbose-boot \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm
+
+# Use shared NAS storage for ISO/recovery images
+osx-next-cli apply --execute \
+  --vmid 910 --name macos-sequoia --macos sequoia \
+  --cores 8 --memory 16384 --disk 128 \
+  --bridge vmbr0 --storage local-lvm \
+  --iso-dir /mnt/pve/nas/template/iso
 
 # Skip SMBIOS generation entirely
 osx-next-cli apply --no-smbios \

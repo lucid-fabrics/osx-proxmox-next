@@ -60,21 +60,25 @@ ADVANCED="${TAB}🧩${TAB}${CL}"
 
 # ── macOS version definitions ──
 declare -A MACOS_LABELS=(
+  ["ventura"]="macOS Ventura 13"
   ["sonoma"]="macOS Sonoma 14"
   ["sequoia"]="macOS Sequoia 15"
   ["tahoe"]="macOS Tahoe 26"
 )
 declare -A MACOS_BOARD_IDS=(
+  ["ventura"]="Mac-4B682C642B45593E"
   ["sonoma"]="Mac-827FAC58A8FDFA22"
   ["sequoia"]="Mac-27AD2F918AE68F61"
   ["tahoe"]="Mac-27AD2F918AE68F61"
 )
 declare -A MACOS_OS_TYPE=(
+  ["ventura"]="default"
   ["sonoma"]="default"
   ["sequoia"]="default"
   ["tahoe"]="latest"
 )
 declare -A SMBIOS_MODELS=(
+  ["ventura"]="iMacPro1,1"
   ["sonoma"]="iMacPro1,1"
   ["sequoia"]="iMacPro1,1"
   ["tahoe"]="MacPro7,1"
@@ -512,13 +516,15 @@ function default_settings() {
 function advanced_settings() {
   METHOD="advanced"
 
-  if MACOS_VER=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "macOS Version" --radiolist "Choose macOS version" --cancel-button Exit-Script 12 58 3 \
+  if MACOS_VER=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "macOS Version" --radiolist "Choose macOS version" --cancel-button Exit-Script 14 58 4 \
+    "ventura" "macOS Ventura 13 (stable)  " OFF \
     "sonoma" "macOS Sonoma 14 (stable)  " OFF \
     "sequoia" "macOS Sequoia 15 (stable)  " ON \
     "tahoe" "macOS Tahoe 26 (stable)  " OFF \
     3>&1 1>&2 2>&3); then
     echo -e "${OS}${BOLD}${DGN}macOS Version: ${BGN}${MACOS_LABELS[$MACOS_VER]}${CL}"
     case "$MACOS_VER" in
+    ventura) var_version="13" ;;
     sonoma) var_version="14" ;;
     sequoia) var_version="15" ;;
     tahoe) var_version="26" ;;
