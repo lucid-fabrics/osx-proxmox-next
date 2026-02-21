@@ -22,7 +22,6 @@ RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
 NSAPP="macos-vm"
 var_os="macos"
-DISK_SIZE="64G"
 
 YW=$(echo "\033[33m")
 BL=$(echo "\033[36m")
@@ -124,6 +123,7 @@ function cleanup_vmid() {
 function cleanup() {
   [ -n "${BUILD_SRC_MNT:-}" ] && umount "$BUILD_SRC_MNT" 2>/dev/null || true
   [ -n "${BUILD_DEST_MNT:-}" ] && umount "$BUILD_DEST_MNT" 2>/dev/null || true
+  [ -n "${BUILD_SRC_LOOP:-}" ] && losetup -d "$BUILD_SRC_LOOP" 2>/dev/null || true
   [ -n "${BUILD_LOOP:-}" ] && losetup -d "$BUILD_LOOP" 2>/dev/null || true
   popd >/dev/null 2>/dev/null || true
   rm -rf "${TEMP_DIR:-}"
@@ -251,10 +251,64 @@ function detect_cpu_vendor() {
 
 CPU_VENDOR=$(detect_cpu_vendor)
 
+# ── Per-version default disk sizes (matches Python defaults.py) ──
+function default_disk_gb() {
+  local ver="$1"
+  case "$ver" in
+    tahoe)   echo 160 ;;
+    sequoia) echo 128 ;;
+    sonoma)  echo 96 ;;
+    *)       echo 80 ;;
+  esac
+}
+
+# ── Round down to nearest power of 2 ──
+function round_down_pow2() {
+  local n="$1"
+  local p=1
+  while [ $((p * 2)) -le "$n" ]; do
+    p=$((p * 2))
+  done
+  echo "$p"
+}
+
+# ── Detect smart CPU core count (half host, power-of-2, cap 16) ──
+function detect_cpu_cores() {
+  local count
+  count=$(nproc 2>/dev/null || echo 4)
+  local half
+  if [ "$count" -ge 8 ]; then
+    half=$((count / 2))
+  else
+    half="$count"
+  fi
+  # Clamp 2–16
+  [ "$half" -lt 2 ] && half=2
+  [ "$half" -gt 16 ] && half=16
+  round_down_pow2 "$half"
+}
+
+# ── Detect smart memory default (half host, clamp 4096–32768) ──
+function detect_memory_mb() {
+  local mem_kb
+  mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if [ "$mem_kb" -le 0 ] 2>/dev/null; then
+    echo 8192
+    return
+  fi
+  local mem_mb=$((mem_kb / 1024))
+  local half=$((mem_mb / 2))
+  [ "$half" -lt 4096 ] && half=4096
+  [ "$half" -gt 32768 ] && half=32768
+  echo "$half"
+}
+
 # ── Generate SMBIOS identity ──
 function generate_smbios() {
   local macos_ver="$1"
   SMBIOS_SERIAL=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 12)
+  SMBIOS_MLB=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 17)
+  SMBIOS_ROM=$(openssl rand -hex 6 | tr '[:lower:]' '[:upper:]')
   SMBIOS_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
   SMBIOS_MODEL="${SMBIOS_MODELS[$macos_ver]:-iMacPro1,1}"
 }
@@ -368,6 +422,10 @@ function build_opencore_disk() {
 
   msg_info "Building OpenCore boot disk (GPT+ESP)"
 
+  # Clean up stale mounts from previous failed runs
+  umount /tmp/oc-src 2>/dev/null || true
+  umount /tmp/oc-dest 2>/dev/null || true
+
   # Create 1GB blank disk
   dd if=/dev/zero of="$dest_disk" bs=1M count=1024 status=none
 
@@ -383,7 +441,7 @@ function build_opencore_disk() {
   sleep 1
 
   # Format ESP partition
-  mkfs.fat -F 32 "${dest_loop}p1" &>/dev/null
+  mkfs.fat -F 32 -n OPENCORE "${dest_loop}p1" &>/dev/null
 
   # Mount destination ESP
   local dest_mnt
@@ -391,11 +449,22 @@ function build_opencore_disk() {
   mount "${dest_loop}p1" "$dest_mnt"
   BUILD_DEST_MNT="$dest_mnt"
 
-  # Mount source ISO
-  local src_mnt
+  # Mount source ISO (use blkid to find FAT32 partition for any layout)
+  local src_mnt src_loop src_part
   src_mnt=$(mktemp -d)
-  mount -o loop,ro "$source_iso" "$src_mnt"
+  src_loop=$(losetup -fP --show "$source_iso")
+  partprobe "$src_loop" 2>/dev/null || true
+  sleep 1
+  src_part=$(blkid -o device "$src_loop" "${src_loop}"p* 2>/dev/null \
+    | xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' \
+    | head -1)
+  if [ -n "$src_part" ]; then
+    mount -o ro "$src_part" "$src_mnt"
+  else
+    mount -o ro "$src_loop" "$src_mnt"
+  fi
   BUILD_SRC_MNT="$src_mnt"
+  BUILD_SRC_LOOP="$src_loop"
 
   # Copy OpenCore files
   cp -a "$src_mnt"/* "$dest_mnt"/ 2>/dev/null || cp -a "$src_mnt"/. "$dest_mnt"/ 2>/dev/null || true
@@ -405,6 +474,7 @@ function build_opencore_disk() {
     msg_error "OpenCore ISO does not contain expected EFI/OC directory. ISO may be corrupt."
     umount "$dest_mnt" 2>/dev/null || true
     umount "$src_mnt" 2>/dev/null || true
+    losetup -d "$src_loop" 2>/dev/null || true
     losetup -d "$dest_loop" 2>/dev/null || true
     rm -rf "$dest_mnt" "$src_mnt"
     exit 1
@@ -420,10 +490,11 @@ with open(path, 'rb') as f:
     pl = plistlib.load(f)
 # Security
 pl.setdefault('Misc', {}).setdefault('Security', {})['ScanPolicy'] = 0
-pl['Misc']['Security']['DmgLoading'] = 'Signed'
-pl['Misc']['Security']['SecureBootModel'] = 'Default'
+pl['Misc']['Security']['DmgLoading'] = 'Any'
+pl['Misc']['Security']['SecureBootModel'] = 'Disabled'
 # Boot — graphical picker with Apple icons, auto-boot after 15s
 pl['Misc'].setdefault('Boot', {})['Timeout'] = 15
+pl['Misc']['Boot']['HideAuxiliary'] = True
 pl['Misc']['Boot']['PickerAttributes'] = 17
 pl['Misc']['Boot']['PickerMode'] = 'External'
 pl['Misc']['Boot']['PickerVariant'] = 'Acidanthera\\\Syrah'
@@ -440,7 +511,6 @@ pl['NVRAM']['WriteFlash'] = True
 [k.update(Enabled=True) for k in pl.get('Kernel', {}).get('Add', []) if 'VirtualSMC' in k.get('BundlePath', '')]
 # AMD-specific patches
 if cpu_vendor == 'AMD':
-    pl['Misc']['Security']['SecureBootModel'] = 'Disabled'
     kq = pl['Kernel']['Quirks']
     kq['AppleCpuPmCfgLock'] = True
     kq['AppleXcpmCfgLock'] = True
@@ -450,6 +520,7 @@ with open(path, 'wb') as f:
       msg_error "Failed to patch OpenCore config.plist"
       umount "$dest_mnt" 2>/dev/null || true
       umount "$src_mnt" 2>/dev/null || true
+      losetup -d "$src_loop" 2>/dev/null || true
       losetup -d "$dest_loop" 2>/dev/null || true
       rm -rf "$dest_mnt" "$src_mnt"
       exit 1
@@ -462,9 +533,10 @@ with open(path, 'wb') as f:
   # Cleanup mounts
   umount "$src_mnt" 2>/dev/null || true
   umount "$dest_mnt" 2>/dev/null || true
+  losetup -d "$BUILD_SRC_LOOP" 2>/dev/null || true
   losetup -d "$dest_loop" 2>/dev/null || true
   rm -rf "$dest_mnt" "$src_mnt"
-  BUILD_SRC_MNT="" BUILD_DEST_MNT="" BUILD_LOOP=""
+  BUILD_SRC_MNT="" BUILD_DEST_MNT="" BUILD_LOOP="" BUILD_SRC_LOOP=""
 
   msg_ok "Built OpenCore boot disk"
 }
@@ -482,10 +554,10 @@ function default_settings() {
   MACOS_VER="sequoia"
   var_version="15"
   VMID=$(get_valid_nextid)
-  DISK_SIZE="64G"
+  DISK_SIZE="$(default_disk_gb "$MACOS_VER")G"
   HN="macos-sequoia"
-  CORE_COUNT="4"
-  RAM_SIZE="8192"
+  CORE_COUNT="$(detect_cpu_cores)"
+  RAM_SIZE="$(detect_memory_mb)"
   BRG="vmbr0"
   MAC="$GEN_MAC"
   VLAN=""
@@ -545,7 +617,9 @@ function advanced_settings() {
     fi
   done
 
-  if DISK_SIZE=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set Disk Size in GiB (minimum 64)" 8 58 64 --title "DISK SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  local default_disk
+  default_disk=$(default_disk_gb "$MACOS_VER")
+  if DISK_SIZE=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set Disk Size in GiB (minimum 64)" 8 58 "$default_disk" --title "DISK SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     DISK_SIZE=$(echo "$DISK_SIZE" | tr -d ' ')
     if [[ "$DISK_SIZE" =~ ^[0-9]+$ ]]; then
       if [ "$DISK_SIZE" -lt 64 ]; then
@@ -581,9 +655,11 @@ function advanced_settings() {
     exit-script
   fi
 
-  if CORE_COUNT=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Allocate CPU Cores (minimum 2)" 8 58 4 --title "CORE COUNT" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  local default_cores
+  default_cores=$(detect_cpu_cores)
+  if CORE_COUNT=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Allocate CPU Cores (minimum 2)" 8 58 "$default_cores" --title "CORE COUNT" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$CORE_COUNT" ]; then
-      CORE_COUNT="4"
+      CORE_COUNT="$default_cores"
     fi
     if [ "$CORE_COUNT" -lt 2 ] 2>/dev/null; then
       msg_error "At least 2 CPU cores are required for macOS"
@@ -594,9 +670,11 @@ function advanced_settings() {
     exit-script
   fi
 
-  if RAM_SIZE=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Allocate RAM in MiB (minimum 4096)" 8 58 8192 --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  local default_ram
+  default_ram=$(detect_memory_mb)
+  if RAM_SIZE=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Allocate RAM in MiB (minimum 4096)" 8 58 "$default_ram" --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$RAM_SIZE" ]; then
-      RAM_SIZE="8192"
+      RAM_SIZE="$default_ram"
     fi
     if [ "$RAM_SIZE" -lt 4096 ] 2>/dev/null; then
       msg_error "At least 4096 MiB RAM is required for macOS"
@@ -754,6 +832,7 @@ qm create "$VMID" \
   --ostype other \
   --machine q35 \
   --bios ovmf \
+  --sockets 1 \
   --cores "$CORE_COUNT" \
   --memory "$RAM_SIZE" \
   --cpu host \
@@ -778,20 +857,22 @@ msg_ok "Applied hardware profile ($CPU_VENDOR)"
 
 # ── Set SMBIOS identity (base64-encoded for Proxmox) ──
 msg_info "Setting SMBIOS identity"
+SMBIOS_SERIAL_B64=$(echo -n "$SMBIOS_SERIAL" | base64)
 SMBIOS_MFR_B64=$(echo -n "Apple Inc." | base64)
 SMBIOS_PRODUCT_B64=$(echo -n "$SMBIOS_MODEL" | base64)
 SMBIOS_FAMILY_B64=$(echo -n "Mac" | base64)
 qm set "$VMID" \
-  --smbios1 "uuid=${SMBIOS_UUID},serial=${SMBIOS_SERIAL},base64=1,manufacturer=${SMBIOS_MFR_B64},product=${SMBIOS_PRODUCT_B64},family=${SMBIOS_FAMILY_B64}" \
+  --smbios1 "uuid=${SMBIOS_UUID},serial=${SMBIOS_SERIAL_B64},manufacturer=${SMBIOS_MFR_B64},product=${SMBIOS_PRODUCT_B64},family=${SMBIOS_FAMILY_B64}" \
   >/dev/null
 msg_ok "Set SMBIOS identity (serial: $SMBIOS_SERIAL)"
 
-# ── Attach EFI disk ──
-msg_info "Attaching EFI disk"
+# ── Attach EFI disk + TPM ──
+msg_info "Attaching EFI disk + TPM"
 qm set "$VMID" \
   --efidisk0 "${STORAGE}:0,efitype=4m,pre-enrolled-keys=0" \
+  --tpmstate0 "${STORAGE}:0,version=v2.0" \
   >/dev/null
-msg_ok "Attached EFI disk"
+msg_ok "Attached EFI disk + TPM"
 
 # ── Create main disk ──
 msg_info "Creating main disk (${DISK_SIZE})"
@@ -832,6 +913,11 @@ OC_IMPORT_OUT="$("${IMPORT_CMD[@]}" "$VMID" "$OC_DISK" "$STORAGE" --format raw 2
 }
 OC_DISK_REF="$(get_disk_ref "$OC_IMPORT_OUT" "$STORAGE" "$VMID" "OpenCore")"
 qm set "$VMID" --ide0 "${OC_DISK_REF},media=disk" >/dev/null
+# Fix GPT header corruption on thin-provisioned LVM after importdisk
+OC_DEV=$(pvesm path "$OC_DISK_REF" 2>/dev/null) || true
+if [ -n "$OC_DEV" ] && [ -b "$OC_DEV" ]; then
+  dd if="$OC_DISK" of="$OC_DEV" bs=512 count=2048 conv=notrunc 2>/dev/null || true
+fi
 msg_ok "Attached OpenCore disk (ide0)"
 
 # ── Stamp recovery with Apple icon flavour ──
@@ -854,8 +940,16 @@ RLOOP=$(losetup --find --show "$RECOVERY_RAW")
 partprobe "$RLOOP" && sleep 1
 mkdir -p /tmp/oc-recovery
 mount -t hfsplus -o rw "${RLOOP}p1" /tmp/oc-recovery
-printf 'AppleRecv' > /tmp/oc-recovery/.contentFlavour
-printf '%s' "$MACOS_LABEL" > /tmp/oc-recovery/.contentDetails
+# Write .contentDetails in CoreServices (matches Python planner)
+mkdir -p /tmp/oc-recovery/System/Library/CoreServices
+rm -f /tmp/oc-recovery/System/Library/CoreServices/.contentDetails 2>/dev/null
+printf '%s' "$MACOS_LABEL" > /tmp/oc-recovery/System/Library/CoreServices/.contentDetails
+# Copy InstallAssistant.icns → .VolumeIcon.icns (matches Python planner)
+ICON=$(find /tmp/oc-recovery -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1)
+if [ -n "$ICON" ]; then
+  rm -f /tmp/oc-recovery/.VolumeIcon.icns
+  cp "$ICON" /tmp/oc-recovery/.VolumeIcon.icns
+fi
 umount /tmp/oc-recovery
 losetup -d "$RLOOP"
 rm -rf /tmp/oc-recovery
