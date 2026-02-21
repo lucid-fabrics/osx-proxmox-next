@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 
-# Copyright (c) 2021-2026 community-scripts ORG
-# Author: Wassim Mehanna (lucid-fabrics)
-# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
-
-source /dev/stdin <<<"$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)"
+# Copyright (c) 2024-2026 Wassim Mehanna (lucid-fabrics)
+# License: MIT | https://github.com/lucid-fabrics/osx-proxmox-next/blob/main/LICENSE
 
 function header_info {
   clear
@@ -90,15 +87,12 @@ OC_URL="https://github.com/lucid-fabrics/osx-proxmox-next/releases/download/asse
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
-trap 'post_update_to_api "failed" 130' SIGINT
-trap 'post_update_to_api "failed" 143' SIGTERM
 
 function error_handler() {
   local exit_code="$?"
   local line_number="$1"
   local command="$2"
   local error_message="${RD}[ERROR]${CL} in line ${RD}$line_number${CL}: exit code ${RD}$exit_code${CL}: while executing command ${YW}$command${CL}"
-  post_update_to_api "failed" "${exit_code}"
   echo -e "\n$error_message\n"
   cleanup_vmid
 }
@@ -195,7 +189,7 @@ function arch_check() {
 function ssh_check() {
   if command -v pveversion >/dev/null 2>&1; then
     if [ -n "${SSH_CLIENT:+x}" ]; then
-      if whiptail --backtitle "Proxmox VE Helper Scripts" --defaultno --title "SSH DETECTED" --yesno "It's suggested to use the Proxmox shell instead of SSH, since SSH can create issues while gathering variables. Would you like to proceed with using SSH?" 10 62; then
+      if whiptail --backtitle "OSX Proxmox Next" --defaultno --title "SSH DETECTED" --yesno "It's suggested to use the Proxmox shell instead of SSH, since SSH can create issues while gathering variables. Would you like to proceed with using SSH?" 10 62; then
         echo "you've been warned"
       else
         clear
@@ -478,7 +472,7 @@ with open(path, 'wb') as f:
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
 
-if whiptail --backtitle "Proxmox VE Helper Scripts" --title "macOS VM" --yesno "This will create a new macOS VM on Proxmox.\n\nRequirements:\n  - Intel or AMD CPU with VT-x/AMD-V\n  - 64GB+ free disk space\n  - Internet access (downloads ~1GB)\n\nProceed?" 14 58; then
+if whiptail --backtitle "OSX Proxmox Next" --title "macOS VM" --yesno "This will create a new macOS VM on Proxmox.\n\nRequirements:\n  - Intel or AMD CPU with VT-x/AMD-V\n  - 64GB+ free disk space\n  - Internet access (downloads ~1GB)\n\nProceed?" 14 58; then
   :
 else
   header_info && echo -e "${CROSS}${RD}User exited script${CL}\n" && exit
@@ -516,7 +510,7 @@ function default_settings() {
 function advanced_settings() {
   METHOD="advanced"
 
-  if MACOS_VER=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "macOS Version" --radiolist "Choose macOS version" --cancel-button Exit-Script 14 58 4 \
+  if MACOS_VER=$(whiptail --backtitle "OSX Proxmox Next" --title "macOS Version" --radiolist "Choose macOS version" --cancel-button Exit-Script 14 58 4 \
     "ventura" "macOS Ventura 13 (stable)  " OFF \
     "sonoma" "macOS Sonoma 14 (stable)  " OFF \
     "sequoia" "macOS Sequoia 15 (stable)  " ON \
@@ -535,7 +529,7 @@ function advanced_settings() {
 
   [ -z "${VMID:-}" ] && VMID=$(get_valid_nextid)
   while true; do
-    if VMID=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Virtual Machine ID" 8 58 $VMID --title "VIRTUAL MACHINE ID" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+    if VMID=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set Virtual Machine ID" 8 58 $VMID --title "VIRTUAL MACHINE ID" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
       if [ -z "$VMID" ]; then
         VMID=$(get_valid_nextid)
       fi
@@ -551,7 +545,7 @@ function advanced_settings() {
     fi
   done
 
-  if DISK_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Disk Size in GiB (minimum 64)" 8 58 64 --title "DISK SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if DISK_SIZE=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set Disk Size in GiB (minimum 64)" 8 58 64 --title "DISK SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     DISK_SIZE=$(echo "$DISK_SIZE" | tr -d ' ')
     if [[ "$DISK_SIZE" =~ ^[0-9]+$ ]]; then
       if [ "$DISK_SIZE" -lt 64 ]; then
@@ -576,7 +570,7 @@ function advanced_settings() {
   fi
 
   local default_hn="macos-${MACOS_VER}"
-  if VM_NAME=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 "$default_hn" --title "HOSTNAME" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if VM_NAME=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set Hostname" 8 58 "$default_hn" --title "HOSTNAME" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$VM_NAME" ]; then
       HN="$default_hn"
     else
@@ -587,7 +581,7 @@ function advanced_settings() {
     exit-script
   fi
 
-  if CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate CPU Cores (minimum 2)" 8 58 4 --title "CORE COUNT" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if CORE_COUNT=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Allocate CPU Cores (minimum 2)" 8 58 4 --title "CORE COUNT" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$CORE_COUNT" ]; then
       CORE_COUNT="4"
     fi
@@ -600,7 +594,7 @@ function advanced_settings() {
     exit-script
   fi
 
-  if RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate RAM in MiB (minimum 4096)" 8 58 8192 --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if RAM_SIZE=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Allocate RAM in MiB (minimum 4096)" 8 58 8192 --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$RAM_SIZE" ]; then
       RAM_SIZE="8192"
     fi
@@ -613,7 +607,7 @@ function advanced_settings() {
     exit-script
   fi
 
-  if BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a Bridge" 8 58 vmbr0 --title "BRIDGE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if BRG=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set a Bridge" 8 58 vmbr0 --title "BRIDGE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$BRG" ]; then
       BRG="vmbr0"
     fi
@@ -622,7 +616,7 @@ function advanced_settings() {
     exit-script
   fi
 
-  if MAC1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a MAC Address" 8 58 $GEN_MAC --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if MAC1=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set a MAC Address" 8 58 $GEN_MAC --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$MAC1" ]; then
       MAC="$GEN_MAC"
     else
@@ -633,7 +627,7 @@ function advanced_settings() {
     exit-script
   fi
 
-  if VLAN1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a VLAN (leave blank for default)" 8 58 --title "VLAN" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if VLAN1=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set a VLAN (leave blank for default)" 8 58 --title "VLAN" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$VLAN1" ]; then
       VLAN1="Default"
       VLAN=""
@@ -645,7 +639,7 @@ function advanced_settings() {
     exit-script
   fi
 
-  if MTU1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Interface MTU Size (leave blank for default)" 8 58 --title "MTU SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if MTU1=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set Interface MTU Size (leave blank for default)" 8 58 --title "MTU SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$MTU1" ]; then
       MTU1="Default"
       MTU=""
@@ -657,7 +651,7 @@ function advanced_settings() {
     exit-script
   fi
 
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "START VIRTUAL MACHINE" --yesno "Start VM when completed?" 10 58); then
+  if (whiptail --backtitle "OSX Proxmox Next" --title "START VIRTUAL MACHINE" --yesno "Start VM when completed?" 10 58); then
     echo -e "${DGN}Start VM when completed: ${BGN}yes${CL}"
     START_VM="yes"
   else
@@ -665,7 +659,7 @@ function advanced_settings() {
     START_VM="no"
   fi
 
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "ADVANCED SETTINGS COMPLETE" --yesno "Ready to create ${MACOS_LABELS[$MACOS_VER]} VM?" --no-button Do-Over 10 58); then
+  if (whiptail --backtitle "OSX Proxmox Next" --title "ADVANCED SETTINGS COMPLETE" --yesno "Ready to create ${MACOS_LABELS[$MACOS_VER]} VM?" --no-button Do-Over 10 58); then
     echo -e "${RD}Creating a macOS VM using the above advanced settings${CL}"
   else
     header_info
@@ -675,7 +669,7 @@ function advanced_settings() {
 }
 
 function start_script() {
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced 10 58); then
+  if (whiptail --backtitle "OSX Proxmox Next" --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced 10 58); then
     header_info
     echo -e "${BL}Using Default Settings${CL}"
     default_settings
@@ -692,8 +686,6 @@ pve_check
 ssh_check
 check_dependencies
 start_script
-post_to_api_vm
-start_install_timer
 
 # ── Storage selection ──
 msg_info "Validating Storage"
@@ -716,9 +708,7 @@ elif [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then
   STORAGE=${STORAGE_MENU[0]}
 else
   while [ -z "${STORAGE:+x}" ]; do
-    if [ -n "$SPINNER_PID" ] && ps -p $SPINNER_PID >/dev/null; then kill $SPINNER_PID >/dev/null; fi
-    printf "\e[?25h"
-    STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage Pools" --radiolist \
+    STORAGE=$(whiptail --backtitle "OSX Proxmox Next" --title "Storage Pools" --radiolist \
       "Which storage pool would you like to use for ${HN}?\nTo make a selection, use the Spacebar.\n" \
       16 $(($MSG_MAX_LENGTH + 23)) 6 \
       "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3)
@@ -768,7 +758,6 @@ qm create "$VMID" \
   --memory "$RAM_SIZE" \
   --cpu host \
   --net0 "virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU" \
-  --tags community-script \
   >/dev/null
 msg_ok "Created VM shell"
 
@@ -892,29 +881,25 @@ msg_ok "Set boot order (ide2 → sata0 → ide0)"
 DESCRIPTION=$(
   cat <<EOF
 <div align='center'>
-  <a href='https://Helper-Scripts.com' target='_blank' rel='noopener noreferrer'>
-    <img src='https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
-  </a>
-
   <h2 style='font-size: 24px; margin: 20px 0;'>${MACOS_LABELS[$MACOS_VER]} VM</h2>
 
   <p style='margin: 16px 0;'>
-    <a href='https://ko-fi.com/community_scripts' target='_blank' rel='noopener noreferrer'>
-      <img src='https://img.shields.io/badge/&#x2615;-Buy us a coffee-blue' alt='Buy Coffee' />
+    <a href='https://ko-fi.com/lucidfabrics' target='_blank' rel='noopener noreferrer'>
+      <img src='https://img.shields.io/badge/&#x2615;-Buy me a coffee-blue' alt='Buy Coffee' />
     </a>
   </p>
 
   <span style='margin: 0 10px;'>
     <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
+    <a href='https://github.com/lucid-fabrics/osx-proxmox-next' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
   </span>
   <span style='margin: 0 10px;'>
     <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
+    <a href='https://github.com/lucid-fabrics/osx-proxmox-next/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
   </span>
   <span style='margin: 0 10px;'>
     <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
+    <a href='https://github.com/lucid-fabrics/osx-proxmox-next/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
   </span>
 </div>
 EOF
@@ -933,7 +918,6 @@ if [ "$START_VM" == "yes" ]; then
   msg_ok "Started macOS VM"
 fi
 
-post_update_to_api "done" 0
 echo ""
 msg_ok "Completed successfully!"
 echo -e "\n${INFO}${YW}Next steps:${CL}"
