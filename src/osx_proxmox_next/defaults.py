@@ -68,7 +68,7 @@ def detect_iso_storage() -> list[str]:
         )
         for line in output.splitlines()[1:]:
             parts = line.split()
-            if len(parts) >= 7 and parts[1] != "0":
+            if len(parts) >= 7 and parts[2] == "active":
                 storage_id = parts[0]
                 path = _resolve_iso_path(storage_id)
                 if path and path not in dirs:

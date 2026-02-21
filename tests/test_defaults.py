@@ -120,20 +120,34 @@ def test_detect_iso_storage_pvesm_fails(monkeypatch):
 
 
 def test_detect_iso_storage_parses_pvesm(monkeypatch):
-    """Parses pvesm status output and resolves paths."""
+    """Parses pvesm status output and resolves paths; skips inactive storage."""
     import subprocess
     pvesm_output = (
         "Name         Type     Status           Total            Used       Available        %\n"
         "local          dir     active       100000000        50000000        50000000   50.00%\n"
         "nas-iso        nfs     active       200000000       100000000       100000000   50.00%\n"
+        "offline-nas    nfs     inactive     300000000       150000000       150000000   50.00%\n"
     )
-    monkeypatch.setattr(
-        subprocess, "check_output",
-        lambda cmd, **kw: pvesm_output if "status" in cmd else (_ for _ in ()).throw(Exception("nope")),
-    )
-    # _resolve_iso_path will fail for both, but local fallback still appears
+    resolve_calls = []
+
+    def fake_check_output(cmd, **kw):
+        if "status" in cmd:
+            return pvesm_output
+        raise Exception("nope")
+
+    monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+    # Patch _resolve_iso_path to track which storage IDs are resolved
+    import osx_proxmox_next.defaults as dm
+    original_resolve = dm._resolve_iso_path
+    def tracking_resolve(sid):
+        resolve_calls.append(sid)
+        return original_resolve(sid)
+    monkeypatch.setattr(dm, "_resolve_iso_path", tracking_resolve)
+
     dirs = detect_iso_storage()
     assert DEFAULT_ISO_DIR in dirs
+    # inactive storage should NOT be resolved
+    assert "offline-nas" not in resolve_calls
 
 
 def test_resolve_iso_path_local():
