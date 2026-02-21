@@ -85,12 +85,12 @@ This clones the repo, sets up a Python venv, and launches the TUI wizard.
 
 > Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/lucidfabrics) or a [coffee on BMC](https://buymeacoffee.com/lucidfabrics). ☕
 
-### 🐚 Bash Alternative (community-scripts)
+### 🐚 Bash Alternative
 
-Prefer a standalone bash script with no Python dependency? Use the [community-scripts](https://github.com/community-scripts/ProxmoxVE) version:
+Prefer a standalone bash script with no Python dependency?
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/vm/macos-vm.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/community-scripts/vm/macos-vm.sh)"
 ```
 
 Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv needed.
