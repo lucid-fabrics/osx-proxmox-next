@@ -40,7 +40,7 @@ def test_suggested_fetch_commands_include_recovery_note() -> None:
 
 
 def test_resolve_opencore_path_default(monkeypatch):
-    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns, **kw: None)
     result = resolve_opencore_path("sequoia")
     assert result == Path("/var/lib/vz/template/iso/opencore-osx-proxmox-vm.iso")
 
@@ -48,7 +48,7 @@ def test_resolve_opencore_path_default(monkeypatch):
 def test_resolve_opencore_path_found(monkeypatch):
     monkeypatch.setattr(
         assets_module, "_find_iso",
-        lambda patterns: Path("/mnt/pve/wd2tb/template/iso/opencore-sequoia.iso"),
+        lambda patterns, **kw: Path("/mnt/pve/wd2tb/template/iso/opencore-sequoia.iso"),
     )
     result = resolve_opencore_path("sequoia")
     assert result == Path("/mnt/pve/wd2tb/template/iso/opencore-sequoia.iso")
@@ -63,7 +63,7 @@ def test_resolve_recovery_installer_path():
 def test_resolve_recovery_tahoe_found(monkeypatch):
     monkeypatch.setattr(
         assets_module, "_find_iso",
-        lambda patterns: Path("/var/lib/vz/template/iso/tahoe-recovery.img"),
+        lambda patterns, **kw: Path("/var/lib/vz/template/iso/tahoe-recovery.img"),
     )
     cfg = _cfg("tahoe")
     cfg.disk_gb = 160
@@ -74,7 +74,7 @@ def test_resolve_recovery_tahoe_found(monkeypatch):
 def test_resolve_recovery_standard_found(monkeypatch):
     monkeypatch.setattr(
         assets_module, "_find_iso",
-        lambda patterns: Path("/var/lib/vz/template/iso/sequoia-recovery.iso"),
+        lambda patterns, **kw: Path("/var/lib/vz/template/iso/sequoia-recovery.iso"),
     )
     cfg = _cfg("sequoia")
     result = resolve_recovery_or_installer_path(cfg)
@@ -82,7 +82,7 @@ def test_resolve_recovery_standard_found(monkeypatch):
 
 
 def test_resolve_recovery_fallback(monkeypatch):
-    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns, **kw: None)
     cfg = _cfg("sequoia")
     result = resolve_recovery_or_installer_path(cfg)
     assert result == Path("/var/lib/vz/template/iso/sequoia-recovery.iso")
@@ -117,6 +117,28 @@ def test_find_iso_no_roots_exist(monkeypatch):
     monkeypatch.setattr(Path, "exists", lambda self: False)
     result = _find_iso(["nonexistent.iso"])
     assert result is None
+
+
+def test_find_iso_extra_dirs(tmp_path, monkeypatch):
+    """extra_dirs are searched in addition to default roots."""
+    custom_dir = tmp_path / "custom-iso"
+    custom_dir.mkdir()
+    (custom_dir / "opencore-osx-proxmox-vm.iso").write_text("fake")
+
+    real_path = Path
+
+    # Redirect default roots to non-existent paths so only extra_dirs matches
+    def fake_path(p):
+        if p == "/var/lib/vz/template/iso":
+            return real_path("/nonexistent/iso")
+        if p == "/mnt/pve":
+            return real_path("/nonexistent/mnt")
+        return real_path(p)
+
+    monkeypatch.setattr(assets_module, "Path", fake_path)
+    result = _find_iso(["opencore-osx-proxmox-vm.iso"], extra_dirs=[custom_dir])
+    assert result is not None
+    assert result.name == "opencore-osx-proxmox-vm.iso"
 
 
 def test_find_iso_skips_dirs(tmp_path, monkeypatch):
@@ -160,7 +182,7 @@ def test_suggested_fetch_tahoe_auto_download():
 
 def test_resolve_recovery_tahoe_fallback(monkeypatch):
     """tahoe with no recovery file falls back to default path."""
-    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns, **kw: None)
     cfg = _cfg("tahoe")
     cfg.disk_gb = 160
     result = resolve_recovery_or_installer_path(cfg)
@@ -186,7 +208,7 @@ def test_find_iso_real_with_tmp_root(tmp_path, monkeypatch):
     monkeypatch.setattr(am, "Path", lambda p: original_path(p))
 
     # Override _find_iso internals by monkeypatching the roots
-    def patched_find_iso(patterns):
+    def patched_find_iso(patterns, **kw):
         from fnmatch import fnmatch
         roots = [tmp_path]
         for root in roots:
@@ -266,7 +288,7 @@ def test_find_iso_real_with_existing_root(tmp_path, monkeypatch):
 
 
 def test_asset_check_downloadable_opencore(monkeypatch):
-    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns, **kw: None)
     cfg = _cfg("sequoia")
     checks = required_assets(cfg)
     opencore = [c for c in checks if "OpenCore" in c.name][0]
@@ -274,7 +296,7 @@ def test_asset_check_downloadable_opencore(monkeypatch):
 
 
 def test_asset_check_downloadable_recovery(monkeypatch):
-    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns, **kw: None)
     cfg = _cfg("sequoia")
     checks = required_assets(cfg)
     recovery = [c for c in checks if "Recovery" in c.name][0]
@@ -282,7 +304,7 @@ def test_asset_check_downloadable_recovery(monkeypatch):
 
 
 def test_asset_check_downloadable_tahoe_recovery(monkeypatch):
-    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns: None)
+    monkeypatch.setattr(assets_module, "_find_iso", lambda patterns, **kw: None)
     cfg = _cfg("tahoe", "/tmp/tahoe.iso")
     cfg.disk_gb = 160
     checks = required_assets(cfg)
@@ -293,7 +315,7 @@ def test_asset_check_downloadable_tahoe_recovery(monkeypatch):
 def test_resolve_recovery_finds_img(tmp_path, monkeypatch):
     """Recovery resolver finds .img files."""
     call_count = [0]
-    def fake_find_iso(patterns):
+    def fake_find_iso(patterns, **kw):
         call_count[0] += 1
         # Should include .img pattern
         if any(".img" in p for p in patterns):
@@ -307,7 +329,7 @@ def test_resolve_recovery_finds_img(tmp_path, monkeypatch):
 
 def test_resolve_recovery_finds_dmg(tmp_path, monkeypatch):
     """Recovery resolver finds .dmg files."""
-    def fake_find_iso(patterns):
+    def fake_find_iso(patterns, **kw):
         if any(".dmg" in p for p in patterns):
             return Path("/var/lib/vz/template/iso/sequoia-recovery.dmg")
         return None

@@ -12,7 +12,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
 from .assets import required_assets
-from .defaults import DEFAULT_BRIDGE, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_vendor, detect_memory_mb
+from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_vendor, detect_iso_storage, detect_memory_mb
 from .domain import SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
@@ -27,6 +27,8 @@ class WizardState:
     selected_os: str = ""
     selected_storage: str = ""
     storage_targets: list[str] = field(default_factory=list)
+    iso_dirs: list[str] = field(default_factory=list)
+    selected_iso_dir: str = ""
     # Form
     vmid: int = 900
     name: str = ""
@@ -236,6 +238,8 @@ class NextApp(App):
         super().__init__()
         self.state = WizardState()
         self.state.storage_targets = self._detect_storage_targets()
+        self.state.iso_dirs = detect_iso_storage()
+        self.state.selected_iso_dir = self.state.iso_dirs[0] if self.state.iso_dirs else DEFAULT_ISO_DIR
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -317,6 +321,8 @@ class NextApp(App):
                     yield Input(value=DEFAULT_BRIDGE, id="bridge")
                     yield Static("Storage", classes="label")
                     yield Input(value=DEFAULT_STORAGE, id="storage_input")
+                    yield Static("ISO Storage", classes="label")
+                    yield Input(value=DEFAULT_ISO_DIR, id="iso_dir")
                     yield Static("Installer Path", classes="label")
                     yield Input(value="", id="installer_path")
                 yield Static("", id="form_errors")
@@ -527,6 +533,7 @@ class NextApp(App):
         self._set_input_value("#disk", str(default_disk_gb(macos)))
         self._set_input_value("#bridge", DEFAULT_BRIDGE)
         self._set_input_value("#storage_input", self.state.selected_storage)
+        self._set_input_value("#iso_dir", self.state.selected_iso_dir)
         self._set_input_value("#installer_path", "")
         self._update_smbios_preview()
 
@@ -539,6 +546,7 @@ class NextApp(App):
         self._set_input_value("#disk", str(default_disk_gb(macos)))
         self._set_input_value("#bridge", DEFAULT_BRIDGE)
         self._set_input_value("#storage_input", self.state.selected_storage or DEFAULT_STORAGE)
+        self._set_input_value("#iso_dir", self.state.selected_iso_dir)
         if not self.state.smbios:
             self.state.smbios = generate_smbios(macos)
         self._update_smbios_preview()
@@ -637,6 +645,7 @@ class NextApp(App):
             bridge=self.query_one("#bridge", Input).value.strip() or DEFAULT_BRIDGE,
             storage=self.query_one("#storage_input", Input).value.strip() or DEFAULT_STORAGE,
             installer_path=self.query_one("#installer_path", Input).value.strip(),
+            iso_dir=self.query_one("#iso_dir", Input).value.strip() or DEFAULT_ISO_DIR,
             smbios_serial=smbios.serial if smbios else "",
             smbios_uuid=smbios.uuid if smbios else "",
             smbios_mlb=smbios.mlb if smbios else "",
@@ -698,7 +707,7 @@ class NextApp(App):
             )
 
     def _download_worker(self, config: VmConfig, missing: list) -> None:
-        dest_dir = Path("/var/lib/vz/template/iso")
+        dest_dir = Path(config.iso_dir or DEFAULT_ISO_DIR)
         errors: list[str] = []
 
         def on_progress(p: DownloadProgress) -> None:

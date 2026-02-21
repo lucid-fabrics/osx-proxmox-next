@@ -56,7 +56,7 @@ async def _advance_to_step(pilot, app, target_step, monkeypatch=None):
 def test_wizard_starts_at_step1() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             assert app.current_step == 1
             assert not app.query_one("#step1").has_class("step_hidden")
@@ -68,7 +68,7 @@ def test_wizard_starts_at_step1() -> None:
 def test_next_blocked_without_preflight() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             assert app.query_one("#preflight_next_btn", Button).disabled is True
             app._go_next()
@@ -80,7 +80,7 @@ def test_next_blocked_without_preflight() -> None:
 def test_forward_backward_navigation() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             # Pass preflight → step 2
             app.state.preflight_done = True
@@ -106,7 +106,7 @@ def test_forward_backward_navigation() -> None:
 def test_back_at_step1_stays() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app._go_back()
             assert app.current_step == 1
@@ -117,7 +117,7 @@ def test_back_at_step1_stays() -> None:
 def test_step3_next_without_storage_blocked() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 3)
             app.state.selected_storage = ""
@@ -130,7 +130,7 @@ def test_step3_next_without_storage_blocked() -> None:
 def test_step5_next_requires_dry_run() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             # Force to step 5 directly
             app.current_step = 5
@@ -145,7 +145,7 @@ def test_step5_next_requires_dry_run() -> None:
 def test_step_bar_updates() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             bar_text = app.query_one("#step_bar", Static).content
             assert "[>] 1.Preflight" in bar_text
@@ -165,7 +165,7 @@ def test_step_bar_updates() -> None:
 def test_step_visibility_toggles() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.current_step = 4
             await pilot.pause()
@@ -187,7 +187,7 @@ def test_preflight_step_blocks_until_ok() -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             checks = [
                 PreflightCheck("qm available", False, "not found"),
@@ -206,7 +206,7 @@ def test_preflight_step_enables_on_success() -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             checks = [
                 PreflightCheck("qm available", True, "/usr/sbin/qm"),
@@ -224,7 +224,7 @@ def test_rerun_preflight() -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             # First complete preflight successfully
             checks = [PreflightCheck("qm available", True, "/usr/sbin/qm")]
@@ -245,7 +245,7 @@ def test_rerun_preflight() -> None:
 def test_select_os_sonoma() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#os_sonoma")
@@ -262,7 +262,7 @@ def test_select_os_sonoma() -> None:
 def test_select_os_sequoia() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#os_sequoia")
@@ -276,7 +276,7 @@ def test_select_os_sequoia() -> None:
 def test_select_os_tahoe() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#os_tahoe")
@@ -290,7 +290,7 @@ def test_select_os_tahoe() -> None:
 def test_switch_os_deselects_previous() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#os_sonoma")
@@ -307,7 +307,7 @@ def test_switch_os_deselects_previous() -> None:
 def test_os_invalid_key_ignored() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             # Simulate button with unknown os key
             class FakeEvent:
@@ -322,7 +322,7 @@ def test_os_invalid_key_ignored() -> None:
 def test_next_blocked_without_os_selection() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             assert app.query_one("#next_btn", Button).disabled is True
@@ -337,7 +337,7 @@ def test_next_blocked_without_os_selection() -> None:
 def test_storage_preselected() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             assert app.state.selected_storage == app.state.storage_targets[0]
 
@@ -347,7 +347,7 @@ def test_storage_preselected() -> None:
 def test_storage_click_selects() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 3)
             assert app.current_step == 3
@@ -361,7 +361,7 @@ def test_storage_click_selects() -> None:
 def test_storage_invalid_index_ignored() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             class FakeEvent:
                 class button:
@@ -375,7 +375,7 @@ def test_storage_invalid_index_ignored() -> None:
 def test_storage_non_numeric_ignored() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             class FakeEvent:
                 class button:
@@ -388,7 +388,7 @@ def test_storage_non_numeric_ignored() -> None:
 def test_storage_selection_updates_buttons() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 3)
             if len(app.state.storage_targets) >= 2:
@@ -415,7 +415,7 @@ def test_detect_storage_fallback() -> None:
 def test_prefill_form_on_step3_next() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             assert app.query_one("#name", Input).value == "macos-sequoia"
@@ -427,7 +427,7 @@ def test_prefill_form_on_step3_next() -> None:
 def test_suggest_defaults_button() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.query_one("#vmid", Input).value = ""
@@ -443,7 +443,7 @@ def test_suggest_defaults_button() -> None:
 def test_generate_smbios_button() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             old_serial = app.state.smbios.serial if app.state.smbios else ""
@@ -459,7 +459,7 @@ def test_generate_smbios_button() -> None:
 def test_smbios_preview_none() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.state.smbios = None
@@ -474,7 +474,7 @@ def test_smbios_preview_none() -> None:
 def test_validate_form_all_invalid() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.query_one("#vmid", Input).value = "abc"
@@ -498,7 +498,7 @@ def test_validate_form_all_invalid() -> None:
 def test_validate_form_valid() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             result = app._validate_form(quiet=True)
@@ -511,7 +511,7 @@ def test_validate_form_valid() -> None:
 def test_validate_form_quiet_no_notification() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.query_one("#vmid", Input).value = "abc"
@@ -524,7 +524,7 @@ def test_validate_form_quiet_no_notification() -> None:
 def test_input_changed_triggers_validation() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.query_one("#vmid", Input).value = "5"
@@ -537,7 +537,7 @@ def test_input_changed_triggers_validation() -> None:
 def test_step4_next_validation_blocks() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.query_one("#vmid", Input).value = "abc"
@@ -551,7 +551,7 @@ def test_step4_next_validation_blocks() -> None:
 def test_step4_next_read_form_fails() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             # Make _validate_form pass but _read_form fail
@@ -567,7 +567,7 @@ def test_step4_next_read_form_fails() -> None:
 def test_step4_next_domain_validation_fails(monkeypatch) -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             monkeypatch.setattr(
@@ -586,7 +586,7 @@ def test_step4_next_domain_validation_fails(monkeypatch) -> None:
 def test_read_form_invalid_vmid() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.query_one("#vmid", Input).value = "not-a-number"
@@ -599,7 +599,7 @@ def test_read_form_invalid_vmid() -> None:
 def test_read_form_success() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             config = app._read_form()
@@ -613,7 +613,7 @@ def test_read_form_success() -> None:
 def test_read_form_no_smbios() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.state.smbios = None
@@ -627,7 +627,7 @@ def test_read_form_no_smbios() -> None:
 def test_preflight_checks_running() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.preflight_done = False
             app._update_preflight_display()
@@ -642,7 +642,7 @@ def test_preflight_checks_ok() -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.preflight_done = True
             app.state.preflight_ok = True
@@ -664,7 +664,7 @@ def test_preflight_checks_failed() -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.preflight_done = True
             app.state.preflight_ok = False
@@ -686,7 +686,7 @@ def test_preflight_checks_mixed() -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.preflight_done = True
             app.state.preflight_ok = False
@@ -710,7 +710,7 @@ def test_step4_to_step5_with_assets_ok(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 5, monkeypatch)
             assert app.current_step == 5
@@ -725,7 +725,7 @@ def test_config_summary_displayed(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 5, monkeypatch)
             summary = str(app.query_one("#config_summary", Static).content)
@@ -740,7 +740,7 @@ def test_config_summary_with_installer_path(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.query_one("#installer_path", Input).value = "/tmp/test.iso"
@@ -756,7 +756,7 @@ def test_config_summary_with_installer_path(monkeypatch) -> None:
 def test_render_config_summary_no_config() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.config = None
             app._render_config_summary()
@@ -772,7 +772,7 @@ def test_check_assets_missing_not_downloadable(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             monkeypatch.setattr(
@@ -790,7 +790,7 @@ def test_check_assets_missing_not_downloadable(monkeypatch) -> None:
 def test_check_assets_no_config() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.config = None
             app._check_and_download_assets()
@@ -824,7 +824,7 @@ def test_download_worker_success(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             # Set required_assets AFTER _advance_to_step (which doesn't use it for step 4)
@@ -861,7 +861,7 @@ def test_download_worker_opencore_error(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             monkeypatch.setattr(
@@ -896,7 +896,7 @@ def test_download_worker_recovery_error(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             monkeypatch.setattr(
@@ -921,7 +921,7 @@ def test_download_worker_recovery_error(monkeypatch) -> None:
 def test_update_download_progress() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.query_one("#download_progress").remove_class("hidden")
             app._update_download_progress("opencore", 50)
@@ -940,7 +940,7 @@ def test_update_download_progress() -> None:
 def test_finish_download_success() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.download_running = True
             app._finish_download([])
@@ -953,7 +953,7 @@ def test_finish_download_success() -> None:
 def test_finish_download_errors() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.download_running = True
             app._finish_download(["OpenCore: network error"])
@@ -966,7 +966,7 @@ def test_finish_download_errors() -> None:
 def test_dry_run_blocked_while_running() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.apply_running = True
             app._run_dry_apply()
@@ -978,7 +978,7 @@ def test_dry_run_blocked_while_running() -> None:
 def test_dry_run_blocked_no_plan() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.plan_steps = []
             app._run_dry_apply()
@@ -1005,7 +1005,7 @@ def test_dry_run_success(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 5, monkeypatch)
             await pilot.click("#dry_run_btn")
@@ -1031,7 +1031,7 @@ def test_dry_run_failure(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 5, monkeypatch)
             await pilot.click("#dry_run_btn")
@@ -1049,7 +1049,7 @@ def test_dry_run_failure(monkeypatch) -> None:
 def test_update_dry_progress_before_result() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.query_one("#dry_progress").remove_class("hidden")
             app.query_one("#dry_log").remove_class("hidden")
@@ -1063,7 +1063,7 @@ def test_update_dry_progress_before_result() -> None:
 def test_update_dry_progress_after_result() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.query_one("#dry_progress").remove_class("hidden")
             app.query_one("#dry_log").remove_class("hidden")
@@ -1086,7 +1086,7 @@ def test_prepare_install_step() -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.config = VmConfig(
                 vmid=900, name="test", macos="sequoia",
@@ -1104,7 +1104,7 @@ def test_prepare_install_step() -> None:
 def test_prepare_install_no_config() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.config = None
             app._prepare_install_step()
@@ -1116,7 +1116,7 @@ def test_prepare_install_no_config() -> None:
 def test_live_install_blocked_while_running() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.apply_running = True
             app._run_live_install()
@@ -1128,7 +1128,7 @@ def test_live_install_blocked_while_running() -> None:
 def test_live_install_blocked_no_config() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.config = None
             app._run_live_install()
@@ -1143,7 +1143,7 @@ def test_live_install_blocked_no_preflight() -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.config = VmConfig(
                 vmid=900, name="test", macos="sequoia",
@@ -1184,7 +1184,7 @@ def test_live_install_success(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             # Wait for preflight to complete with all-ok mocked checks
             for _ in range(20):
                 await pilot.pause()
@@ -1227,7 +1227,7 @@ def test_live_install_failure(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             for _ in range(20):
                 await pilot.pause()
                 time.sleep(0.05)
@@ -1257,7 +1257,7 @@ def test_live_install_failure(monkeypatch) -> None:
 def test_finish_live_install_ok_no_snapshot() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app._finish_live_install(ok=True, log_path=Path("/tmp/log.txt"), snapshot=None)
             assert app.state.live_ok is True
@@ -1270,7 +1270,7 @@ def test_finish_live_install_ok_no_snapshot() -> None:
 def test_finish_live_install_fail_no_snapshot() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app._finish_live_install(ok=False, log_path=Path("/tmp/log.txt"), snapshot=None)
             assert app.state.live_ok is False
@@ -1284,7 +1284,7 @@ def test_finish_live_install_fail_no_snapshot() -> None:
 def test_update_live_progress() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.query_one("#live_progress").remove_class("hidden")
             app.query_one("#live_log").remove_class("hidden")
@@ -1522,7 +1522,7 @@ def test_detect_storage_empty_line(monkeypatch) -> None:
 def test_preflight_runs_on_mount() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             # Give preflight thread time to complete
             for _ in range(20):
                 await pilot.pause()
@@ -1539,7 +1539,7 @@ def test_finish_preflight_all_ok(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             checks = [
                 PreflightCheck("qm available", True, "/usr/sbin/qm"),
@@ -1557,7 +1557,7 @@ def test_finish_preflight_some_fail(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             checks = [
                 PreflightCheck("qm available", True, "/usr/sbin/qm"),
@@ -1575,7 +1575,7 @@ def test_finish_preflight_some_fail(monkeypatch) -> None:
 def test_unmapped_button_pressed() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
 
             class FakeEvent:
@@ -1612,7 +1612,7 @@ def test_wizard_state_defaults() -> None:
 def test_append_log_rolling_window() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.query_one("#dry_log").remove_class("hidden")
             for i in range(20):
@@ -1629,7 +1629,7 @@ def test_on_mount_no_storage_targets(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             assert app.state.selected_storage == ""
 
@@ -1639,7 +1639,7 @@ def test_on_mount_no_storage_targets(monkeypatch) -> None:
 def test_suggest_defaults_generates_smbios_if_missing() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.state.smbios = None
@@ -1652,7 +1652,7 @@ def test_suggest_defaults_generates_smbios_if_missing() -> None:
 def test_suggest_defaults_keeps_existing_smbios() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             original = app.state.smbios
@@ -1666,7 +1666,7 @@ def test_go_next_step6_noop() -> None:
     """_go_next at step 6 does nothing (no step 7)."""
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.current_step = 6
             await pilot.pause()
@@ -1685,7 +1685,7 @@ def test_step5_to_step6_transition(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 5, monkeypatch)
             # Simulate dry run passing
@@ -1716,7 +1716,7 @@ def test_download_worker_skips_non_downloadable(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             # Mix of downloadable and non-downloadable
@@ -1745,7 +1745,7 @@ def test_rebuild_plan_after_download(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 5, monkeypatch)
             assert app.state.plan_steps
@@ -1764,7 +1764,7 @@ def test_rebuild_plan_after_download_no_config(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 5, monkeypatch)
             old_config = app.state.config
@@ -1783,7 +1783,7 @@ def test_rebuild_plan_after_download_no_config(monkeypatch) -> None:
 def test_manage_mode_toggle() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             assert not app.state.manage_mode
@@ -1827,7 +1827,7 @@ def test_manage_vm_list_populated(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -1853,7 +1853,7 @@ def test_manage_vm_list_empty(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -1878,7 +1878,7 @@ def test_manage_vm_list_no_macos_vms(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -1903,7 +1903,7 @@ def test_manage_vm_list_config_failure(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -1920,7 +1920,7 @@ def test_manage_vm_list_config_failure(monkeypatch) -> None:
 def test_manage_vmid_input_enables_destroy() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -1936,7 +1936,7 @@ def test_manage_vmid_input_enables_destroy() -> None:
 def test_manage_vmid_invalid_keeps_destroy_disabled() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -1951,7 +1951,7 @@ def test_manage_vmid_invalid_keeps_destroy_disabled() -> None:
 def test_manage_vmid_out_of_range() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -1966,7 +1966,7 @@ def test_manage_vmid_out_of_range() -> None:
 def test_manage_purge_toggle() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -1996,7 +1996,7 @@ def test_manage_purge_toggle() -> None:
 def test_manage_destroy_blocked_while_running() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.state.uninstall_running = True
             app._run_destroy()
@@ -2008,7 +2008,7 @@ def test_manage_destroy_blocked_while_running() -> None:
 def test_manage_destroy_invalid_vmid_noop() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -2023,7 +2023,7 @@ def test_manage_destroy_invalid_vmid_noop() -> None:
 def test_manage_destroy_vmid_out_of_range_noop() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -2057,7 +2057,7 @@ def test_manage_destroy_success(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -2093,7 +2093,7 @@ def test_manage_destroy_failure(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -2116,7 +2116,7 @@ def test_manage_destroy_failure(monkeypatch) -> None:
 def test_manage_update_destroy_log() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
@@ -2141,7 +2141,7 @@ def test_manage_finish_destroy_refreshes_list(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 44)) as pilot:
+        async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_manage")
