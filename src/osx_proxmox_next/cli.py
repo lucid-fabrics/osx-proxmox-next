@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from .assets import required_assets, suggested_fetch_commands
-from .defaults import detect_cpu_vendor
+from .defaults import DEFAULT_ISO_DIR, detect_cpu_vendor, detect_iso_storage
 from .diagnostics import export_log_bundle, recovery_guide
 from .domain import VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
@@ -33,6 +33,7 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
         smbios_model=args.smbios_model or "",
         no_smbios=args.no_smbios,
         verbose_boot=args.verbose_boot,
+        iso_dir=getattr(args, "iso_dir", "") or "",
     )
 
 
@@ -107,6 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Skip auto-download of missing assets")
     common.add_argument("--verbose-boot", action="store_true", default=False,
                         help="Show verbose kernel log instead of Apple logo during boot")
+    common.add_argument("--iso-dir", type=str, default="",
+                        help="Directory for ISO/recovery images (default: auto-detect)")
 
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("--script-out", type=str, default="")
@@ -158,7 +161,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     missing = [a for a in assets if not a.ok]
 
     if missing and not getattr(args, "no_download", False):
-        dest_dir = Path("/var/lib/vz/template/iso")
+        dest_dir = Path(config.iso_dir) if config.iso_dir else Path(detect_iso_storage()[0])
         _auto_download_missing(config, dest_dir)
         # Re-check after download
         assets = required_assets(config)

@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from osx_proxmox_next.defaults import default_disk_gb, detect_cpu_cores, detect_cpu_vendor, detect_memory_mb
+from osx_proxmox_next.defaults import (
+    DEFAULT_ISO_DIR,
+    _resolve_iso_path,
+    default_disk_gb,
+    detect_cpu_cores,
+    detect_cpu_vendor,
+    detect_iso_storage,
+    detect_memory_mb,
+)
 
 
 def test_detect_defaults_return_sane_values() -> None:
@@ -98,3 +106,112 @@ def test_detect_cpu_vendor_no_vendor_line(monkeypatch, tmp_path):
     fake_cpuinfo.write_text("model name\t: Some CPU\nflags\t: sse sse2\n")
     monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
     assert detect_cpu_vendor() == "Intel"
+
+
+def test_detect_iso_storage_pvesm_fails(monkeypatch):
+    """When pvesm is unavailable, fall back to DEFAULT_ISO_DIR."""
+    import subprocess
+    monkeypatch.setattr(
+        subprocess, "check_output",
+        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("no pvesm")),
+    )
+    dirs = detect_iso_storage()
+    assert DEFAULT_ISO_DIR in dirs
+
+
+def test_detect_iso_storage_parses_pvesm(monkeypatch):
+    """Parses pvesm status output and resolves paths; skips inactive storage."""
+    import subprocess
+    pvesm_output = (
+        "Name         Type     Status           Total            Used       Available        %\n"
+        "local          dir     active       100000000        50000000        50000000   50.00%\n"
+        "nas-iso        nfs     active       200000000       100000000       100000000   50.00%\n"
+        "offline-nas    nfs     inactive     300000000       150000000       150000000   50.00%\n"
+    )
+    resolve_calls = []
+
+    def fake_check_output(cmd, **kw):
+        if "status" in cmd:
+            return pvesm_output
+        raise Exception("nope")
+
+    monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+    # Patch _resolve_iso_path to track which storage IDs are resolved
+    import osx_proxmox_next.defaults as dm
+    original_resolve = dm._resolve_iso_path
+    def tracking_resolve(sid):
+        resolve_calls.append(sid)
+        return original_resolve(sid)
+    monkeypatch.setattr(dm, "_resolve_iso_path", tracking_resolve)
+
+    dirs = detect_iso_storage()
+    assert DEFAULT_ISO_DIR in dirs
+    # inactive storage should NOT be resolved
+    assert "offline-nas" not in resolve_calls
+
+
+def test_resolve_iso_path_local():
+    """local storage resolves to default ISO dir."""
+    assert _resolve_iso_path("local") == DEFAULT_ISO_DIR
+
+
+def test_resolve_iso_path_unknown(monkeypatch):
+    """Unknown storage with no pvesm and no /mnt/pve path returns None."""
+    import subprocess
+    monkeypatch.setattr(
+        subprocess, "check_output",
+        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    monkeypatch.setattr(
+        "osx_proxmox_next.defaults.Path",
+        lambda p: Path("/nonexistent") if "/mnt/pve/" in str(p) else Path(p),
+    )
+    assert _resolve_iso_path("nonexistent-storage") is None
+
+
+def test_resolve_iso_path_mnt_pve(tmp_path, monkeypatch):
+    """Resolves storage via /mnt/pve/{id}/template/iso if it exists."""
+    import subprocess
+    iso_dir = tmp_path / "template" / "iso"
+    iso_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        subprocess, "check_output",
+        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    monkeypatch.setattr(
+        "osx_proxmox_next.defaults.Path",
+        lambda p: iso_dir if "/mnt/pve/" in str(p) else Path(p),
+    )
+    result = _resolve_iso_path("my-nas")
+    assert result == str(iso_dir)
+
+
+def test_resolve_iso_path_pvesm_success(monkeypatch):
+    """pvesm path returns a file path; we extract the parent directory."""
+    import subprocess
+    monkeypatch.setattr(
+        subprocess, "check_output",
+        lambda *a, **kw: "/mnt/pve/nas/template/iso/probe.iso\n",
+    )
+    result = _resolve_iso_path("nas")
+    assert result == "/mnt/pve/nas/template/iso"
+
+
+def test_detect_iso_storage_resolves_path(monkeypatch):
+    """detect_iso_storage resolves storage IDs via _resolve_iso_path."""
+    import subprocess
+    pvesm_output = (
+        "Name         Type     Status           Total            Used       Available        %\n"
+        "nas-iso        nfs     active       200000000       100000000       100000000   50.00%\n"
+    )
+
+    def fake_check_output(cmd, **kw):
+        if "status" in cmd:
+            return pvesm_output
+        # pvesm path call
+        return "/mnt/pve/nas-iso/template/iso/probe.iso\n"
+
+    monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+    dirs = detect_iso_storage()
+    assert "/mnt/pve/nas-iso/template/iso" in dirs
+    assert DEFAULT_ISO_DIR in dirs

@@ -29,6 +29,7 @@ class VmConfig:
     smbios_model: str = ""
     no_smbios: bool = False
     verbose_boot: bool = False
+    iso_dir: str = ""
 
 
 def validate_config(config: VmConfig) -> list[str]:
