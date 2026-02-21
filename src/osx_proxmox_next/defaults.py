@@ -55,6 +55,54 @@ def detect_memory_mb() -> int:
     return max(4096, min(32768, mem_total_mb // 2))
 
 
+DEFAULT_ISO_DIR = "/var/lib/vz/template/iso"
+
+
+def detect_iso_storage() -> list[str]:
+    """Return ISO directory paths from Proxmox storage pools that support ISO content."""
+    import subprocess
+    dirs: list[str] = []
+    try:
+        output = subprocess.check_output(
+            ["pvesm", "status", "-content", "iso"], text=True, timeout=2.0,
+        )
+        for line in output.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 7 and parts[1] != "0":
+                storage_id = parts[0]
+                path = _resolve_iso_path(storage_id)
+                if path and path not in dirs:
+                    dirs.append(path)
+    except Exception:
+        pass
+    # Always include local as fallback
+    if DEFAULT_ISO_DIR not in dirs:
+        dirs.insert(0, DEFAULT_ISO_DIR)
+    return dirs
+
+
+def _resolve_iso_path(storage_id: str) -> str | None:
+    """Resolve a Proxmox storage ID to its ISO template directory."""
+    import subprocess
+    try:
+        output = subprocess.check_output(
+            ["pvesm", "path", f"{storage_id}:iso/probe.iso"],
+            text=True, timeout=2.0,
+        ).strip()
+        # pvesm path returns full file path; we want the directory
+        if output:
+            return str(Path(output).parent)
+    except Exception:
+        pass
+    # Fallback heuristics for common Proxmox layouts
+    local_path = Path(f"/mnt/pve/{storage_id}/template/iso")
+    if local_path.exists():
+        return str(local_path)
+    if storage_id == "local":
+        return DEFAULT_ISO_DIR
+    return None
+
+
 def default_disk_gb(macos: str) -> int:
     if macos == "tahoe":
         return 160

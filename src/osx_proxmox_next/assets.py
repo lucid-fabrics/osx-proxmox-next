@@ -17,9 +17,9 @@ class AssetCheck:
 
 
 def required_assets(config: VmConfig) -> list[AssetCheck]:
-    iso_root = Path("/var/lib/vz/template/iso")
     checks: list[AssetCheck] = []
-    opencore_path = resolve_opencore_path(config.macos)
+    extra_dirs = [Path(config.iso_dir)] if config.iso_dir else []
+    opencore_path = resolve_opencore_path(config.macos, extra_dirs=extra_dirs)
 
     checks.append(
         AssetCheck(
@@ -31,7 +31,7 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
         )
     )
 
-    recovery_path = resolve_recovery_or_installer_path(config)
+    recovery_path = resolve_recovery_or_installer_path(config, extra_dirs=extra_dirs)
     checks.append(
         AssetCheck(
             name="Recovery image",
@@ -45,7 +45,7 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
 
 
 def suggested_fetch_commands(config: VmConfig) -> list[str]:
-    iso_root = "/var/lib/vz/template/iso"
+    iso_root = config.iso_dir or "/var/lib/vz/template/iso"
     return [
         f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
         f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
@@ -53,36 +53,48 @@ def suggested_fetch_commands(config: VmConfig) -> list[str]:
     ]
 
 
-def resolve_opencore_path(macos: str) -> Path:
+def resolve_opencore_path(macos: str, extra_dirs: list[Path] | None = None) -> Path:
     match = _find_iso(
         [
             "opencore-osx-proxmox-vm.iso",
             f"opencore-{macos}.iso",
             f"opencore-{macos}-*.iso",
-        ]
+        ],
+        extra_dirs=extra_dirs,
     )
     if match:
         return match
     return Path("/var/lib/vz/template/iso") / "opencore-osx-proxmox-vm.iso"
 
 
-def resolve_recovery_or_installer_path(config: VmConfig) -> Path:
+def resolve_recovery_or_installer_path(
+    config: VmConfig, extra_dirs: list[Path] | None = None,
+) -> Path:
     if config.installer_path:
         return Path(config.installer_path)
-    match = _find_iso([
-        f"{config.macos}-recovery.iso",
-        f"{config.macos}-recovery.img",
-        f"{config.macos}-recovery.dmg",
-    ])
+    match = _find_iso(
+        [
+            f"{config.macos}-recovery.iso",
+            f"{config.macos}-recovery.img",
+            f"{config.macos}-recovery.dmg",
+        ],
+        extra_dirs=extra_dirs,
+    )
     if match:
         return match
     return Path("/var/lib/vz/template/iso") / f"{config.macos}-recovery.iso"
 
 
-def _find_iso(patterns: list[str]) -> Path | None:
+def _find_iso(
+    patterns: list[str], extra_dirs: list[Path] | None = None,
+) -> Path | None:
     roots = [
         Path("/var/lib/vz/template/iso"),
     ]
+    if extra_dirs:
+        for d in extra_dirs:
+            if d not in roots:
+                roots.append(d)
     mnt_pve = Path("/mnt/pve")
     if mnt_pve.exists():
         for entry in sorted(mnt_pve.iterdir()):
