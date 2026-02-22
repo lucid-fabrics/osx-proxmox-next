@@ -306,10 +306,15 @@ function detect_memory_mb() {
 # ── Generate SMBIOS identity ──
 function generate_smbios() {
   local macos_ver="$1"
+  local existing_uuid="$2"
   SMBIOS_SERIAL=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 12)
   SMBIOS_MLB=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 17)
   SMBIOS_ROM=$(openssl rand -hex 6 | tr '[:lower:]' '[:upper:]')
-  SMBIOS_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
+  if [ -n "$existing_uuid" ]; then
+    SMBIOS_UUID="$existing_uuid"
+  else
+    SMBIOS_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
+  fi
   SMBIOS_MODEL="${SMBIOS_MODELS[$macos_ver]:-MacPro7,1}"
 }
 
