@@ -325,6 +325,8 @@ class NextApp(App):
                     yield Input(value=DEFAULT_ISO_DIR, id="iso_dir")
                     yield Static("Installer Path", classes="label")
                     yield Input(value="", id="installer_path")
+                    yield Static("Existing UUID (optional)", classes="label")
+                    yield Input(value="", id="existing_uuid", placeholder="Preserve existing VM UUID")
                 yield Static("", id="form_errors")
                 with Horizontal(classes="action_row"):
                     yield Button("Suggest Defaults", id="suggest_btn")
@@ -548,12 +550,26 @@ class NextApp(App):
         self._set_input_value("#storage_input", self.state.selected_storage or DEFAULT_STORAGE)
         self._set_input_value("#iso_dir", self.state.selected_iso_dir)
         if not self.state.smbios:
-            self.state.smbios = generate_smbios(macos)
+            existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
+            if existing_uuid:
+                identity = generate_smbios(macos)
+                identity.uuid = existing_uuid
+                self.state.smbios = identity
+            else:
+                self.state.smbios = generate_smbios(macos)
         self._update_smbios_preview()
 
     def _generate_smbios(self) -> None:
         macos = self.state.selected_os or "sequoia"
-        self.state.smbios = generate_smbios(macos)
+        existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
+
+        if existing_uuid:
+            # Preserve existing UUID, generate other fields
+            identity = generate_smbios(macos)
+            identity.uuid = existing_uuid
+            self.state.smbios = identity
+        else:
+            self.state.smbios = generate_smbios(macos)
         self._update_smbios_preview()
 
     def _update_smbios_preview(self) -> None:
