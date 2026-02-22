@@ -200,7 +200,7 @@ osx-next-cli apply --execute \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm \
   --smbios-serial C02X1234ABCD --smbios-uuid "$(uuidgen)" \
-  --smbios-model iMacPro1,1
+  --smbios-model MacPro7,1
 ```
 
 ---

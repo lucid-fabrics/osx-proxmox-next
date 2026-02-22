@@ -36,14 +36,14 @@ def test_rom_format() -> None:
 
 
 def test_model_for_known_macos() -> None:
-    assert model_for_macos("ventura") == "iMacPro1,1"
-    assert model_for_macos("sonoma") == "iMacPro1,1"
-    assert model_for_macos("sequoia") == "iMacPro1,1"
+    assert model_for_macos("ventura") == "MacPro7,1"
+    assert model_for_macos("sonoma") == "MacPro7,1"
+    assert model_for_macos("sequoia") == "MacPro7,1"
     assert model_for_macos("tahoe") == "MacPro7,1"
 
 
 def test_model_for_unknown_macos() -> None:
-    assert model_for_macos("unknown") == "iMacPro1,1"
+    assert model_for_macos("unknown") == "MacPro7,1"
 
 
 def test_generate_smbios_complete() -> None:
@@ -51,7 +51,7 @@ def test_generate_smbios_complete() -> None:
     assert len(identity.serial) == 12
     assert len(identity.mlb) == 17
     assert len(identity.rom) == 12
-    assert identity.model == "iMacPro1,1"
+    assert identity.model == "MacPro7,1"
     uuid_mod.UUID(identity.uuid)
 
 

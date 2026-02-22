@@ -74,9 +74,9 @@ declare -A MACOS_OS_TYPE=(
   ["tahoe"]="latest"
 )
 declare -A SMBIOS_MODELS=(
-  ["ventura"]="iMacPro1,1"
-  ["sonoma"]="iMacPro1,1"
-  ["sequoia"]="iMacPro1,1"
+  ["ventura"]="MacPro7,1"
+  ["sonoma"]="MacPro7,1"
+  ["sequoia"]="MacPro7,1"
   ["tahoe"]="MacPro7,1"
 )
 
@@ -310,7 +310,7 @@ function generate_smbios() {
   SMBIOS_MLB=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 17)
   SMBIOS_ROM=$(openssl rand -hex 6 | tr '[:lower:]' '[:upper:]')
   SMBIOS_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
-  SMBIOS_MODEL="${SMBIOS_MODELS[$macos_ver]:-iMacPro1,1}"
+  SMBIOS_MODEL="${SMBIOS_MODELS[$macos_ver]:-MacPro7,1}"
 }
 
 # ── Download macOS recovery via Apple's osrecovery API ──

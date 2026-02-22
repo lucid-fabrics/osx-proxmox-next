@@ -136,7 +136,7 @@ def test_smbios_model_fallback():
     cfg.smbios_model = ""  # empty model triggers fallback
     steps = build_plan(cfg)
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
-    assert f"product={base64.b64encode(b'iMacPro1,1').decode()}" in smbios_step.command
+    assert f"product={base64.b64encode(b'MacPro7,1').decode()}" in smbios_step.command
 
 
 def test_build_plan_includes_build_oc_step() -> None:

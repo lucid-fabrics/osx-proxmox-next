@@ -252,7 +252,7 @@ def test_select_os_sonoma() -> None:
             await pilot.pause()
             assert app.state.selected_os == "sonoma"
             assert app.state.smbios is not None
-            assert app.state.smbios.model == "iMacPro1,1"
+            assert app.state.smbios.model == "MacPro7,1"
             assert app.query_one("#os_sonoma").has_class("os_selected")
             assert not app.query_one("#os_sequoia").has_class("os_selected")
 

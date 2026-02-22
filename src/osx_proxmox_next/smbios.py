@@ -6,13 +6,13 @@ import uuid
 from dataclasses import dataclass
 
 SMBIOS_MODELS: dict[str, str] = {
-    "ventura": "iMacPro1,1",
-    "sonoma": "iMacPro1,1",
-    "sequoia": "iMacPro1,1",
+    "ventura": "MacPro7,1",
+    "sonoma": "MacPro7,1",
+    "sequoia": "MacPro7,1",
     "tahoe": "MacPro7,1",
 }
 
-DEFAULT_SMBIOS_MODEL = "iMacPro1,1"
+DEFAULT_SMBIOS_MODEL = "MacPro7,1"
 
 
 @dataclass
