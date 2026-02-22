@@ -90,6 +90,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             ],
         ),
         *_smbios_steps(config, vmid),
+        *_apple_services_steps(config, vmid),
         PlanStep(
             title="Attach EFI + TPM",
             argv=[
@@ -302,7 +303,7 @@ def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
     smbios_uuid = config.smbios_uuid
     model = config.smbios_model
     if not serial:
-        identity = generate_smbios(config.macos)
+        identity = generate_smbios(config.macos, config.apple_services)
         serial = identity.serial
         smbios_uuid = identity.uuid
         model = identity.model
@@ -326,6 +327,39 @@ def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
             argv=["qm", "set", vmid, "--smbios1", smbios_value],
         ),
     ]
+
+
+def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
+    """Configure vmgenid and static MAC for Apple services (iMessage, FaceTime, etc.)."""
+    if not config.apple_services:
+        return []
+
+    steps = []
+
+    # Generate vmgenid if not set
+    if not config.vmgenid:
+        from .smbios import generate_vmgenid
+        config.vmgenid = generate_vmgenid()
+
+    # Generate static MAC if not set
+    if not config.static_mac:
+        from .smbios import generate_mac
+        config.static_mac = generate_mac()
+
+    # Add vmgenid for Apple services
+    steps.append(PlanStep(
+        title="Configure vmgenid for Apple services",
+        argv=["qm", "set", vmid, "--vmgenid", config.vmgenid],
+    ))
+
+    # Get current net0 config and update with static MAC
+    # We'll replace the existing net0 with a static MAC
+    steps.append(PlanStep(
+        title="Configure static MAC for Apple services",
+        argv=["qm", "set", vmid, "--net0", f"virtio,bridge={config.bridge},macaddr={config.static_mac}"],
+    ))
+
+    return steps
 
 
 # ── VM Destroy ──────────────────────────────────────────────────────

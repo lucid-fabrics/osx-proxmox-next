@@ -22,6 +22,7 @@ RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
 NSAPP="macos-vm"
 var_os="macos"
+APPLE_SERVICES="false"
 
 YW=$(echo "\033[33m")
 BL=$(echo "\033[36m")
@@ -870,6 +871,22 @@ qm set "$VMID" \
   --smbios1 "uuid=${SMBIOS_UUID},serial=${SMBIOS_SERIAL_B64},manufacturer=${SMBIOS_MFR_B64},product=${SMBIOS_PRODUCT_B64},family=${SMBIOS_FAMILY_B64}" \
   >/dev/null
 msg_ok "Set SMBIOS identity (serial: $SMBIOS_SERIAL)"
+
+# ── Apple Services configuration (vmgenid + static MAC) ──
+if [ "$APPLE_SERVICES" = "true" ]; then
+  msg_info "Configuring Apple Services (iMessage, FaceTime, iCloud)"
+  # Generate vmgenid for Apple services
+  VMGENID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
+  # Generate static MAC address (locally administered)
+  MAC_BYTE1=$((0x$(openssl rand -hex 1) | 0x02))
+  MAC_BYTE1=$(printf '%02X' $MAC_BYTE1)
+  MAC_rest=$(openssl rand -hex 5 | tr '[:lower:]' '[:upper:]' | sed 's/\(..\)/\1:/g; s/:$//')
+  STATIC_MAC="${MAC_BYTE1}:${MAC_rest}"
+
+  qm set "$VMID" --vmgenid "$VMGENID" >/dev/null
+  qm set "$VMID" --net0 "virtio,bridge=${BRG},macaddr=${STATIC_MAC}" >/dev/null
+  msg_ok "Configured Apple Services (vmgenid: $VMGENID, MAC: $STATIC_MAC)"
+fi
 
 # ── Attach EFI disk + TPM ──
 msg_info "Attaching EFI disk + TPM"

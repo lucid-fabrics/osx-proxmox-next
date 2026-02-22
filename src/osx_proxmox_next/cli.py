@@ -32,6 +32,7 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
         smbios_rom=args.smbios_rom or "",
         smbios_model=args.smbios_model or "",
         no_smbios=args.no_smbios,
+        apple_services=args.apple_services,
         verbose_boot=args.verbose_boot,
         iso_dir=getattr(args, "iso_dir", "") or "",
     )
@@ -104,6 +105,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--smbios-rom", type=str, default="")
     common.add_argument("--smbios-model", type=str, default="")
     common.add_argument("--no-smbios", action="store_true", default=False)
+    common.add_argument("--apple-services", action="store_true", default=False,
+                        help="Configure for Apple services (iMessage, FaceTime, iCloud). Adds vmgenid and static MAC.")
     common.add_argument("--no-download", action="store_true", default=False,
                         help="Skip auto-download of missing assets")
     common.add_argument("--verbose-boot", action="store_true", default=False,

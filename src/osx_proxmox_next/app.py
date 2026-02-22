@@ -39,6 +39,7 @@ class WizardState:
     storage: str = "local-lvm"
     installer_path: str = ""
     smbios: SmbiosIdentity | None = None
+    apple_services: bool = False
     form_errors: dict[str, str] = field(default_factory=dict)
     # Preflight
     preflight_done: bool = False
@@ -327,6 +328,13 @@ class NextApp(App):
                     yield Input(value="", id="installer_path")
                     yield Static("Existing UUID (optional)", classes="label")
                     yield Input(value="", id="existing_uuid", placeholder="Preserve existing VM UUID")
+                with Horizontal(classes="action_row"):
+                    yield Checkbox("Enable Apple Services (iMessage, FaceTime, iCloud)", id="apple_services_cb")
+                with Container(id="apple_services_fields", classes="hidden"):
+                    yield Static("Custom vmgenid (optional)", classes="label")
+                    yield Input(value="", id="custom_vmgenid", placeholder="Auto-generated if empty")
+                    yield Static("Custom MAC (optional)", classes="label")
+                    yield Input(value="", id="custom_mac", placeholder="Auto-generated if empty")
                 yield Static("", id="form_errors")
                 with Horizontal(classes="action_row"):
                     yield Button("Suggest Defaults", id="suggest_btn")
@@ -429,6 +437,17 @@ class NextApp(App):
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id == "manage_purge_cb":
             self._toggle_purge()
+        if event.checkbox.id == "apple_services_cb":
+            self.state.apple_services = event.checkbox.value
+            self._update_smbios_preview()
+            self._toggle_apple_services_fields()
+
+    def _toggle_apple_services_fields(self) -> None:
+        container = self.query_one("#apple_services_fields")
+        if self.state.apple_services:
+            container.remove_class("hidden")
+        else:
+            container.add_class("hidden")
 
     # ── Navigation ──────────────────────────────────────────────────
 
@@ -551,31 +570,35 @@ class NextApp(App):
         self._set_input_value("#iso_dir", self.state.selected_iso_dir)
         if not self.state.smbios:
             existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
+            apple_services = self.state.apple_services
             if existing_uuid:
-                identity = generate_smbios(macos)
+                identity = generate_smbios(macos, apple_services)
                 identity.uuid = existing_uuid
                 self.state.smbios = identity
             else:
-                self.state.smbios = generate_smbios(macos)
+                self.state.smbios = generate_smbios(macos, apple_services)
         self._update_smbios_preview()
 
     def _generate_smbios(self) -> None:
         macos = self.state.selected_os or "sequoia"
         existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
+        apple_services = self.state.apple_services
 
         if existing_uuid:
             # Preserve existing UUID, generate other fields
-            identity = generate_smbios(macos)
+            identity = generate_smbios(macos, apple_services)
             identity.uuid = existing_uuid
             self.state.smbios = identity
         else:
-            self.state.smbios = generate_smbios(macos)
+            self.state.smbios = generate_smbios(macos, apple_services)
         self._update_smbios_preview()
 
     def _update_smbios_preview(self) -> None:
         smbios = self.state.smbios
         if smbios:
             text = f"SMBIOS: serial={smbios.serial}  uuid={smbios.uuid}  model={smbios.model}"
+            if self.state.apple_services:
+                text += "  [Apple Services]"
         else:
             text = "SMBIOS: not generated yet."
         self.query_one("#smbios_preview", Static).update(text)
@@ -667,6 +690,9 @@ class NextApp(App):
             smbios_mlb=smbios.mlb if smbios else "",
             smbios_rom=smbios.rom if smbios else "",
             smbios_model=smbios.model if smbios else "",
+            apple_services=self.state.apple_services,
+            vmgenid=self.query_one("#custom_vmgenid", Input).value.strip().upper() if self.state.apple_services else "",
+            static_mac=self.query_one("#custom_mac", Input).value.strip().upper() if self.state.apple_services else "",
         )
 
     # ── Step 5: Review & Dry Run ────────────────────────────────────

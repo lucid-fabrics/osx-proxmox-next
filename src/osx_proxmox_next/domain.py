@@ -28,6 +28,9 @@ class VmConfig:
     smbios_rom: str = ""
     smbios_model: str = ""
     no_smbios: bool = False
+    apple_services: bool = False
+    vmgenid: str = ""
+    static_mac: str = ""
     verbose_boot: bool = False
     iso_dir: str = ""
 
