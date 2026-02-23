@@ -878,7 +878,7 @@ if [ "$APPLE_SERVICES" = "true" ]; then
   # Generate vmgenid for Apple services
   VMGENID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
   # Generate static MAC address (locally administered)
-  MAC_BYTE1=$((0x$(openssl rand -hex 1) | 0x02))
+  MAC_BYTE1=$(( (0x$(openssl rand -hex 1) | 0x02) & 0xFE ))
   MAC_BYTE1=$(printf '%02X' $MAC_BYTE1)
   MAC_rest=$(openssl rand -hex 5 | tr '[:lower:]' '[:upper:]' | sed 's/\(..\)/\1:/g; s/:$//')
   STATIC_MAC="${MAC_BYTE1}:${MAC_rest}"
