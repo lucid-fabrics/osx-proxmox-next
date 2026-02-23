@@ -66,7 +66,7 @@ def generate_rom() -> str:
 def generate_mac() -> str:
     """Generate a static MAC address (local admin bit set)."""
     # First byte: 0x02 (locally administered, unicast)
-    first_byte = secrets.randbelow(256) | 0x02 & 0xFE
+    first_byte = (secrets.randbelow(256) | 0x02) & 0xFE
     rest = [secrets.randbelow(256) for _ in range(5)]
     return ":".join(f"{(first_byte if i == 0 else rest[i-1]):02X}" for i in range(6))
 
