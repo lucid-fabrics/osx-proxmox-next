@@ -201,6 +201,13 @@ osx-next-cli apply --execute \
   --bridge vmbr0 --storage local-lvm \
   --smbios-serial C02X1234ABCD --smbios-uuid "$(uuidgen)" \
   --smbios-model MacPro7,1
+
+# Enable Apple Services (iMessage, FaceTime, iCloud)
+osx-next-cli apply --execute \
+  --vmid 910 --name macos-sequoia --macos sequoia \
+  --cores 8 --memory 16384 --disk 128 \
+  --bridge vmbr0 --storage local-lvm \
+  --apple-services
 ```
 
 ---
@@ -362,9 +369,32 @@ Apple services require a clean, unique SMBIOS identity and stable network/time c
 This tool **automatically generates** a unique SMBIOS identity (serial, UUID, model) for each VM and applies it via Proxmox's native `--smbios1` flag. No manual OpenCore config editing required.
 
 - **TUI:** SMBIOS is auto-generated when you select a macOS version in step 1. Click **Generate SMBIOS** in step 3 to regenerate.
-- **CLI:** SMBIOS is auto-generated unless you pass `--no-smbios` or provide your own values via `--smbios-serial`, `--smbios-uuid`, `--smbios-model`.
+- **CLI:** SMBIOS is auto-generated unless you pass `--no-smbios` or provide your own values via `--smbios-serial`, `--smbios-uuid`, `--smbios-mlb`, `--smbios-rom`, `--smbios-model`.
+- **Existing UUID:** Enter an existing UUID in step 4 to preserve it (useful for re-running on an existing VM).
 
 The generated values are visible in the dry-run output as a `qm set --smbios1` step.
+
+### Apple Services (iMessage, FaceTime, iCloud)
+
+Enable Apple Services support with the `--apple-services` flag:
+
+```bash
+# Enable Apple Services (auto-generates vmgenid + static MAC)
+osx-next-cli apply --execute \
+  --vmid 910 --name macos-sequoia --macos sequoia \
+  --cores 8 --memory 16384 --disk 128 \
+  --bridge vmbr0 --storage local-lvm \
+  --apple-services
+
+# With custom vmgenid and MAC (provide your own)
+osx-next-cli apply --execute \
+  --vmid 910 --name macos-sequoia --macos sequoia \
+  --apple-services --smbios-uuid "YOUR-UUID-HERE"
+```
+
+In the **TUI**, check "Enable Apple Services (iMessage, FaceTime, iCloud)" in step 4 to add:
+- `vmgenid` device (required for Apple services)
+- Static MAC address (persistent across reboots)
 
 ### Additional Setup for Apple Services
 
@@ -376,7 +406,8 @@ The generated values are visible in the dry-run output as a `qm set --smbios1` s
 ### Checklist
 
 - [x] SMBIOS values are unique to this VM (auto-generated)
-- [ ] MAC address is stable (not regenerated each boot)
+- [x] MAC address is stable (auto-generated with --apple-services)
+- [x] vmgenid is configured (auto-generated with --apple-services)
 - [ ] Same OpenCore EFI is always used
 - [ ] NVRAM reset is not triggered on every boot
 
