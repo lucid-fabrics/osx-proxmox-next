@@ -40,6 +40,8 @@ sync_repo() {
     git clone "$REPO_URL" "$REPO_DIR" >>"$LOG_FILE" 2>&1 || die "git clone failed"
     git -C "$REPO_DIR" checkout "$REPO_BRANCH" >>"$LOG_FILE" 2>&1 || die "git checkout failed"
   fi
+  # Purge stale bytecode so Python imports fresh source
+  find "$REPO_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 }
 
 setup_runtime() {
@@ -48,7 +50,8 @@ setup_runtime() {
   # shellcheck source=/dev/null
   source "$VENV_DIR/bin/activate"
   pip install --upgrade pip >>"$LOG_FILE" 2>&1 || die "pip upgrade failed"
-  pip install -e "$REPO_DIR" >>"$LOG_FILE" 2>&1 || die "editable install failed"
+  pip install --force-reinstall --no-deps -e "$REPO_DIR" >>"$LOG_FILE" 2>&1 || die "editable install failed"
+  pip install -e "$REPO_DIR" >>"$LOG_FILE" 2>&1 || die "dependency install failed"
 }
 
 launch() {
