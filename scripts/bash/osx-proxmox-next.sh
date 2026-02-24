@@ -520,6 +520,12 @@ function build_opencore_disk() {
 import plistlib, sys
 path = sys.argv[1]
 cpu_vendor = sys.argv[2]
+apple_svc = sys.argv[3] if len(sys.argv) > 3 else 'false'
+serial = sys.argv[4] if len(sys.argv) > 4 else ''
+uuid_val = sys.argv[5] if len(sys.argv) > 5 else ''
+mlb = sys.argv[6] if len(sys.argv) > 6 else ''
+rom = sys.argv[7] if len(sys.argv) > 7 else ''
+model = sys.argv[8] if len(sys.argv) > 8 else ''
 with open(path, 'rb') as f:
     pl = plistlib.load(f)
 # Security
@@ -548,9 +554,21 @@ if cpu_vendor == 'AMD':
     kq = pl['Kernel']['Quirks']
     kq['AppleCpuPmCfgLock'] = True
     kq['AppleXcpmCfgLock'] = True
+# PlatformInfo — required for Apple Services (iMessage, FaceTime, iCloud)
+# macOS reads identity from OpenCore's EFI PlatformInfo, not QEMU SMBIOS
+if apple_svc == 'true' and serial:
+    pi = pl.setdefault('PlatformInfo', {}).setdefault('Generic', {})
+    pi['SystemSerialNumber'] = serial
+    pi['SystemProductName'] = model
+    pi['SystemUUID'] = uuid_val
+    pi['MLB'] = mlb
+    pi['ROM'] = bytes.fromhex(rom)
+    pl['PlatformInfo']['UpdateSMBIOS'] = True
+    pl['PlatformInfo']['UpdateDataHub'] = True
 with open(path, 'wb') as f:
     plistlib.dump(pl, f)
-" "$dest_mnt/EFI/OC/config.plist" "$CPU_VENDOR" || {
+" "$dest_mnt/EFI/OC/config.plist" "$CPU_VENDOR" \
+      "$APPLE_SERVICES" "$SMBIOS_SERIAL" "$SMBIOS_UUID" "$SMBIOS_MLB" "$SMBIOS_ROM" "$SMBIOS_MODEL" || {
       msg_error "Failed to patch OpenCore config.plist"
       umount "$dest_mnt" 2>/dev/null || true
       umount "$src_mnt" 2>/dev/null || true
@@ -852,12 +870,23 @@ fi
 RECOVERY_RAW="$TEMP_DIR/recovery.img"
 download_recovery "$MACOS_VER" "$RECOVERY_RAW"
 
+# ── Generate SMBIOS identity (before OC build — PlatformInfo needs these) ──
+generate_smbios "$MACOS_VER"
+
+# ── Apple Services: derive ROM from static MAC ──
+if [ "$APPLE_SERVICES" = "true" ]; then
+  # Generate static MAC address (locally administered, unicast)
+  MAC_BYTE1=$(( (0x$(openssl rand -hex 1) | 0x02) & 0xFE ))
+  MAC_BYTE1=$(printf '%02X' $MAC_BYTE1)
+  MAC_rest=$(openssl rand -hex 5 | tr '[:lower:]' '[:upper:]' | sed 's/\(..\)/\1:/g; s/:$//')
+  STATIC_MAC="${MAC_BYTE1}:${MAC_rest}"
+  # Derive ROM from MAC (macOS cross-checks ROM against NIC during Apple ID validation)
+  SMBIOS_ROM=$(echo "$STATIC_MAC" | tr -d ':')
+fi
+
 # ── Build OpenCore GPT disk ──
 OC_DISK="$TEMP_DIR/opencore.raw"
 build_opencore_disk "$OC_ISO" "$OC_DISK" "$MACOS_VER"
-
-# ── Generate SMBIOS identity ──
-generate_smbios "$MACOS_VER"
 
 # ── Create VM ──
 msg_info "Creating macOS VM shell"
@@ -905,11 +934,7 @@ if [ "$APPLE_SERVICES" = "true" ]; then
   msg_info "Configuring Apple Services (iMessage, FaceTime, iCloud)"
   # Generate vmgenid for Apple services
   VMGENID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
-  # Generate static MAC address (locally administered)
-  MAC_BYTE1=$(( (0x$(openssl rand -hex 1) | 0x02) & 0xFE ))
-  MAC_BYTE1=$(printf '%02X' $MAC_BYTE1)
-  MAC_rest=$(openssl rand -hex 5 | tr '[:lower:]' '[:upper:]' | sed 's/\(..\)/\1:/g; s/:$//')
-  STATIC_MAC="${MAC_BYTE1}:${MAC_rest}"
+  # STATIC_MAC was already generated before OC build (for ROM derivation)
 
   qm set "$VMID" --vmgenid "$VMGENID" >/dev/null
   qm set "$VMID" --net0 "virtio,bridge=${BRG},macaddr=${STATIC_MAC}" >/dev/null

@@ -450,6 +450,63 @@ def test_fetch_vm_info_config_failure() -> None:
     assert info.name == ""
 
 
+def test_build_plan_apple_services_patches_platforminfo(monkeypatch) -> None:
+    """When apple_services=True, PlatformInfo fields must appear in OC build script."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = True
+    steps = build_plan(cfg)
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "PlatformInfo" in build.command
+    assert "SystemSerialNumber" in build.command
+    assert "MLB" in build.command
+    assert "ROM" in build.command
+    assert "UpdateSMBIOS" in build.command
+    assert "UpdateDataHub" in build.command
+
+
+def test_build_plan_no_apple_services_no_platforminfo(monkeypatch) -> None:
+    """When apple_services=False, PlatformInfo must NOT appear in OC build script."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = False
+    steps = build_plan(cfg)
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "PlatformInfo" not in build.command
+
+
+def test_build_plan_apple_services_rom_derived_from_mac(monkeypatch) -> None:
+    """When apple_services=True, ROM must be derived from static MAC."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = True
+    steps = build_plan(cfg)
+    # ROM should equal MAC without colons
+    expected_rom = cfg.static_mac.replace(":", "")[:12].upper()
+    assert cfg.smbios_rom == expected_rom
+    # Build script should contain the derived ROM
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert expected_rom in build.command
+
+
+def test_build_plan_apple_services_mac_propagated_from_smbios(monkeypatch) -> None:
+    """_smbios_steps propagates MAC to config.static_mac so _apple_services_steps reuses it."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = True
+    steps = build_plan(cfg)
+    # MAC set by _smbios_steps should be reused — verify ROM matches MAC
+    mac_hex = cfg.static_mac.replace(":", "").upper()
+    assert cfg.smbios_rom == mac_hex
+    # Verify the MAC appears in the net0 step
+    net_step = next(step for step in steps if step.title == "Configure static MAC for Apple services")
+    assert cfg.static_mac in net_step.command
+
+
 def test_fetch_vm_info_no_name_in_config() -> None:
     class FakeAdapter:
         def run(self, argv):

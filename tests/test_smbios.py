@@ -4,6 +4,7 @@ import uuid as uuid_mod
 from osx_proxmox_next.smbios import (
     generate_mlb,
     generate_rom,
+    generate_rom_from_mac,
     generate_serial,
     generate_smbios,
     generate_uuid,
@@ -53,6 +54,24 @@ def test_generate_smbios_complete() -> None:
     assert len(identity.rom) == 12
     assert identity.model == "MacPro7,1"
     uuid_mod.UUID(identity.uuid)
+
+
+def test_generate_rom_from_mac() -> None:
+    assert generate_rom_from_mac("02:AB:CD:EF:01:23") == "02ABCDEF0123"
+    assert generate_rom_from_mac("aa:bb:cc:dd:ee:ff") == "AABBCCDDEEFF"
+
+
+def test_generate_smbios_apple_services_derives_rom_from_mac() -> None:
+    identity = generate_smbios("sequoia", apple_services=True)
+    assert identity.mac != ""
+    expected_rom = identity.mac.replace(":", "")[:12].upper()
+    assert identity.rom == expected_rom
+
+
+def test_generate_smbios_no_apple_services_random_rom() -> None:
+    identity = generate_smbios("sequoia", apple_services=False)
+    assert identity.mac == ""
+    assert len(identity.rom) == 12
 
 
 def test_uniqueness() -> None:

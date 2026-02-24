@@ -9,7 +9,7 @@ from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import CpuInfo, detect_cpu_info
 from .domain import SUPPORTED_MACOS, VmConfig
 from .infrastructure import ProxmoxAdapter
-from .smbios import generate_smbios, model_for_macos
+from .smbios import generate_rom_from_mac, generate_smbios, model_for_macos
 
 
 @dataclass
@@ -122,7 +122,16 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             title="Build OpenCore boot disk",
             argv=[
                 "bash", "-c",
-                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk, config.macos, is_amd, config.cores, config.verbose_boot),
+                _build_oc_disk_script(
+                    opencore_path, recovery_raw, oc_disk, config.macos,
+                    is_amd, config.cores, config.verbose_boot,
+                    apple_services=config.apple_services,
+                    smbios_serial=config.smbios_serial,
+                    smbios_uuid=config.smbios_uuid,
+                    smbios_mlb=config.smbios_mlb,
+                    smbios_rom=config.smbios_rom,
+                    smbios_model=config.smbios_model,
+                ),
             ],
         ),
         PlanStep(
@@ -228,6 +237,9 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
 def _build_oc_disk_script(
     opencore_path: Path, recovery_path: Path, dest: Path, macos: str,
     is_amd: bool = False, cores: int = 4, verbose_boot: bool = False,
+    apple_services: bool = False, smbios_serial: str = "",
+    smbios_uuid: str = "", smbios_mlb: str = "", smbios_rom: str = "",
+    smbios_model: str = "",
 ) -> str:
     """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
     meta = SUPPORTED_MACOS.get(macos, {})
@@ -246,6 +258,22 @@ def _build_oc_disk_script(
             "kq=p[\"Kernel\"][\"Quirks\"]; "
             "kq[\"AppleCpuPmCfgLock\"]=True; "
             "kq[\"AppleXcpmCfgLock\"]=True; "
+        )
+
+    # PlatformInfo — required for Apple Services (iMessage, FaceTime, iCloud).
+    # macOS reads identity from OpenCore's EFI PlatformInfo, not QEMU SMBIOS.
+    # ROM must match NIC MAC (macOS cross-checks during Apple ID validation).
+    platforminfo_block = ""
+    if apple_services and smbios_serial:
+        platforminfo_block = (
+            "pi=p.setdefault(\"PlatformInfo\",{}).setdefault(\"Generic\",{}); "
+            f"pi[\"SystemSerialNumber\"]=\"{smbios_serial}\"; "
+            f"pi[\"SystemProductName\"]=\"{smbios_model}\"; "
+            f"pi[\"SystemUUID\"]=\"{smbios_uuid}\"; "
+            f"pi[\"MLB\"]=\"{smbios_mlb}\"; "
+            f"pi[\"ROM\"]=bytes.fromhex(\"{smbios_rom}\"); "
+            "p[\"PlatformInfo\"][\"UpdateSMBIOS\"]=True; "
+            "p[\"PlatformInfo\"][\"UpdateDataHub\"]=True; "
         )
 
     return (
@@ -294,7 +322,8 @@ def _build_oc_disk_script(
         "p[\"NVRAM\"][\"WriteFlash\"]=True; "
         # Enable VirtualSMC — shipped OC ISO has it disabled
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
-        + amd_patch_block +
+        + amd_patch_block
+        + platforminfo_block +
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "print(\"config.plist patched\")' && "
         # Hide OC partition from boot picker (shown only when user presses Space)
@@ -327,6 +356,9 @@ def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
         config.smbios_model = model
         config.smbios_mlb = identity.mlb
         config.smbios_rom = identity.rom
+        # Propagate MAC so _apple_services_steps doesn't generate a second one
+        if identity.mac and not config.static_mac:
+            config.static_mac = identity.mac
     if not model:
         model = model_for_macos(config.macos)
     smbios_value = (
@@ -361,6 +393,9 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
     if not config.static_mac:
         from .smbios import generate_mac
         config.static_mac = generate_mac()
+
+    # Derive ROM from MAC — macOS cross-checks ROM against NIC during Apple ID validation
+    config.smbios_rom = generate_rom_from_mac(config.static_mac)
 
     # Add vmgenid for Apple services
     steps.append(PlanStep(

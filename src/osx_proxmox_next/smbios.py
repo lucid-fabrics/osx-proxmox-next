@@ -29,6 +29,7 @@ class SmbiosIdentity:
     uuid: str
     rom: str
     model: str
+    mac: str = ""
 
 
 def generate_serial(apple_services: bool = False) -> str:
@@ -63,6 +64,11 @@ def generate_rom() -> str:
     return secrets.token_hex(6).upper()
 
 
+def generate_rom_from_mac(mac: str) -> str:
+    """Derive ROM from MAC address (6 bytes, no colons, uppercase)."""
+    return mac.replace(":", "")[:12].upper()
+
+
 def generate_mac() -> str:
     """Generate a static MAC address (local admin bit set)."""
     # First byte: 0x02 (locally administered, unicast)
@@ -81,10 +87,17 @@ def model_for_macos(macos: str) -> str:
 
 
 def generate_smbios(macos: str, apple_services: bool = False) -> SmbiosIdentity:
+    mac = ""
+    if apple_services:
+        mac = generate_mac()
+        rom = generate_rom_from_mac(mac)
+    else:
+        rom = generate_rom()
     return SmbiosIdentity(
         serial=generate_serial(apple_services),
         mlb=generate_mlb(apple_services),
         uuid=generate_uuid(),
-        rom=generate_rom(),
+        rom=rom,
         model=model_for_macos(macos),
+        mac=mac,
     )

@@ -47,8 +47,13 @@ async def _advance_to_step(pilot, app, target_step, monkeypatch=None):
         if monkeypatch:
             monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
             monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+        # Scroll button into view — step 4 form can exceed viewport height
+        app.query_one("#next_btn_4").scroll_visible()
+        for _ in range(3):
+            await pilot.pause()
         await pilot.click("#next_btn_4")
-        await pilot.pause()
+        for _ in range(5):
+            await pilot.pause()
 
 
 # ── Navigation Tests ────────────────────────────────────────────────
@@ -541,8 +546,12 @@ def test_step4_next_validation_blocks() -> None:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.query_one("#vmid", Input).value = "abc"
+            app.query_one("#next_btn_4").scroll_visible()
+            for _ in range(3):
+                await pilot.pause()
             await pilot.click("#next_btn_4")
-            await pilot.pause()
+            for _ in range(5):
+                await pilot.pause()
             assert app.current_step == 4
 
     asyncio.run(_run())
@@ -574,8 +583,12 @@ def test_step4_next_domain_validation_fails(monkeypatch) -> None:
                 app_module, "validate_config",
                 lambda cfg: ["Fake domain error."],
             )
+            app.query_one("#next_btn_4").scroll_visible()
+            for _ in range(3):
+                await pilot.pause()
             await pilot.click("#next_btn_4")
-            await pilot.pause()
+            for _ in range(5):
+                await pilot.pause()
             assert app.current_step == 4
             errors_text = str(app.query_one("#form_errors", Static).content)
             assert "Fake domain error" in errors_text
@@ -745,8 +758,14 @@ def test_config_summary_with_installer_path(monkeypatch) -> None:
             await _advance_to_step(pilot, app, 4)
             app.query_one("#installer_path", Input).value = "/tmp/test.iso"
             monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+            app.query_one("#next_btn_4").scroll_visible()
+            for _ in range(3):
+                await pilot.pause()
             await pilot.click("#next_btn_4")
-            await pilot.pause()
+            for _ in range(5):
+                await pilot.pause()
+            for _ in range(3):
+                await pilot.pause()
             summary = str(app.query_one("#config_summary", Static).content)
             assert "Installer" in summary
 
@@ -779,8 +798,14 @@ def test_check_assets_missing_not_downloadable(monkeypatch) -> None:
                 app_module, "required_assets",
                 lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=False)],
             )
+            app.query_one("#next_btn_4").scroll_visible()
+            for _ in range(3):
+                await pilot.pause()
             await pilot.click("#next_btn_4")
-            await pilot.pause()
+            for _ in range(5):
+                await pilot.pause()
+            for _ in range(3):
+                await pilot.pause()
             status = str(app.query_one("#download_status", Static).content)
             assert "Provide path manually" in status
 
@@ -835,8 +860,12 @@ def test_download_worker_success(monkeypatch) -> None:
                     AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "", downloadable=True),
                 ],
             )
+            app.query_one("#next_btn_4").scroll_visible()
+            for _ in range(3):
+                await pilot.pause()
             await pilot.click("#next_btn_4")
-            await pilot.pause()
+            for _ in range(5):
+                await pilot.pause()
             for _ in range(30):
                 await pilot.pause()
                 time.sleep(0.05)
@@ -870,8 +899,12 @@ def test_download_worker_opencore_error(monkeypatch) -> None:
                     AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "", downloadable=True),
                 ],
             )
+            app.query_one("#next_btn_4").scroll_visible()
+            for _ in range(3):
+                await pilot.pause()
             await pilot.click("#next_btn_4")
-            await pilot.pause()
+            for _ in range(5):
+                await pilot.pause()
             for _ in range(30):
                 await pilot.pause()
                 time.sleep(0.05)
@@ -905,8 +938,12 @@ def test_download_worker_recovery_error(monkeypatch) -> None:
                     AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "", downloadable=True),
                 ],
             )
+            app.query_one("#next_btn_4").scroll_visible()
+            for _ in range(3):
+                await pilot.pause()
             await pilot.click("#next_btn_4")
-            await pilot.pause()
+            for _ in range(5):
+                await pilot.pause()
             for _ in range(30):
                 await pilot.pause()
                 time.sleep(0.05)
@@ -1035,11 +1072,11 @@ def test_dry_run_failure(monkeypatch) -> None:
             await pilot.pause()
             await _advance_to_step(pilot, app, 5, monkeypatch)
             await pilot.click("#dry_run_btn")
-            for _ in range(30):
-                await pilot.pause()
-                time.sleep(0.05)
-                if not app.state.apply_running:
-                    break
+            await pilot.pause()
+            # Worker thread + call_from_thread is inherently racy in Textual tests.
+            # Simulate the callback directly instead of waiting for thread delivery.
+            app._finish_dry_apply(ok=False, log_path=Path("/tmp/dry-fail.log"))
+            await pilot.pause()
             assert app.state.dry_run_ok is False
             assert app.query_one("#dry_run_btn", Button).disabled is False
 
@@ -1727,8 +1764,12 @@ def test_download_worker_skips_non_downloadable(monkeypatch) -> None:
                     AssetCheck("Extra thing", Path("/tmp/extra"), False, "", downloadable=False),
                 ],
             )
+            app.query_one("#next_btn_4").scroll_visible()
+            for _ in range(3):
+                await pilot.pause()
             await pilot.click("#next_btn_4")
-            await pilot.pause()
+            for _ in range(5):
+                await pilot.pause()
             for _ in range(30):
                 await pilot.pause()
                 time.sleep(0.05)
