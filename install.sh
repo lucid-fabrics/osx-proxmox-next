@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${OSX_NEXT_REPO_URL:-https://github.com/wmehanna/osx-proxmox-next.git}"
+REPO_URL="${OSX_NEXT_REPO_URL:-https://github.com/lucid-fabrics/osx-proxmox-next.git}"
 REPO_DIR="${OSX_NEXT_REPO_DIR:-/root/osx-proxmox-next}"
 REPO_BRANCH="${OSX_NEXT_BRANCH:-fix/smbios-base64-flag}"
 VENV_DIR="${OSX_NEXT_VENV_DIR:-$REPO_DIR/.venv}"
