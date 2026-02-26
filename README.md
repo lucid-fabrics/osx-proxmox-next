@@ -238,7 +238,7 @@ Use `osx-next-cli download --macos <version>` to auto-fetch missing assets. The 
 <details>
 <summary><strong>I see UEFI Shell instead of macOS boot</strong></summary>
 
-Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on `ide2`, with boot order set to `ide2;sata0;ide0`.
+Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on `ide2`, with boot order set to `ide2;virtio0;ide0`.
 </details>
 
 <details>
@@ -287,7 +287,7 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 
 - Use **SSD/NVMe-backed storage** for VM disks
 - Don't overcommit host CPU or RAM
-- Keep the main macOS disk on `sata0`, OpenCore on `ide0`, recovery on `ide2`
+- Keep the main macOS disk on `virtio0`, OpenCore on `ide0`, recovery on `ide2`
 - Use `vga: std` during installation (switch after)
 - Change one setting at a time and measure the impact
 - **Intel CPUs** get native host passthrough — best performance

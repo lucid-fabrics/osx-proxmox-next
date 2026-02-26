@@ -55,7 +55,7 @@ def test_render_script_contains_metadata() -> None:
 def test_build_plan_boot_order_is_shell_safe() -> None:
     steps = build_plan(_cfg("sequoia"))
     boot = next(step for step in steps if step.title == "Set boot order")
-    assert "--boot 'order=ide2;sata0;ide0'" in boot.command
+    assert "--boot 'order=ide2;virtio0;ide0'" in boot.command
 
 
 def test_build_plan_sets_applesmc_args() -> None:
@@ -505,6 +505,59 @@ def test_build_plan_apple_services_mac_propagated_from_smbios(monkeypatch) -> No
     # Verify the MAC appears in the net0 step
     net_step = next(step for step in steps if step.title == "Configure static MAC for Apple services")
     assert cfg.static_mac in net_step.command
+
+
+def test_build_plan_disables_balloon() -> None:
+    """macOS doesn't support balloon driver — must be disabled."""
+    steps = build_plan(_cfg("sequoia"))
+    create = next(step for step in steps if step.title == "Create VM shell")
+    assert "--balloon 0" in create.command
+
+
+def test_build_plan_enables_guest_agent() -> None:
+    """QEMU guest agent should be enabled for graceful shutdown."""
+    steps = build_plan(_cfg("sequoia"))
+    create = next(step for step in steps if step.title == "Create VM shell")
+    assert "--agent enabled=1" in create.command
+
+
+def test_build_plan_uses_vmxnet3_nic() -> None:
+    """NIC must be vmxnet3 (native macOS driver) with firewall=0."""
+    steps = build_plan(_cfg("sequoia"))
+    create = next(step for step in steps if step.title == "Create VM shell")
+    assert "vmxnet3" in create.command
+    assert "firewall=0" in create.command
+    assert "virtio,bridge" not in create.command
+
+
+def test_build_plan_uses_virtio0_disk() -> None:
+    """Main disk must be virtio0 for better I/O performance."""
+    steps = build_plan(_cfg("sequoia"))
+    disk = next(step for step in steps if step.title == "Create main disk")
+    assert "--virtio0" in disk.command
+    assert "--sata0" not in disk.command
+
+
+def test_build_plan_import_detects_pve_version() -> None:
+    """Import steps must detect PVE 9.x 'qm disk import' vs legacy 'qm importdisk'."""
+    steps = build_plan(_cfg("sequoia"))
+    oc_import = next(step for step in steps if step.title == "Import and attach OpenCore disk")
+    assert "IMPORT_CMD" in oc_import.command
+    assert "qm disk import" in oc_import.command
+    rec_import = next(step for step in steps if step.title == "Import and attach macOS recovery")
+    assert "IMPORT_CMD" in rec_import.command
+
+
+def test_build_plan_apple_services_uses_vmxnet3(monkeypatch) -> None:
+    """Apple Services static MAC step must also use vmxnet3."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = True
+    steps = build_plan(cfg)
+    net_step = next(step for step in steps if step.title == "Configure static MAC for Apple services")
+    assert "vmxnet3" in net_step.command
+    assert "firewall=0" in net_step.command
 
 
 def test_fetch_vm_info_no_name_in_config() -> None:

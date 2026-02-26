@@ -87,7 +87,9 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "--sockets", "1",
                 "--memory", str(config.memory_mb),
                 "--cpu", "host",
-                "--net0", f"virtio,bridge={config.bridge}",
+                "--balloon", "0",
+                "--agent", "enabled=1",
+                "--net0", f"vmxnet3,bridge={config.bridge},firewall=0",
             ],
         ),
         PlanStep(
@@ -116,7 +118,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
         ),
         PlanStep(
             title="Create main disk",
-            argv=["qm", "set", vmid, "--sata0", f"{config.storage}:{config.disk_gb}"],
+            argv=["qm", "set", vmid, "--virtio0", f"{config.storage}:{config.disk_gb}"],
         ),
         PlanStep(
             title="Build OpenCore boot disk",
@@ -138,7 +140,8 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             title="Import and attach OpenCore disk",
             argv=[
                 "bash", "-c",
-                f"REF=$(qm importdisk {vmid} {oc_disk} {config.storage} 2>&1 | "
+                "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
+                f"REF=$($IMPORT_CMD {vmid} {oc_disk} {config.storage} 2>&1 | "
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
                 f"qm set {vmid} --ide0 $REF,media=disk && "
                 # Fix GPT header corruption from thin-provisioned LVM importdisk
@@ -184,14 +187,15 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             title="Import and attach macOS recovery",
             argv=[
                 "bash", "-c",
-                f"REF=$(qm importdisk {vmid} {recovery_raw} {config.storage} 2>&1 | "
+                "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
+                f"REF=$($IMPORT_CMD {vmid} {recovery_raw} {config.storage} 2>&1 | "
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
                 f"qm set {vmid} --ide2 $REF,media=disk",
             ],
         ),
         PlanStep(
             title="Set boot order",
-            argv=["qm", "set", vmid, "--boot", "order=ide2;sata0;ide0"],
+            argv=["qm", "set", vmid, "--boot", "order=ide2;virtio0;ide0"],
         ),
         PlanStep(
             title="Start VM",
@@ -407,7 +411,7 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
     # We'll replace the existing net0 with a static MAC
     steps.append(PlanStep(
         title="Configure static MAC for Apple services",
-        argv=["qm", "set", vmid, "--net0", f"virtio,bridge={config.bridge},macaddr={config.static_mac}"],
+        argv=["qm", "set", vmid, "--net0", f"vmxnet3,bridge={config.bridge},macaddr={config.static_mac},firewall=0"],
     ))
 
     return steps

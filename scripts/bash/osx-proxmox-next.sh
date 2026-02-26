@@ -209,7 +209,7 @@ function exit-script() {
 # ── Check required build tools ──
 function check_dependencies() {
   local missing=()
-  for cmd in dmg2img sgdisk partprobe losetup mkfs.fat curl python3; do
+  for cmd in dmg2img sgdisk partprobe losetup mkfs.fat blkid curl python3; do
     if ! command -v "$cmd" &>/dev/null; then
       missing+=("$cmd")
     fi
@@ -223,6 +223,7 @@ function check_dependencies() {
       "partprobe:parted"
       "losetup:mount"
       "mkfs.fat:dosfstools"
+      "blkid:util-linux"
       "curl:curl"
       "python3:python3"
     )
@@ -960,7 +961,9 @@ qm create "$VMID" \
   --cores "$CORE_COUNT" \
   --memory "$RAM_SIZE" \
   --cpu host \
-  --net0 "virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU" \
+  --balloon 0 \
+  --agent enabled=1 \
+  --net0 "vmxnet3,bridge=$BRG,macaddr=$MAC,firewall=0$VLAN$MTU" \
   >/dev/null
 msg_ok "Created VM shell"
 
@@ -998,7 +1001,7 @@ if [ "$APPLE_SERVICES" = "true" ]; then
   # STATIC_MAC was already generated before OC build (for ROM derivation)
 
   qm set "$VMID" --vmgenid "$VMGENID" >/dev/null
-  qm set "$VMID" --net0 "virtio,bridge=${BRG},macaddr=${STATIC_MAC}" >/dev/null
+  qm set "$VMID" --net0 "vmxnet3,bridge=${BRG},macaddr=${STATIC_MAC},firewall=0${VLAN}${MTU}" >/dev/null
   msg_ok "Configured Apple Services (vmgenid: $VMGENID, MAC: $STATIC_MAC)"
 fi
 
@@ -1012,7 +1015,7 @@ msg_ok "Attached EFI disk + TPM"
 
 # ── Create main disk ──
 msg_info "Creating main disk (${DISK_SIZE})"
-qm set "$VMID" --sata0 "${STORAGE}:${DISK_SIZE%G}" >/dev/null
+qm set "$VMID" --virtio0 "${STORAGE}:${DISK_SIZE%G}" >/dev/null
 msg_ok "Created main disk"
 
 # ── Detect import command (PVE 8.x vs 9.x) ──
@@ -1104,8 +1107,8 @@ msg_ok "Attached recovery disk (ide2)"
 
 # ── Set boot order ──
 msg_info "Setting boot order"
-qm set "$VMID" --boot order="ide2;sata0;ide0" >/dev/null
-msg_ok "Set boot order (ide2 → sata0 → ide0)"
+qm set "$VMID" --boot order="ide2;virtio0;ide0" >/dev/null
+msg_ok "Set boot order (ide2 → virtio0 → ide0)"
 
 # ── VM description ──
 DESCRIPTION=$(
@@ -1153,7 +1156,7 @@ msg_ok "Completed successfully!"
 echo -e "\n${INFO}${YW}Next steps:${CL}"
 echo -e "  1. Open the VM console (VM ${VMID} → Console)"
 echo -e "  2. The installer auto-boots after 15 seconds (Apple logo boot screen)"
-echo -e "  3. Use Disk Utility to erase the SATA disk as APFS"
+echo -e "  3. Use Disk Utility to erase the VirtIO disk as APFS"
 echo -e "  4. Run 'Reinstall macOS' from the recovery menu"
 echo -e ""
 echo -e "  ${BL}Documentation: https://github.com/lucid-fabrics/osx-proxmox-next${CL}"
