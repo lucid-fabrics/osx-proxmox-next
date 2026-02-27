@@ -199,7 +199,7 @@ osx-next-cli apply --execute \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm \
-  --smbios-serial C02X1234ABCD --smbios-uuid "$(uuidgen)" \
+  --smbios-serial C02G3050P7QM --smbios-uuid "$(uuidgen)" \
   --smbios-model MacPro7,1
 
 # Enable Apple Services (iMessage, FaceTime, iCloud)
@@ -238,7 +238,7 @@ Use `osx-next-cli download --macos <version>` to auto-fetch missing assets. The 
 <details>
 <summary><strong>I see UEFI Shell instead of macOS boot</strong></summary>
 
-Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on `ide2`, with boot order set to `ide2;sata0;ide0`.
+Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on `ide2`, with boot order set to `ide2;virtio0;ide0`.
 </details>
 
 <details>
@@ -287,7 +287,7 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 
 - Use **SSD/NVMe-backed storage** for VM disks
 - Don't overcommit host CPU or RAM
-- Keep the main macOS disk on `sata0`, OpenCore on `ide0`, recovery on `ide2`
+- Keep the main macOS disk on `virtio0`, OpenCore on `ide0`, recovery on `ide2`
 - Use `vga: std` during installation (switch after)
 - Change one setting at a time and measure the impact
 - **Intel CPUs** get native host passthrough — best performance
@@ -362,11 +362,28 @@ bash scripts/profiles/revert_xcode_profile.sh
 
 ## ☁️ Enable Apple Services (iCloud, iMessage, FaceTime)
 
-Apple services require a clean, unique SMBIOS identity and stable network/time configuration.
+Apple services require a complete, consistent identity chain spanning both QEMU SMBIOS and OpenCore's EFI PlatformInfo — plus stable network/time configuration.
+
+### How It Works
+
+macOS validates Apple ID through two identity sources:
+
+| Layer | What it provides | How it's set |
+|-------|-----------------|--------------|
+| **QEMU SMBIOS** | Serial, UUID, model visible to firmware | Proxmox `--smbios1` flag |
+| **OpenCore PlatformInfo** | Serial, UUID, MLB, ROM visible to macOS | Patched into `config.plist` via `plistlib` |
+
+Both must carry **identical values**. The ROM field must be derived from the NIC MAC address — macOS cross-checks ROM against the hardware NIC during Apple ID validation.
+
+When `--apple-services` is enabled, this tool automatically:
+1. Generates Apple-format SMBIOS identity (serial, UUID, MLB, ROM, model) — GenSMBIOS-compatible base-34 serials with valid manufacturing codes and checksummed MLB, no external binary needed
+2. Generates a stable static MAC address for the NIC
+3. Derives ROM from the MAC address (first 6 bytes, no colons)
+4. Applies SMBIOS via Proxmox's `--smbios1` flag
+5. Patches OpenCore's `config.plist` PlatformInfo with matching values
+6. Adds a `vmgenid` device for Apple service stability
 
 ### SMBIOS Identity (Auto-Generated)
-
-This tool **automatically generates** a unique SMBIOS identity (serial, UUID, model) for each VM and applies it via Proxmox's native `--smbios1` flag. No manual OpenCore config editing required.
 
 - **TUI:** SMBIOS is auto-generated when you select a macOS version in step 1. Click **Generate SMBIOS** in step 3 to regenerate.
 - **CLI:** SMBIOS is auto-generated unless you pass `--no-smbios` or provide your own values via `--smbios-serial`, `--smbios-uuid`, `--smbios-mlb`, `--smbios-rom`, `--smbios-model`.
@@ -374,19 +391,17 @@ This tool **automatically generates** a unique SMBIOS identity (serial, UUID, mo
 
 The generated values are visible in the dry-run output as a `qm set --smbios1` step.
 
-### Apple Services (iMessage, FaceTime, iCloud)
-
-Enable Apple Services support with the `--apple-services` flag:
+### Usage
 
 ```bash
-# Enable Apple Services (auto-generates vmgenid + static MAC)
+# Enable Apple Services (auto-generates identity + vmgenid + static MAC + PlatformInfo)
 osx-next-cli apply --execute \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm \
   --apple-services
 
-# With custom vmgenid and MAC (provide your own)
+# With custom UUID (provide your own)
 osx-next-cli apply --execute \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --apple-services --smbios-uuid "YOUR-UUID-HERE"
@@ -395,8 +410,9 @@ osx-next-cli apply --execute \
 In the **TUI**, check "Enable Apple Services (iMessage, FaceTime, iCloud)" in step 4 to add:
 - `vmgenid` device (required for Apple services)
 - Static MAC address (persistent across reboots)
+- PlatformInfo patching in OpenCore's `config.plist`
 
-### Additional Setup for Apple Services
+### Post-Install Steps
 
 1. **Verify** NVRAM is writable and persists across reboots
 2. **Boot macOS** and confirm date/time are correct and network/DNS works
@@ -406,8 +422,10 @@ In the **TUI**, check "Enable Apple Services (iMessage, FaceTime, iCloud)" in st
 ### Checklist
 
 - [x] SMBIOS values are unique to this VM (auto-generated)
-- [x] MAC address is stable (auto-generated with --apple-services)
-- [x] vmgenid is configured (auto-generated with --apple-services)
+- [x] MAC address is stable (auto-generated with `--apple-services`)
+- [x] ROM derived from NIC MAC (auto-configured with `--apple-services`)
+- [x] OpenCore PlatformInfo matches SMBIOS (auto-patched with `--apple-services`)
+- [x] vmgenid is configured (auto-generated with `--apple-services`)
 - [ ] Same OpenCore EFI is always used
 - [ ] NVRAM reset is not triggered on every boot
 
@@ -416,10 +434,11 @@ In the **TUI**, check "Enable Apple Services (iMessage, FaceTime, iCloud)" in st
 | Problem | Fix |
 |---------|-----|
 | "This Mac cannot connect to iCloud" | Recheck serial/MLB/UUID/ROM uniqueness. Sign out, reboot, sign in again. |
-| "iMessage activation failed" | Verify ROM format and stable MAC mapping. Check date/time sync. |
+| "iMessage activation failed" | Verify ROM matches NIC MAC and MAC is static. Check date/time sync. |
 | Works once then breaks | VM config is regenerating SMBIOS or NIC MAC between boots. |
+| PlatformInfo not applied | Ensure `--apple-services` flag is set. Check OpenCore config.plist for PlatformInfo section. |
 
-> **Important:** Never share SMBIOS values publicly or reuse them across VMs. Apple controls service activation and it can still fail even with correct setup.
+> **Note:** This tool configures all identity fields automatically, but Apple controls service activation server-side. Even with a correct setup, activation may require multiple attempts or a call to Apple Support. Never share SMBIOS values publicly or reuse them across VMs.
 
 ---
 
@@ -437,7 +456,7 @@ src/osx_proxmox_next/
   defaults.py     # Host-aware hardware defaults
   preflight.py    # Host capability checks
   rollback.py     # VM snapshot/rollback hints
-  smbios.py       # SMBIOS identity generation (serial, UUID, model)
+  smbios.py       # SMBIOS identity generation (serial, UUID, MLB, ROM, model)
   profiles.py     # VM config profile management
   infrastructure.py # Proxmox command adapter
 ```

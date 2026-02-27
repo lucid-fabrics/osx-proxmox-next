@@ -1,6 +1,13 @@
+from osx_proxmox_next.defaults import CpuInfo
 from osx_proxmox_next.domain import VmConfig
 from osx_proxmox_next.planner import build_plan, render_script, _cpu_args, VmInfo, fetch_vm_info, build_destroy_plan
 from osx_proxmox_next.infrastructure import CommandResult
+
+
+def _cpu(vendor="Intel", model_name="", family=6, model=85, needs_emulated=False):
+    """Helper to build CpuInfo for tests."""
+    return CpuInfo(vendor=vendor, model_name=model_name, family=family,
+                   model=model, needs_emulated_cpu=needs_emulated)
 
 
 def _cfg(macos: str) -> VmConfig:
@@ -48,7 +55,7 @@ def test_render_script_contains_metadata() -> None:
 def test_build_plan_boot_order_is_shell_safe() -> None:
     steps = build_plan(_cfg("sequoia"))
     boot = next(step for step in steps if step.title == "Set boot order")
-    assert "--boot 'order=ide2;sata0;ide0'" in boot.command
+    assert "--boot 'order=ide2;virtio0;ide0'" in boot.command
 
 
 def test_build_plan_sets_applesmc_args() -> None:
@@ -65,6 +72,7 @@ def test_build_plan_includes_smbios_step() -> None:
     assert "Set SMBIOS identity" in titles
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
     assert "--smbios1" in smbios_step.command
+    assert "base64=1," in smbios_step.command
     assert f"manufacturer={base64.b64encode(b'Apple Inc.').decode()}" in smbios_step.command
     assert f"family={base64.b64encode(b'Mac').decode()}" in smbios_step.command
 
@@ -179,7 +187,7 @@ def test_build_plan_recovery_uses_importdisk(monkeypatch) -> None:
 
 
 def test_smbios_values_are_base64_encoded():
-    """Smbios1 values must be Base64-encoded for Proxmox."""
+    """Smbios1 values must be Base64-encoded for Proxmox with base64=1 flag."""
     import base64
     cfg = _cfg("tahoe")
     cfg.installer_path = "/tmp/tahoe.iso"
@@ -189,6 +197,7 @@ def test_smbios_values_are_base64_encoded():
     steps = build_plan(cfg)
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
     encoded = base64.b64encode(b"MacPro7,1").decode()
+    assert "base64=1," in smbios_step.command
     assert f"product={encoded}," in smbios_step.command
     assert "MacPro7,1" not in smbios_step.command
 
@@ -201,23 +210,23 @@ def test_render_script_simple() -> None:
     assert "Build OpenCore boot disk" in script
 
 
-# ── CPU Vendor Detection Tests ─────────────────────────────────────
+# ── CPU Detection Tests ───────────────────────────────────────────────
 
 
-def test_cpu_args_intel(monkeypatch) -> None:
-    import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
-    args = _cpu_args()
+def test_cpu_args_intel() -> None:
+    """Legacy Intel → -cpu host passthrough."""
+    cpu = _cpu(vendor="Intel", needs_emulated=False)
+    args = _cpu_args(cpu)
     assert "-cpu host," in args
     assert "vendor=GenuineIntel" in args
     assert "+kvm_pv_unhalt" in args
     assert "vmware-cpuid-freq=on" in args
 
 
-def test_cpu_args_amd(monkeypatch) -> None:
-    import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
-    args = _cpu_args()
+def test_cpu_args_amd() -> None:
+    """AMD → Cascadelake-Server emulation."""
+    cpu = _cpu(vendor="AMD", needs_emulated=True)
+    args = _cpu_args(cpu)
     assert "Cascadelake-Server" in args
     assert "vendor=GenuineIntel" in args
     assert "vmware-cpuid-freq=on" in args
@@ -226,9 +235,30 @@ def test_cpu_args_amd(monkeypatch) -> None:
     assert "host" not in args
 
 
+def test_cpu_args_intel_hybrid() -> None:
+    """Hybrid Intel (12th gen+) → Cascadelake-Server, same as AMD."""
+    cpu = _cpu(vendor="Intel", model=151, needs_emulated=True)
+    args = _cpu_args(cpu)
+    assert "Cascadelake-Server" in args
+    assert "-avx512f" in args
+    assert "-pcid" in args
+    assert "host" not in args
+
+
+def test_cpu_args_override() -> None:
+    """CLI --cpu-model override takes precedence."""
+    cpu = _cpu(vendor="Intel", needs_emulated=False)
+    args = _cpu_args(cpu, override="Skylake-Server-IBRS")
+    assert "Skylake-Server-IBRS" in args
+    assert "kvm=on" in args
+    assert "vendor=GenuineIntel" in args
+    assert "Cascadelake" not in args
+    assert "host" not in args
+
+
 def test_build_plan_amd_uses_cascadelake(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="AMD", needs_emulated=True))
     steps = build_plan(_cfg("sequoia"))
     profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
     assert "Cascadelake-Server" in profile.command
@@ -237,16 +267,29 @@ def test_build_plan_amd_uses_cascadelake(monkeypatch) -> None:
 
 def test_build_plan_intel_uses_host(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     steps = build_plan(_cfg("sequoia"))
     profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
     assert "-cpu host," in profile.command
     assert "vendor=GenuineIntel" in profile.command
 
 
+def test_build_plan_intel_hybrid_uses_cascadelake(monkeypatch) -> None:
+    """Hybrid Intel gets Cascadelake-Server but NOT AMD kernel patches."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", model=151, needs_emulated=True))
+    steps = build_plan(_cfg("sequoia"))
+    profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
+    assert "Cascadelake-Server" in profile.command
+    # Must NOT have AMD kernel patches
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "AppleCpuPmCfgLock" not in build.command
+    assert "AppleXcpmCfgLock" not in build.command
+
+
 def test_build_plan_amd_config(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="AMD", needs_emulated=True))
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
     # Power management locks flipped for AMD
@@ -260,7 +303,7 @@ def test_build_plan_amd_config(monkeypatch) -> None:
 
 def test_build_plan_default_no_verbose(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     cfg = _cfg("sequoia")
     steps = build_plan(cfg)
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
@@ -269,7 +312,7 @@ def test_build_plan_default_no_verbose(monkeypatch) -> None:
 
 def test_build_plan_verbose_boot(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     cfg = _cfg("sequoia")
     cfg.verbose_boot = True
     steps = build_plan(cfg)
@@ -279,7 +322,7 @@ def test_build_plan_verbose_boot(monkeypatch) -> None:
 
 def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
     assert "AppleCpuPmCfgLock" not in build.command
@@ -288,7 +331,7 @@ def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
 def test_build_plan_oc_disk_hides_opencore_entry(monkeypatch) -> None:
     """OC ESP must have .contentVisibility=Auxiliary to hide from picker."""
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
     assert ".contentVisibility" in build.command
@@ -299,7 +342,7 @@ def test_build_plan_oc_disk_hides_opencore_entry(monkeypatch) -> None:
 def test_build_plan_stamps_recovery_flavour(monkeypatch) -> None:
     """Recovery must be stamped with custom name and volume icon."""
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     steps = build_plan(_cfg("sequoia"))
     stamp = next(step for step in steps if step.title == "Stamp recovery with Apple icon flavour")
     assert ".contentDetails" in stamp.command
@@ -309,6 +352,18 @@ def test_build_plan_stamps_recovery_flavour(monkeypatch) -> None:
     # Stamp must come before import
     titles = [s.title for s in steps]
     assert titles.index("Stamp recovery with Apple icon flavour") < titles.index("Import and attach macOS recovery")
+
+
+def test_build_plan_cpu_model_override(monkeypatch) -> None:
+    """--cpu-model override is used in hardware profile."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", model=151, needs_emulated=True))
+    cfg = _cfg("sequoia")
+    cfg.cpu_model = "Skylake-Server-IBRS"
+    steps = build_plan(cfg)
+    profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
+    assert "Skylake-Server-IBRS" in profile.command
+    assert "Cascadelake" not in profile.command
 
 
 # ── Destroy Plan Tests ─────────────────────────────────────────────
@@ -393,6 +448,172 @@ def test_fetch_vm_info_config_failure() -> None:
     assert info is not None
     assert info.config_raw == ""
     assert info.name == ""
+
+
+def test_build_plan_apple_services_patches_platforminfo(monkeypatch) -> None:
+    """When apple_services=True, PlatformInfo fields must appear in OC build script."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = True
+    steps = build_plan(cfg)
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "PlatformInfo" in build.command
+    assert "SystemSerialNumber" in build.command
+    assert "MLB" in build.command
+    assert "ROM" in build.command
+    assert "UpdateSMBIOS" in build.command
+    assert "UpdateDataHub" in build.command
+
+
+def test_build_plan_no_apple_services_no_platforminfo(monkeypatch) -> None:
+    """When apple_services=False, PlatformInfo must NOT appear in OC build script."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = False
+    steps = build_plan(cfg)
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "PlatformInfo" not in build.command
+
+
+def test_build_plan_apple_services_rom_derived_from_mac(monkeypatch) -> None:
+    """When apple_services=True, ROM must be derived from static MAC."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = True
+    steps = build_plan(cfg)
+    # ROM should equal MAC without colons
+    expected_rom = cfg.static_mac.replace(":", "")[:12].upper()
+    assert cfg.smbios_rom == expected_rom
+    # Build script should contain the derived ROM
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert expected_rom in build.command
+
+
+def test_build_plan_apple_services_mac_propagated_from_smbios(monkeypatch) -> None:
+    """_smbios_steps propagates MAC to config.static_mac so _apple_services_steps reuses it."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = True
+    steps = build_plan(cfg)
+    # MAC set by _smbios_steps should be reused — verify ROM matches MAC
+    mac_hex = cfg.static_mac.replace(":", "").upper()
+    assert cfg.smbios_rom == mac_hex
+    # Verify the MAC appears in the net0 step
+    net_step = next(step for step in steps if step.title == "Configure static MAC for Apple services")
+    assert cfg.static_mac in net_step.command
+
+
+def test_build_plan_disables_balloon() -> None:
+    """macOS doesn't support balloon driver — must be disabled."""
+    steps = build_plan(_cfg("sequoia"))
+    create = next(step for step in steps if step.title == "Create VM shell")
+    assert "--balloon 0" in create.command
+
+
+def test_build_plan_enables_guest_agent() -> None:
+    """QEMU guest agent should be enabled for graceful shutdown."""
+    steps = build_plan(_cfg("sequoia"))
+    create = next(step for step in steps if step.title == "Create VM shell")
+    assert "--agent enabled=1" in create.command
+
+
+def test_build_plan_uses_vmxnet3_nic() -> None:
+    """NIC must be vmxnet3 (native macOS driver) with firewall=0."""
+    steps = build_plan(_cfg("sequoia"))
+    create = next(step for step in steps if step.title == "Create VM shell")
+    assert "vmxnet3" in create.command
+    assert "firewall=0" in create.command
+    assert "virtio,bridge" not in create.command
+
+
+def test_build_plan_uses_virtio0_disk() -> None:
+    """Main disk must be virtio0 for better I/O performance."""
+    steps = build_plan(_cfg("sequoia"))
+    disk = next(step for step in steps if step.title == "Create main disk")
+    assert "--virtio0" in disk.command
+    assert "--sata0" not in disk.command
+
+
+def test_build_plan_import_detects_pve_version() -> None:
+    """Import steps must detect PVE 9.x 'qm disk import' vs legacy 'qm importdisk'."""
+    steps = build_plan(_cfg("sequoia"))
+    oc_import = next(step for step in steps if step.title == "Import and attach OpenCore disk")
+    assert "IMPORT_CMD" in oc_import.command
+    assert "qm disk import" in oc_import.command
+    rec_import = next(step for step in steps if step.title == "Import and attach macOS recovery")
+    assert "IMPORT_CMD" in rec_import.command
+
+
+def test_build_plan_apple_services_uses_vmxnet3(monkeypatch) -> None:
+    """Apple Services static MAC step must also use vmxnet3."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = True
+    steps = build_plan(cfg)
+    net_step = next(step for step in steps if step.title == "Configure static MAC for Apple services")
+    assert "vmxnet3" in net_step.command
+    assert "firewall=0" in net_step.command
+
+
+def test_build_plan_oc_validates_losetup(monkeypatch) -> None:
+    """OC build script must validate losetup output and retry partprobe."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    cmd = build.command
+    assert '[ -b "$SRC_LOOP" ]' in cmd
+    assert '[ -b "$DEST_LOOP" ]' in cmd
+    assert "for _i in" in cmd
+    assert "mountpoint -q" in cmd
+
+
+def test_build_plan_oc_cleans_stale_dest_loops(monkeypatch) -> None:
+    """OC build must clean stale loops for both source ISO and destination disk."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    cmd = build.command
+    # Must have at least 2 losetup -j calls (source + dest stale cleanup)
+    assert cmd.count("losetup -j") >= 2
+
+
+def test_build_plan_recovery_validates_losetup(monkeypatch) -> None:
+    """Recovery stamp step must validate losetup, check partitions, and verify mount."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    stamp = next(step for step in steps if step.title == "Stamp recovery with Apple icon flavour")
+    cmd = stamp.command
+    assert '[ -b "$RLOOP" ]' in cmd
+    assert "mountpoint -q" in cmd
+    assert "losetup -j" in cmd
+
+
+def test_build_plan_oc_error_messages_actionable(monkeypatch) -> None:
+    """Error paths must include diagnostic hints (modprobe loop or losetup -a)."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    cmd = build.command
+    assert "modprobe loop" in cmd or "losetup -a" in cmd
+
+
+def test_build_plan_blkid_fallback_warns(monkeypatch) -> None:
+    """When blkid finds no vfat partition, a WARN must be emitted before raw mount."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    cmd = build.command
+    assert "WARN" in cmd
 
 
 def test_fetch_vm_info_no_name_in_config() -> None:

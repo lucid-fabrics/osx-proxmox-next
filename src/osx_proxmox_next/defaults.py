@@ -1,23 +1,89 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 
 DEFAULT_STORAGE = "local-lvm"
 DEFAULT_BRIDGE = "vmbr0"
 
+# Intel Family 6 model numbers for hybrid (P+E core) architectures.
+# These CPUs need emulated CPU mode because macOS hardware validation
+# fails on hybrid core topology when using -cpu host with correct SMBIOS.
+_INTEL_HYBRID_MODELS: frozenset[int] = frozenset({
+    151,  # Alder Lake-S (12th gen)
+    154,  # Alder Lake-P (12th gen mobile)
+    170,  # Meteor Lake (14th gen)
+    183,  # Raptor Lake-S (13th gen)
+    186,  # Raptor Lake-P (13th gen mobile)
+})
 
-def detect_cpu_vendor() -> str:
-    """Return 'AMD' or 'Intel' based on /proc/cpuinfo (default: Intel)."""
+# Models >= this threshold are assumed hybrid (future-proofing).
+_INTEL_HYBRID_THRESHOLD: int = 190
+
+
+@dataclass
+class CpuInfo:
+    """Host CPU identification used for QEMU flag selection."""
+    vendor: str             # "AMD" or "Intel"
+    model_name: str         # e.g. "12th Gen Intel(R) Core(TM) i7-12700K"
+    family: int             # cpu family from /proc/cpuinfo
+    model: int              # model number from /proc/cpuinfo
+    needs_emulated_cpu: bool  # True for AMD and Intel hybrid (12th gen+)
+
+
+def detect_cpu_info() -> CpuInfo:
+    """Detect host CPU vendor, model, and whether it needs emulated CPU mode.
+
+    AMD always needs Cascadelake-Server emulation (no native macOS support).
+    Intel hybrid CPUs (12th gen+) need it because macOS hardware validation
+    fails on P+E core topology when using -cpu host with correct SMBIOS.
+    """
+    vendor = "Intel"
+    model_name = ""
+    family = 0
+    model = 0
+
     cpuinfo = Path("/proc/cpuinfo")
     if cpuinfo.exists():
         for line in cpuinfo.read_text(encoding="utf-8", errors="ignore").splitlines():
             if line.startswith("vendor_id"):
-                if "AuthenticAMD" in line:
-                    return "AMD"
-                return "Intel"
-    return "Intel"
+                vendor = "AMD" if "AuthenticAMD" in line else "Intel"
+            elif line.startswith("cpu family"):
+                parts = line.split(":")
+                if len(parts) >= 2 and parts[1].strip().isdigit():
+                    family = int(parts[1].strip())
+            elif line.startswith("model name"):
+                parts = line.split(":", 1)
+                if len(parts) >= 2:
+                    model_name = parts[1].strip()
+            elif line.startswith("model"):
+                # "model\t\t: 183" — must come after "model name" check
+                parts = line.split(":")
+                if len(parts) >= 2 and parts[1].strip().isdigit():
+                    model = int(parts[1].strip())
+            elif not line.strip():
+                # Empty line = end of first CPU block; all cores report same values
+                if vendor and family:
+                    break
+
+    if vendor == "AMD":
+        return CpuInfo(vendor=vendor, model_name=model_name, family=family,
+                       model=model, needs_emulated_cpu=True)
+
+    # Intel: check for hybrid architecture (Family 6 + known hybrid model)
+    is_hybrid = (
+        family == 6
+        and (model in _INTEL_HYBRID_MODELS or model >= _INTEL_HYBRID_THRESHOLD)
+    )
+    return CpuInfo(vendor=vendor, model_name=model_name, family=family,
+                   model=model, needs_emulated_cpu=is_hybrid)
+
+
+def detect_cpu_vendor() -> str:
+    """Return 'AMD' or 'Intel' based on /proc/cpuinfo (default: Intel)."""
+    return detect_cpu_info().vendor
 
 
 def _round_down_power_of_2(n: int) -> int:

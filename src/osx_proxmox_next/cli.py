@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from .assets import required_assets, suggested_fetch_commands
-from .defaults import DEFAULT_ISO_DIR, detect_cpu_vendor, detect_iso_storage
+from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage
 from .diagnostics import export_log_bundle, recovery_guide
 from .domain import VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
@@ -35,6 +35,7 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
         apple_services=args.apple_services,
         verbose_boot=args.verbose_boot,
         iso_dir=getattr(args, "iso_dir", "") or "",
+        cpu_model=getattr(args, "cpu_model", "") or "",
     )
 
 
@@ -113,6 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Show verbose kernel log instead of Apple logo during boot")
     common.add_argument("--iso-dir", type=str, default="",
                         help="Directory for ISO/recovery images (default: auto-detect)")
+    common.add_argument("--cpu-model", type=str, default="",
+                        help="Override QEMU CPU model (e.g. Skylake-Server-IBRS). Default: auto-detect")
 
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("--script-out", type=str, default="")
@@ -177,9 +180,15 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(cmd)
         return 3
 
-    vendor = detect_cpu_vendor()
-    cpu_mode = "Cascadelake-Server emulation" if vendor == "AMD" else "native host passthrough"
-    print(f"CPU: {vendor} ({cpu_mode})")
+    cpu = detect_cpu_info()
+    if config.cpu_model:
+        cpu_mode = f"override: {config.cpu_model}"
+    elif cpu.needs_emulated_cpu:
+        cpu_mode = "Cascadelake-Server emulation"
+    else:
+        cpu_mode = "native host passthrough"
+    cpu_label = cpu.model_name or cpu.vendor
+    print(f"CPU: {cpu_label} ({cpu_mode})")
 
     steps = build_plan(config)
 

@@ -12,7 +12,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
 from .assets import required_assets
-from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_vendor, detect_iso_storage, detect_memory_mb
+from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb
 from .domain import SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
@@ -702,10 +702,12 @@ class NextApp(App):
         if not config:
             return
         meta = SUPPORTED_MACOS.get(config.macos, {})
+        cpu = detect_cpu_info()
+        cpu_label = cpu.model_name or cpu.vendor
         lines = [
             f"Target: {meta.get('label', config.macos)} ({meta.get('channel', '?')})",
             f"VM: {config.vmid} / {config.name}",
-            f"CPU: {detect_cpu_vendor()} — {config.cores} cores | Memory: {config.memory_mb} MB | Disk: {config.disk_gb} GB",
+            f"CPU: {cpu_label} — {config.cores} cores | Memory: {config.memory_mb} MB | Disk: {config.disk_gb} GB",
             f"Storage: {config.storage} | Bridge: {config.bridge}",
         ]
         if config.installer_path:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -33,6 +34,7 @@ class VmConfig:
     static_mac: str = ""
     verbose_boot: bool = False
     iso_dir: str = ""
+    cpu_model: str = ""
 
 
 def validate_config(config: VmConfig) -> list[str]:
@@ -53,4 +55,18 @@ def validate_config(config: VmConfig) -> list[str]:
         issues.append("Bridge should look like vmbr0.")
     if not config.storage:
         issues.append("Storage target is required.")
+    # SMBIOS fields are embedded in shell commands — restrict to safe charset
+    if config.smbios_serial and not re.fullmatch(r"[A-Z0-9]{12}", config.smbios_serial):
+        issues.append("SMBIOS serial must be exactly 12 chars [A-Z0-9].")
+    if config.smbios_mlb and not re.fullmatch(r"[A-Z0-9]{17}", config.smbios_mlb):
+        issues.append("SMBIOS MLB must be exactly 17 chars [A-Z0-9].")
+    if config.smbios_rom and not re.fullmatch(r"[A-F0-9]{12}", config.smbios_rom):
+        issues.append("SMBIOS ROM must be exactly 12 hex chars [A-F0-9].")
+    if config.smbios_uuid and not re.fullmatch(
+        r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}",
+        config.smbios_uuid,
+    ):
+        issues.append("SMBIOS UUID must be a valid uppercase UUID.")
+    if config.smbios_model and not re.fullmatch(r"[A-Za-z0-9,]{1,20}", config.smbios_model):
+        issues.append("SMBIOS model must be alphanumeric (e.g., MacPro7,1).")
     return issues

@@ -122,10 +122,15 @@ function cleanup_vmid() {
 }
 
 function cleanup() {
-  [ -n "${BUILD_SRC_MNT:-}" ] && umount "$BUILD_SRC_MNT" 2>/dev/null || true
-  [ -n "${BUILD_DEST_MNT:-}" ] && umount "$BUILD_DEST_MNT" 2>/dev/null || true
-  [ -n "${BUILD_SRC_LOOP:-}" ] && losetup -d "$BUILD_SRC_LOOP" 2>/dev/null || true
-  [ -n "${BUILD_LOOP:-}" ] && losetup -d "$BUILD_LOOP" 2>/dev/null || true
+  local mnt loop
+  # Unmount all tracked mount points (lazy fallback for busy mounts)
+  for mnt in "${BUILD_SRC_MNT:-}" "${BUILD_DEST_MNT:-}" "${RECOVERY_MNT:-}"; do
+    [ -n "$mnt" ] && { umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true; }
+  done
+  # Detach all tracked loop devices
+  for loop in "${BUILD_SRC_LOOP:-}" "${BUILD_LOOP:-}" "${RLOOP:-}"; do
+    [ -n "$loop" ] && { losetup -d "$loop" 2>/dev/null || true; }
+  done
   popd >/dev/null 2>/dev/null || true
   rm -rf "${TEMP_DIR:-}"
 }
@@ -143,6 +148,72 @@ function msg_ok() {
 function msg_error() {
   local msg="$1"
   echo -e "${BFR}${CROSS}${RD}${msg}${CL}"
+}
+
+# ── Loop/mount helper functions ──
+# Cleanup stale loop devices attached to FILE from a previous failed run.
+function cleanup_stale_loops() {
+  local file="$1"
+  local lo
+  for lo in $(losetup -j "$file" -O NAME --noheadings 2>/dev/null); do
+    umount -l "$lo"* 2>/dev/null || true
+    losetup -d "$lo" 2>/dev/null || true
+  done
+}
+
+# Set up a loop device with validation and retry.
+# Usage: setup_loop VARNAME FILE LABEL
+# Sets the variable named VARNAME to the loop device path.
+function setup_loop() {
+  local varname="$1"
+  local file="$2"
+  local label="$3"
+  local dev stderr_out
+
+  if [ ! -f "$file" ]; then
+    msg_error "Cannot set up ${label}: file not found: ${file}"
+    exit 1
+  fi
+
+  stderr_out=$(mktemp)
+  dev=$(losetup -fP --show "$file" 2>"$stderr_out") || true
+  local losetup_err
+  losetup_err=$(cat "$stderr_out" 2>/dev/null)
+  rm -f "$stderr_out"
+
+  if [ -z "$dev" ] || [ ! -b "$dev" ]; then
+    msg_error "ERROR: losetup failed for ${label}. Output: '${dev}${losetup_err}'"
+    echo -e "  Hints: modprobe loop; losetup -a; ls /dev/loop*"
+    exit 1
+  fi
+
+  # Retry partprobe up to 5 times (slow storage / device-mapper lag)
+  local _i
+  for _i in 1 2 3 4 5; do
+    partprobe "$dev" 2>/dev/null || true
+    if ls "${dev}p"* &>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  eval "$varname=\"$dev\""
+}
+
+# Mount with validation.
+# Usage: safe_mount SRC DEST [OPTS...]
+function safe_mount() {
+  local src="$1"
+  local dest="$2"
+  shift 2
+
+  mount "$@" "$src" "$dest" 2>/dev/null || mount "$@" "$src" "$dest" || true
+
+  if ! mountpoint -q "$dest"; then
+    msg_error "ERROR: ${dest} is not mounted after mount command"
+    echo -e "  Hints: file ${src}; blkid ${src}; dmesg | tail -5"
+    exit 1
+  fi
 }
 
 function check_root() {
@@ -209,7 +280,7 @@ function exit-script() {
 # ── Check required build tools ──
 function check_dependencies() {
   local missing=()
-  for cmd in dmg2img sgdisk partprobe losetup mkfs.fat curl python3; do
+  for cmd in dmg2img sgdisk partprobe losetup mkfs.fat blkid curl python3; do
     if ! command -v "$cmd" &>/dev/null; then
       missing+=("$cmd")
     fi
@@ -223,6 +294,7 @@ function check_dependencies() {
       "partprobe:parted"
       "losetup:mount"
       "mkfs.fat:dosfstools"
+      "blkid:util-linux"
       "curl:curl"
       "python3:python3"
     )
@@ -241,7 +313,7 @@ function check_dependencies() {
   fi
 }
 
-# ── Detect CPU vendor ──
+# ── Detect CPU vendor and model ──
 function detect_cpu_vendor() {
   if grep -q "AuthenticAMD" /proc/cpuinfo 2>/dev/null; then
     echo "AMD"
@@ -250,7 +322,35 @@ function detect_cpu_vendor() {
   fi
 }
 
+function detect_cpu_needs_emulation() {
+  local vendor family model
+  vendor=$(detect_cpu_vendor)
+  if [ "$vendor" = "AMD" ]; then
+    echo "yes"
+    return
+  fi
+  # Parse cpu family and model from /proc/cpuinfo
+  family=$(awk -F: '/^cpu family/{print int($2); exit}' /proc/cpuinfo 2>/dev/null)
+  model=$(awk -F: '/^model\t/{print int($2); exit}' /proc/cpuinfo 2>/dev/null)
+  family=${family:-0}
+  model=${model:-0}
+  # Intel Family 6 + known hybrid models (12th gen+) need emulation
+  # Model numbers: 151=Alder Lake-S, 154=Alder Lake-P, 170=Meteor Lake,
+  #   183=Raptor Lake-S, 186=Raptor Lake-P, >=190 future hybrid
+  if [ "$family" -eq 6 ]; then
+    case "$model" in
+      151|154|170|183|186) echo "yes"; return ;;
+    esac
+    if [ "$model" -ge 190 ]; then
+      echo "yes"
+      return
+    fi
+  fi
+  echo "no"
+}
+
 CPU_VENDOR=$(detect_cpu_vendor)
+CPU_NEEDS_EMULATION=$(detect_cpu_needs_emulation)
 
 # ── Per-version default disk sizes (matches Python defaults.py) ──
 function default_disk_gb() {
@@ -308,15 +408,76 @@ function detect_memory_mb() {
 function generate_smbios() {
   local macos_ver="$1"
   local existing_uuid="$2"
-  SMBIOS_SERIAL=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 12)
-  SMBIOS_MLB=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 17)
+  SMBIOS_MODEL="${SMBIOS_MODELS[$macos_ver]:-MacPro7,1}"
+
+  if [ "$APPLE_SERVICES" = "true" ]; then
+    # Apple-format serial+MLB via inline Python (same algorithm as smbios.py).
+    # Constants are duplicated here — keep in sync with smbios.py APPLE_PLATFORM_DATA.
+    # Model passed via env var to avoid shell injection into Python source.
+    local smbios_out
+    smbios_out=$(SMBIOS_MODEL_ENV="$SMBIOS_MODEL" python3 -c "
+import os, secrets
+
+BASE34 = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+YEAR_CHARS = 'CDFGHJKLMN'
+
+PLATFORMS = {
+    'MacPro7,1': {
+        'model_codes': ['P7QM','PLXV','PLXW','PLXX','PLXY','P7QJ','P7QK','P7QL','P7QN','P7QP','NYGV','K7GF','K7GD','N5RN'],
+        'board_codes': ['K3F7'],
+        'country_codes': ['C02','C07','CK2'],
+        'year_range': (2019, 2023),
+    },
+}
+
+BLOCK1 = ['200','600','403','404','405','303','108','207','609','501','306','102','701','301']
+BLOCK2 = ['Q' + c for c in BASE34]
+
+model = os.environ['SMBIOS_MODEL_ENV']
+p = PLATFORMS[model]
+yr_lo, yr_hi = p['year_range']
+country = secrets.choice(p['country_codes'])
+year = yr_lo + secrets.randbelow(yr_hi - yr_lo + 1)
+week = 1 + secrets.randbelow(52)
+line = secrets.randbelow(3400)
+model_code = secrets.choice(p['model_codes'])
+
+# Encode serial
+dec = (year - 2010) % 10
+if week <= 26:
+    yc = YEAR_CHARS[dec]; wi = week
+else:
+    yc = YEAR_CHARS[(dec + 1) % 10]; wi = week - 26
+d1 = line // (34 * 34); d2 = (line // 34) % 34; d3 = line % 34
+serial = country + yc + BASE34[wi] + BASE34[d1] + BASE34[d2] + BASE34[d3] + model_code
+
+# Build MLB
+board = secrets.choice(p['board_codes'])
+b1 = secrets.choice(BLOCK1)
+b2 = secrets.choice(BLOCK2)
+prefix = country + str(year % 10) + f'{week:02d}' + b1 + b2 + board
+ps = sum((3 if ((i & 1) == (17 & 1)) else 1) * BASE34.index(c) for i, c in enumerate(prefix))
+j16 = (-ps) % 34
+mlb = prefix + '0' + BASE34[j16]
+
+print(serial, mlb)
+") || { msg_error "Failed to generate Apple-format SMBIOS"; exit 1; }
+    read -r SMBIOS_SERIAL SMBIOS_MLB <<< "$smbios_out"
+    if [ -z "$SMBIOS_SERIAL" ] || [ -z "$SMBIOS_MLB" ]; then
+      msg_error "Apple-format SMBIOS generation returned empty values"
+      exit 1
+    fi
+  else
+    SMBIOS_SERIAL=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 12)
+    SMBIOS_MLB=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 17)
+  fi
+
   SMBIOS_ROM=$(openssl rand -hex 6 | tr '[:lower:]' '[:upper:]')
   if [ -n "$existing_uuid" ]; then
     SMBIOS_UUID="$existing_uuid"
   else
     SMBIOS_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
   fi
-  SMBIOS_MODEL="${SMBIOS_MODELS[$macos_ver]:-MacPro7,1}"
 }
 
 # ── Download macOS recovery via Apple's osrecovery API ──
@@ -428,9 +589,11 @@ function build_opencore_disk() {
 
   msg_info "Building OpenCore boot disk (GPT+ESP)"
 
-  # Clean up stale mounts from previous failed runs
+  # Clean up stale mounts/loops from previous failed runs
   umount /tmp/oc-src 2>/dev/null || true
   umount /tmp/oc-dest 2>/dev/null || true
+  cleanup_stale_loops "$source_iso"
+  cleanup_stale_loops "$dest_disk"
 
   # Create 1GB blank disk
   dd if=/dev/zero of="$dest_disk" bs=1M count=1024 status=none
@@ -441,10 +604,15 @@ function build_opencore_disk() {
 
   # Set up loop device for destination (tracked globally for cleanup)
   local dest_loop
-  dest_loop=$(losetup -fP --show "$dest_disk")
+  setup_loop dest_loop "$dest_disk" "OpenCore destination disk"
   BUILD_LOOP="$dest_loop"
-  partprobe "$dest_loop" 2>/dev/null || true
-  sleep 1
+
+  # Verify partition exists before formatting
+  if [ ! -b "${dest_loop}p1" ]; then
+    msg_error "ERROR: ${dest_loop}p1 not found after partprobe"
+    echo -e "  Hint: Try running the script again (slow storage)"
+    exit 1
+  fi
 
   # Format ESP partition
   mkfs.fat -F 32 -n OPENCORE "${dest_loop}p1" &>/dev/null
@@ -452,25 +620,25 @@ function build_opencore_disk() {
   # Mount destination ESP
   local dest_mnt
   dest_mnt=$(mktemp -d)
-  mount "${dest_loop}p1" "$dest_mnt"
+  safe_mount "${dest_loop}p1" "$dest_mnt"
   BUILD_DEST_MNT="$dest_mnt"
 
   # Mount source ISO (use blkid to find FAT32 partition for any layout)
   local src_mnt src_loop src_part
   src_mnt=$(mktemp -d)
-  src_loop=$(losetup -fP --show "$source_iso")
-  partprobe "$src_loop" 2>/dev/null || true
-  sleep 1
+  setup_loop src_loop "$source_iso" "OpenCore source ISO"
+  BUILD_SRC_LOOP="$src_loop"
+
   src_part=$(blkid -o device "$src_loop" "${src_loop}"p* 2>/dev/null \
     | xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' \
     | head -1)
   if [ -n "$src_part" ]; then
-    mount -o ro "$src_part" "$src_mnt"
+    safe_mount "$src_part" "$src_mnt" -o ro
   else
-    mount -o ro "$src_loop" "$src_mnt"
+    echo -e "  ${YW}WARN: No vfat partition found on source ISO via blkid, trying raw mount${CL}"
+    safe_mount "$src_loop" "$src_mnt" -o ro
   fi
   BUILD_SRC_MNT="$src_mnt"
-  BUILD_SRC_LOOP="$src_loop"
 
   # Copy OpenCore files
   cp -a "$src_mnt"/* "$dest_mnt"/ 2>/dev/null || cp -a "$src_mnt"/. "$dest_mnt"/ 2>/dev/null || true
@@ -492,6 +660,12 @@ function build_opencore_disk() {
 import plistlib, sys
 path = sys.argv[1]
 cpu_vendor = sys.argv[2]
+apple_svc = sys.argv[3] if len(sys.argv) > 3 else 'false'
+serial = sys.argv[4] if len(sys.argv) > 4 else ''
+uuid_val = sys.argv[5] if len(sys.argv) > 5 else ''
+mlb = sys.argv[6] if len(sys.argv) > 6 else ''
+rom = sys.argv[7] if len(sys.argv) > 7 else ''
+model = sys.argv[8] if len(sys.argv) > 8 else ''
 with open(path, 'rb') as f:
     pl = plistlib.load(f)
 # Security
@@ -520,9 +694,21 @@ if cpu_vendor == 'AMD':
     kq = pl['Kernel']['Quirks']
     kq['AppleCpuPmCfgLock'] = True
     kq['AppleXcpmCfgLock'] = True
+# PlatformInfo — required for Apple Services (iMessage, FaceTime, iCloud)
+# macOS reads identity from OpenCore's EFI PlatformInfo, not QEMU SMBIOS
+if apple_svc == 'true' and serial:
+    pi = pl.setdefault('PlatformInfo', {}).setdefault('Generic', {})
+    pi['SystemSerialNumber'] = serial
+    pi['SystemProductName'] = model
+    pi['SystemUUID'] = uuid_val
+    pi['MLB'] = mlb
+    pi['ROM'] = bytes.fromhex(rom)
+    pl['PlatformInfo']['UpdateSMBIOS'] = True
+    pl['PlatformInfo']['UpdateDataHub'] = True
 with open(path, 'wb') as f:
     plistlib.dump(pl, f)
-" "$dest_mnt/EFI/OC/config.plist" "$CPU_VENDOR" || {
+" "$dest_mnt/EFI/OC/config.plist" "$CPU_VENDOR" \
+      "$APPLE_SERVICES" "$SMBIOS_SERIAL" "$SMBIOS_UUID" "$SMBIOS_MLB" "$SMBIOS_ROM" "$SMBIOS_MODEL" || {
       msg_error "Failed to patch OpenCore config.plist"
       umount "$dest_mnt" 2>/dev/null || true
       umount "$src_mnt" 2>/dev/null || true
@@ -824,12 +1010,23 @@ fi
 RECOVERY_RAW="$TEMP_DIR/recovery.img"
 download_recovery "$MACOS_VER" "$RECOVERY_RAW"
 
+# ── Generate SMBIOS identity (before OC build — PlatformInfo needs these) ──
+generate_smbios "$MACOS_VER"
+
+# ── Apple Services: derive ROM from static MAC ──
+if [ "$APPLE_SERVICES" = "true" ]; then
+  # Generate static MAC address (locally administered, unicast)
+  MAC_BYTE1=$(( (0x$(openssl rand -hex 1) | 0x02) & 0xFE ))
+  MAC_BYTE1=$(printf '%02X' $MAC_BYTE1)
+  MAC_rest=$(openssl rand -hex 5 | tr '[:lower:]' '[:upper:]' | sed 's/\(..\)/\1:/g; s/:$//')
+  STATIC_MAC="${MAC_BYTE1}:${MAC_rest}"
+  # Derive ROM from MAC (macOS cross-checks ROM against NIC during Apple ID validation)
+  SMBIOS_ROM=$(echo "$STATIC_MAC" | tr -d ':')
+fi
+
 # ── Build OpenCore GPT disk ──
 OC_DISK="$TEMP_DIR/opencore.raw"
 build_opencore_disk "$OC_ISO" "$OC_DISK" "$MACOS_VER"
-
-# ── Generate SMBIOS identity ──
-generate_smbios "$MACOS_VER"
 
 # ── Create VM ──
 msg_info "Creating macOS VM shell"
@@ -842,13 +1039,15 @@ qm create "$VMID" \
   --cores "$CORE_COUNT" \
   --memory "$RAM_SIZE" \
   --cpu host \
-  --net0 "virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU" \
+  --balloon 0 \
+  --agent enabled=1 \
+  --net0 "vmxnet3,bridge=$BRG,macaddr=$MAC,firewall=0$VLAN$MTU" \
   >/dev/null
 msg_ok "Created VM shell"
 
 # ── Apply macOS hardware profile ──
-msg_info "Applying macOS hardware profile (CPU: $CPU_VENDOR)"
-if [ "$CPU_VENDOR" = "AMD" ]; then
+msg_info "Applying macOS hardware profile (CPU: $CPU_VENDOR, emulation: $CPU_NEEDS_EMULATION)"
+if [ "$CPU_NEEDS_EMULATION" = "yes" ]; then
   CPU_FLAG="-cpu Cascadelake-Server,vendor=GenuineIntel,+invtsc,-pcid,-hle,-rtm,-avx512f,-avx512dq,-avx512cd,-avx512bw,-avx512vl,-avx512vnni,kvm=on,vmware-cpuid-freq=on"
 else
   CPU_FLAG="-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc,vmware-cpuid-freq=on"
@@ -868,7 +1067,7 @@ SMBIOS_MFR_B64=$(echo -n "Apple Inc." | base64)
 SMBIOS_PRODUCT_B64=$(echo -n "$SMBIOS_MODEL" | base64)
 SMBIOS_FAMILY_B64=$(echo -n "Mac" | base64)
 qm set "$VMID" \
-  --smbios1 "uuid=${SMBIOS_UUID},serial=${SMBIOS_SERIAL_B64},manufacturer=${SMBIOS_MFR_B64},product=${SMBIOS_PRODUCT_B64},family=${SMBIOS_FAMILY_B64}" \
+  --smbios1 "uuid=${SMBIOS_UUID},base64=1,serial=${SMBIOS_SERIAL_B64},manufacturer=${SMBIOS_MFR_B64},product=${SMBIOS_PRODUCT_B64},family=${SMBIOS_FAMILY_B64}" \
   >/dev/null
 msg_ok "Set SMBIOS identity (serial: $SMBIOS_SERIAL)"
 
@@ -877,14 +1076,10 @@ if [ "$APPLE_SERVICES" = "true" ]; then
   msg_info "Configuring Apple Services (iMessage, FaceTime, iCloud)"
   # Generate vmgenid for Apple services
   VMGENID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
-  # Generate static MAC address (locally administered)
-  MAC_BYTE1=$((0x$(openssl rand -hex 1) | 0x02))
-  MAC_BYTE1=$(printf '%02X' $MAC_BYTE1)
-  MAC_rest=$(openssl rand -hex 5 | tr '[:lower:]' '[:upper:]' | sed 's/\(..\)/\1:/g; s/:$//')
-  STATIC_MAC="${MAC_BYTE1}:${MAC_rest}"
+  # STATIC_MAC was already generated before OC build (for ROM derivation)
 
   qm set "$VMID" --vmgenid "$VMGENID" >/dev/null
-  qm set "$VMID" --net0 "virtio,bridge=${BRG},macaddr=${STATIC_MAC}" >/dev/null
+  qm set "$VMID" --net0 "vmxnet3,bridge=${BRG},macaddr=${STATIC_MAC},firewall=0${VLAN}${MTU}" >/dev/null
   msg_ok "Configured Apple Services (vmgenid: $VMGENID, MAC: $STATIC_MAC)"
 fi
 
@@ -898,7 +1093,7 @@ msg_ok "Attached EFI disk + TPM"
 
 # ── Create main disk ──
 msg_info "Creating main disk (${DISK_SIZE})"
-qm set "$VMID" --sata0 "${STORAGE}:${DISK_SIZE%G}" >/dev/null
+qm set "$VMID" --virtio0 "${STORAGE}:${DISK_SIZE%G}" >/dev/null
 msg_ok "Created main disk"
 
 # ── Detect import command (PVE 8.x vs 9.x) ──
@@ -958,23 +1153,30 @@ a = (a | 0x100) & ~0x800
 f.seek(off); f.write(struct.pack('>I', a))
 f.close(); print('HFS+ flags fixed')
 "
-RLOOP=$(losetup --find --show "$RECOVERY_RAW")
-partprobe "$RLOOP" && sleep 1
-mkdir -p /tmp/oc-recovery
-mount -t hfsplus -o rw "${RLOOP}p1" /tmp/oc-recovery
-# Write .contentDetails in CoreServices (matches Python planner)
-mkdir -p /tmp/oc-recovery/System/Library/CoreServices
-rm -f /tmp/oc-recovery/System/Library/CoreServices/.contentDetails 2>/dev/null
-printf '%s' "$MACOS_LABEL" > /tmp/oc-recovery/System/Library/CoreServices/.contentDetails
-# Copy InstallAssistant.icns → .VolumeIcon.icns (matches Python planner)
-ICON=$(find /tmp/oc-recovery -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1)
-if [ -n "$ICON" ]; then
-  rm -f /tmp/oc-recovery/.VolumeIcon.icns
-  cp "$ICON" /tmp/oc-recovery/.VolumeIcon.icns
+cleanup_stale_loops "$RECOVERY_RAW"
+setup_loop RLOOP "$RECOVERY_RAW" "recovery image"
+RECOVERY_MNT="/tmp/oc-recovery"
+mkdir -p "$RECOVERY_MNT"
+if [ ! -b "${RLOOP}p1" ]; then
+  msg_error "ERROR: ${RLOOP}p1 not found after partprobe"
+  echo -e "  Hint: Try running the script again (slow storage)"
+  exit 1
 fi
-umount /tmp/oc-recovery
-losetup -d "$RLOOP"
-rm -rf /tmp/oc-recovery
+safe_mount "${RLOOP}p1" "$RECOVERY_MNT" -t hfsplus -o rw
+# Write .contentDetails in CoreServices (matches Python planner)
+mkdir -p "$RECOVERY_MNT/System/Library/CoreServices"
+rm -f "$RECOVERY_MNT/System/Library/CoreServices/.contentDetails" 2>/dev/null
+printf '%s' "$MACOS_LABEL" > "$RECOVERY_MNT/System/Library/CoreServices/.contentDetails"
+# Copy InstallAssistant.icns → .VolumeIcon.icns (matches Python planner)
+ICON=$(find "$RECOVERY_MNT" -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1)
+if [ -n "$ICON" ]; then
+  rm -f "$RECOVERY_MNT/.VolumeIcon.icns"
+  cp "$ICON" "$RECOVERY_MNT/.VolumeIcon.icns"
+fi
+umount "$RECOVERY_MNT" 2>/dev/null || umount -l "$RECOVERY_MNT" 2>/dev/null || true
+losetup -d "$RLOOP" 2>/dev/null || true
+rm -rf "$RECOVERY_MNT"
+RLOOP="" RECOVERY_MNT=""
 msg_ok "Recovery stamped with Apple icon"
 
 # ── Import and attach recovery disk → ide2 ──
@@ -990,8 +1192,8 @@ msg_ok "Attached recovery disk (ide2)"
 
 # ── Set boot order ──
 msg_info "Setting boot order"
-qm set "$VMID" --boot order="ide2;sata0;ide0" >/dev/null
-msg_ok "Set boot order (ide2 → sata0 → ide0)"
+qm set "$VMID" --boot order="ide2;virtio0;ide0" >/dev/null
+msg_ok "Set boot order (ide2 → virtio0 → ide0)"
 
 # ── VM description ──
 DESCRIPTION=$(
@@ -1039,7 +1241,7 @@ msg_ok "Completed successfully!"
 echo -e "\n${INFO}${YW}Next steps:${CL}"
 echo -e "  1. Open the VM console (VM ${VMID} → Console)"
 echo -e "  2. The installer auto-boots after 15 seconds (Apple logo boot screen)"
-echo -e "  3. Use Disk Utility to erase the SATA disk as APFS"
+echo -e "  3. Use Disk Utility to erase the VirtIO disk as APFS"
 echo -e "  4. Run 'Reinstall macOS' from the recovery menu"
 echo -e ""
 echo -e "  ${BL}Documentation: https://github.com/lucid-fabrics/osx-proxmox-next${CL}"

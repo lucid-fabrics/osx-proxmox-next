@@ -6,10 +6,10 @@ from pathlib import Path
 from shlex import join
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
-from .defaults import detect_cpu_vendor
+from .defaults import CpuInfo, detect_cpu_info
 from .domain import SUPPORTED_MACOS, VmConfig
 from .infrastructure import ProxmoxAdapter
-from .smbios import generate_smbios, model_for_macos
+from .smbios import generate_rom_from_mac, generate_smbios, model_for_macos
 
 
 @dataclass
@@ -23,17 +23,29 @@ class PlanStep:
         return join(self.argv)
 
 
-def _cpu_args() -> str:
-    """Return QEMU -cpu flag tailored to host CPU vendor.
+def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
+    """Return QEMU -cpu flag tailored to host CPU.
 
-    AMD uses Cascadelake-Server with AVX-512/TSX/PCID disabled — this presents
-    a convincing Intel server CPUID to macOS while avoiding instructions AMD
-    CPUs lack.  Combined with AMD_Vanilla kernel patches this covers all
-    all supported macOS versions reliably.
+    If *override* is provided (e.g. ``Skylake-Server-IBRS``), it is used
+    directly as the -cpu model with standard KVM flags.
+
+    AMD always uses Cascadelake-Server emulation (no native macOS support).
+    Intel hybrid CPUs (12th gen+) also need Cascadelake-Server because macOS
+    hardware validation fails on P+E core topology with correct SMBIOS.
+
+    Non-hybrid Intel uses ``-cpu host`` for native passthrough.
 
     Ref: luchina-gabriel/OSX-PROXMOX (battle-tested on ~5k installs).
     """
-    if detect_cpu_vendor() == "AMD":
+    if override:
+        return (
+            f"-cpu {override},"
+            "kvm=on,"
+            "vendor=GenuineIntel,"
+            "+invtsc,"
+            "vmware-cpuid-freq=on"
+        )
+    if cpu.needs_emulated_cpu:
         return (
             "-cpu Cascadelake-Server,"
             "vendor=GenuineIntel,"
@@ -56,8 +68,11 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     oc_disk = opencore_path.parent / f"opencore-{config.macos}-vm{vmid}.img"
 
     macos_label = meta["label"]
-    cpu_flag = _cpu_args()
-    is_amd = detect_cpu_vendor() == "AMD"
+    cpu = detect_cpu_info()
+    cpu_flag = _cpu_args(cpu, override=config.cpu_model)
+    # AMD needs kernel patches (AppleCpuPmCfgLock / AppleXcpmCfgLock).
+    # Hybrid Intel does NOT — it only needs Cascadelake-Server emulation.
+    is_amd = cpu.vendor == "AMD"
 
     steps = [
         PlanStep(
@@ -72,7 +87,9 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "--sockets", "1",
                 "--memory", str(config.memory_mb),
                 "--cpu", "host",
-                "--net0", f"virtio,bridge={config.bridge}",
+                "--balloon", "0",
+                "--agent", "enabled=1",
+                "--net0", f"vmxnet3,bridge={config.bridge},firewall=0",
             ],
         ),
         PlanStep(
@@ -101,20 +118,30 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
         ),
         PlanStep(
             title="Create main disk",
-            argv=["qm", "set", vmid, "--sata0", f"{config.storage}:{config.disk_gb}"],
+            argv=["qm", "set", vmid, "--virtio0", f"{config.storage}:{config.disk_gb}"],
         ),
         PlanStep(
             title="Build OpenCore boot disk",
             argv=[
                 "bash", "-c",
-                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk, config.macos, is_amd, config.cores, config.verbose_boot),
+                _build_oc_disk_script(
+                    opencore_path, recovery_raw, oc_disk, config.macos,
+                    is_amd, config.cores, config.verbose_boot,
+                    apple_services=config.apple_services,
+                    smbios_serial=config.smbios_serial,
+                    smbios_uuid=config.smbios_uuid,
+                    smbios_mlb=config.smbios_mlb,
+                    smbios_rom=config.smbios_rom,
+                    smbios_model=config.smbios_model,
+                ),
             ],
         ),
         PlanStep(
             title="Import and attach OpenCore disk",
             argv=[
                 "bash", "-c",
-                f"REF=$(qm importdisk {vmid} {oc_disk} {config.storage} 2>&1 | "
+                "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
+                f"REF=$($IMPORT_CMD {vmid} {oc_disk} {config.storage} 2>&1 | "
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
                 f"qm set {vmid} --ide0 $REF,media=disk && "
                 # Fix GPT header corruption from thin-provisioned LVM importdisk
@@ -139,11 +166,19 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "a=(a|0x100)&~0x800; "
                 "f.seek(off); f.write(struct.pack(\">I\",a)); "
                 "f.close(); print(\"HFS+ flags fixed\")' && "
-                f"RLOOP=$(losetup --find --show {recovery_raw}) && "
-                "partprobe $RLOOP && sleep 1 && "
+                # Cleanup stale loops from previous failed runs
+                f"for lo in $(losetup -j {recovery_raw} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; "
+                f"RLOOP=$(losetup -fP --show {recovery_raw}) && "
+                "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
+                # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
+                "partprobe $RLOOP 2>/dev/null; "
+                "for _i in 1 2 3 4 5; do ls ${RLOOP}p* &>/dev/null && break; sleep 1; partprobe $RLOOP 2>/dev/null; done && "
+                "{ [ -b \"${RLOOP}p1\" ] || { echo \"ERROR: ${RLOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
                 "mkdir -p /tmp/oc-recovery && "
                 "mount -t hfsplus -o rw ${RLOOP}p1 /tmp/oc-recovery && "
+                "{ mountpoint -q /tmp/oc-recovery || { echo \"ERROR: /tmp/oc-recovery is not mounted. Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
                 # Set custom name via .contentDetails in blessed directory
+                "mkdir -p /tmp/oc-recovery/System/Library/CoreServices && "
                 "rm -f /tmp/oc-recovery/System/Library/CoreServices/.contentDetails 2>/dev/null; "
                 f"printf '{macos_label}' > /tmp/oc-recovery/System/Library/CoreServices/.contentDetails && "
                 # Copy macOS installer icon as .VolumeIcon.icns for boot picker
@@ -153,21 +188,22 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "cp \"$ICON\" /tmp/oc-recovery/.VolumeIcon.icns && "
                 "echo \"Volume icon set from $ICON\"; "
                 "else echo \"No InstallAssistant.icns found, using default icon\"; fi && "
-                "umount /tmp/oc-recovery && losetup -d $RLOOP",
+                "{ umount /tmp/oc-recovery || umount -l /tmp/oc-recovery; } && losetup -d $RLOOP",
             ],
         ),
         PlanStep(
             title="Import and attach macOS recovery",
             argv=[
                 "bash", "-c",
-                f"REF=$(qm importdisk {vmid} {recovery_raw} {config.storage} 2>&1 | "
+                "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
+                f"REF=$($IMPORT_CMD {vmid} {recovery_raw} {config.storage} 2>&1 | "
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
                 f"qm set {vmid} --ide2 $REF,media=disk",
             ],
         ),
         PlanStep(
             title="Set boot order",
-            argv=["qm", "set", vmid, "--boot", "order=ide2;sata0;ide0"],
+            argv=["qm", "set", vmid, "--boot", "order=ide2;virtio0;ide0"],
         ),
         PlanStep(
             title="Start VM",
@@ -213,6 +249,9 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
 def _build_oc_disk_script(
     opencore_path: Path, recovery_path: Path, dest: Path, macos: str,
     is_amd: bool = False, cores: int = 4, verbose_boot: bool = False,
+    apple_services: bool = False, smbios_serial: str = "",
+    smbios_uuid: str = "", smbios_mlb: str = "", smbios_rom: str = "",
+    smbios_model: str = "",
 ) -> str:
     """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
     meta = SUPPORTED_MACOS.get(macos, {})
@@ -233,31 +272,57 @@ def _build_oc_disk_script(
             "kq[\"AppleXcpmCfgLock\"]=True; "
         )
 
+    # PlatformInfo — required for Apple Services (iMessage, FaceTime, iCloud).
+    # macOS reads identity from OpenCore's EFI PlatformInfo, not QEMU SMBIOS.
+    # ROM must match NIC MAC (macOS cross-checks during Apple ID validation).
+    platforminfo_block = ""
+    if apple_services and smbios_serial:
+        platforminfo_block = (
+            "pi=p.setdefault(\"PlatformInfo\",{}).setdefault(\"Generic\",{}); "
+            f"pi[\"SystemSerialNumber\"]=\"{smbios_serial}\"; "
+            f"pi[\"SystemProductName\"]=\"{smbios_model}\"; "
+            f"pi[\"SystemUUID\"]=\"{smbios_uuid}\"; "
+            f"pi[\"MLB\"]=\"{smbios_mlb}\"; "
+            f"pi[\"ROM\"]=bytes.fromhex(\"{smbios_rom}\"); "
+            "p[\"PlatformInfo\"][\"UpdateSMBIOS\"]=True; "
+            "p[\"PlatformInfo\"][\"UpdateDataHub\"]=True; "
+        )
+
     return (
         # Cleanup stale mounts/loops from any previous failed run
         "umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
-        f"for lo in $(losetup -j {opencore_path} -O NAME --noheadings 2>/dev/null); do losetup -d $lo; done; "
+        f"for lo in $(losetup -j {opencore_path} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; "
+        f"for lo in $(losetup -j {dest} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; "
         # Create 1GB GPT disk with EFI System Partition
         f"dd if=/dev/zero of={dest} bs=1M count=1024 && "
         f"sgdisk -Z {dest} && "
         f"sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {dest} && "
         # Mount source OpenCore — detect FAT32 partition by filesystem type, not position.
-        # blkid probes all loop partitions and returns the one with TYPE=vfat, handling
-        # any partition table layout (raw FAT32, MBR p1, GPT p2, etc.).
-        f"SRC_LOOP=$(losetup -P --find --show {opencore_path}) && "
-        "partprobe $SRC_LOOP 2>/dev/null; sleep 1 && "
+        f"SRC_LOOP=$(losetup -fP --show {opencore_path}) && "
+        "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
+        # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
+        "partprobe $SRC_LOOP 2>/dev/null; "
+        "for _i in 1 2 3 4 5; do ls ${SRC_LOOP}p* &>/dev/null && break; sleep 1; partprobe $SRC_LOOP 2>/dev/null; done && "
         "mkdir -p /tmp/oc-src && "
         "SRC_PART=$(blkid -o device $SRC_LOOP ${SRC_LOOP}p* 2>/dev/null "
         "| xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' "
-        "| head -1) && "
-        "[ -n \"$SRC_PART\" ] && mount \"$SRC_PART\" /tmp/oc-src || mount $SRC_LOOP /tmp/oc-src && "
+        "| head -1); "
+        "if [ -n \"$SRC_PART\" ]; then mount \"$SRC_PART\" /tmp/oc-src; "
+        "else echo 'WARN: No vfat partition found on source ISO via blkid, trying raw mount'; mount $SRC_LOOP /tmp/oc-src; fi && "
+        "{ mountpoint -q /tmp/oc-src || { echo \"ERROR: /tmp/oc-src is not mounted. Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
         # Format and mount dest ESP — label the volume OPENCORE
-        f"DEST_LOOP=$(losetup -P --find --show {dest}) && "
-        "partprobe $DEST_LOOP && sleep 1 && "
+        f"DEST_LOOP=$(losetup -fP --show {dest}) && "
+        "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
+        "partprobe $DEST_LOOP 2>/dev/null; "
+        "for _i in 1 2 3 4 5; do ls ${DEST_LOOP}p* &>/dev/null && break; sleep 1; partprobe $DEST_LOOP 2>/dev/null; done && "
+        "{ [ -b \"${DEST_LOOP}p1\" ] || { echo \"ERROR: ${DEST_LOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
         "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
         "mkdir -p /tmp/oc-dest && mount ${DEST_LOOP}p1 /tmp/oc-dest && "
-        # Copy OpenCore files
-        "cp -a /tmp/oc-src/* /tmp/oc-dest/ && "
+        "{ mountpoint -q /tmp/oc-dest || { echo \"ERROR: /tmp/oc-dest is not mounted. Hints: file ${DEST_LOOP}p1; blkid ${DEST_LOOP}p1; dmesg | tail -5\"; false; }; } && "
+        # Copy OpenCore files (including hidden files)
+        "cp -a /tmp/oc-src/. /tmp/oc-dest/ && "
+        # Validate EFI structure was copied
+        "{ [ -d /tmp/oc-dest/EFI/OC ] || { echo 'ERROR: OpenCore ISO does not contain expected EFI/OC directory. ISO may be corrupt.'; false; }; } && "
         # Patch config.plist: security, boot labels, hide auxiliary entries
         "python3 -c '"
         "import plistlib; "
@@ -279,14 +344,15 @@ def _build_oc_disk_script(
         "p[\"NVRAM\"][\"WriteFlash\"]=True; "
         # Enable VirtualSMC — shipped OC ISO has it disabled
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
-        + amd_patch_block +
+        + amd_patch_block
+        + platforminfo_block +
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "print(\"config.plist patched\")' && "
         # Hide OC partition from boot picker (shown only when user presses Space)
         "echo Auxiliary > /tmp/oc-dest/.contentVisibility && "
-        # Cleanup mounts
-        "umount /tmp/oc-src && losetup -d $SRC_LOOP && "
-        "umount /tmp/oc-dest && losetup -d $DEST_LOOP"
+        # Cleanup mounts (lazy unmount fallback for busy mounts)
+        "{ umount /tmp/oc-src || umount -l /tmp/oc-src; } && losetup -d $SRC_LOOP && "
+        "{ umount /tmp/oc-dest || umount -l /tmp/oc-dest; } && losetup -d $DEST_LOOP"
     )
 
 
@@ -312,10 +378,14 @@ def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
         config.smbios_model = model
         config.smbios_mlb = identity.mlb
         config.smbios_rom = identity.rom
+        # Propagate MAC so _apple_services_steps doesn't generate a second one
+        if identity.mac and not config.static_mac:
+            config.static_mac = identity.mac
     if not model:
         model = model_for_macos(config.macos)
     smbios_value = (
         f"uuid={smbios_uuid},"
+        f"base64=1,"
         f"serial={_encode_smbios_value(serial)},"
         f"manufacturer={_encode_smbios_value('Apple Inc.')},"
         f"product={_encode_smbios_value(model)},"
@@ -346,6 +416,9 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
         from .smbios import generate_mac
         config.static_mac = generate_mac()
 
+    # Derive ROM from MAC — macOS cross-checks ROM against NIC during Apple ID validation
+    config.smbios_rom = generate_rom_from_mac(config.static_mac)
+
     # Add vmgenid for Apple services
     steps.append(PlanStep(
         title="Configure vmgenid for Apple services",
@@ -356,7 +429,7 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
     # We'll replace the existing net0 with a static MAC
     steps.append(PlanStep(
         title="Configure static MAC for Apple services",
-        argv=["qm", "set", vmid, "--net0", f"virtio,bridge={config.bridge},macaddr={config.static_mac}"],
+        argv=["qm", "set", vmid, "--net0", f"vmxnet3,bridge={config.bridge},macaddr={config.static_mac},firewall=0"],
     ))
 
     return steps
