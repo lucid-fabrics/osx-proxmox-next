@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from subprocess import check_output
@@ -439,7 +440,7 @@ class NextApp(App):
             self._toggle_purge()
         if event.checkbox.id == "apple_services_cb":
             self.state.apple_services = event.checkbox.value
-            self._update_smbios_preview()
+            self._generate_smbios()
             self._toggle_apple_services_fields()
 
     def _toggle_apple_services_fields(self) -> None:
@@ -521,7 +522,7 @@ class NextApp(App):
 
     def _select_os(self, key: str) -> None:
         self.state.selected_os = key
-        self.state.smbios = generate_smbios(key)
+        self.state.smbios = generate_smbios(key, self.state.apple_services)
         # Update card styles
         for os_key in SUPPORTED_MACOS:
             card = self.query_one(f"#os_{os_key}")
@@ -637,8 +638,8 @@ class NextApp(App):
         except ValueError:
             errors["disk"] = "Disk must be >= 64 GB."
 
-        if not bridge_text.startswith("vmbr"):
-            errors["bridge"] = "Bridge should look like vmbr0."
+        if not re.fullmatch(r"vmbr[0-9]+", bridge_text):
+            errors["bridge"] = "Bridge must match vmbr<N> (e.g. vmbr0)."
 
         if not storage_text:
             errors["storage_input"] = "Storage target is required."
@@ -668,6 +669,9 @@ class NextApp(App):
     def _read_form(self) -> VmConfig | None:
         try:
             vmid = int(self.query_one("#vmid", Input).value.strip())
+            cores = int(self.query_one("#cores", Input).value.strip() or "8")
+            memory_mb = int(self.query_one("#memory", Input).value.strip() or "16384")
+            disk_gb = int(self.query_one("#disk", Input).value.strip() or "128")
         except ValueError:
             return None
 
@@ -678,9 +682,9 @@ class NextApp(App):
             vmid=vmid,
             name=self.query_one("#name", Input).value.strip(),
             macos=macos,
-            cores=int(self.query_one("#cores", Input).value.strip() or "8"),
-            memory_mb=int(self.query_one("#memory", Input).value.strip() or "16384"),
-            disk_gb=int(self.query_one("#disk", Input).value.strip() or "128"),
+            cores=cores,
+            memory_mb=memory_mb,
+            disk_gb=disk_gb,
             bridge=self.query_one("#bridge", Input).value.strip() or DEFAULT_BRIDGE,
             storage=self.query_one("#storage_input", Input).value.strip() or DEFAULT_STORAGE,
             installer_path=self.query_one("#installer_path", Input).value.strip(),

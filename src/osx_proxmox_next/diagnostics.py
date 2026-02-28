@@ -43,7 +43,6 @@ def export_log_bundle() -> Path:
     include_paths = [
         out_dir / "logs",
         out_dir / "snapshots",
-        out_dir,
     ]
 
     with tarfile.open(bundle, "w:gz") as tar:

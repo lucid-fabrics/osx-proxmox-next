@@ -292,6 +292,22 @@ def test_select_os_tahoe() -> None:
     asyncio.run(_run())
 
 
+def test_select_os_passes_apple_services_flag() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 2)
+            app.state.apple_services = True
+            await pilot.click("#os_sequoia")
+            await pilot.pause()
+            assert app.state.smbios is not None
+            # Apple-format serials start with "C"
+            assert app.state.smbios.serial.startswith("C")
+
+    asyncio.run(_run())
+
+
 def test_switch_os_deselects_previous() -> None:
     async def _run() -> None:
         app = NextApp()
@@ -2030,6 +2046,94 @@ def test_manage_purge_toggle() -> None:
             event = Checkbox.Changed(fake_cb, fake_cb.value)
             app.on_checkbox_changed(event)
             assert app.state.uninstall_purge is True  # unchanged
+
+    asyncio.run(_run())
+
+
+def test_apple_services_checkbox_toggle() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            # Initially unchecked
+            cb = app.query_one("#apple_services_cb", Checkbox)
+            assert cb.value is False
+            assert app.state.apple_services is False
+            container = app.query_one("#apple_services_fields")
+            assert container.has_class("hidden")
+            # Toggle ON
+            await pilot.click("#apple_services_cb")
+            await pilot.pause()
+            assert cb.value is True
+            assert app.state.apple_services is True
+            assert not container.has_class("hidden")
+            assert app.state.smbios is not None
+            assert app.state.smbios.serial.startswith("C")
+            # Toggle OFF
+            await pilot.click("#apple_services_cb")
+            await pilot.pause()
+            assert cb.value is False
+            assert app.state.apple_services is False
+            assert container.has_class("hidden")
+
+    asyncio.run(_run())
+
+
+def test_generate_smbios_with_existing_uuid() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            # Set an existing UUID
+            app.query_one("#existing_uuid", Input).value = "12345678-1234-1234-1234-123456789ABC"
+            await pilot.pause()
+            # Click Generate SMBIOS
+            app.query_one("#smbios_btn").scroll_visible()
+            await pilot.pause()
+            await pilot.click("#smbios_btn")
+            await pilot.pause()
+            assert app.state.smbios is not None
+            assert app.state.smbios.uuid == "12345678-1234-1234-1234-123456789ABC"
+
+    asyncio.run(_run())
+
+
+def test_generate_smbios_apple_services_preview() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            app.state.apple_services = True
+            # Click Generate SMBIOS to trigger _generate_smbios
+            app.query_one("#smbios_btn").scroll_visible()
+            await pilot.pause()
+            await pilot.click("#smbios_btn")
+            await pilot.pause()
+            text = app.query_one("#smbios_preview", Static).content
+            assert "[Apple Services]" in text
+
+    asyncio.run(_run())
+
+
+def test_apply_host_defaults_with_existing_uuid() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            # Clear smbios so _apply_host_defaults generates one
+            app.state.smbios = None
+            app.query_one("#existing_uuid", Input).value = "AABBCCDD-1122-3344-5566-778899AABBCC"
+            await pilot.pause()
+            app.query_one("#suggest_btn").scroll_visible()
+            await pilot.pause()
+            await pilot.click("#suggest_btn")
+            await pilot.pause()
+            assert app.state.smbios is not None
+            assert app.state.smbios.uuid == "AABBCCDD-1122-3344-5566-778899AABBCC"
 
     asyncio.run(_run())
 

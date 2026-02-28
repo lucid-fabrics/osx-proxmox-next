@@ -18,10 +18,10 @@ header_info
 echo -e "\n Loading..."
 
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
-RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
-METHOD=""
-NSAPP="macos-vm"
-var_os="macos"
+if ! [[ "$GEN_MAC" =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]]; then
+  echo "ERROR: Failed to generate valid MAC address: $GEN_MAC" >&2
+  exit 1
+fi
 APPLE_SERVICES="false"
 
 YW=$(echo "\033[33m")
@@ -46,7 +46,7 @@ DISKSIZE="${TAB}💾${TAB}${CL}"
 CPUCORE="${TAB}🧠${TAB}${CL}"
 RAMSIZE="${TAB}🛠️${TAB}${CL}"
 CONTAINERID="${TAB}🆔${TAB}${CL}"
-HOSTNAME="${TAB}🏠${TAB}${CL}"
+LBL_HOSTNAME="${TAB}🏠${TAB}${CL}"
 BRIDGE="${TAB}🌉${TAB}${CL}"
 GATEWAY="${TAB}🌐${TAB}${CL}"
 DEFAULT="${TAB}⚙️${TAB}${CL}"
@@ -84,7 +84,7 @@ declare -A SMBIOS_MODELS=(
 # ── OpenCore ISO download URL ──
 OC_URL="https://github.com/lucid-fabrics/osx-proxmox-next/releases/download/assets/opencore-osx-proxmox-vm.iso"
 
-set -e
+set -euo pipefail
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
 
@@ -94,6 +94,7 @@ function error_handler() {
   local command="$2"
   local error_message="${RD}[ERROR]${CL} in line ${RD}$line_number${CL}: exit code ${RD}$exit_code${CL}: while executing command ${YW}$command${CL}"
   echo -e "\n$error_message\n"
+  trap - ERR  # Prevent recursion if cleanup_vmid fails
   cleanup_vmid
 }
 
@@ -115,9 +116,10 @@ function get_valid_nextid() {
 }
 
 function cleanup_vmid() {
+  if [ -z "${VMID:-}" ]; then return; fi
   if qm status "$VMID" &>/dev/null; then
     qm stop "$VMID" &>/dev/null
-    qm destroy "$VMID" &>/dev/null
+    qm destroy "$VMID" --purge &>/dev/null
   fi
 }
 
@@ -197,7 +199,7 @@ function setup_loop() {
     sleep 1
   done
 
-  eval "$varname=\"$dev\""
+  printf -v "$varname" '%s' "$dev"
 }
 
 # Mount with validation.
@@ -217,7 +219,7 @@ function safe_mount() {
 }
 
 function check_root() {
-  if [[ "$(id -u)" -ne 0 || $(ps -o comm= -p $PPID) == "sudo" ]]; then
+  if [[ "$(id -u)" -ne 0 || $(ps -o comm= -p "$PPID") == "sudo" ]]; then
     clear
     msg_error "Please run this script as root."
     echo -e "\nExiting..."
@@ -231,7 +233,7 @@ pve_check() {
   PVE_VER="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
   if [[ "$PVE_VER" =~ ^8\.([0-9]+) ]]; then
     local MINOR="${BASH_REMATCH[1]}"
-    if ((MINOR < 0 || MINOR > 9)); then
+    if ((MINOR > 9)); then
       msg_error "Requires Proxmox VE 8.0–8.9"
       exit 1
     fi
@@ -239,7 +241,7 @@ pve_check() {
   fi
   if [[ "$PVE_VER" =~ ^9\.([0-9]+) ]]; then
     local MINOR="${BASH_REMATCH[1]}"
-    if ((MINOR < 0 || MINOR > 1)); then
+    if ((MINOR > 1)); then
       msg_error "Requires Proxmox VE 9.0–9.1"
       exit 1
     fi
@@ -407,7 +409,7 @@ function detect_memory_mb() {
 # ── Generate SMBIOS identity ──
 function generate_smbios() {
   local macos_ver="$1"
-  local existing_uuid="$2"
+  local existing_uuid="${2:-}"
   SMBIOS_MODEL="${SMBIOS_MODELS[$macos_ver]:-MacPro7,1}"
 
   if [ "$APPLE_SERVICES" = "true" ]; then
@@ -467,16 +469,20 @@ print(serial, mlb)
       msg_error "Apple-format SMBIOS generation returned empty values"
       exit 1
     fi
+    if ! [[ "$SMBIOS_SERIAL" =~ ^[A-Z0-9]{10,14}$ ]] || ! [[ "$SMBIOS_MLB" =~ ^[A-Z0-9]{17}$ ]]; then
+      msg_error "Apple-format SMBIOS output invalid: serial='$SMBIOS_SERIAL' mlb='$SMBIOS_MLB'"
+      exit 1
+    fi
   else
-    SMBIOS_SERIAL=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 12)
-    SMBIOS_MLB=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 17)
+    SMBIOS_SERIAL=$(openssl rand -hex 6 | tr '[:lower:]' '[:upper:]')
+    SMBIOS_MLB=$(openssl rand -hex 9 | tr '[:lower:]' '[:upper:]' | head -c 17)
   fi
 
   SMBIOS_ROM=$(openssl rand -hex 6 | tr '[:lower:]' '[:upper:]')
   if [ -n "$existing_uuid" ]; then
     SMBIOS_UUID="$existing_uuid"
   else
-    SMBIOS_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
+    SMBIOS_UUID=$(tr '[:lower:]' '[:upper:]' < /proc/sys/kernel/random/uuid)
   fi
 }
 
@@ -554,7 +560,6 @@ fg=${fg}"
   local attempt=0
   while true; do
     if curl -fSL -C - -o "$base_dmg" \
-      --retry 3 --retry-delay 5 \
       -H "User-Agent: InternetRecovery/1.0" \
       ${image_sess:+-H "Cookie: AssetToken=${image_sess}"} \
       "$image_url"; then
@@ -589,9 +594,7 @@ function build_opencore_disk() {
 
   msg_info "Building OpenCore boot disk (GPT+ESP)"
 
-  # Clean up stale mounts/loops from previous failed runs
-  umount /tmp/oc-src 2>/dev/null || true
-  umount /tmp/oc-dest 2>/dev/null || true
+  # Clean up stale loops from previous failed runs
   cleanup_stale_loops "$source_iso"
   cleanup_stale_loops "$dest_disk"
 
@@ -640,8 +643,11 @@ function build_opencore_disk() {
   fi
   BUILD_SRC_MNT="$src_mnt"
 
-  # Copy OpenCore files
-  cp -a "$src_mnt"/* "$dest_mnt"/ 2>/dev/null || cp -a "$src_mnt"/. "$dest_mnt"/ 2>/dev/null || true
+  # Copy OpenCore files (including hidden files)
+  cp -a "$src_mnt"/. "$dest_mnt"/ || {
+    msg_error "Failed to copy OpenCore files from source ISO"
+    exit 1
+  }
 
   # Validate EFI structure was copied
   if [ ! -d "$dest_mnt/EFI/OC" ]; then
@@ -717,6 +723,8 @@ with open(path, 'wb') as f:
       rm -rf "$dest_mnt" "$src_mnt"
       exit 1
     }
+    # Fix plistlib self-closing tags that OpenCore's OcXmlLib rejects
+    sed -i 's|<array/>|<array></array>|g; s|<dict/>|<dict></dict>|g; s|<data/>|<data></data>|g' "$dest_mnt/EFI/OC/config.plist"
   fi
 
   # Hide OC partition from boot picker (shown only when user presses Space)
@@ -744,7 +752,6 @@ fi
 
 function default_settings() {
   MACOS_VER="sequoia"
-  var_version="15"
   VMID=$(get_valid_nextid)
   DISK_SIZE="$(default_disk_gb "$MACOS_VER")G"
   HN="macos-sequoia"
@@ -760,7 +767,7 @@ function default_settings() {
   echo -e "${CONTAINERID}${BOLD}${DGN}Virtual Machine ID: ${BGN}${VMID}${CL}"
   echo -e "${CONTAINERTYPE}${BOLD}${DGN}Machine Type: ${BGN}q35${CL}"
   echo -e "${DISKSIZE}${BOLD}${DGN}Disk Size: ${BGN}${DISK_SIZE}${CL}"
-  echo -e "${HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}${HN}${CL}"
+  echo -e "${LBL_HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}${HN}${CL}"
   echo -e "${CPUCORE}${BOLD}${DGN}CPU Cores: ${BGN}${CORE_COUNT}${CL}"
   echo -e "${RAMSIZE}${BOLD}${DGN}RAM Size: ${BGN}${RAM_SIZE}${CL}"
   echo -e "${BRIDGE}${BOLD}${DGN}Bridge: ${BGN}${BRG}${CL}"
@@ -781,19 +788,14 @@ function advanced_settings() {
     "tahoe" "macOS Tahoe 26 (stable)  " OFF \
     3>&1 1>&2 2>&3); then
     echo -e "${OS}${BOLD}${DGN}macOS Version: ${BGN}${MACOS_LABELS[$MACOS_VER]}${CL}"
-    case "$MACOS_VER" in
-    ventura) var_version="13" ;;
-    sonoma) var_version="14" ;;
-    sequoia) var_version="15" ;;
-    tahoe) var_version="26" ;;
-    esac
+    : # version metadata handled by MACOS_LABELS
   else
     exit-script
   fi
 
   [ -z "${VMID:-}" ] && VMID=$(get_valid_nextid)
   while true; do
-    if VMID=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set Virtual Machine ID" 8 58 $VMID --title "VIRTUAL MACHINE ID" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+    if VMID=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set Virtual Machine ID" 8 58 "$VMID" --title "VIRTUAL MACHINE ID" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
       if [ -z "$VMID" ]; then
         VMID=$(get_valid_nextid)
       fi
@@ -842,7 +844,11 @@ function advanced_settings() {
     else
       HN=$(echo "${VM_NAME,,}" | tr -d ' ')
     fi
-    echo -e "${HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}$HN${CL}"
+    if ! [[ "$HN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.\-]*$ ]]; then
+      msg_error "Invalid hostname: $HN (must start with alphanumeric, contain only [a-zA-Z0-9.-])"
+      exit-script
+    fi
+    echo -e "${LBL_HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}$HN${CL}"
   else
     exit-script
   fi
@@ -853,7 +859,11 @@ function advanced_settings() {
     if [ -z "$CORE_COUNT" ]; then
       CORE_COUNT="$default_cores"
     fi
-    if [ "$CORE_COUNT" -lt 2 ] 2>/dev/null; then
+    if ! [[ "$CORE_COUNT" =~ ^[0-9]+$ ]]; then
+      msg_error "CPU cores must be a number"
+      exit-script
+    fi
+    if [ "$CORE_COUNT" -lt 2 ]; then
       msg_error "At least 2 CPU cores are required for macOS"
       exit-script
     fi
@@ -868,7 +878,11 @@ function advanced_settings() {
     if [ -z "$RAM_SIZE" ]; then
       RAM_SIZE="$default_ram"
     fi
-    if [ "$RAM_SIZE" -lt 4096 ] 2>/dev/null; then
+    if ! [[ "$RAM_SIZE" =~ ^[0-9]+$ ]]; then
+      msg_error "RAM size must be a number"
+      exit-script
+    fi
+    if [ "$RAM_SIZE" -lt 4096 ]; then
       msg_error "At least 4096 MiB RAM is required for macOS"
       exit-script
     fi
@@ -881,12 +895,16 @@ function advanced_settings() {
     if [ -z "$BRG" ]; then
       BRG="vmbr0"
     fi
+    if ! [[ "$BRG" =~ ^[a-zA-Z0-9]+$ ]]; then
+      msg_error "Invalid bridge name: $BRG"
+      exit-script
+    fi
     echo -e "${BRIDGE}${BOLD}${DGN}Bridge: ${BGN}$BRG${CL}"
   else
     exit-script
   fi
 
-  if MAC1=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set a MAC Address" 8 58 $GEN_MAC --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if MAC1=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Set a MAC Address" 8 58 "$GEN_MAC" --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$MAC1" ]; then
       MAC="$GEN_MAC"
     else
@@ -902,6 +920,10 @@ function advanced_settings() {
       VLAN1="Default"
       VLAN=""
     else
+      if ! [[ "$VLAN1" =~ ^[0-9]+$ ]]; then
+        msg_error "VLAN must be a number"
+        exit-script
+      fi
       VLAN=",tag=$VLAN1"
     fi
     echo -e "${VLANTAG}${BOLD}${DGN}VLAN: ${BGN}$VLAN1${CL}"
@@ -914,6 +936,10 @@ function advanced_settings() {
       MTU1="Default"
       MTU=""
     else
+      if ! [[ "$MTU1" =~ ^[0-9]+$ ]]; then
+        msg_error "MTU must be a number"
+        exit-script
+      fi
       MTU=",mtu=$MTU1"
     fi
     echo -e "${DEFAULT}${BOLD}${DGN}Interface MTU Size: ${BGN}$MTU1${CL}"
@@ -959,38 +985,50 @@ start_script
 
 # ── Storage selection ──
 msg_info "Validating Storage"
+declare -a STORAGE_MENU=()
+MSG_MAX_LENGTH=0
 while read -r line; do
-  TAG=$(echo $line | awk '{print $1}')
-  TYPE=$(echo $line | awk '{printf "%-10s", $2}')
-  FREE=$(echo $line | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
+  TAG=$(echo "$line" | awk '{print $1}')
+  TYPE=$(echo "$line" | awk '{printf "%-10s", $2}')
+  FREE=$(echo "$line" | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f 2>/dev/null | awk '{printf( "%9sB", $6)}') || FREE="  unknown"
   ITEM="  Type: $TYPE Free: $FREE "
   OFFSET=2
-  if [[ $((${#ITEM} + $OFFSET)) -gt ${MSG_MAX_LENGTH:-} ]]; then
+  if [[ $((${#ITEM} + $OFFSET)) -gt $MSG_MAX_LENGTH ]]; then
     MSG_MAX_LENGTH=$((${#ITEM} + $OFFSET))
   fi
   STORAGE_MENU+=("$TAG" "$ITEM" "OFF")
 done < <(pvesm status -content images | awk 'NR>1')
-VALID=$(pvesm status -content images | awk 'NR>1')
-if [ -z "$VALID" ]; then
+if [ ${#STORAGE_MENU[@]} -eq 0 ]; then
   msg_error "Unable to detect a valid storage location."
   exit
 elif [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then
   STORAGE=${STORAGE_MENU[0]}
 else
   while [ -z "${STORAGE:+x}" ]; do
-    STORAGE=$(whiptail --backtitle "OSX Proxmox Next" --title "Storage Pools" --radiolist \
+    if ! STORAGE=$(whiptail --backtitle "OSX Proxmox Next" --title "Storage Pools" --radiolist \
       "Which storage pool would you like to use for ${HN}?\nTo make a selection, use the Spacebar.\n" \
       16 $(($MSG_MAX_LENGTH + 23)) 6 \
-      "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3)
+      "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3); then
+      exit-script
+    fi
   done
 fi
 msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
 msg_ok "Virtual Machine ID is ${CL}${BL}$VMID${CL}."
 
+# ── Apple Services toggle ──
+if whiptail --backtitle "OSX Proxmox Next" --title "Apple Services" --yesno \
+  "Enable Apple Services (iMessage, FaceTime, iCloud)?\n\nThis generates a unique SMBIOS identity, static MAC, and patches OpenCore PlatformInfo.\n\nNOTE: Apple Services only work on macOS Sonoma 14 and earlier.\nSequoia 15+ requires signing in on Sonoma first, then upgrading." \
+  14 70 --defaultno 3>&1 1>&2 2>&3; then
+  APPLE_SERVICES="true"
+  msg_ok "Apple Services enabled"
+else
+  msg_ok "Apple Services disabled"
+fi
 
 # ── Download OpenCore ISO ──
 CACHE_DIR="/var/lib/vz/template/cache"
-mkdir -p "$CACHE_DIR"
+mkdir -p "$CACHE_DIR" || { msg_error "Cannot create $CACHE_DIR"; exit 1; }
 OC_ISO="$CACHE_DIR/opencore-osx-proxmox-vm.iso"
 
 if [ -f "$OC_ISO" ] && [ -s "$OC_ISO" ]; then
@@ -1020,6 +1058,10 @@ if [ "$APPLE_SERVICES" = "true" ]; then
   MAC_BYTE1=$(printf '%02X' $MAC_BYTE1)
   MAC_rest=$(openssl rand -hex 5 | tr '[:lower:]' '[:upper:]' | sed 's/\(..\)/\1:/g; s/:$//')
   STATIC_MAC="${MAC_BYTE1}:${MAC_rest}"
+  if ! [[ "$STATIC_MAC" =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]]; then
+    msg_error "Failed to generate valid static MAC: $STATIC_MAC"
+    exit 1
+  fi
   # Derive ROM from MAC (macOS cross-checks ROM against NIC during Apple ID validation)
   SMBIOS_ROM=$(echo "$STATIC_MAC" | tr -d ':')
 fi
@@ -1027,6 +1069,13 @@ fi
 # ── Build OpenCore GPT disk ──
 OC_DISK="$TEMP_DIR/opencore.raw"
 build_opencore_disk "$OC_ISO" "$OC_DISK" "$MACOS_VER"
+
+# ── Determine final MAC address (Apple Services uses static MAC) ──
+if [ "$APPLE_SERVICES" = "true" ]; then
+  VM_MAC="$STATIC_MAC"
+else
+  VM_MAC="$MAC"
+fi
 
 # ── Create VM ──
 msg_info "Creating macOS VM shell"
@@ -1041,7 +1090,7 @@ qm create "$VMID" \
   --cpu host \
   --balloon 0 \
   --agent enabled=1 \
-  --net0 "vmxnet3,bridge=$BRG,macaddr=$MAC,firewall=0$VLAN$MTU" \
+  --net0 "vmxnet3,bridge=$BRG,macaddr=$VM_MAC,firewall=0$VLAN$MTU" \
   >/dev/null
 msg_ok "Created VM shell"
 
@@ -1062,10 +1111,10 @@ msg_ok "Applied hardware profile ($CPU_VENDOR)"
 
 # ── Set SMBIOS identity (base64-encoded for Proxmox) ──
 msg_info "Setting SMBIOS identity"
-SMBIOS_SERIAL_B64=$(echo -n "$SMBIOS_SERIAL" | base64)
-SMBIOS_MFR_B64=$(echo -n "Apple Inc." | base64)
-SMBIOS_PRODUCT_B64=$(echo -n "$SMBIOS_MODEL" | base64)
-SMBIOS_FAMILY_B64=$(echo -n "Mac" | base64)
+SMBIOS_SERIAL_B64=$(echo -n "$SMBIOS_SERIAL" | base64 -w 0)
+SMBIOS_MFR_B64=$(echo -n "Apple Inc." | base64 -w 0)
+SMBIOS_PRODUCT_B64=$(echo -n "$SMBIOS_MODEL" | base64 -w 0)
+SMBIOS_FAMILY_B64=$(echo -n "Mac" | base64 -w 0)
 qm set "$VMID" \
   --smbios1 "uuid=${SMBIOS_UUID},base64=1,serial=${SMBIOS_SERIAL_B64},manufacturer=${SMBIOS_MFR_B64},product=${SMBIOS_PRODUCT_B64},family=${SMBIOS_FAMILY_B64}" \
   >/dev/null
@@ -1075,11 +1124,10 @@ msg_ok "Set SMBIOS identity (serial: $SMBIOS_SERIAL)"
 if [ "$APPLE_SERVICES" = "true" ]; then
   msg_info "Configuring Apple Services (iMessage, FaceTime, iCloud)"
   # Generate vmgenid for Apple services
-  VMGENID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
+  VMGENID=$(tr '[:lower:]' '[:upper:]' < /proc/sys/kernel/random/uuid)
   # STATIC_MAC was already generated before OC build (for ROM derivation)
 
   qm set "$VMID" --vmgenid "$VMGENID" >/dev/null
-  qm set "$VMID" --net0 "vmxnet3,bridge=${BRG},macaddr=${STATIC_MAC},firewall=0${VLAN}${MTU}" >/dev/null
   msg_ok "Configured Apple Services (vmgenid: $VMGENID, MAC: $STATIC_MAC)"
 fi
 
@@ -1142,8 +1190,8 @@ msg_info "Adding Apple icon flavour to recovery"
 MACOS_LABEL="${MACOS_LABELS[$MACOS_VER]}"
 # Fix HFS+ dirty/lock flags so Linux mounts read-write
 python3 -c "
-import struct, subprocess
-img = '$RECOVERY_RAW'
+import struct, subprocess, sys
+img = sys.argv[1]
 out = subprocess.check_output(['sgdisk', '-i', '1', img], text=True)
 start = int([l for l in out.splitlines() if 'First sector' in l][0].split(':')[1].split('(')[0].strip())
 off = start * 512 + 1024 + 4
@@ -1152,11 +1200,10 @@ a = struct.unpack('>I', f.read(4))[0]
 a = (a | 0x100) & ~0x800
 f.seek(off); f.write(struct.pack('>I', a))
 f.close(); print('HFS+ flags fixed')
-"
+" "$RECOVERY_RAW"
 cleanup_stale_loops "$RECOVERY_RAW"
 setup_loop RLOOP "$RECOVERY_RAW" "recovery image"
-RECOVERY_MNT="/tmp/oc-recovery"
-mkdir -p "$RECOVERY_MNT"
+RECOVERY_MNT=$(mktemp -d /tmp/oc-recovery.XXXXXX)
 if [ ! -b "${RLOOP}p1" ]; then
   msg_error "ERROR: ${RLOOP}p1 not found after partprobe"
   echo -e "  Hint: Try running the script again (slow storage)"
@@ -1229,7 +1276,7 @@ msg_ok "Created ${MACOS_LABELS[$MACOS_VER]} VM ${CL}${BL}(${HN})"
 if [ "$START_VM" == "yes" ]; then
   msg_info "Starting macOS VM"
   # Clean up any stale swtpm processes for this VMID
-  pkill -f "swtpm.*${VMID}" 2>/dev/null || true
+  pkill -f "swtpm.*/${VMID}\\.swtpm" 2>/dev/null || true
   rm -f "/var/run/qemu-server/${VMID}.swtpm" "/var/run/qemu-server/${VMID}.swtpm.pid" 2>/dev/null
   sleep 1
   qm start "$VMID"

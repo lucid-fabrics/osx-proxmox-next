@@ -30,6 +30,7 @@ def test_validate_config_rejects_invalid_values() -> None:
     assert len(issues) >= 7
     assert any("VMID" in issue for issue in issues)
     assert any("macOS version" in issue for issue in issues)
+    assert any("Bridge" in issue for issue in issues)
 
 
 def test_validate_config_accepts_ventura() -> None:
@@ -142,3 +143,107 @@ def test_validate_tahoe_no_installer_path_ok():
     )
     issues = validate_config(cfg)
     assert not any("Tahoe" in i for i in issues)
+
+
+# ── Bridge validation ──────────────────────────────────────────────
+
+
+def test_validate_bridge_rejects_non_vmbr() -> None:
+    cfg = _valid_cfg(bridge="br0")
+    issues = validate_config(cfg)
+    assert any("Bridge" in i for i in issues)
+
+
+def test_validate_bridge_rejects_vmbr_no_number() -> None:
+    cfg = _valid_cfg(bridge="vmbr")
+    issues = validate_config(cfg)
+    assert any("Bridge" in i for i in issues)
+
+
+def test_validate_bridge_accepts_vmbr1() -> None:
+    cfg = _valid_cfg(bridge="vmbr1")
+    assert validate_config(cfg) == []
+
+
+# ── Name validation ────────────────────────────────────────────────
+
+
+def test_validate_name_rejects_special_chars() -> None:
+    cfg = _valid_cfg(name="macos;rm -rf /")
+    issues = validate_config(cfg)
+    assert any("name" in i.lower() for i in issues)
+
+
+def test_validate_name_accepts_dashes_dots() -> None:
+    cfg = _valid_cfg(name="macos-vm.test")
+    assert validate_config(cfg) == []
+
+
+# ── Installer path validation ──────────────────────────────────────
+
+
+def test_validate_installer_path_rejects_shell_meta() -> None:
+    cfg = _valid_cfg(installer_path="/tmp/foo;rm -rf /")
+    issues = validate_config(cfg)
+    assert any("path" in i.lower() for i in issues)
+
+
+def test_validate_installer_path_accepts_normal() -> None:
+    cfg = _valid_cfg(installer_path="/var/lib/vz/template/iso/macos.iso")
+    assert validate_config(cfg) == []
+
+
+# ── CPU model validation ──────────────────────────────────────────
+
+
+def test_validate_cpu_model_rejects_injection() -> None:
+    cfg = _valid_cfg(cpu_model="Skylake;rm")
+    issues = validate_config(cfg)
+    assert any("CPU" in i for i in issues)
+
+
+def test_validate_cpu_model_accepts_valid() -> None:
+    cfg = _valid_cfg(cpu_model="Skylake-Server-IBRS")
+    assert validate_config(cfg) == []
+
+
+# ── Storage validation ────────────────────────────────────────────
+
+
+def test_validate_storage_rejects_injection() -> None:
+    cfg = _valid_cfg(storage="local;rm")
+    issues = validate_config(cfg)
+    assert any("Storage" in i for i in issues)
+
+
+def test_validate_storage_accepts_underscores() -> None:
+    cfg = _valid_cfg(storage="wd_2tb-ssd")
+    assert validate_config(cfg) == []
+
+
+# ── Static MAC validation ─────────────────────────────────────────
+
+
+def test_validate_static_mac_rejects_lowercase() -> None:
+    cfg = _valid_cfg(static_mac="02:ab:cd:ef:01:23")
+    issues = validate_config(cfg)
+    assert any("MAC" in i for i in issues)
+
+
+def test_validate_static_mac_accepts_valid() -> None:
+    cfg = _valid_cfg(static_mac="02:AB:CD:EF:01:23")
+    assert validate_config(cfg) == []
+
+
+# ── vmgenid validation ────────────────────────────────────────────
+
+
+def test_validate_vmgenid_rejects_bad() -> None:
+    cfg = _valid_cfg(vmgenid="not-a-uuid")
+    issues = validate_config(cfg)
+    assert any("vmgenid" in i for i in issues)
+
+
+def test_validate_vmgenid_accepts_valid() -> None:
+    cfg = _valid_cfg(vmgenid="550E8400-E29B-41D4-A716-446655440000")
+    assert validate_config(cfg) == []

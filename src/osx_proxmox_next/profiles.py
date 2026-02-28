@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from .domain import VmConfig
+
+_VALID_FIELDS = {f.name for f in fields(VmConfig)}
 
 
 def _profiles_path() -> Path:
@@ -17,7 +19,10 @@ def _profiles_path() -> Path:
 
 def load_profiles() -> dict[str, VmConfig]:
     raw = json.loads(_profiles_path().read_text(encoding="utf-8"))
-    return {name: VmConfig(**value) for name, value in raw.items()}
+    return {
+        name: VmConfig(**{k: v for k, v in value.items() if k in _VALID_FIELDS})
+        for name, value in raw.items()
+    }
 
 
 def save_profile(name: str, config: VmConfig) -> Path:

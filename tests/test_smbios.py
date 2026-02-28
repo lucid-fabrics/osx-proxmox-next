@@ -7,12 +7,14 @@ from osx_proxmox_next.smbios import (
     _YEAR_CHARS,
     _encode_year_week,
     _verify_mlb_checksum,
+    generate_mac,
     generate_mlb,
     generate_rom,
     generate_rom_from_mac,
     generate_serial,
     generate_smbios,
     generate_uuid,
+    generate_vmgenid,
     model_for_macos,
 )
 
@@ -246,3 +248,36 @@ def test_generate_smbios_apple_services_full() -> None:
     # ROM derived from MAC
     assert identity.mac != ""
     assert identity.rom == identity.mac.replace(":", "")[:12].upper()
+
+
+# ── MAC and vmgenid tests ──────────────────────────────────────────
+
+
+def test_generate_mac_format() -> None:
+    """MAC must be 6 octets, uppercase hex, colon-separated."""
+    for _ in range(20):
+        mac = generate_mac()
+        assert re.fullmatch(r"([0-9A-F]{2}:){5}[0-9A-F]{2}", mac), f"Bad MAC format: {mac}"
+
+
+def test_generate_mac_local_admin_unicast() -> None:
+    """First byte must have local-admin bit set (bit 1) and unicast bit clear (bit 0)."""
+    for _ in range(50):
+        mac = generate_mac()
+        first_byte = int(mac.split(":")[0], 16)
+        assert first_byte & 0x02, f"Local-admin bit not set: {mac}"
+        assert not (first_byte & 0x01), f"Unicast bit not clear: {mac}"
+
+
+def test_generate_mac_uniqueness() -> None:
+    macs = {generate_mac() for _ in range(100)}
+    assert len(macs) == 100
+
+
+def test_generate_vmgenid_format() -> None:
+    """vmgenid must be a valid uppercase UUID."""
+    for _ in range(10):
+        vid = generate_vmgenid()
+        assert re.fullmatch(
+            r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}", vid
+        ), f"Bad vmgenid: {vid}"
