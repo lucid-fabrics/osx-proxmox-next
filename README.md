@@ -143,12 +143,16 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 
 ## 🍎 Supported macOS Versions
 
-| macOS | Channel | Notes |
-|-------|---------|-------|
-| **Ventura 13** | ✅ Stable | Lightweight, great for older hardware |
-| **Sonoma 14** | ✅ Stable | Best tested, most reliable |
-| **Sequoia 15** | ✅ Stable | Fully supported |
-| **Tahoe 26** | ✅ Stable | Fully supported |
+| macOS | Channel | Apple Services | Notes |
+|-------|---------|---------------|-------|
+| **Ventura 13** | ✅ Stable | ✅ Works | Lightweight, great for older hardware |
+| **Sonoma 14** | ✅ Stable | ✅ Works | Best tested, most reliable. **Last version with full Apple Services on VMs** |
+| **Sequoia 15** | ✅ Stable | ⚠️ Limited | Apple blocks Apple ID sign-in on VMs (see below) |
+| **Tahoe 26** | ✅ Stable | ⚠️ Limited | Apple blocks Apple ID sign-in on VMs (see below) |
+
+> **Apple Services on Sequoia/Tahoe VMs:** Starting with macOS Sequoia 15, Apple enforces hardware device attestation (DeviceCheck) that requires a physical Secure Enclave — which VMs don't have. This blocks Apple ID sign-in (iCloud, iMessage, FaceTime) on all VM platforms (Proxmox, Parallels, VMware, KVM). This is a server-side restriction by Apple, not a bug in this tool or OpenCore.
+>
+> **Workaround:** Install **Sonoma 14** first, sign into Apple ID, then upgrade in-place to Sequoia or Tahoe. Apple Services stay connected because the device was already authenticated. See the [Apple Services section](#-enable-apple-services-icloud-imessage-facetime) for details.
 
 ---
 
@@ -437,8 +441,29 @@ In the **TUI**, check "Enable Apple Services (iMessage, FaceTime, iCloud)" in st
 | "iMessage activation failed" | Verify ROM matches NIC MAC and MAC is static. Check date/time sync. |
 | Works once then breaks | VM config is regenerating SMBIOS or NIC MAC between boots. |
 | PlatformInfo not applied | Ensure `--apple-services` flag is set. Check OpenCore config.plist for PlatformInfo section. |
+| "Verification Failed" on Sequoia/Tahoe | Apple enforces hardware attestation on Sequoia+. See workaround below. |
 
 > **Note:** This tool configures all identity fields automatically, but Apple controls service activation server-side. Even with a correct setup, activation may require multiple attempts or a call to Apple Support. Never share SMBIOS values publicly or reuse them across VMs.
+
+### Sequoia/Tahoe Apple ID Limitation
+
+Starting with macOS Sequoia 15, Apple requires **hardware device attestation** (DeviceCheck/App Attest) for Apple ID sign-in. This uses the Secure Enclave — hardware that VMs cannot emulate. The error appears as:
+
+```
+Verification Failed — An unknown error occurred.
+```
+
+**This affects all VM platforms** (Proxmox, Parallels, VMware, KVM) — not just this tool. The underlying error is `AKAnisetteError Code=-8008` / `DeviceIdentity not available`.
+
+**Workaround — Install Sonoma first, then upgrade:**
+
+1. Create a **Sonoma 14** VM with `--apple-services`
+2. Complete macOS setup, sign into **Apple ID** in System Settings
+3. Verify iCloud, iMessage, FaceTime all work
+4. Upgrade in-place to Sequoia or Tahoe via System Settings > Software Update
+5. Apple Services stay connected because the device identity was established on Sonoma
+
+> `RestrictEvents.kext` with `revpatch=sbvmm` (hides `kern.hv_vmm_present`) does **not** fix this — Apple's attestation check is deeper than VMM detection and is enforced server-side.
 
 ---
 
