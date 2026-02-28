@@ -307,7 +307,8 @@ def test_build_plan_default_no_verbose(monkeypatch) -> None:
     cfg = _cfg("sequoia")
     steps = build_plan(cfg)
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
-    assert " -v" not in build.command
+    assert "debug=0x100 -v" not in build.command
+    assert 'debug=0x100"' in build.command or "debug=0x100'" in build.command
 
 
 def test_build_plan_verbose_boot(monkeypatch) -> None:
@@ -317,7 +318,7 @@ def test_build_plan_verbose_boot(monkeypatch) -> None:
     cfg.verbose_boot = True
     steps = build_plan(cfg)
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
-    assert "-v" in build.command
+    assert "debug=0x100 -v" in build.command
 
 
 def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
@@ -628,3 +629,80 @@ def test_fetch_vm_info_no_name_in_config() -> None:
     info = fetch_vm_info(400, adapter=FakeAdapter())
     assert info is not None
     assert info.name == ""
+
+
+# ── Phase 4: Defensive pattern tests ─────────────────────────────────
+
+
+def test_build_plan_oc_plistlib_sed_fix(monkeypatch) -> None:
+    """Verify generated bash includes sed to fix self-closing XML tags."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    oc = next(s for s in steps if "Build OpenCore" in s.title)
+    assert "sed -i" in oc.command
+    assert "<array/>" in oc.command
+    assert "<array></array>" in oc.command
+    assert "<dict/>" in oc.command
+    assert "<data/>" in oc.command
+
+
+def test_build_plan_oc_smbios_sanitized(monkeypatch) -> None:
+    """Verify SMBIOS values with special chars don't break generated bash."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.apple_services = True
+    cfg.smbios_serial = "C02VALID123"
+    cfg.smbios_uuid = "12345678-1234-1234-1234-123456789ABC"
+    cfg.smbios_mlb = "C02123456ABCDEFGH"
+    cfg.smbios_model = "MacPro7,1"
+    steps = build_plan(cfg)
+    oc = next(s for s in steps if "Build OpenCore" in s.title)
+    # Sanitizer preserves commas (MacPro7,1 stays MacPro7,1)
+    assert "C02VALID123" in oc.command
+    assert "MacPro7,1" in oc.command
+
+
+def test_build_plan_paths_quoted(monkeypatch) -> None:
+    """Verify path interpolations are quoted in shell commands."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    # Check OC build step quotes opencore_path and dest
+    build = next(s for s in steps if "Build OpenCore" in s.title)
+    cmd = build.command
+    # losetup paths should be in double quotes
+    assert 'losetup -fP --show "' in cmd
+    assert 'dd if=/dev/zero of="' in cmd
+    assert 'sgdisk -Z "' in cmd
+    # Import step should quote disk paths
+    oc_import = next(s for s in steps if s.title == "Import and attach OpenCore disk")
+    assert '"' in oc_import.command  # at minimum has quoted path
+
+
+def test_sanitize_smbios_strips_comma_for_non_model() -> None:
+    """Commas must be stripped from serial/UUID/MLB/ROM but preserved in model."""
+    from osx_proxmox_next.planner import _sanitize_smbios
+    # Model allows commas
+    assert _sanitize_smbios("MacPro7,1", allow_comma=True) == "MacPro7,1"
+    # Serial/MLB/ROM/UUID must not have commas
+    assert _sanitize_smbios("C02,FAKE", allow_comma=False) == "C02FAKE"
+    assert _sanitize_smbios("ABC';echo pwned", allow_comma=False) == "ABCechopwned"
+
+
+def test_build_plan_oc_base64_no_newlines(monkeypatch) -> None:
+    """Verify planner SMBIOS step uses base64 without line wrapping."""
+    import base64
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    cfg.smbios_serial = "C02LONGSERIAL1"
+    cfg.smbios_uuid = "12345678-1234-1234-1234-123456789ABC"
+    cfg.smbios_model = "MacPro7,1"
+    steps = build_plan(cfg)
+    smbios = next(s for s in steps if s.title == "Set SMBIOS identity")
+    # Encoded values should not contain newlines (Python base64 doesn't wrap)
+    encoded = base64.b64encode(b"C02LONGSERIAL1").decode()
+    assert "\n" not in encoded
+    assert f"serial={encoded}" in smbios.command

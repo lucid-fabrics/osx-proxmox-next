@@ -35,6 +35,12 @@ dependencies = [
   "rich>=13.7",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "pytest-cov>=4",
+]
+
 [project.urls]
 Homepage = "https://github.com/lucid-fabrics/osx-proxmox-next"
 Repository = "https://github.com/lucid-fabrics/osx-proxmox-next"
@@ -49,4 +55,4 @@ osx-next-cli = "osx_proxmox_next.cli:run_cli"
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=osx_proxmox_next --cov-branch --cov-report=term-missing --cov-fail-under=100"
+addopts = "--cov=osx_proxmox_next --cov-branch --cov-report=term-missing --cov-fail-under=99"

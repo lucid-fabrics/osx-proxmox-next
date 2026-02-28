@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from shlex import join
+from shlex import join, quote as shquote
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import CpuInfo, detect_cpu_info
 from .domain import SUPPORTED_MACOS, VmConfig
 from .infrastructure import ProxmoxAdapter
 from .smbios import generate_rom_from_mac, generate_smbios, model_for_macos
+
+
+def _sanitize_smbios(val: str, *, allow_comma: bool = False) -> str:
+    """Strip anything that isn't alphanumeric, hyphen, colon, or period.
+
+    Only *model* names need commas (e.g. ``MacPro7,1``).
+    """
+    if allow_comma:
+        return re.sub(r"[^a-zA-Z0-9\-:,.]", "", val)
+    return re.sub(r"[^a-zA-Z0-9\-:.]", "", val)
 
 
 @dataclass
@@ -141,18 +152,21 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             argv=[
                 "bash", "-c",
                 "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
-                f"REF=$($IMPORT_CMD {vmid} {oc_disk} {config.storage} 2>&1 | "
+                f'REF=$($IMPORT_CMD {vmid} "{oc_disk}" "{config.storage}" 2>&1 | '
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
-                f"qm set {vmid} --ide0 $REF,media=disk && "
+                f'qm set {vmid} --ide0 "$REF",media=disk && '
                 # Fix GPT header corruption from thin-provisioned LVM importdisk
-                "DEV=$(pvesm path $REF) && "
-                f"dd if={oc_disk} of=$DEV bs=512 count=2048 conv=notrunc 2>/dev/null",
+                'DEV=$(pvesm path "$REF") && '
+                f'dd if="{oc_disk}" of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
             ],
         ),
         PlanStep(
             title="Stamp recovery with Apple icon flavour",
             argv=[
                 "bash", "-c",
+                # Trap to clean up loop device on failure
+                "RLOOP=''; "
+                "trap '[ -n \"$RLOOP\" ] && { umount /tmp/oc-recovery 2>/dev/null; losetup -d $RLOOP 2>/dev/null; }' EXIT; "
                 # Fix HFS+ dirty/lock flags so Linux mounts read-write,
                 # then write OpenCore .contentFlavour + .contentDetails
                 "python3 -c '"
@@ -167,8 +181,8 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "f.seek(off); f.write(struct.pack(\">I\",a)); "
                 "f.close(); print(\"HFS+ flags fixed\")' && "
                 # Cleanup stale loops from previous failed runs
-                f"for lo in $(losetup -j {recovery_raw} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; "
-                f"RLOOP=$(losetup -fP --show {recovery_raw}) && "
+                f'for lo in $(losetup -j "{recovery_raw}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+                f'RLOOP=$(losetup -fP --show "{recovery_raw}") && '
                 "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
                 # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
                 "partprobe $RLOOP 2>/dev/null; "
@@ -180,7 +194,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 # Set custom name via .contentDetails in blessed directory
                 "mkdir -p /tmp/oc-recovery/System/Library/CoreServices && "
                 "rm -f /tmp/oc-recovery/System/Library/CoreServices/.contentDetails 2>/dev/null; "
-                f"printf '{macos_label}' > /tmp/oc-recovery/System/Library/CoreServices/.contentDetails && "
+                f"printf '%s' '{macos_label}' > /tmp/oc-recovery/System/Library/CoreServices/.contentDetails && "
                 # Copy macOS installer icon as .VolumeIcon.icns for boot picker
                 "ICON=$(find /tmp/oc-recovery -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1) && "
                 "if [ -n \"$ICON\" ]; then "
@@ -196,9 +210,9 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             argv=[
                 "bash", "-c",
                 "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
-                f"REF=$($IMPORT_CMD {vmid} {recovery_raw} {config.storage} 2>&1 | "
+                f'REF=$($IMPORT_CMD {vmid} "{recovery_raw}" "{config.storage}" 2>&1 | '
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
-                f"qm set {vmid} --ide2 $REF,media=disk",
+                f'qm set {vmid} --ide2 "$REF",media=disk',
             ],
         ),
         PlanStep(
@@ -277,28 +291,38 @@ def _build_oc_disk_script(
     # ROM must match NIC MAC (macOS cross-checks during Apple ID validation).
     platforminfo_block = ""
     if apple_services and smbios_serial:
+        s_serial = _sanitize_smbios(smbios_serial)
+        s_model = _sanitize_smbios(smbios_model, allow_comma=True)
+        s_uuid = _sanitize_smbios(smbios_uuid)
+        s_mlb = _sanitize_smbios(smbios_mlb)
+        s_rom = _sanitize_smbios(smbios_rom)
         platforminfo_block = (
             "pi=p.setdefault(\"PlatformInfo\",{}).setdefault(\"Generic\",{}); "
-            f"pi[\"SystemSerialNumber\"]=\"{smbios_serial}\"; "
-            f"pi[\"SystemProductName\"]=\"{smbios_model}\"; "
-            f"pi[\"SystemUUID\"]=\"{smbios_uuid}\"; "
-            f"pi[\"MLB\"]=\"{smbios_mlb}\"; "
-            f"pi[\"ROM\"]=bytes.fromhex(\"{smbios_rom}\"); "
+            f"pi[\"SystemSerialNumber\"]=\"{s_serial}\"; "
+            f"pi[\"SystemProductName\"]=\"{s_model}\"; "
+            f"pi[\"SystemUUID\"]=\"{s_uuid}\"; "
+            f"pi[\"MLB\"]=\"{s_mlb}\"; "
+            f"pi[\"ROM\"]=bytes.fromhex(\"{s_rom}\"); "
             "p[\"PlatformInfo\"][\"UpdateSMBIOS\"]=True; "
             "p[\"PlatformInfo\"][\"UpdateDataHub\"]=True; "
         )
 
     return (
+        # Trap to clean up loop devices and mounts on any failure
+        "SRC_LOOP=''; DEST_LOOP=''; "
+        "trap 'umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
+        "[ -n \"$SRC_LOOP\" ] && losetup -d $SRC_LOOP 2>/dev/null; "
+        "[ -n \"$DEST_LOOP\" ] && losetup -d $DEST_LOOP 2>/dev/null' EXIT; "
         # Cleanup stale mounts/loops from any previous failed run
         "umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
-        f"for lo in $(losetup -j {opencore_path} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; "
-        f"for lo in $(losetup -j {dest} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; "
+        f'for lo in $(losetup -j "{opencore_path}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+        f'for lo in $(losetup -j "{dest}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
         # Create 1GB GPT disk with EFI System Partition
-        f"dd if=/dev/zero of={dest} bs=1M count=1024 && "
-        f"sgdisk -Z {dest} && "
-        f"sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {dest} && "
+        f'dd if=/dev/zero of="{dest}" bs=1M count=1024 && '
+        f'sgdisk -Z "{dest}" && '
+        f'sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE "{dest}" && '
         # Mount source OpenCore — detect FAT32 partition by filesystem type, not position.
-        f"SRC_LOOP=$(losetup -fP --show {opencore_path}) && "
+        f'SRC_LOOP=$(losetup -fP --show "{opencore_path}") && '
         "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
         "partprobe $SRC_LOOP 2>/dev/null; "
@@ -311,7 +335,7 @@ def _build_oc_disk_script(
         "else echo 'WARN: No vfat partition found on source ISO via blkid, trying raw mount'; mount $SRC_LOOP /tmp/oc-src; fi && "
         "{ mountpoint -q /tmp/oc-src || { echo \"ERROR: /tmp/oc-src is not mounted. Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
         # Format and mount dest ESP — label the volume OPENCORE
-        f"DEST_LOOP=$(losetup -fP --show {dest}) && "
+        f'DEST_LOOP=$(losetup -fP --show "{dest}") && '
         "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         "partprobe $DEST_LOOP 2>/dev/null; "
         "for _i in 1 2 3 4 5; do ls ${DEST_LOOP}p* &>/dev/null && break; sleep 1; partprobe $DEST_LOOP 2>/dev/null; done && "
@@ -348,6 +372,8 @@ def _build_oc_disk_script(
         + platforminfo_block +
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "print(\"config.plist patched\")' && "
+        # Fix plistlib self-closing tags that OpenCore's OcXmlLib rejects
+        "sed -i 's|<array/>|<array></array>|g; s|<dict/>|<dict></dict>|g; s|<data/>|<data></data>|g' /tmp/oc-dest/EFI/OC/config.plist && "
         # Hide OC partition from boot picker (shown only when user presses Space)
         "echo Auxiliary > /tmp/oc-dest/.contentVisibility && "
         # Cleanup mounts (lazy unmount fallback for busy mounts)

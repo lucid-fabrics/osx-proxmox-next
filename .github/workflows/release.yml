@@ -16,6 +16,20 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Validate bash script syntax
+        run: bash -n scripts/bash/osx-proxmox-next.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run tests
+        run: |
+          pip install -e ".[dev]" 2>/dev/null || pip install -e .
+          pip install pytest pytest-cov 2>/dev/null || true
+          pytest tests/ -v --tb=short
+
       - name: Get current version
         id: current
         run: |
@@ -76,17 +90,18 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Update pyproject.toml version
+      - name: Update pyproject.toml and __init__.py version
         if: steps.bump.outputs.bump != 'none' && steps.check.outputs.exists == 'false'
         run: |
           sed -i "s/^version = \".*\"/version = \"${{ steps.version.outputs.new }}\"/" pyproject.toml
+          sed -i "s/^__version__ = \".*\"/__version__ = \"${{ steps.version.outputs.new }}\"/" src/osx_proxmox_next/__init__.py
 
       - name: Commit version bump
         if: steps.bump.outputs.bump != 'none' && steps.check.outputs.exists == 'false'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml
+          git add pyproject.toml src/osx_proxmox_next/__init__.py
           git commit -m "chore(release): v${{ steps.version.outputs.new }}" --no-verify
           git push origin main
 
