@@ -260,43 +260,35 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
     return "\n".join(lines)
 
 
-def _build_oc_disk_script(
-    opencore_path: Path, recovery_path: Path, dest: Path, macos: str,
-    is_amd: bool = False, cores: int = 4, verbose_boot: bool = False,
-    apple_services: bool = False, smbios_serial: str = "",
-    smbios_uuid: str = "", smbios_mlb: str = "", smbios_rom: str = "",
+def _plist_patch_script(
+    verbose_boot: bool = False,
+    is_amd: bool = False,
+    apple_services: bool = False,
+    smbios_serial: str = "",
+    smbios_uuid: str = "",
+    smbios_mlb: str = "",
+    smbios_rom: str = "",
     smbios_model: str = "",
 ) -> str:
-    """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
-    meta = SUPPORTED_MACOS.get(macos, {})
-    macos_label = meta.get("label", f"macOS {macos.title()}")
-
-    # AMD VM config — follows luchina-gabriel/OSX-PROXMOX's proven approach:
-    # Cascadelake-Server handles CPUID emulation, only minimal PENRYN kernel
-    # patches are needed (not the full AMD_Vanilla set which is for bare-metal).
-    # SecureBootModel=Disabled + DmgLoading=Any — required because dmg2img-converted
-    # recovery images are not Apple-signed. SecureBootModel must be Disabled
-    # when DmgLoading=Any (OpenCore enforces this constraint).
-    amd_patch_block = ""
+    """Return an inline python3 -c script that patches OpenCore's config.plist."""
+    # AMD: flip power management locks for Cascadelake-Server emulation
+    amd_patch = ""
     if is_amd:
-        amd_patch_block = (
-            # Flip power management locks for AMD
+        amd_patch = (
             "kq=p[\"Kernel\"][\"Quirks\"]; "
             "kq[\"AppleCpuPmCfgLock\"]=True; "
             "kq[\"AppleXcpmCfgLock\"]=True; "
         )
 
-    # PlatformInfo — required for Apple Services (iMessage, FaceTime, iCloud).
-    # macOS reads identity from OpenCore's EFI PlatformInfo, not QEMU SMBIOS.
-    # ROM must match NIC MAC (macOS cross-checks during Apple ID validation).
-    platforminfo_block = ""
+    # PlatformInfo for Apple Services (iMessage, FaceTime, iCloud)
+    platforminfo = ""
     if apple_services and smbios_serial:
         s_serial = _sanitize_smbios(smbios_serial)
         s_model = _sanitize_smbios(smbios_model, allow_comma=True)
         s_uuid = _sanitize_smbios(smbios_uuid)
         s_mlb = _sanitize_smbios(smbios_mlb)
         s_rom = _sanitize_smbios(smbios_rom)
-        platforminfo_block = (
+        platforminfo = (
             "pi=p.setdefault(\"PlatformInfo\",{}).setdefault(\"Generic\",{}); "
             f"pi[\"SystemSerialNumber\"]=\"{s_serial}\"; "
             f"pi[\"SystemProductName\"]=\"{s_model}\"; "
@@ -308,46 +300,6 @@ def _build_oc_disk_script(
         )
 
     return (
-        # Trap to clean up loop devices and mounts on any failure
-        "SRC_LOOP=''; DEST_LOOP=''; "
-        "trap 'umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
-        "[ -n \"$SRC_LOOP\" ] && losetup -d $SRC_LOOP 2>/dev/null; "
-        "[ -n \"$DEST_LOOP\" ] && losetup -d $DEST_LOOP 2>/dev/null' EXIT; "
-        # Cleanup stale mounts/loops from any previous failed run
-        "umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
-        f'for lo in $(losetup -j "{opencore_path}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
-        f'for lo in $(losetup -j "{dest}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
-        # Create 1GB GPT disk with EFI System Partition
-        f'dd if=/dev/zero of="{dest}" bs=1M count=1024 && '
-        f'sgdisk -Z "{dest}" && '
-        f'sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE "{dest}" && '
-        # Mount source OpenCore — detect FAT32 partition by filesystem type, not position.
-        f'SRC_LOOP=$(losetup -fP --show "{opencore_path}") && '
-        "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
-        # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
-        "partprobe $SRC_LOOP 2>/dev/null; "
-        "for _i in 1 2 3 4 5; do ls ${SRC_LOOP}p* &>/dev/null && break; sleep 1; partprobe $SRC_LOOP 2>/dev/null; done && "
-        "mkdir -p /tmp/oc-src && "
-        "SRC_PART=$(blkid -o device $SRC_LOOP ${SRC_LOOP}p* 2>/dev/null "
-        "| xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' "
-        "| head -1); "
-        "if [ -n \"$SRC_PART\" ]; then mount \"$SRC_PART\" /tmp/oc-src; "
-        "else echo 'WARN: No vfat partition found on source ISO via blkid, trying raw mount'; mount $SRC_LOOP /tmp/oc-src; fi && "
-        "{ mountpoint -q /tmp/oc-src || { echo \"ERROR: /tmp/oc-src is not mounted. Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
-        # Format and mount dest ESP — label the volume OPENCORE
-        f'DEST_LOOP=$(losetup -fP --show "{dest}") && '
-        "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
-        "partprobe $DEST_LOOP 2>/dev/null; "
-        "for _i in 1 2 3 4 5; do ls ${DEST_LOOP}p* &>/dev/null && break; sleep 1; partprobe $DEST_LOOP 2>/dev/null; done && "
-        "{ [ -b \"${DEST_LOOP}p1\" ] || { echo \"ERROR: ${DEST_LOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
-        "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
-        "mkdir -p /tmp/oc-dest && mount ${DEST_LOOP}p1 /tmp/oc-dest && "
-        "{ mountpoint -q /tmp/oc-dest || { echo \"ERROR: /tmp/oc-dest is not mounted. Hints: file ${DEST_LOOP}p1; blkid ${DEST_LOOP}p1; dmesg | tail -5\"; false; }; } && "
-        # Copy OpenCore files (including hidden files)
-        "cp -a /tmp/oc-src/. /tmp/oc-dest/ && "
-        # Validate EFI structure was copied
-        "{ [ -d /tmp/oc-dest/EFI/OC ] || { echo 'ERROR: OpenCore ISO does not contain expected EFI/OC directory. ISO may be corrupt.'; false; }; } && "
-        # Patch config.plist: security, boot labels, hide auxiliary entries
         "python3 -c '"
         "import plistlib; "
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
@@ -362,16 +314,89 @@ def _build_oc_disk_script(
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x67\\x0f\\x00\\x00\"; "
         f"p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 debug=0x100{' -v' if verbose_boot else ''}\"; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"prev-lang:kbd\"]=\"en-US:0\".encode(); "
-        # Ensure NVRAM Delete purges stale values so our Add entries take effect
         "nv_del=p.setdefault(\"NVRAM\",{}).setdefault(\"Delete\",{}); "
         "nv_del[\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"]=[\"csr-active-config\",\"boot-args\",\"prev-lang:kbd\"]; "
         "p[\"NVRAM\"][\"WriteFlash\"]=True; "
-        # Enable VirtualSMC — shipped OC ISO has it disabled
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
-        + amd_patch_block
-        + platforminfo_block +
+        + amd_patch
+        + platforminfo +
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
-        "print(\"config.plist patched\")' && "
+        "print(\"config.plist patched\")'"
+    )
+
+
+def _loop_cleanup_script(opencore_path: Path, dest: Path) -> str:
+    """Return bash snippet for loop device trap and stale cleanup."""
+    return (
+        "SRC_LOOP=''; DEST_LOOP=''; "
+        "trap 'umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
+        "[ -n \"$SRC_LOOP\" ] && losetup -d $SRC_LOOP 2>/dev/null; "
+        "[ -n \"$DEST_LOOP\" ] && losetup -d $DEST_LOOP 2>/dev/null' EXIT; "
+        "umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
+        f'for lo in $(losetup -j "{opencore_path}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+        f'for lo in $(losetup -j "{dest}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+    )
+
+
+def _mount_source_oc_script(opencore_path: Path) -> str:
+    """Return bash snippet to loop-mount the source OpenCore ISO."""
+    return (
+        f'SRC_LOOP=$(losetup -fP --show "{opencore_path}") && '
+        "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
+        "partprobe $SRC_LOOP 2>/dev/null; "
+        "for _i in 1 2 3 4 5; do ls ${SRC_LOOP}p* &>/dev/null && break; sleep 1; partprobe $SRC_LOOP 2>/dev/null; done && "
+        "mkdir -p /tmp/oc-src && "
+        "SRC_PART=$(blkid -o device $SRC_LOOP ${SRC_LOOP}p* 2>/dev/null "
+        "| xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' "
+        "| head -1); "
+        "if [ -n \"$SRC_PART\" ]; then mount \"$SRC_PART\" /tmp/oc-src; "
+        "else echo 'WARN: No vfat partition found on source ISO via blkid, trying raw mount'; mount $SRC_LOOP /tmp/oc-src; fi && "
+        "{ mountpoint -q /tmp/oc-src || { echo \"ERROR: /tmp/oc-src is not mounted. Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
+    )
+
+
+def _format_dest_oc_script(dest: Path) -> str:
+    """Return bash snippet to create, format, and mount the destination OpenCore disk."""
+    return (
+        f'dd if=/dev/zero of="{dest}" bs=1M count=1024 && '
+        f'sgdisk -Z "{dest}" && '
+        f'sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE "{dest}" && '
+        f'DEST_LOOP=$(losetup -fP --show "{dest}") && '
+        "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
+        "partprobe $DEST_LOOP 2>/dev/null; "
+        "for _i in 1 2 3 4 5; do ls ${DEST_LOOP}p* &>/dev/null && break; sleep 1; partprobe $DEST_LOOP 2>/dev/null; done && "
+        "{ [ -b \"${DEST_LOOP}p1\" ] || { echo \"ERROR: ${DEST_LOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
+        "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
+        "mkdir -p /tmp/oc-dest && mount ${DEST_LOOP}p1 /tmp/oc-dest && "
+        "{ mountpoint -q /tmp/oc-dest || { echo \"ERROR: /tmp/oc-dest is not mounted. Hints: file ${DEST_LOOP}p1; blkid ${DEST_LOOP}p1; dmesg | tail -5\"; false; }; } && "
+    )
+
+
+def _build_oc_disk_script(
+    opencore_path: Path, recovery_path: Path, dest: Path, macos: str,
+    is_amd: bool = False, cores: int = 4, verbose_boot: bool = False,
+    apple_services: bool = False, smbios_serial: str = "",
+    smbios_uuid: str = "", smbios_mlb: str = "", smbios_rom: str = "",
+    smbios_model: str = "",
+) -> str:
+    """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
+    plist_script = _plist_patch_script(
+        verbose_boot=verbose_boot, is_amd=is_amd,
+        apple_services=apple_services, smbios_serial=smbios_serial,
+        smbios_uuid=smbios_uuid, smbios_mlb=smbios_mlb,
+        smbios_rom=smbios_rom, smbios_model=smbios_model,
+    )
+
+    return (
+        _loop_cleanup_script(opencore_path, dest)
+        + _format_dest_oc_script(dest)
+        + _mount_source_oc_script(opencore_path)
+        # Copy OpenCore files (including hidden files)
+        + "cp -a /tmp/oc-src/. /tmp/oc-dest/ && "
+        # Validate EFI structure was copied
+        "{ [ -d /tmp/oc-dest/EFI/OC ] || { echo 'ERROR: OpenCore ISO does not contain expected EFI/OC directory. ISO may be corrupt.'; false; }; } && "
+        # Patch config.plist
+        + plist_script + " && "
         # Fix plistlib self-closing tags that OpenCore's OcXmlLib rejects
         "sed -i 's|<array/>|<array></array>|g; s|<dict/>|<dict></dict>|g; s|<data/>|<data></data>|g' /tmp/oc-dest/EFI/OC/config.plist && "
         # Hide OC partition from boot picker (shown only when user presses Space)

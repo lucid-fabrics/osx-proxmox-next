@@ -1,6 +1,10 @@
 from osx_proxmox_next.defaults import CpuInfo
 from osx_proxmox_next.domain import VmConfig
-from osx_proxmox_next.planner import build_plan, render_script, _cpu_args, VmInfo, fetch_vm_info, build_destroy_plan
+from osx_proxmox_next.planner import (
+    build_plan, render_script, _cpu_args, _plist_patch_script,
+    _loop_cleanup_script, _mount_source_oc_script, _format_dest_oc_script,
+    VmInfo, fetch_vm_info, build_destroy_plan,
+)
 from osx_proxmox_next.infrastructure import CommandResult
 
 
@@ -689,6 +693,78 @@ def test_sanitize_smbios_strips_comma_for_non_model() -> None:
     # Serial/MLB/ROM/UUID must not have commas
     assert _sanitize_smbios("C02,FAKE", allow_comma=False) == "C02FAKE"
     assert _sanitize_smbios("ABC';echo pwned", allow_comma=False) == "ABCechopwned"
+
+
+# ── Extracted helper tests ────────────────────────────────────────
+
+
+def test_plist_patch_script_default() -> None:
+    """Default plist patch includes security settings and VirtualSMC."""
+    script = _plist_patch_script()
+    assert "ScanPolicy" in script
+    assert "DmgLoading" in script
+    assert "SecureBootModel" in script
+    assert "VirtualSMC" in script
+    assert "AppleCpuPmCfgLock" not in script
+    assert "PlatformInfo" not in script
+
+
+def test_plist_patch_script_amd() -> None:
+    """AMD patch adds kernel quirks."""
+    script = _plist_patch_script(is_amd=True)
+    assert "AppleCpuPmCfgLock" in script
+    assert "AppleXcpmCfgLock" in script
+
+
+def test_plist_patch_script_verbose_boot() -> None:
+    """Verbose boot adds -v flag to boot-args."""
+    script = _plist_patch_script(verbose_boot=True)
+    assert "-v" in script
+    no_verbose = _plist_patch_script(verbose_boot=False)
+    assert "debug=0x100 -v" not in no_verbose
+
+
+def test_plist_patch_script_platforminfo() -> None:
+    """Apple services adds PlatformInfo block."""
+    script = _plist_patch_script(
+        apple_services=True,
+        smbios_serial="C02VALID1234",
+        smbios_model="MacPro7,1",
+        smbios_uuid="12345678-1234-1234-1234-123456789ABC",
+        smbios_mlb="C0234567890ABCDEF",
+        smbios_rom="AABBCCDDEEFF",
+    )
+    assert "PlatformInfo" in script
+    assert "SystemSerialNumber" in script
+    assert "C02VALID1234" in script
+    assert "MacPro7,1" in script
+
+
+def test_loop_cleanup_script_contains_trap() -> None:
+    from pathlib import Path
+    script = _loop_cleanup_script(Path("/tmp/oc.iso"), Path("/tmp/dest.img"))
+    assert "trap" in script
+    assert "SRC_LOOP" in script
+    assert "DEST_LOOP" in script
+    assert "losetup -d" in script
+
+
+def test_mount_source_oc_script() -> None:
+    from pathlib import Path
+    script = _mount_source_oc_script(Path("/tmp/oc.iso"))
+    assert "losetup -fP --show" in script
+    assert "blkid" in script
+    assert "vfat" in script
+    assert "/tmp/oc-src" in script
+
+
+def test_format_dest_oc_script() -> None:
+    from pathlib import Path
+    script = _format_dest_oc_script(Path("/tmp/dest.img"))
+    assert "sgdisk" in script
+    assert "mkfs.fat" in script
+    assert "OPENCORE" in script
+    assert "/tmp/oc-dest" in script
 
 
 def test_build_plan_oc_base64_no_newlines(monkeypatch) -> None:
