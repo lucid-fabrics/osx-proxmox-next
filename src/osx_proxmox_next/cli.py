@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
+from . import __version__
 from .assets import required_assets, suggested_fetch_commands
 from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage
 from .diagnostics import export_log_bundle, recovery_guide
@@ -75,6 +77,7 @@ def _auto_download_missing(config: VmConfig, dest_dir: Path) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="osx-next-cli")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("preflight")
@@ -119,6 +122,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("--script-out", type=str, default="")
+    plan.add_argument("--json", action="store_true", default=False,
+                      help="Output plan as JSON instead of human-readable text")
 
     apply_cmd = sub.add_parser("apply", parents=[common])
     apply_cmd.add_argument("--execute", action="store_true")
@@ -181,21 +186,30 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 3
 
     cpu = detect_cpu_info()
-    if config.cpu_model:
-        cpu_mode = f"override: {config.cpu_model}"
-    elif cpu.needs_emulated_cpu:
-        cpu_mode = "Cascadelake-Server emulation"
-    else:
-        cpu_mode = "native host passthrough"
-    cpu_label = cpu.model_name or cpu.vendor
-    print(f"CPU: {cpu_label} ({cpu_mode})")
+    json_mode = args.cmd == "plan" and getattr(args, "json", False)
+    if not json_mode:
+        if config.cpu_model:
+            cpu_mode = f"override: {config.cpu_model}"
+        elif cpu.needs_emulated_cpu:
+            cpu_mode = "Cascadelake-Server emulation"
+        else:
+            cpu_mode = "native host passthrough"
+        cpu_label = cpu.model_name or cpu.vendor
+        print(f"CPU: {cpu_label} ({cpu_mode})")
 
     steps = build_plan(config)
 
     if args.cmd == "plan":
-        for idx, step in enumerate(steps, start=1):
-            print(f"{idx:02d}. {step.title}")
-            print(f"    {step.command}")
+        if getattr(args, "json", False):
+            plan_data = [
+                {"step": idx, "title": step.title, "command": step.command, "risk": step.risk}
+                for idx, step in enumerate(steps, start=1)
+            ]
+            print(json.dumps(plan_data, indent=2))
+        else:
+            for idx, step in enumerate(steps, start=1):
+                print(f"{idx:02d}. {step.title}")
+                print(f"    {step.command}")
         if args.script_out:
             out = Path(args.script_out)
             out.parent.mkdir(parents=True, exist_ok=True)

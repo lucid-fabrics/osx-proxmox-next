@@ -16,6 +16,65 @@ def test_cli_parser_has_expected_commands() -> None:
     assert "download" in cmds
 
 
+def test_cli_version(capsys):
+    """--version flag prints version and exits."""
+    import pytest
+    from osx_proxmox_next import __version__
+    with pytest.raises(SystemExit) as exc_info:
+        run_cli(["--version"])
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert __version__ in captured.out
+
+
+def test_cli_plan_json(monkeypatch, capsys):
+    """--json flag outputs plan as JSON array."""
+    import json as json_mod
+    from osx_proxmox_next.assets import AssetCheck
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
+    )
+    rc = run_cli(_plan_args() + ["--json"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = json_mod.loads(captured.out)
+    assert isinstance(data, list)
+    assert len(data) > 0
+    assert "title" in data[0]
+    assert "command" in data[0]
+    assert "risk" in data[0]
+    assert "step" in data[0]
+    # JSON mode should NOT print CPU info
+    assert "CPU:" not in captured.out
+
+
+def test_cli_plan_prints_cpu_info(monkeypatch, capsys):
+    """Non-JSON plan prints CPU info line."""
+    from osx_proxmox_next.assets import AssetCheck
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
+    )
+    rc = run_cli(_plan_args())
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "CPU:" in captured.out
+
+
+def test_cli_plan_cpu_override_display(monkeypatch, capsys):
+    """CPU model override is shown in plan output."""
+    from osx_proxmox_next.assets import AssetCheck
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
+    )
+    rc = run_cli(_plan_args() + ["--cpu-model", "Skylake-Server-IBRS"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "override" in captured.out
+
+
 def test_cli_preflight(monkeypatch):
     from osx_proxmox_next.preflight import PreflightCheck
     monkeypatch.setattr(
