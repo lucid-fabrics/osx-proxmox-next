@@ -171,9 +171,9 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             title="Stamp recovery with Apple icon flavour",
             argv=[
                 "bash", "-c",
-                # Trap to clean up loop device on failure
-                "RLOOP=''; "
-                "trap '[ -n \"$RLOOP\" ] && { umount /tmp/oc-recovery 2>/dev/null; losetup -d $RLOOP 2>/dev/null; }' EXIT; "
+                # Trap to clean up loop device and temp dir on failure
+                "RLOOP=''; OC_REC=$(mktemp -d) && "
+                "trap '[ -n \"$RLOOP\" ] && { umount $OC_REC 2>/dev/null; losetup -d $RLOOP 2>/dev/null; }; rm -rf $OC_REC' EXIT; "
                 # Fix HFS+ dirty/lock flags so Linux mounts read-write,
                 # then write OpenCore .contentFlavour + .contentDetails
                 "python3 -c '"
@@ -195,21 +195,20 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "partprobe $RLOOP 2>/dev/null; "
                 "for _i in 1 2 3 4 5; do ls ${RLOOP}p* &>/dev/null && break; sleep 1; partprobe $RLOOP 2>/dev/null; done && "
                 "{ [ -b \"${RLOOP}p1\" ] || { echo \"ERROR: ${RLOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
-                "mkdir -p /tmp/oc-recovery && "
-                "mount -t hfsplus -o rw ${RLOOP}p1 /tmp/oc-recovery && "
-                "{ mountpoint -q /tmp/oc-recovery || { echo \"ERROR: /tmp/oc-recovery is not mounted. Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
+                "mount -t hfsplus -o rw ${RLOOP}p1 $OC_REC && "
+                "{ mountpoint -q $OC_REC || { echo \"ERROR: $OC_REC is not mounted. Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
                 # Set custom name via .contentDetails in blessed directory
-                "mkdir -p /tmp/oc-recovery/System/Library/CoreServices && "
-                "rm -f /tmp/oc-recovery/System/Library/CoreServices/.contentDetails 2>/dev/null; "
-                f"printf '%s' '{macos_label}' > /tmp/oc-recovery/System/Library/CoreServices/.contentDetails && "
+                "mkdir -p $OC_REC/System/Library/CoreServices && "
+                "rm -f $OC_REC/System/Library/CoreServices/.contentDetails 2>/dev/null; "
+                f"printf '%s' '{macos_label}' > $OC_REC/System/Library/CoreServices/.contentDetails && "
                 # Copy macOS installer icon as .VolumeIcon.icns for boot picker
-                "ICON=$(find /tmp/oc-recovery -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1) && "
+                "ICON=$(find $OC_REC -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1) && "
                 "if [ -n \"$ICON\" ]; then "
-                "rm -f /tmp/oc-recovery/.VolumeIcon.icns; "
-                "cp \"$ICON\" /tmp/oc-recovery/.VolumeIcon.icns && "
+                "rm -f $OC_REC/.VolumeIcon.icns; "
+                "cp \"$ICON\" $OC_REC/.VolumeIcon.icns && "
                 "echo \"Volume icon set from $ICON\"; "
                 "else echo \"No InstallAssistant.icns found, using default icon\"; fi && "
-                "{ umount /tmp/oc-recovery || umount -l /tmp/oc-recovery; } && losetup -d $RLOOP",
+                "{ umount $OC_REC || umount -l $OC_REC; } && losetup -d $RLOOP",
             ],
         ),
         PlanStep(
@@ -309,7 +308,8 @@ def _plist_patch_script(
     return (
         "python3 -c '"
         "import plistlib; "
-        "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
+        "import os; oc_dest=os.environ[\"OC_DEST\"]; "
+        "f=open(oc_dest+\"/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
         "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
         "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
         "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
@@ -327,7 +327,7 @@ def _plist_patch_script(
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
         + amd_patch
         + platforminfo +
-        "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
+        "f=open(oc_dest+\"/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "print(\"config.plist patched\")'"
     )
 
@@ -336,10 +336,12 @@ def _loop_cleanup_script(opencore_path: Path, dest: Path) -> str:
     """Return bash snippet for loop device trap and stale cleanup."""
     return (
         "SRC_LOOP=''; DEST_LOOP=''; "
-        "trap 'umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
+        "OC_SRC=$(mktemp -d) && OC_DEST=$(mktemp -d) && export OC_SRC OC_DEST && "
+        "trap 'umount $OC_SRC 2>/dev/null; umount $OC_DEST 2>/dev/null; "
         "[ -n \"$SRC_LOOP\" ] && losetup -d $SRC_LOOP 2>/dev/null; "
-        "[ -n \"$DEST_LOOP\" ] && losetup -d $DEST_LOOP 2>/dev/null' EXIT; "
-        "umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
+        "[ -n \"$DEST_LOOP\" ] && losetup -d $DEST_LOOP 2>/dev/null; "
+        "rm -rf $OC_SRC $OC_DEST' EXIT; "
+        "umount $OC_SRC 2>/dev/null; umount $OC_DEST 2>/dev/null; "
         f'for lo in $(losetup -j {shquote(str(opencore_path))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
         f'for lo in $(losetup -j {shquote(str(dest))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
     )
@@ -352,13 +354,12 @@ def _mount_source_oc_script(opencore_path: Path) -> str:
         "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         "partprobe $SRC_LOOP 2>/dev/null; "
         "for _i in 1 2 3 4 5; do ls ${SRC_LOOP}p* &>/dev/null && break; sleep 1; partprobe $SRC_LOOP 2>/dev/null; done && "
-        "mkdir -p /tmp/oc-src && "
         "SRC_PART=$(blkid -o device $SRC_LOOP ${SRC_LOOP}p* 2>/dev/null "
         "| xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' "
         "| head -1); "
-        "if [ -n \"$SRC_PART\" ]; then mount \"$SRC_PART\" /tmp/oc-src; "
-        "else echo 'WARN: No vfat partition found on source ISO via blkid, trying raw mount'; mount $SRC_LOOP /tmp/oc-src; fi && "
-        "{ mountpoint -q /tmp/oc-src || { echo \"ERROR: /tmp/oc-src is not mounted. Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
+        "if [ -n \"$SRC_PART\" ]; then mount \"$SRC_PART\" $OC_SRC; "
+        "else echo 'WARN: No vfat partition found on source ISO via blkid, trying raw mount'; mount $SRC_LOOP $OC_SRC; fi && "
+        "{ mountpoint -q $OC_SRC || { echo \"ERROR: $OC_SRC is not mounted. Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
     )
 
 
@@ -375,8 +376,8 @@ def _format_dest_oc_script(dest: Path) -> str:
         "for _i in 1 2 3 4 5; do ls ${DEST_LOOP}p* &>/dev/null && break; sleep 1; partprobe $DEST_LOOP 2>/dev/null; done && "
         "{ [ -b \"${DEST_LOOP}p1\" ] || { echo \"ERROR: ${DEST_LOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
         "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
-        "mkdir -p /tmp/oc-dest && mount ${DEST_LOOP}p1 /tmp/oc-dest && "
-        "{ mountpoint -q /tmp/oc-dest || { echo \"ERROR: /tmp/oc-dest is not mounted. Hints: file ${DEST_LOOP}p1; blkid ${DEST_LOOP}p1; dmesg | tail -5\"; false; }; } && "
+        "mount ${DEST_LOOP}p1 $OC_DEST && "
+        "{ mountpoint -q $OC_DEST || { echo \"ERROR: $OC_DEST is not mounted. Hints: file ${DEST_LOOP}p1; blkid ${DEST_LOOP}p1; dmesg | tail -5\"; false; }; } && "
     )
 
 
@@ -400,18 +401,18 @@ def _build_oc_disk_script(
         + _format_dest_oc_script(dest)
         + _mount_source_oc_script(opencore_path)
         # Copy OpenCore files (including hidden files)
-        + "cp -a /tmp/oc-src/. /tmp/oc-dest/ && "
+        + "cp -a $OC_SRC/. $OC_DEST/ && "
         # Validate EFI structure was copied
-        "{ [ -d /tmp/oc-dest/EFI/OC ] || { echo 'ERROR: OpenCore ISO does not contain expected EFI/OC directory. ISO may be corrupt.'; false; }; } && "
+        "{ [ -d $OC_DEST/EFI/OC ] || { echo 'ERROR: OpenCore ISO does not contain expected EFI/OC directory. ISO may be corrupt.'; false; }; } && "
         # Patch config.plist
         + plist_script + " && "
         # Fix plistlib self-closing tags that OpenCore's OcXmlLib rejects
-        "sed -i 's|<array/>|<array></array>|g; s|<dict/>|<dict></dict>|g; s|<data/>|<data></data>|g' /tmp/oc-dest/EFI/OC/config.plist && "
+        "sed -i 's|<array/>|<array></array>|g; s|<dict/>|<dict></dict>|g; s|<data/>|<data></data>|g' $OC_DEST/EFI/OC/config.plist && "
         # Hide OC partition from boot picker (shown only when user presses Space)
-        "echo Auxiliary > /tmp/oc-dest/.contentVisibility && "
+        "echo Auxiliary > $OC_DEST/.contentVisibility && "
         # Cleanup mounts (lazy unmount fallback for busy mounts)
-        "{ umount /tmp/oc-src || umount -l /tmp/oc-src; } && losetup -d $SRC_LOOP && "
-        "{ umount /tmp/oc-dest || umount -l /tmp/oc-dest; } && losetup -d $DEST_LOOP"
+        "{ umount $OC_SRC || umount -l $OC_SRC; } && losetup -d $SRC_LOOP && "
+        "{ umount $OC_DEST || umount -l $OC_DEST; } && losetup -d $DEST_LOOP"
     )
 
 
