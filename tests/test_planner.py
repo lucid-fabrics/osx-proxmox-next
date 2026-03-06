@@ -765,7 +765,7 @@ def test_mount_source_oc_script() -> None:
     assert "losetup -fP --show" in script
     assert "blkid" in script
     assert "vfat" in script
-    assert "/tmp/oc-src" in script
+    assert "$OC_SRC" in script
 
 
 def test_format_dest_oc_script() -> None:
@@ -774,7 +774,7 @@ def test_format_dest_oc_script() -> None:
     assert "sgdisk" in script
     assert "mkfs.fat" in script
     assert "OPENCORE" in script
-    assert "/tmp/oc-dest" in script
+    assert "$OC_DEST" in script
 
 
 def test_build_plan_oc_base64_no_newlines(monkeypatch) -> None:
