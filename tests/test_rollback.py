@@ -1,7 +1,16 @@
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
+from osx_proxmox_next.infrastructure import ProxmoxAdapter
 from osx_proxmox_next.rollback import create_snapshot, rollback_hints, RollbackSnapshot
+
+
+@dataclass
+class _FakeResult:
+    ok: bool
+    output: str
+    returncode: int = 0
 
 
 def test_create_snapshot_success(monkeypatch, tmp_path):
