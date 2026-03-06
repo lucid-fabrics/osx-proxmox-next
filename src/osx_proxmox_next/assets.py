@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
+from .defaults import DEFAULT_ISO_DIR
 from .domain import VmConfig
 
 
@@ -45,7 +46,7 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
 
 
 def suggested_fetch_commands(config: VmConfig) -> list[str]:
-    iso_root = config.iso_dir or "/var/lib/vz/template/iso"
+    iso_root = config.iso_dir or DEFAULT_ISO_DIR
     return [
         f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
         f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
@@ -64,7 +65,7 @@ def resolve_opencore_path(macos: str, extra_dirs: list[Path] | None = None) -> P
     )
     if match:
         return match
-    return Path("/var/lib/vz/template/iso") / "opencore-osx-proxmox-vm.iso"
+    return Path(DEFAULT_ISO_DIR) / "opencore-osx-proxmox-vm.iso"
 
 
 def resolve_recovery_or_installer_path(
@@ -82,14 +83,14 @@ def resolve_recovery_or_installer_path(
     )
     if match:
         return match
-    return Path("/var/lib/vz/template/iso") / f"{config.macos}-recovery.iso"
+    return Path(DEFAULT_ISO_DIR) / f"{config.macos}-recovery.iso"
 
 
 def _find_iso(
     patterns: list[str], extra_dirs: list[Path] | None = None,
 ) -> Path | None:
     roots = [
-        Path("/var/lib/vz/template/iso"),
+        Path(DEFAULT_ISO_DIR),
     ]
     if extra_dirs:
         for d in extra_dirs:
