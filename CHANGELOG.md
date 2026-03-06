@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-03-06
+
+### Fixed
+- Replace hardcoded `/tmp/oc-*` paths with `mktemp -d` to prevent symlink attacks
+
+## [0.11.0] - 2026-03-06
+
+### Added
+- CLI `status` subcommand to query VM info
+- `--version` flag and `--json` plan output
+- PEP 561 `py.typed` marker for type checker support
+- Python 3.9/3.11/3.12/3.13 CI test matrix
+
+### Fixed
+- Harden command injection with `shlex.quote()` on all path interpolations
+- Enforce `validate_config()` at `build_plan()` boundary (defense-in-depth)
+- Replace `random.choices()` with `secrets.token_hex()` for session IDs
+- Narrow bare `except Exception` to specific types
+
+### Changed
+- Extract OC disk script into composable helpers
+- CI badge and CLI documentation in README
+
+## [0.10.2] - 2025-02-21
+
+### Fixed
+- Pass apple_services flag during OS selection and add bash toggle
+
+### Changed
+- Document Apple Services limitation on Sequoia/Tahoe VMs
+- Restore screenshot images in README
+
 ## [0.10.1] - 2025-02-21
 
 ### Fixed
@@ -88,6 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OpenCore bootloader setup automation
 - Recovery image download from Apple osrecovery API
 
+[0.11.1]: https://github.com/lucid-fabrics/osx-proxmox-next/compare/v0.11.0...v0.11.1
+[0.11.0]: https://github.com/lucid-fabrics/osx-proxmox-next/compare/v0.10.2...v0.11.0
+[0.10.2]: https://github.com/lucid-fabrics/osx-proxmox-next/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/lucid-fabrics/osx-proxmox-next/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/lucid-fabrics/osx-proxmox-next/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/lucid-fabrics/osx-proxmox-next/compare/v0.8.2...v0.9.0
