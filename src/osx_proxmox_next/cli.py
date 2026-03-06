@@ -128,6 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
     apply_cmd = sub.add_parser("apply", parents=[common])
     apply_cmd.add_argument("--execute", action="store_true")
 
+    # Status subcommand
+    status = sub.add_parser("status", help="Show info about an existing macOS VM")
+    status.add_argument("--vmid", type=int, required=True, help="VM ID to query")
+
     # Uninstall subcommand
     uninstall = sub.add_parser("uninstall", help="Destroy an existing macOS VM")
     uninstall.add_argument("--vmid", type=int, required=True, help="VM ID to destroy")
@@ -157,6 +161,9 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if args.cmd == "download":
         return _run_download(args)
+
+    if args.cmd == "status":
+        return _run_status(args)
 
     if args.cmd == "uninstall":
         return _run_uninstall(args)
@@ -229,6 +236,27 @@ def run_cli(argv: list[str] | None = None) -> int:
     for hint in rollback_hints(snapshot):
         print(f"ROLLBACK: {hint}")
     return 4
+
+
+def _run_status(args: argparse.Namespace) -> int:
+    vmid = args.vmid
+    if vmid < 100 or vmid > 999999:
+        print("ERROR: VMID must be between 100 and 999999.")
+        return 2
+
+    info = fetch_vm_info(vmid)
+    if info is None:
+        print(f"ERROR: VM {vmid} not found.")
+        return 2
+
+    print(f"VM {vmid}: {info.name}")
+    print(f"Status: {info.status}")
+    if info.config_raw:
+        for line in info.config_raw.splitlines():
+            key = line.split(":")[0].strip()
+            if key in ("cores", "memory", "balloon", "net0", "smbios1", "cpu", "machine"):
+                print(f"  {line.strip()}")
+    return 0
 
 
 def _run_uninstall(args: argparse.Namespace) -> int:

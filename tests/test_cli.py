@@ -553,6 +553,61 @@ def test_cli_auto_download_on_missing(monkeypatch, tmp_path):
     assert rc == 0
 
 
+# ── Status Tests ────────────────────────────────────────────────────
+
+
+def test_cli_parser_has_status_command() -> None:
+    from osx_proxmox_next.cli import build_parser
+    parser = build_parser()
+    cmds = parser._subparsers._group_actions[0].choices  # type: ignore[attr-defined]
+    assert "status" in cmds
+
+
+def test_cli_status_invalid_vmid():
+    rc = run_cli(["status", "--vmid", "5"])
+    assert rc == 2
+
+
+def test_cli_status_vm_not_found(monkeypatch):
+    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid: None)
+    rc = run_cli(["status", "--vmid", "106"])
+    assert rc == 2
+
+
+def test_cli_status_success(monkeypatch, capsys):
+    from osx_proxmox_next.planner import VmInfo
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid: VmInfo(
+            vmid=vmid, name="macos-sonoma", status="running",
+            config_raw="cores: 8\nmemory: 16384\nballoon: 0\nnet0: vmxnet3=AA:BB:CC:DD:EE:FF\ncpu: host\nmachine: q35\nide0: local:iso/opencore.iso\n",
+        ),
+    )
+    rc = run_cli(["status", "--vmid", "106"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "macos-sonoma" in captured.out
+    assert "running" in captured.out
+    assert "cores: 8" in captured.out
+    assert "memory: 16384" in captured.out
+    assert "balloon: 0" in captured.out
+    # ide0 should NOT be printed (not in the filter list)
+    assert "ide0" not in captured.out
+
+
+def test_cli_status_no_config(monkeypatch, capsys):
+    from osx_proxmox_next.planner import VmInfo
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid: VmInfo(vmid=vmid, name="test-vm", status="stopped", config_raw=""),
+    )
+    rc = run_cli(["status", "--vmid", "200"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "test-vm" in captured.out
+    assert "stopped" in captured.out
+
+
 # ── Uninstall Tests ─────────────────────────────────────────────────
 
 
