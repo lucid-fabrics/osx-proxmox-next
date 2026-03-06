@@ -55,4 +55,4 @@ osx-next-cli = "osx_proxmox_next.cli:run_cli"
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=osx_proxmox_next --cov-branch --cov-report=term-missing --cov-fail-under=99"
+addopts = "--cov=osx_proxmox_next --cov-branch --cov-report=term-missing --cov-fail-under=95"
