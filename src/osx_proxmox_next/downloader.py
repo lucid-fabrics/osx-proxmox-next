@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import random
-import string
+import secrets
 import subprocess
 import time
 import urllib.error
@@ -164,7 +163,7 @@ def _find_release_asset(release: dict, asset_name: str, *, required: bool = True
 
 
 def _generate_id(length: int) -> str:
-    return "".join(random.choices(string.hexdigits[:16].upper(), k=length))
+    return secrets.token_hex(length // 2).upper()
 
 
 def _get_recovery_session() -> str:
@@ -181,7 +180,7 @@ def _get_recovery_session() -> str:
                     for part in value.split("; "):
                         if part.startswith("session="):
                             return part
-    except Exception as exc:
+    except (OSError, urllib.error.URLError) as exc:
         raise DownloadError(f"Failed to get recovery session: {exc}") from exc
     raise DownloadError("No session cookie in Apple recovery response.")
 
@@ -209,7 +208,7 @@ def _get_recovery_image_info(
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             output = resp.read().decode("utf-8")
-    except Exception as exc:
+    except (OSError, urllib.error.URLError) as exc:
         raise DownloadError(f"Failed to get recovery image info: {exc}") from exc
 
     info: dict[str, str] = {}
@@ -249,7 +248,7 @@ def _download_file_with_token(
             _do_download(url, part_path, on_progress, phase, extra_headers=headers)
             part_path.rename(dest)
             return
-        except Exception as exc:
+        except (OSError, urllib.error.URLError) as exc:
             last_error = exc
             if part_path.exists():
                 part_path.unlink()
@@ -274,7 +273,7 @@ def _download_file(
             _do_download(url, part_path, on_progress, phase)
             part_path.rename(dest)
             return
-        except Exception as exc:
+        except (OSError, urllib.error.URLError) as exc:
             last_error = exc
             if part_path.exists():
                 part_path.unlink()

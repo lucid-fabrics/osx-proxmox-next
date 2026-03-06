@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -139,7 +140,7 @@ def detect_iso_storage() -> list[str]:
                 path = _resolve_iso_path(storage_id)
                 if path and path not in dirs:
                     dirs.append(path)
-    except Exception:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         pass
     # Always include local as fallback
     if DEFAULT_ISO_DIR not in dirs:
@@ -158,7 +159,7 @@ def _resolve_iso_path(storage_id: str) -> str | None:
         # pvesm path returns full file path; we want the directory
         if output:
             return str(Path(output).parent)
-    except Exception:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         pass
     # Fallback heuristics for common Proxmox layouts
     local_path = Path(f"/mnt/pve/{storage_id}/template/iso")

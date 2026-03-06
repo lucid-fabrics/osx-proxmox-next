@@ -28,6 +28,15 @@ def _cfg(macos: str) -> VmConfig:
     )
 
 
+def test_build_plan_rejects_invalid_config() -> None:
+    """build_plan must enforce validate_config at the boundary."""
+    import pytest
+    bad = VmConfig(vmid=5, name="x", macos="invalid", cores=1,
+                   memory_mb=100, disk_gb=10, bridge="br0", storage="")
+    with pytest.raises(ValueError, match="Invalid VM config"):
+        build_plan(bad)
+
+
 def test_build_plan_includes_core_steps() -> None:
     steps = build_plan(_cfg("sequoia"))
     titles = [step.title for step in steps]
@@ -657,14 +666,15 @@ def test_build_plan_oc_smbios_sanitized(monkeypatch) -> None:
     monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     cfg = _cfg("sequoia")
     cfg.apple_services = True
-    cfg.smbios_serial = "C02VALID123"
+    cfg.smbios_serial = "C02VALID1234"
     cfg.smbios_uuid = "12345678-1234-1234-1234-123456789ABC"
-    cfg.smbios_mlb = "C02123456ABCDEFGH"
+    cfg.smbios_mlb = "C0212345ABCDEFGH0"
+    cfg.smbios_rom = "AABBCCDDEEFF"
     cfg.smbios_model = "MacPro7,1"
     steps = build_plan(cfg)
     oc = next(s for s in steps if "Build OpenCore" in s.title)
     # Sanitizer preserves commas (MacPro7,1 stays MacPro7,1)
-    assert "C02VALID123" in oc.command
+    assert "C02VALID1234" in oc.command
     assert "MacPro7,1" in oc.command
 
 
@@ -676,13 +686,13 @@ def test_build_plan_paths_quoted(monkeypatch) -> None:
     # Check OC build step quotes opencore_path and dest
     build = next(s for s in steps if "Build OpenCore" in s.title)
     cmd = build.command
-    # losetup paths should be in double quotes
-    assert 'losetup -fP --show "' in cmd
-    assert 'dd if=/dev/zero of="' in cmd
-    assert 'sgdisk -Z "' in cmd
-    # Import step should quote disk paths
+    # Paths should be shell-quoted (shlex.quote uses single quotes for safe paths)
+    assert "losetup -fP --show " in cmd
+    assert "dd if=/dev/zero of=" in cmd
+    assert "sgdisk -Z " in cmd
+    # Import step should shell-quote disk paths
     oc_import = next(s for s in steps if s.title == "Import and attach OpenCore disk")
-    assert '"' in oc_import.command  # at minimum has quoted path
+    assert "'" in oc_import.command or '"' in oc_import.command
 
 
 def test_sanitize_smbios_strips_comma_for_non_model() -> None:
@@ -773,12 +783,12 @@ def test_build_plan_oc_base64_no_newlines(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     cfg = _cfg("sequoia")
-    cfg.smbios_serial = "C02LONGSERIAL1"
+    cfg.smbios_serial = "C02LNGSERL12"
     cfg.smbios_uuid = "12345678-1234-1234-1234-123456789ABC"
     cfg.smbios_model = "MacPro7,1"
     steps = build_plan(cfg)
     smbios = next(s for s in steps if s.title == "Set SMBIOS identity")
     # Encoded values should not contain newlines (Python base64 doesn't wrap)
-    encoded = base64.b64encode(b"C02LONGSERIAL1").decode()
+    encoded = base64.b64encode(b"C02LNGSERL12").decode()
     assert "\n" not in encoded
     assert f"serial={encoded}" in smbios.command

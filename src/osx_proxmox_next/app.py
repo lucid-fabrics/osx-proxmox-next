@@ -810,7 +810,10 @@ class NextApp(App):
         config = self._read_form()
         if config:
             self.state.config = config
-            self.state.plan_steps = build_plan(config)
+            try:
+                self.state.plan_steps = build_plan(config)
+            except ValueError:
+                pass
             self._render_config_summary()
 
     def _run_dry_apply(self) -> None:

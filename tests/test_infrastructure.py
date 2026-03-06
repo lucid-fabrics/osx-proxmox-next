@@ -48,6 +48,37 @@ def test_pvesh_wraps_binary(monkeypatch):
     assert calls[0][1] == "get"
 
 
+def test_run_timeout_with_bytes_output(monkeypatch):
+    """TimeoutExpired.stdout/stderr can be bytes — must not crash."""
+    def raise_timeout(*args, **kwargs):
+        exc = subprocess.TimeoutExpired(cmd=["qm", "start"], timeout=300)
+        exc.stdout = b"partial output"
+        exc.stderr = b"error bytes"
+        raise exc
+
+    monkeypatch.setattr(subprocess, "run", raise_timeout)
+    adapter = ProxmoxAdapter()
+    result = adapter.run(["qm", "start", "900"])
+    assert result.ok is False
+    assert "partial output" in result.output
+    assert "error bytes" in result.output
+
+
+def test_run_timeout_with_none_output(monkeypatch):
+    """TimeoutExpired.stdout/stderr can be None — must not crash."""
+    def raise_timeout(*args, **kwargs):
+        exc = subprocess.TimeoutExpired(cmd=["qm", "start"], timeout=300)
+        exc.stdout = None
+        exc.stderr = None
+        raise exc
+
+    monkeypatch.setattr(subprocess, "run", raise_timeout)
+    adapter = ProxmoxAdapter()
+    result = adapter.run(["qm", "start", "900"])
+    assert result.ok is False
+    assert "timed out" in result.output
+
+
 def test_run_nonzero_returncode(monkeypatch):
     def fake_run(argv, **kw):
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="fail")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -8,9 +9,12 @@ from shlex import join, quote as shquote
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import CpuInfo, detect_cpu_info
-from .domain import SUPPORTED_MACOS, VmConfig
+from .domain import SUPPORTED_MACOS, VmConfig, validate_config
 from .infrastructure import ProxmoxAdapter
 from .smbios import generate_rom_from_mac, generate_smbios, model_for_macos
+
+
+_APPLE_OSK = "ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc"
 
 
 def _sanitize_smbios(val: str, *, allow_comma: bool = False) -> str:
@@ -71,6 +75,9 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
 
 
 def build_plan(config: VmConfig) -> list[PlanStep]:
+    issues = validate_config(config)
+    if issues:
+        raise ValueError(f"Invalid VM config: {'; '.join(issues)}")
     meta = SUPPORTED_MACOS[config.macos]
     vmid = str(config.vmid)
 
@@ -108,7 +115,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             argv=[
                 "qm", "set", vmid,
                 "--args",
-                '-device isa-applesmc,osk="ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc" '
+                f'-device isa-applesmc,osk="{_APPLE_OSK}" '
                 "-smbios type=2 -device qemu-xhci -device usb-kbd -device usb-tablet "
                 "-global nec-usb-xhci.msi=off -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
                 f"{cpu_flag}",
@@ -152,12 +159,12 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             argv=[
                 "bash", "-c",
                 "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
-                f'REF=$($IMPORT_CMD {vmid} "{oc_disk}" "{config.storage}" 2>&1 | '
+                f'REF=$($IMPORT_CMD {shquote(vmid)} {shquote(str(oc_disk))} {shquote(config.storage)} 2>&1 | '
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
-                f'qm set {vmid} --ide0 "$REF",media=disk && '
+                f'qm set {shquote(vmid)} --ide0 "$REF",media=disk && '
                 # Fix GPT header corruption from thin-provisioned LVM importdisk
                 'DEV=$(pvesm path "$REF") && '
-                f'dd if="{oc_disk}" of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
+                f'dd if={shquote(str(oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
             ],
         ),
         PlanStep(
@@ -171,7 +178,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 # then write OpenCore .contentFlavour + .contentDetails
                 "python3 -c '"
                 "import struct,subprocess; "
-                f"img=\"{recovery_raw}\"; "
+                f"img={shquote(str(recovery_raw))}; "
                 "out=subprocess.check_output([\"sgdisk\",\"-i\",\"1\",img],text=True); "
                 "start=int([l for l in out.splitlines() if \"First sector\" in l][0].split(\":\")[1].split(\"(\")[0].strip()); "
                 "off=start*512+1024+4; "
@@ -181,8 +188,8 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "f.seek(off); f.write(struct.pack(\">I\",a)); "
                 "f.close(); print(\"HFS+ flags fixed\")' && "
                 # Cleanup stale loops from previous failed runs
-                f'for lo in $(losetup -j "{recovery_raw}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
-                f'RLOOP=$(losetup -fP --show "{recovery_raw}") && '
+                f'for lo in $(losetup -j {shquote(str(recovery_raw))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+                f'RLOOP=$(losetup -fP --show {shquote(str(recovery_raw))}) && '
                 "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
                 # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
                 "partprobe $RLOOP 2>/dev/null; "
@@ -210,9 +217,9 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             argv=[
                 "bash", "-c",
                 "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
-                f'REF=$($IMPORT_CMD {vmid} "{recovery_raw}" "{config.storage}" 2>&1 | '
+                f'REF=$($IMPORT_CMD {shquote(vmid)} {shquote(str(recovery_raw))} {shquote(config.storage)} 2>&1 | '
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
-                f'qm set {vmid} --ide2 "$REF",media=disk',
+                f'qm set {shquote(vmid)} --ide2 "$REF",media=disk',
             ],
         ),
         PlanStep(
@@ -333,15 +340,15 @@ def _loop_cleanup_script(opencore_path: Path, dest: Path) -> str:
         "[ -n \"$SRC_LOOP\" ] && losetup -d $SRC_LOOP 2>/dev/null; "
         "[ -n \"$DEST_LOOP\" ] && losetup -d $DEST_LOOP 2>/dev/null' EXIT; "
         "umount /tmp/oc-src 2>/dev/null; umount /tmp/oc-dest 2>/dev/null; "
-        f'for lo in $(losetup -j "{opencore_path}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
-        f'for lo in $(losetup -j "{dest}" -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+        f'for lo in $(losetup -j {shquote(str(opencore_path))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+        f'for lo in $(losetup -j {shquote(str(dest))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
     )
 
 
 def _mount_source_oc_script(opencore_path: Path) -> str:
     """Return bash snippet to loop-mount the source OpenCore ISO."""
     return (
-        f'SRC_LOOP=$(losetup -fP --show "{opencore_path}") && '
+        f'SRC_LOOP=$(losetup -fP --show {shquote(str(opencore_path))}) && '
         "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         "partprobe $SRC_LOOP 2>/dev/null; "
         "for _i in 1 2 3 4 5; do ls ${SRC_LOOP}p* &>/dev/null && break; sleep 1; partprobe $SRC_LOOP 2>/dev/null; done && "
@@ -357,11 +364,12 @@ def _mount_source_oc_script(opencore_path: Path) -> str:
 
 def _format_dest_oc_script(dest: Path) -> str:
     """Return bash snippet to create, format, and mount the destination OpenCore disk."""
+    qp = shquote(str(dest))
     return (
-        f'dd if=/dev/zero of="{dest}" bs=1M count=1024 && '
-        f'sgdisk -Z "{dest}" && '
-        f'sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE "{dest}" && '
-        f'DEST_LOOP=$(losetup -fP --show "{dest}") && '
+        f'dd if=/dev/zero of={qp} bs=1M count=1024 && '
+        f'sgdisk -Z {qp} && '
+        f'sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {qp} && '
+        f'DEST_LOOP=$(losetup -fP --show {qp}) && '
         "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         "partprobe $DEST_LOOP 2>/dev/null; "
         "for _i in 1 2 3 4 5; do ls ${DEST_LOOP}p* &>/dev/null && break; sleep 1; partprobe $DEST_LOOP 2>/dev/null; done && "
@@ -409,7 +417,6 @@ def _build_oc_disk_script(
 
 def _encode_smbios_value(value: str) -> str:
     """Base64-encode a value for Proxmox smbios1 fields."""
-    import base64
     return base64.b64encode(value.encode()).decode()
 
 
