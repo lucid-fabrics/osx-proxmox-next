@@ -43,6 +43,8 @@ def validate_config(config: VmConfig) -> list[str]:
         issues.append("VMID must be between 100 and 999999.")
     if not config.name or len(config.name) < 3:
         issues.append("VM name must be at least 3 characters.")
+    if config.name and len(config.name) > 63:
+        issues.append("VM name must be at most 63 characters.")
     if config.macos not in SUPPORTED_MACOS:
         issues.append(f"macOS version must be one of: {', '.join(SUPPORTED_MACOS)}.")
     if config.cores < 2:

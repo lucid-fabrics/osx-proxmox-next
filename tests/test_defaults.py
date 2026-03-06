@@ -298,7 +298,7 @@ def test_detect_iso_storage_parses_pvesm(monkeypatch):
     def fake_check_output(cmd, **kw):
         if "status" in cmd:
             return pvesm_output
-        raise Exception("nope")
+        raise subprocess.CalledProcessError(1, cmd)
 
     monkeypatch.setattr(subprocess, "check_output", fake_check_output)
     # Patch _resolve_iso_path to track which storage IDs are resolved

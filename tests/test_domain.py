@@ -247,3 +247,17 @@ def test_validate_vmgenid_rejects_bad() -> None:
 def test_validate_vmgenid_accepts_valid() -> None:
     cfg = _valid_cfg(vmgenid="550E8400-E29B-41D4-A716-446655440000")
     assert validate_config(cfg) == []
+
+
+# ── Name length validation ───────────────────────────────────────
+
+
+def test_validate_name_max_length() -> None:
+    cfg = _valid_cfg(name="a" * 64)
+    issues = validate_config(cfg)
+    assert any("63" in i for i in issues)
+
+
+def test_validate_name_at_max_length_ok() -> None:
+    cfg = _valid_cfg(name="a" * 63)
+    assert validate_config(cfg) == []

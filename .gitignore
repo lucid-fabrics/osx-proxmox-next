@@ -5,6 +5,17 @@ __pycache__/
 .DS_Store
 
 *.egg-info/
+*.egg
+dist/
+build/
+
+# coverage
+.coverage
+htmlcov/
+
+# environment
+.env
+.env.*
 
 # generated runtime artifacts
 generated/

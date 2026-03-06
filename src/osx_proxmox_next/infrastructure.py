@@ -18,7 +18,9 @@ class ProxmoxAdapter:
             output = (proc.stdout or "") + (proc.stderr or "")
             return CommandResult(ok=(proc.returncode == 0), returncode=proc.returncode, output=output.strip())
         except subprocess.TimeoutExpired as exc:
-            output = f"Command timed out after 300s: {' '.join(argv)}\n{(exc.stdout or '')}{(exc.stderr or '')}"
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            output = f"Command timed out after 300s: {' '.join(argv)}\n{stdout}{stderr}"
             return CommandResult(ok=False, returncode=124, output=output.strip())
 
     def qm(self, *args: str) -> CommandResult:
