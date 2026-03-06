@@ -10,6 +10,9 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/lucid-fabrics/osx-proxmox-next/actions/workflows/test.yml">
+    <img alt="Tests" src="https://github.com/lucid-fabrics/osx-proxmox-next/actions/workflows/test.yml/badge.svg">
+  </a>
   <a href="https://github.com/wmehanna/osx-proxmox-next">
     <img alt="Proxmox" src="https://img.shields.io/badge/Proxmox-9%20Ready-E57000?logo=proxmox&logoColor=white">
   </a>
@@ -161,6 +164,9 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 For scripting or headless use, the CLI bypasses the TUI entirely:
 
 ```bash
+# Show version
+osx-next-cli --version
+
 # Download OpenCore + recovery images
 osx-next-cli download --macos ventura
 
@@ -212,6 +218,18 @@ osx-next-cli apply --execute \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm \
   --apple-services
+
+# Export plan as JSON (for scripting / CI integration)
+osx-next-cli plan --json \
+  --vmid 910 --name macos-sequoia --macos sequoia \
+  --cores 8 --memory 16384 --disk 128 \
+  --bridge vmbr0 --storage local-lvm
+
+# Destroy a VM (dry run — preview commands)
+osx-next-cli uninstall --vmid 910
+
+# Destroy a VM (execute for real, including disk images)
+osx-next-cli uninstall --vmid 910 --purge --execute
 ```
 
 ---
@@ -484,6 +502,7 @@ src/osx_proxmox_next/
   smbios.py       # SMBIOS identity generation (serial, UUID, MLB, ROM, model)
   profiles.py     # VM config profile management
   infrastructure.py # Proxmox command adapter
+  py.typed        # PEP 561 type marker
 ```
 
 ---
