@@ -18,7 +18,7 @@ from osx_proxmox_next.downloader import (
     _build_recovery_image,
     _download_file,
     _download_file_with_token,
-    _fetch_github_release,
+    _fetch_github_releases,
     _find_release_asset,
     _get_recovery_session,
     _get_recovery_image_info,
@@ -47,7 +47,7 @@ def _make_chunked_response(chunks: list[bytes], content_length: int | None = Non
 
 class TestDownloadOpencore:
     def test_success(self, tmp_path, monkeypatch):
-        release_json = {
+        release = {
             "tag_name": "v0.3.0",
             "assets": [
                 {
@@ -56,19 +56,11 @@ class TestDownloadOpencore:
                 }
             ],
         }
-        api_resp = _make_response(json.dumps(release_json).encode())
+        monkeypatch.setattr(dl_module, "_fetch_github_releases", lambda v: [release])
+
         file_data = b"fake-iso-content-" * 100
         file_resp = _make_chunked_response([file_data], len(file_data))
-
-        call_count = [0]
-
-        def fake_urlopen(req, timeout=None):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return api_resp
-            return file_resp
-
-        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: file_resp)
         monkeypatch.setattr(dl_module, "__version__", "0.3.0")
         monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
 
@@ -76,47 +68,41 @@ class TestDownloadOpencore:
         assert result == tmp_path / "opencore-sequoia.iso"
         assert result.exists()
 
-    def test_fallback_latest(self, tmp_path, monkeypatch):
-        release_json = {
-            "tag_name": "v0.2.0",
+    def test_fallback_to_assets_release(self, tmp_path, monkeypatch):
+        """When version-tagged release has no OC asset, falls back to 'assets' tag."""
+        version_release = {"tag_name": "v0.11.1", "assets": []}
+        assets_release = {
+            "tag_name": "assets",
             "assets": [
                 {
-                    "name": "opencore-sequoia.iso",
-                    "browser_download_url": "https://example.com/opencore-sequoia.iso",
+                    "name": "opencore-osx-proxmox-vm.iso",
+                    "browser_download_url": "https://example.com/opencore-osx-proxmox-vm.iso",
                 }
             ],
         }
-        api_resp = _make_response(json.dumps(release_json).encode())
+        monkeypatch.setattr(dl_module, "_fetch_github_releases",
+                            lambda v: [version_release, assets_release])
+
         file_data = b"iso-data"
         file_resp = _make_chunked_response([file_data], len(file_data))
-
-        call_count = [0]
-
-        def fake_urlopen(req, timeout=None):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b""))
-            if call_count[0] == 2:
-                return api_resp
-            return file_resp
-
-        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fake_urlopen)
-        monkeypatch.setattr(dl_module, "__version__", "99.99.99")
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: file_resp)
+        monkeypatch.setattr(dl_module, "__version__", "0.11.1")
         monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
 
         result = download_opencore("sequoia", tmp_path)
-        assert result == tmp_path / "opencore-sequoia.iso"
+        assert result == tmp_path / "opencore-osx-proxmox-vm.iso"
 
     def test_no_matching_asset(self, tmp_path, monkeypatch):
-        release_json = {
-            "tag_name": "v0.3.0",
-            "assets": [
+        releases = [
+            {"tag_name": "v0.3.0", "assets": [
                 {"name": "other-file.zip", "browser_download_url": "https://example.com/other.zip"}
-            ],
-        }
-        api_resp = _make_response(json.dumps(release_json).encode())
+            ]},
+            {"tag_name": "assets", "assets": [
+                {"name": "other-file.zip", "browser_download_url": "https://example.com/other.zip"}
+            ]},
+        ]
 
-        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: api_resp)
+        monkeypatch.setattr(dl_module, "_fetch_github_releases", lambda v: releases)
         monkeypatch.setattr(dl_module, "__version__", "0.3.0")
 
         with pytest.raises(DownloadError, match="No OpenCore asset found"):
@@ -124,7 +110,7 @@ class TestDownloadOpencore:
 
     def test_fallback_to_universal(self, tmp_path, monkeypatch):
         """When version-specific ISO missing, falls back to universal OC image."""
-        release_json = {
+        release = {
             "tag_name": "v0.3.0",
             "assets": [
                 {
@@ -133,19 +119,11 @@ class TestDownloadOpencore:
                 }
             ],
         }
-        api_resp = _make_response(json.dumps(release_json).encode())
+        monkeypatch.setattr(dl_module, "_fetch_github_releases", lambda v: [release])
+
         file_data = b"universal-oc"
         file_resp = _make_chunked_response([file_data], len(file_data))
-
-        call_count = [0]
-
-        def fake_urlopen(req, timeout=None):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return api_resp
-            return file_resp
-
-        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: file_resp)
         monkeypatch.setattr(dl_module, "__version__", "0.3.0")
 
         result = download_opencore("tahoe", tmp_path)
@@ -359,24 +337,60 @@ class TestDownloadFile:
         assert progress_calls[1].total == total
 
 
-class TestFetchGithubRelease:
+class TestFetchGithubReleases:
     def test_tag_success(self, monkeypatch):
         release = {"tag_name": "v0.3.0", "assets": []}
-        resp = _make_response(json.dumps(release).encode())
-        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
-        monkeypatch.setattr(dl_module, "__version__", "0.3.0")
+        data = json.dumps(release).encode()
 
-        result = _fetch_github_release("0.3.0")
-        assert result["tag_name"] == "v0.3.0"
+        def fake_urlopen(req, timeout=None):
+            return _make_response(data)
 
-    def test_both_fail(self, monkeypatch):
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fake_urlopen)
+
+        result = _fetch_github_releases("0.3.0")
+        assert any(r["tag_name"] == "v0.3.0" for r in result)
+
+    def test_all_fail(self, monkeypatch):
         def fail(req, timeout=None):
             raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b""))
 
         monkeypatch.setattr(dl_module.urllib.request, "urlopen", fail)
 
-        with pytest.raises(DownloadError, match="Could not fetch GitHub release"):
-            _fetch_github_release("99.0.0")
+        with pytest.raises(DownloadError, match="Could not fetch any GitHub release"):
+            _fetch_github_releases("99.0.0")
+
+    def test_fallback_to_assets_tag(self, monkeypatch):
+        """When version tag and latest both fail, falls back to 'assets' tag."""
+        assets_release = {"tag_name": "assets", "assets": [
+            {"name": "opencore-osx-proxmox-vm.iso", "browser_download_url": "https://example.com/oc.iso"}
+        ]}
+        call_count = [0]
+
+        def fake_urlopen(req, timeout=None):
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b""))
+            return _make_response(json.dumps(assets_release).encode())
+
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fake_urlopen)
+
+        result = _fetch_github_releases("99.0.0")
+        assert len(result) == 1
+        assert result[0]["tag_name"] == "assets"
+
+    def test_deduplicates_tags(self, monkeypatch):
+        """Same tag from version and latest endpoints is not duplicated."""
+        release = {"tag_name": "v0.3.0", "assets": []}
+        data = json.dumps(release).encode()
+
+        def fake_urlopen(req, timeout=None):
+            return _make_response(data)
+
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fake_urlopen)
+
+        result = _fetch_github_releases("0.3.0")
+        tags = [r["tag_name"] for r in result]
+        assert tags.count("v0.3.0") == 1
 
 
 class TestFindReleaseAsset:

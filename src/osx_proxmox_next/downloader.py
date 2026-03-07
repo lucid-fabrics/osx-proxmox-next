@@ -51,6 +51,7 @@ _BACKOFF_SECONDS = [1, 2, 4]
 
 
 _OPENCORE_UNIVERSAL = "opencore-osx-proxmox-vm.iso"
+_ASSETS_TAG = "assets"
 
 
 def download_opencore(
@@ -66,15 +67,19 @@ def download_opencore(
         if dest.exists():
             return dest
 
-    release = _fetch_github_release(version)
-    for name in candidates:
-        url = _find_release_asset(release, name, required=False)
-        if url:
-            dest = dest_dir / name
-            _download_file(url, dest, on_progress, "opencore")
-            return dest
+    # Check version-tagged release, latest release, then permanent 'assets' tag
+    releases = _fetch_github_releases(version)
+    for release in releases:
+        for name in candidates:
+            url = _find_release_asset(release, name, required=False)
+            if url:
+                dest = dest_dir / name
+                _download_file(url, dest, on_progress, "opencore")
+                return dest
+
+    tags_tried = [r.get("tag_name", "?") for r in releases]
     raise DownloadError(
-        f"No OpenCore asset found in release '{release.get('tag_name', '?')}'. "
+        f"No OpenCore asset found in releases {tags_tried}. "
         f"Tried: {', '.join(candidates)}"
     )
 
@@ -131,22 +136,33 @@ def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> 
         )
 
 
-def _fetch_github_release(version: str) -> dict:
-    tag_url = f"{_GITHUB_API}/tags/v{version}"
-    try:
-        data = _http_get_json(tag_url)
-        return data
-    except (urllib.error.HTTPError, DownloadError):
-        pass
+def _fetch_github_releases(version: str) -> list[dict]:
+    """Return a list of releases to search for assets, in priority order.
 
-    latest_url = f"{_GITHUB_API}/latest"
-    try:
-        data = _http_get_json(latest_url)
-        return data
-    except (urllib.error.HTTPError, DownloadError) as exc:
+    Order: version-tagged → latest → permanent 'assets' tag.
+    """
+    releases: list[dict] = []
+    seen_tags: set[str] = set()
+
+    for url in (
+        f"{_GITHUB_API}/tags/v{version}",
+        f"{_GITHUB_API}/latest",
+        f"{_GITHUB_API}/tags/{_ASSETS_TAG}",
+    ):
+        try:
+            data = _http_get_json(url)
+            tag = data.get("tag_name", "")
+            if tag and tag not in seen_tags:
+                seen_tags.add(tag)
+                releases.append(data)
+        except (urllib.error.HTTPError, DownloadError):
+            pass
+
+    if not releases:
         raise DownloadError(
-            f"Could not fetch GitHub release (tried v{version} and latest): {exc}"
-        ) from exc
+            f"Could not fetch any GitHub release (tried v{version}, latest, {_ASSETS_TAG})."
+        )
+    return releases
 
 
 def _find_release_asset(release: dict, asset_name: str, *, required: bool = True) -> str:
