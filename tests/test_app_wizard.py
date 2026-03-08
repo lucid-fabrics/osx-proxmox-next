@@ -9,7 +9,27 @@ from textual.widgets import Button, Checkbox, Input, Static
 from osx_proxmox_next import app as app_module
 from osx_proxmox_next.app import NextApp, WizardState
 from osx_proxmox_next.executor import ApplyResult
+from osx_proxmox_next.infrastructure import CommandResult
 from osx_proxmox_next.planner import PlanStep
+
+
+class FakePve:
+    """Test helper that mimics ProxmoxAdapter with canned responses."""
+
+    def __init__(self, handler):
+        self._handler = handler
+
+    def run(self, argv):
+        return self._handler(argv)
+
+    def qm(self, *args):
+        return self.run(["qm", *args])
+
+    def pvesm(self, *args):
+        return self.run(["pvesm", *args])
+
+    def pvesh(self, *args):
+        return self.run(["pvesh", *args])
 
 
 # ── Helper ──────────────────────────────────────────────────────────
@@ -1358,12 +1378,12 @@ def test_update_live_progress() -> None:
 # ── Detection Tests ─────────────────────────────────────────────────
 
 def test_detect_vmid_pvesh(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "pvesh":
-            return "910\n"
-        raise Exception("not found")
+            return CommandResult(ok=True, returncode=0, output="910")
+        return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1373,14 +1393,14 @@ def test_detect_vmid_pvesh(monkeypatch) -> None:
 
 
 def test_detect_vmid_qm_list(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "pvesh":
-            raise Exception("not found")
+            return CommandResult(ok=False, returncode=1, output="not found")
         if cmd[0] == "qm":
-            return "VMID  NAME\n900   macos-test\n905   macos-test2\n"
-        raise Exception("unknown")
+            return CommandResult(ok=True, returncode=0, output="VMID  NAME\n900   macos-test\n905   macos-test2")
+        return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1390,7 +1410,7 @@ def test_detect_vmid_qm_list(monkeypatch) -> None:
 
 
 def test_detect_vmid_fallback(monkeypatch) -> None:
-    monkeypatch.setattr(app_module, "check_output", lambda cmd, **kw: (_ for _ in ()).throw(Exception("no")))
+    monkeypatch.setattr(app_module, "_pve", FakePve(lambda cmd: CommandResult(ok=False, returncode=1, output="no")))
 
     async def _run() -> None:
         app = NextApp()
@@ -1400,12 +1420,12 @@ def test_detect_vmid_fallback(monkeypatch) -> None:
 
 
 def test_detect_vmid_pvesh_non_digit(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "pvesh":
-            return "not-a-number\n"
-        raise Exception("not found")
+            return CommandResult(ok=True, returncode=0, output="not-a-number")
+        return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1415,12 +1435,12 @@ def test_detect_vmid_pvesh_non_digit(monkeypatch) -> None:
 
 
 def test_detect_vmid_pvesh_out_of_range(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "pvesh":
-            return "50"
-        raise Exception("not found")
+            return CommandResult(ok=True, returncode=0, output="50")
+        return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1430,12 +1450,12 @@ def test_detect_vmid_pvesh_out_of_range(monkeypatch) -> None:
 
 
 def test_detect_vmid_pvesh_json_object(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "pvesh":
-            return '{"data": 200}'
-        raise Exception("not found")
+            return CommandResult(ok=True, returncode=0, output='{"data": 200}')
+        return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1445,14 +1465,14 @@ def test_detect_vmid_pvesh_json_object(monkeypatch) -> None:
 
 
 def test_detect_vmid_qm_list_empty(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "pvesh":
-            raise Exception("not found")
+            return CommandResult(ok=False, returncode=1, output="not found")
         if cmd[0] == "qm":
-            return "VMID  NAME\n"
-        raise Exception("unknown")
+            return CommandResult(ok=True, returncode=0, output="VMID  NAME")
+        return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1462,14 +1482,14 @@ def test_detect_vmid_qm_list_empty(monkeypatch) -> None:
 
 
 def test_detect_vmid_qm_list_non_digit(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "pvesh":
-            raise Exception("not found")
+            return CommandResult(ok=False, returncode=1, output="not found")
         if cmd[0] == "qm":
-            return "VMID  NAME\n900   test\n      \nstatus running\n"
-        raise Exception("unknown")
+            return CommandResult(ok=True, returncode=0, output="VMID  NAME\n900   test\n      \nstatus running")
+        return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1479,14 +1499,14 @@ def test_detect_vmid_qm_list_non_digit(monkeypatch) -> None:
 
 
 def test_detect_vmid_boundary_low(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "pvesh":
-            raise Exception("not found")
+            return CommandResult(ok=False, returncode=1, output="not found")
         if cmd[0] == "qm":
-            return "VMID  NAME\n50    test\n"
-        raise Exception("unknown")
+            return CommandResult(ok=True, returncode=0, output="VMID  NAME\n50    test")
+        return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1496,14 +1516,14 @@ def test_detect_vmid_boundary_low(monkeypatch) -> None:
 
 
 def test_detect_vmid_boundary_high(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "pvesh":
-            raise Exception("not found")
+            return CommandResult(ok=False, returncode=1, output="not found")
         if cmd[0] == "qm":
-            return "VMID  NAME\n999999 test\n"
-        raise Exception("unknown")
+            return CommandResult(ok=True, returncode=0, output="VMID  NAME\n999999 test")
+        return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1513,10 +1533,10 @@ def test_detect_vmid_boundary_high(monkeypatch) -> None:
 
 
 def test_detect_storage_success(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
-        return "Name      Type  Status\nlocal-lvm dir   active\nnfs-store nfs   active\n"
+    def handler(cmd):
+        return CommandResult(ok=True, returncode=0, output="Name      Type  Status\nlocal-lvm dir   active\nnfs-store nfs   active")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1528,10 +1548,10 @@ def test_detect_storage_success(monkeypatch) -> None:
 
 
 def test_detect_storage_no_default(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
-        return "Name     Type  Status\ncustom1  dir   active\n"
+    def handler(cmd):
+        return CommandResult(ok=True, returncode=0, output="Name     Type  Status\ncustom1  dir   active")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1543,10 +1563,10 @@ def test_detect_storage_no_default(monkeypatch) -> None:
 
 
 def test_detect_storage_dedup(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
-        return "Name      Type\nlocal-lvm dir\nlocal-lvm dir\ncustom1   nfs\n"
+    def handler(cmd):
+        return CommandResult(ok=True, returncode=0, output="Name      Type\nlocal-lvm dir\nlocal-lvm dir\ncustom1   nfs")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1557,10 +1577,10 @@ def test_detect_storage_dedup(monkeypatch) -> None:
 
 
 def test_detect_storage_empty_line(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
-        return "Name  Type\n\n   \nlocal dir\n"
+    def handler(cmd):
+        return CommandResult(ok=True, returncode=0, output="Name  Type\n\n   \nlocal dir")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1865,22 +1885,22 @@ def test_manage_mode_toggle() -> None:
 
 
 def test_manage_vm_list_populated(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "qm" and cmd[1] == "list":
-            return (
+            return CommandResult(ok=True, returncode=0, output=(
                 "VMID  NAME          STATUS\n"
                 "106   macos-test    running\n"
                 "\n"
-                "200   linux-vm      stopped\n"
-            )
+                "200   linux-vm      stopped"
+            ))
         if cmd[0] == "qm" and cmd[1] == "config":
             vmid = cmd[2]
             if vmid == "106":
-                return 'args: -device isa-applesmc,osk="test"\n'
-            return "ostype: l26\n"  # non-macOS
-        raise Exception("not found")
+                return CommandResult(ok=True, returncode=0, output='args: -device isa-applesmc,osk="test"')
+            return CommandResult(ok=True, returncode=0, output="ostype: l26")
+        return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1903,10 +1923,10 @@ def test_manage_vm_list_populated(monkeypatch) -> None:
 
 
 def test_manage_vm_list_empty(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
-        raise Exception("qm not found")
+    def handler(cmd):
+        return CommandResult(ok=False, returncode=1, output="qm not found")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1924,14 +1944,14 @@ def test_manage_vm_list_empty(monkeypatch) -> None:
 
 
 def test_manage_vm_list_no_macos_vms(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "qm" and cmd[1] == "list":
-            return "VMID  NAME          STATUS\n200   linux-vm      running\n"
+            return CommandResult(ok=True, returncode=0, output="VMID  NAME          STATUS\n200   linux-vm      running")
         if cmd[0] == "qm" and cmd[1] == "config":
-            return "ostype: l26\n"
-        raise Exception("not found")
+            return CommandResult(ok=True, returncode=0, output="ostype: l26")
+        return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1949,14 +1969,14 @@ def test_manage_vm_list_no_macos_vms(monkeypatch) -> None:
 
 
 def test_manage_vm_list_config_failure(monkeypatch) -> None:
-    def fake_check_output(cmd, **kw):
+    def handler(cmd):
         if cmd[0] == "qm" and cmd[1] == "list":
-            return "VMID  NAME          STATUS\n106   macos-test    running\n"
+            return CommandResult(ok=True, returncode=0, output="VMID  NAME          STATUS\n106   macos-test    running")
         if cmd[0] == "qm" and cmd[1] == "config":
-            raise Exception("config failed")
-        raise Exception("not found")
+            return CommandResult(ok=False, returncode=1, output="config failed")
+        return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "check_output", fake_check_output)
+    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()

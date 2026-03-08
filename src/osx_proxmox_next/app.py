@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from subprocess import check_output
 from threading import Thread
+
+log = logging.getLogger(__name__)
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
@@ -17,8 +19,11 @@ from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_
 from .domain import SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
+from .infrastructure import ProxmoxAdapter
 from .planner import PlanStep, build_plan, build_destroy_plan, fetch_vm_info
 from .preflight import run_preflight
+
+_pve = ProxmoxAdapter()
 from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
 from .smbios import generate_smbios, SmbiosIdentity
 
@@ -45,7 +50,7 @@ class WizardState:
     # Preflight
     preflight_done: bool = False
     preflight_ok: bool = False
-    preflight_checks: list = field(default_factory=list)
+    preflight_checks: list[object] = field(default_factory=list)
     # Downloads
     download_running: bool = False
     download_phase: str = ""
@@ -54,9 +59,9 @@ class WizardState:
     downloads_complete: bool = False
     # Config + Plan
     config: VmConfig | None = None
-    plan_steps: list = field(default_factory=list)
+    plan_steps: list[PlanStep] = field(default_factory=list)
     assets_ok: bool = False
-    assets_missing: list = field(default_factory=list)
+    assets_missing: list[str] = field(default_factory=list)
     # Dry run
     dry_run_done: bool = False
     dry_run_ok: bool = False
@@ -69,7 +74,7 @@ class WizardState:
     snapshot: RollbackSnapshot | None = None
     # Manage mode
     manage_mode: bool = False
-    uninstall_vm_list: list = field(default_factory=list)
+    uninstall_vm_list: list[str] = field(default_factory=list)
     uninstall_purge: bool = True
     uninstall_log: list[str] = field(default_factory=list)
     uninstall_running: bool = False
@@ -967,8 +972,11 @@ class NextApp(App):
 
     def _vm_list_worker(self) -> None:
         try:
-            output = check_output(["qm", "list"], text=True, timeout=5.0)
-            all_lines = output.strip().splitlines()
+            res = _pve.qm("list")
+            if not res.ok:
+                self.call_from_thread(self._finish_vm_list, [])
+                return
+            all_lines = res.output.strip().splitlines()
             # Filter to macOS VMs only (have isa-applesmc in config)
             macos_lines: list[str] = []
             for line in all_lines[1:]:  # skip header
@@ -976,18 +984,14 @@ class NextApp(App):
                 if not parts:
                     continue
                 vmid = parts[0]
-                try:
-                    cfg = check_output(
-                        ["qm", "config", vmid], text=True, timeout=5.0,
-                    )
-                    if "isa-applesmc" in cfg:
-                        macos_lines.append(line)
-                except Exception:
-                    pass
+                cfg_res = _pve.qm("config", vmid)
+                if cfg_res.ok and "isa-applesmc" in cfg_res.output:
+                    macos_lines.append(line)
             header = all_lines[0] if all_lines else ""
             result = [header] + macos_lines if macos_lines else []
             self.call_from_thread(self._finish_vm_list, result)
         except Exception:
+            log.debug("Failed to list VMs", exc_info=True)
             self.call_from_thread(self._finish_vm_list, [])
 
     def _finish_vm_list(self, lines: list[str]) -> None:
@@ -1085,7 +1089,7 @@ class NextApp(App):
         checks = run_preflight()
         self.call_from_thread(self._finish_preflight, checks)
 
-    def _finish_preflight(self, checks: list) -> None:
+    def _finish_preflight(self, checks: list[object]) -> None:
         self.state.preflight_done = True
         self.state.preflight_checks = checks
         self.state.preflight_ok = all(c.ok for c in checks)
@@ -1095,14 +1099,12 @@ class NextApp(App):
     # ── Detection Helpers ───────────────────────────────────────────
 
     def _detect_storage_targets(self) -> list[str]:
-        try:
-            output = check_output(
-                ["pvesm", "status", "-content", "images"], text=True, timeout=2.0
-            )
-        except Exception:
+        res = _pve.pvesm("status", "-content", "images")
+        if not res.ok:
+            log.debug("Failed to detect storage targets: %s", res.output)
             return [DEFAULT_STORAGE, "local"]
         targets: list[str] = []
-        for line in output.splitlines()[1:]:
+        for line in res.output.splitlines()[1:]:
             parts = line.split()
             if parts:
                 name = parts[0]
@@ -1113,24 +1115,26 @@ class NextApp(App):
         return targets[:5]
 
     def _detect_next_vmid(self) -> int:
-        try:
-            output = check_output(
-                ["pvesh", "get", "/cluster/nextid"], text=True, timeout=2.0
-            ).strip()
+        res = _pve.pvesh("get", "/cluster/nextid")
+        if res.ok:
+            output = res.output.strip()
             if output.isdigit():
                 vmid = int(output)
                 if 100 <= vmid <= 999999:
                     return vmid
-            parsed = json.loads(output)
-            if isinstance(parsed, int) and 100 <= parsed <= 999999:
-                return parsed  # pragma: no cover
-        except Exception:
-            pass
+            try:
+                parsed = json.loads(output)
+                if isinstance(parsed, int) and 100 <= parsed <= 999999:
+                    return parsed  # pragma: no cover
+            except (json.JSONDecodeError, ValueError):
+                pass
+        else:
+            log.debug("Failed to get next VMID via pvesh: %s", res.output)
 
-        try:
-            output = check_output(["qm", "list"], text=True, timeout=2.0)
+        res = _pve.qm("list")
+        if res.ok:
             vmids: list[int] = []
-            for line in output.splitlines()[1:]:
+            for line in res.output.splitlines()[1:]:
                 parts = line.split()
                 if parts and parts[0].isdigit():
                     vmids.append(int(parts[0]))
@@ -1140,8 +1144,8 @@ class NextApp(App):
             if next_vmid > 999999:
                 return 999999
             return next_vmid
-        except Exception:
-            return 900
+        log.debug("Failed to detect next VMID via qm list: %s", res.output)
+        return 900
 
     # ── UI Helpers ──────────────────────────────────────────────────
 

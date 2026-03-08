@@ -17,6 +17,8 @@ class ProxmoxAdapter:
             proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=300)
             output = (proc.stdout or "") + (proc.stderr or "")
             return CommandResult(ok=(proc.returncode == 0), returncode=proc.returncode, output=output.strip())
+        except FileNotFoundError:
+            return CommandResult(ok=False, returncode=127, output=f"Command not found: {argv[0]}")
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")

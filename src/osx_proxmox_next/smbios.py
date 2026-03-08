@@ -14,13 +14,6 @@ SMBIOS_MODELS: dict[str, str] = {
 
 DEFAULT_SMBIOS_MODEL = "MacPro7,1"
 
-# Known valid board IDs for MacPro7,1
-VALID_BOARD_IDS = [
-    "Mac-5F5EDEB5FD3EFD52",
-    "Mac-4B682C642B45593E",
-    "Mac-827FAC58A8FDFA22",
-]
-
 # ---------------------------------------------------------------------------
 # Apple serial/MLB format constants
 # ---------------------------------------------------------------------------
