@@ -16,16 +16,16 @@ from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
 from .assets import required_assets
 from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb
-from .domain import SUPPORTED_MACOS, VmConfig, validate_config
+from .domain import DEFAULT_VMID, MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
 from .infrastructure import ProxmoxAdapter
 from .planner import PlanStep, build_plan, build_destroy_plan, fetch_vm_info
 from .preflight import run_preflight
-
-_pve = ProxmoxAdapter()
 from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
 from .smbios import generate_smbios, SmbiosIdentity
+
+_pve = ProxmoxAdapter()
 
 
 @dataclass
@@ -36,7 +36,7 @@ class WizardState:
     iso_dirs: list[str] = field(default_factory=list)
     selected_iso_dir: str = ""
     # Form
-    vmid: int = 900
+    vmid: int = DEFAULT_VMID
     name: str = ""
     cores: int = 8
     memory_mb: int = 16384
@@ -315,7 +315,7 @@ class NextApp(App):
                 yield Static("VM Configuration")
                 with Container(id="config_grid"):
                     yield Static("VMID", classes="label")
-                    yield Input(value="900", id="vmid")
+                    yield Input(value=str(DEFAULT_VMID), id="vmid")
                     yield Static("VM Name", classes="label")
                     yield Input(value="", id="name")
                     yield Static("CPU Cores", classes="label")
@@ -405,7 +405,7 @@ class NextApp(App):
                 idx = int(bid.split("_")[1])
                 self._select_storage(self.state.storage_targets[idx])
             except (ValueError, IndexError):
-                pass
+                log.debug("Invalid storage button index: %s", bid)
             return
 
         handlers = {
@@ -621,27 +621,27 @@ class NextApp(App):
 
         try:
             vmid_val = int(vmid_text)
-            if vmid_val < 100 or vmid_val > 999999:
+            if vmid_val < MIN_VMID or vmid_val > MAX_VMID:
                 raise ValueError
         except ValueError:
-            errors["vmid"] = "VMID must be 100-999999."
+            errors["vmid"] = f"VMID must be {MIN_VMID}-{MAX_VMID}."
 
         if len(name_text) < 3:
             errors["name"] = "VM Name must be at least 3 chars."
 
         try:
             mem_val = int(memory_text)
-            if mem_val < 4096:
+            if mem_val < MIN_MEMORY_MB:
                 raise ValueError
         except ValueError:
-            errors["memory"] = "Memory must be >= 4096 MB."
+            errors["memory"] = f"Memory must be >= {MIN_MEMORY_MB} MB."
 
         try:
             disk_val = int(disk_text)
-            if disk_val < 64:
+            if disk_val < MIN_DISK_GB:
                 raise ValueError
         except ValueError:
-            errors["disk"] = "Disk must be >= 64 GB."
+            errors["disk"] = f"Disk must be >= {MIN_DISK_GB} GB."
 
         if not re.fullmatch(r"vmbr[0-9]+", bridge_text):
             errors["bridge"] = "Bridge must match vmbr<N> (e.g. vmbr0)."
@@ -818,7 +818,7 @@ class NextApp(App):
             try:
                 self.state.plan_steps = build_plan(config)
             except ValueError:
-                pass
+                log.debug("Failed to rebuild plan after download", exc_info=True)
             self._render_config_summary()
 
     def _run_dry_apply(self) -> None:
@@ -1007,7 +1007,7 @@ class NextApp(App):
         btn = self.query_one("#manage_destroy_btn", Button)
         try:
             vmid = int(text)
-            btn.disabled = vmid < 100 or vmid > 999999
+            btn.disabled = vmid < MIN_VMID or vmid > MAX_VMID
         except ValueError:
             btn.disabled = True
 
@@ -1034,7 +1034,7 @@ class NextApp(App):
             vmid = int(text)
         except ValueError:
             return
-        if vmid < 100 or vmid > 999999:
+        if vmid < MIN_VMID or vmid > MAX_VMID:
             return
 
         self.state.uninstall_running = True
@@ -1120,14 +1120,14 @@ class NextApp(App):
             output = res.output.strip()
             if output.isdigit():
                 vmid = int(output)
-                if 100 <= vmid <= 999999:
+                if MIN_VMID <= vmid <= MAX_VMID:
                     return vmid
             try:
                 parsed = json.loads(output)
-                if isinstance(parsed, int) and 100 <= parsed <= 999999:
+                if isinstance(parsed, int) and MIN_VMID <= parsed <= MAX_VMID:
                     return parsed  # pragma: no cover
             except (json.JSONDecodeError, ValueError):
-                pass
+                log.debug("pvesh returned non-JSON/non-int: %s", output)
         else:
             log.debug("Failed to get next VMID via pvesh: %s", res.output)
 
@@ -1138,14 +1138,14 @@ class NextApp(App):
                 parts = line.split()
                 if parts and parts[0].isdigit():
                     vmids.append(int(parts[0]))
-            next_vmid = (max(vmids) + 1) if vmids else 900
-            if next_vmid < 100:
-                return 100
-            if next_vmid > 999999:
-                return 999999
+            next_vmid = (max(vmids) + 1) if vmids else DEFAULT_VMID
+            if next_vmid < MIN_VMID:
+                return MIN_VMID
+            if next_vmid > MAX_VMID:
+                return MAX_VMID
             return next_vmid
         log.debug("Failed to detect next VMID via qm list: %s", res.output)
-        return 900
+        return DEFAULT_VMID
 
     # ── UI Helpers ──────────────────────────────────────────────────
 
