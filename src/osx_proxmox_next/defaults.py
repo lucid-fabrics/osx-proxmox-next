@@ -4,6 +4,10 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .infrastructure import ProxmoxAdapter
 
 log = logging.getLogger(__name__)
 
@@ -149,9 +153,9 @@ def detect_iso_storage() -> list[str]:
     return dirs
 
 
-def _resolve_iso_path(pve: object, storage_id: str) -> str | None:
+def _resolve_iso_path(pve: ProxmoxAdapter, storage_id: str) -> str | None:
     """Resolve a Proxmox storage ID to its ISO template directory."""
-    res = pve.pvesm("path", f"{storage_id}:iso/probe.iso")  # type: ignore[attr-defined]
+    res = pve.pvesm("path", f"{storage_id}:iso/probe.iso")
     if res.ok and res.output.strip():
         return str(Path(res.output.strip()).parent)
     else:

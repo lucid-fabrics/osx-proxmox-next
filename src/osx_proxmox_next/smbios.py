@@ -79,11 +79,16 @@ def _encode_year_week(year: int, week: int) -> tuple[str, str]:
     return year_char, week_char
 
 
+_BASE = len(BASE34)  # 34
+_WEEKS_PER_YEAR = 52
+_MAX_PRODUCTION_LINE = 3400
+
+
 def _encode_line(line: int) -> str:
     """Encode production line (0-3399) into 3 base-34 chars (pure base-34)."""
-    d1 = line // (34 * 34)
-    d2 = (line // 34) % 34
-    d3 = line % 34
+    d1 = line // (_BASE * _BASE)
+    d2 = (line // _BASE) % _BASE
+    d3 = line % _BASE
     return BASE34[d1] + BASE34[d2] + BASE34[d3]
 
 
@@ -94,8 +99,8 @@ def _random_manufacturing_data(model: str) -> dict:
     return {
         "country": secrets.choice(platform["country_codes"]),
         "year": year_lo + secrets.randbelow(year_hi - year_lo + 1),
-        "week": 1 + secrets.randbelow(52),
-        "line": secrets.randbelow(3400),
+        "week": 1 + secrets.randbelow(_WEEKS_PER_YEAR),
+        "line": secrets.randbelow(_MAX_PRODUCTION_LINE),
         "model_code": secrets.choice(platform["model_codes"]),
     }
 

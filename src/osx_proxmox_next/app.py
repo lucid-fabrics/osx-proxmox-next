@@ -14,14 +14,14 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
-from .assets import required_assets
+from .assets import AssetCheck, required_assets
 from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb
 from .domain import DEFAULT_VMID, MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
-from .executor import apply_plan
+from .executor import StepResult, apply_plan
 from .infrastructure import ProxmoxAdapter
 from .planner import PlanStep, build_plan, build_destroy_plan, fetch_vm_info
-from .preflight import run_preflight
+from .preflight import PreflightCheck, run_preflight
 from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
 from .smbios import generate_smbios, SmbiosIdentity
 
@@ -50,7 +50,7 @@ class WizardState:
     # Preflight
     preflight_done: bool = False
     preflight_ok: bool = False
-    preflight_checks: list[object] = field(default_factory=list)
+    preflight_checks: list[PreflightCheck] = field(default_factory=list)
     # Downloads
     download_running: bool = False
     download_phase: str = ""
@@ -759,7 +759,7 @@ class NextApp(App):
                 f"Missing assets: {', '.join(a.name for a in missing)}. Provide path manually."
             )
 
-    def _download_worker(self, config: VmConfig, missing: list) -> None:
+    def _download_worker(self, config: VmConfig, missing: list[AssetCheck]) -> None:
         dest_dir = Path(config.iso_dir or DEFAULT_ISO_DIR)
         errors: list[str] = []
 
@@ -834,7 +834,7 @@ class NextApp(App):
         self.query_one("#dry_log", Static).update("Starting dry run...")
         self.query_one("#dry_run_btn", Button).disabled = True
 
-        def callback(idx: int, total: int, step: PlanStep, result: object) -> None:
+        def callback(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
             self.call_from_thread(self._update_dry_progress, idx, total, step.title, result)
 
         def worker() -> None:
@@ -843,7 +843,7 @@ class NextApp(App):
 
         Thread(target=worker, daemon=True).start()
 
-    def _update_dry_progress(self, idx: int, total: int, title: str, result: object) -> None:
+    def _update_dry_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#dry_progress", ProgressBar).update(total=total, progress=idx)
         if result is None:
             self._append_log("#dry_log", f"Running {idx}/{total}: {title}")
@@ -895,7 +895,7 @@ class NextApp(App):
         )
         self.query_one("#live_log", Static).update("Starting live install...")
 
-        def callback(idx: int, total: int, step: PlanStep, result: object) -> None:
+        def callback(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
             self.call_from_thread(self._update_live_progress, idx, total, step.title, result)
 
         def worker() -> None:
@@ -906,7 +906,7 @@ class NextApp(App):
 
         Thread(target=worker, daemon=True).start()
 
-    def _update_live_progress(self, idx: int, total: int, title: str, result: object) -> None:
+    def _update_live_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#live_progress", ProgressBar).update(total=total, progress=idx)
         if result is None:
             self._append_log("#live_log", f"Running {idx}/{total}: {title}")
@@ -990,7 +990,7 @@ class NextApp(App):
             header = all_lines[0] if all_lines else ""
             result = [header] + macos_lines if macos_lines else []
             self.call_from_thread(self._finish_vm_list, result)
-        except Exception:
+        except (OSError, RuntimeError):
             log.debug("Failed to list VMs", exc_info=True)
             self.call_from_thread(self._finish_vm_list, [])
 
@@ -1051,13 +1051,13 @@ class NextApp(App):
         snapshot = create_snapshot(vmid)
         steps = build_destroy_plan(vmid, purge=self.state.uninstall_purge)
 
-        def on_step(idx: int, total: int, step: PlanStep, result: object) -> None:
+        def on_step(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
             self.call_from_thread(self._update_destroy_log, idx, total, step.title, result)
 
         result = apply_plan(steps, execute=True, on_step=on_step)
         self.call_from_thread(self._finish_destroy, result.ok, result.log_path)
 
-    def _update_destroy_log(self, idx: int, total: int, title: str, result: object) -> None:
+    def _update_destroy_log(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         if result is None:
             self.state.uninstall_log.append(f"Running {idx}/{total}: {title}")
         else:
@@ -1089,7 +1089,7 @@ class NextApp(App):
         checks = run_preflight()
         self.call_from_thread(self._finish_preflight, checks)
 
-    def _finish_preflight(self, checks: list[object]) -> None:
+    def _finish_preflight(self, checks: list[PreflightCheck]) -> None:
         self.state.preflight_done = True
         self.state.preflight_checks = checks
         self.state.preflight_ok = all(c.ok for c in checks)
