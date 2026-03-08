@@ -178,7 +178,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 # then write OpenCore .contentFlavour + .contentDetails
                 "python3 -c '"
                 "import struct,subprocess; "
-                f"img={shquote(str(recovery_raw))}; "
+                f'img="{recovery_raw}"; '
                 "out=subprocess.check_output([\"sgdisk\",\"-i\",\"1\",img],text=True); "
                 "start=int([l for l in out.splitlines() if \"First sector\" in l][0].split(\":\")[1].split(\"(\")[0].strip()); "
                 "off=start*512+1024+4; "
@@ -193,7 +193,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
                 # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
                 "partprobe $RLOOP 2>/dev/null; "
-                "for _i in 1 2 3 4 5; do ls ${RLOOP}p* &>/dev/null && break; sleep 1; partprobe $RLOOP 2>/dev/null; done && "
+                "for _i in $(seq 1 10); do ls ${RLOOP}p* &>/dev/null && break; sleep 1; partprobe $RLOOP 2>/dev/null; blockdev --rereadpt $RLOOP 2>/dev/null; done && "
                 "{ [ -b \"${RLOOP}p1\" ] || { echo \"ERROR: ${RLOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
                 "mount -t hfsplus -o rw ${RLOOP}p1 $OC_REC && "
                 "{ mountpoint -q $OC_REC || { echo \"ERROR: $OC_REC is not mounted. Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
@@ -353,7 +353,7 @@ def _mount_source_oc_script(opencore_path: Path) -> str:
         f'SRC_LOOP=$(losetup -fP --show {shquote(str(opencore_path))}) && '
         "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         "partprobe $SRC_LOOP 2>/dev/null; "
-        "for _i in 1 2 3 4 5; do ls ${SRC_LOOP}p* &>/dev/null && break; sleep 1; partprobe $SRC_LOOP 2>/dev/null; done && "
+        "for _i in $(seq 1 10); do ls ${SRC_LOOP}p* &>/dev/null && break; sleep 1; partprobe $SRC_LOOP 2>/dev/null; blockdev --rereadpt $SRC_LOOP 2>/dev/null; done && "
         "SRC_PART=$(blkid -o device $SRC_LOOP ${SRC_LOOP}p* 2>/dev/null "
         "| xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' "
         "| head -1); "
@@ -373,7 +373,7 @@ def _format_dest_oc_script(dest: Path) -> str:
         f'DEST_LOOP=$(losetup -fP --show {qp}) && '
         "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         "partprobe $DEST_LOOP 2>/dev/null; "
-        "for _i in 1 2 3 4 5; do ls ${DEST_LOOP}p* &>/dev/null && break; sleep 1; partprobe $DEST_LOOP 2>/dev/null; done && "
+        "for _i in $(seq 1 10); do ls ${DEST_LOOP}p* &>/dev/null && break; sleep 1; partprobe $DEST_LOOP 2>/dev/null; blockdev --rereadpt $DEST_LOOP 2>/dev/null; done && "
         "{ [ -b \"${DEST_LOOP}p1\" ] || { echo \"ERROR: ${DEST_LOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
         "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
         "mount ${DEST_LOOP}p1 $OC_DEST && "
