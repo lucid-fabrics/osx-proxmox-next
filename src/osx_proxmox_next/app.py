@@ -1106,7 +1106,7 @@ class NextApp(App):
         targets: list[str] = []
         for line in res.output.splitlines()[1:]:
             parts = line.split()
-            if parts:
+            if len(parts) >= 3 and parts[2] == "active":
                 name = parts[0]
                 if name not in targets:
                     targets.append(name)
