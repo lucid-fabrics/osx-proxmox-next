@@ -241,12 +241,12 @@ def _get_recovery_image_info(
     return info
 
 
-def _download_file_with_token(
+def _retry_download(
     url: str,
-    asset_token: str,
     dest: Path,
     on_progress: ProgressCallback,
     phase: str,
+    extra_headers: dict[str, str] | None = None,
 ) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part_path = dest.parent / (dest.name + ".part")
@@ -254,14 +254,7 @@ def _download_file_with_token(
     last_error: Optional[Exception] = None
     for attempt in range(_MAX_RETRIES):
         try:
-            parsed = urlparse(url)
-            headers = {
-                "Host": parsed.hostname,
-                "Connection": "close",
-                "User-Agent": "InternetRecovery/1.0",
-                "Cookie": f"AssetToken={asset_token}",
-            }
-            _do_download(url, part_path, on_progress, phase, extra_headers=headers)
+            _do_download(url, part_path, on_progress, phase, extra_headers=extra_headers)
             part_path.rename(dest)
             return
         except (OSError, urllib.error.URLError) as exc:
@@ -272,6 +265,23 @@ def _download_file_with_token(
                 time.sleep(_BACKOFF_SECONDS[attempt])
 
     raise DownloadError(f"Download failed after {_MAX_RETRIES} attempts: {last_error}")
+
+
+def _download_file_with_token(
+    url: str,
+    asset_token: str,
+    dest: Path,
+    on_progress: ProgressCallback,
+    phase: str,
+) -> None:
+    parsed = urlparse(url)
+    headers = {
+        "Host": parsed.hostname,
+        "Connection": "close",
+        "User-Agent": "InternetRecovery/1.0",
+        "Cookie": f"AssetToken={asset_token}",
+    }
+    _retry_download(url, dest, on_progress, phase, extra_headers=headers)
 
 
 def _download_file(
@@ -280,23 +290,7 @@ def _download_file(
     on_progress: ProgressCallback,
     phase: str,
 ) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    part_path = dest.parent / (dest.name + ".part")
-
-    last_error: Optional[Exception] = None
-    for attempt in range(_MAX_RETRIES):
-        try:
-            _do_download(url, part_path, on_progress, phase)
-            part_path.rename(dest)
-            return
-        except (OSError, urllib.error.URLError) as exc:
-            last_error = exc
-            if part_path.exists():
-                part_path.unlink()
-            if attempt < _MAX_RETRIES - 1:
-                time.sleep(_BACKOFF_SECONDS[attempt])
-
-    raise DownloadError(f"Download failed after {_MAX_RETRIES} attempts: {last_error}")
+    _retry_download(url, dest, on_progress, phase)
 
 
 def _do_download(

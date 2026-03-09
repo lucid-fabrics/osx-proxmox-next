@@ -9,7 +9,7 @@ from . import __version__
 from .assets import required_assets, suggested_fetch_commands
 from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage
 from .diagnostics import export_log_bundle, recovery_guide
-from .domain import VmConfig, validate_config
+from .domain import MIN_VMID, MAX_VMID, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
 from .planner import build_plan, build_destroy_plan, fetch_vm_info, render_script
@@ -240,8 +240,8 @@ def run_cli(argv: list[str] | None = None) -> int:
 
 def _run_status(args: argparse.Namespace) -> int:
     vmid = args.vmid
-    if vmid < 100 or vmid > 999999:
-        print("ERROR: VMID must be between 100 and 999999.")
+    if vmid < MIN_VMID or vmid > MAX_VMID:
+        print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
         return 2
 
     info = fetch_vm_info(vmid)
@@ -261,8 +261,8 @@ def _run_status(args: argparse.Namespace) -> int:
 
 def _run_uninstall(args: argparse.Namespace) -> int:
     vmid = args.vmid
-    if vmid < 100 or vmid > 999999:
-        print("ERROR: VMID must be between 100 and 999999.")
+    if vmid < MIN_VMID or vmid > MAX_VMID:
+        print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
         return 2
 
     if args.execute:

@@ -1,26 +1,31 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from subprocess import check_output
 from threading import Thread
+
+log = logging.getLogger(__name__)
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
-from .assets import required_assets
+from .assets import AssetCheck, required_assets
 from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb
-from .domain import SUPPORTED_MACOS, VmConfig, validate_config
+from .domain import DEFAULT_VMID, MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
-from .executor import apply_plan
+from .executor import StepResult, apply_plan
+from .infrastructure import ProxmoxAdapter
 from .planner import PlanStep, build_plan, build_destroy_plan, fetch_vm_info
-from .preflight import run_preflight
+from .preflight import PreflightCheck, run_preflight
 from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
 from .smbios import generate_smbios, SmbiosIdentity
+
+_pve = ProxmoxAdapter()
 
 
 @dataclass
@@ -31,7 +36,7 @@ class WizardState:
     iso_dirs: list[str] = field(default_factory=list)
     selected_iso_dir: str = ""
     # Form
-    vmid: int = 900
+    vmid: int = DEFAULT_VMID
     name: str = ""
     cores: int = 8
     memory_mb: int = 16384
@@ -45,7 +50,7 @@ class WizardState:
     # Preflight
     preflight_done: bool = False
     preflight_ok: bool = False
-    preflight_checks: list = field(default_factory=list)
+    preflight_checks: list[PreflightCheck] = field(default_factory=list)
     # Downloads
     download_running: bool = False
     download_phase: str = ""
@@ -54,9 +59,9 @@ class WizardState:
     downloads_complete: bool = False
     # Config + Plan
     config: VmConfig | None = None
-    plan_steps: list = field(default_factory=list)
+    plan_steps: list[PlanStep] = field(default_factory=list)
     assets_ok: bool = False
-    assets_missing: list = field(default_factory=list)
+    assets_missing: list[str] = field(default_factory=list)
     # Dry run
     dry_run_done: bool = False
     dry_run_ok: bool = False
@@ -69,7 +74,7 @@ class WizardState:
     snapshot: RollbackSnapshot | None = None
     # Manage mode
     manage_mode: bool = False
-    uninstall_vm_list: list = field(default_factory=list)
+    uninstall_vm_list: list[str] = field(default_factory=list)
     uninstall_purge: bool = True
     uninstall_log: list[str] = field(default_factory=list)
     uninstall_running: bool = False
@@ -310,7 +315,7 @@ class NextApp(App):
                 yield Static("VM Configuration")
                 with Container(id="config_grid"):
                     yield Static("VMID", classes="label")
-                    yield Input(value="900", id="vmid")
+                    yield Input(value=str(DEFAULT_VMID), id="vmid")
                     yield Static("VM Name", classes="label")
                     yield Input(value="", id="name")
                     yield Static("CPU Cores", classes="label")
@@ -400,7 +405,7 @@ class NextApp(App):
                 idx = int(bid.split("_")[1])
                 self._select_storage(self.state.storage_targets[idx])
             except (ValueError, IndexError):
-                pass
+                log.debug("Invalid storage button index: %s", bid)
             return
 
         handlers = {
@@ -616,27 +621,27 @@ class NextApp(App):
 
         try:
             vmid_val = int(vmid_text)
-            if vmid_val < 100 or vmid_val > 999999:
+            if vmid_val < MIN_VMID or vmid_val > MAX_VMID:
                 raise ValueError
         except ValueError:
-            errors["vmid"] = "VMID must be 100-999999."
+            errors["vmid"] = f"VMID must be {MIN_VMID}-{MAX_VMID}."
 
         if len(name_text) < 3:
             errors["name"] = "VM Name must be at least 3 chars."
 
         try:
             mem_val = int(memory_text)
-            if mem_val < 4096:
+            if mem_val < MIN_MEMORY_MB:
                 raise ValueError
         except ValueError:
-            errors["memory"] = "Memory must be >= 4096 MB."
+            errors["memory"] = f"Memory must be >= {MIN_MEMORY_MB} MB."
 
         try:
             disk_val = int(disk_text)
-            if disk_val < 64:
+            if disk_val < MIN_DISK_GB:
                 raise ValueError
         except ValueError:
-            errors["disk"] = "Disk must be >= 64 GB."
+            errors["disk"] = f"Disk must be >= {MIN_DISK_GB} GB."
 
         if not re.fullmatch(r"vmbr[0-9]+", bridge_text):
             errors["bridge"] = "Bridge must match vmbr<N> (e.g. vmbr0)."
@@ -754,7 +759,7 @@ class NextApp(App):
                 f"Missing assets: {', '.join(a.name for a in missing)}. Provide path manually."
             )
 
-    def _download_worker(self, config: VmConfig, missing: list) -> None:
+    def _download_worker(self, config: VmConfig, missing: list[AssetCheck]) -> None:
         dest_dir = Path(config.iso_dir or DEFAULT_ISO_DIR)
         errors: list[str] = []
 
@@ -813,7 +818,7 @@ class NextApp(App):
             try:
                 self.state.plan_steps = build_plan(config)
             except ValueError:
-                pass
+                log.debug("Failed to rebuild plan after download", exc_info=True)
             self._render_config_summary()
 
     def _run_dry_apply(self) -> None:
@@ -829,7 +834,7 @@ class NextApp(App):
         self.query_one("#dry_log", Static).update("Starting dry run...")
         self.query_one("#dry_run_btn", Button).disabled = True
 
-        def callback(idx: int, total: int, step: PlanStep, result: object) -> None:
+        def callback(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
             self.call_from_thread(self._update_dry_progress, idx, total, step.title, result)
 
         def worker() -> None:
@@ -838,7 +843,7 @@ class NextApp(App):
 
         Thread(target=worker, daemon=True).start()
 
-    def _update_dry_progress(self, idx: int, total: int, title: str, result: object) -> None:
+    def _update_dry_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#dry_progress", ProgressBar).update(total=total, progress=idx)
         if result is None:
             self._append_log("#dry_log", f"Running {idx}/{total}: {title}")
@@ -890,7 +895,7 @@ class NextApp(App):
         )
         self.query_one("#live_log", Static).update("Starting live install...")
 
-        def callback(idx: int, total: int, step: PlanStep, result: object) -> None:
+        def callback(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
             self.call_from_thread(self._update_live_progress, idx, total, step.title, result)
 
         def worker() -> None:
@@ -901,7 +906,7 @@ class NextApp(App):
 
         Thread(target=worker, daemon=True).start()
 
-    def _update_live_progress(self, idx: int, total: int, title: str, result: object) -> None:
+    def _update_live_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#live_progress", ProgressBar).update(total=total, progress=idx)
         if result is None:
             self._append_log("#live_log", f"Running {idx}/{total}: {title}")
@@ -967,8 +972,11 @@ class NextApp(App):
 
     def _vm_list_worker(self) -> None:
         try:
-            output = check_output(["qm", "list"], text=True, timeout=5.0)
-            all_lines = output.strip().splitlines()
+            res = _pve.qm("list")
+            if not res.ok:
+                self.call_from_thread(self._finish_vm_list, [])
+                return
+            all_lines = res.output.strip().splitlines()
             # Filter to macOS VMs only (have isa-applesmc in config)
             macos_lines: list[str] = []
             for line in all_lines[1:]:  # skip header
@@ -976,18 +984,14 @@ class NextApp(App):
                 if not parts:
                     continue
                 vmid = parts[0]
-                try:
-                    cfg = check_output(
-                        ["qm", "config", vmid], text=True, timeout=5.0,
-                    )
-                    if "isa-applesmc" in cfg:
-                        macos_lines.append(line)
-                except Exception:
-                    pass
+                cfg_res = _pve.qm("config", vmid)
+                if cfg_res.ok and "isa-applesmc" in cfg_res.output:
+                    macos_lines.append(line)
             header = all_lines[0] if all_lines else ""
             result = [header] + macos_lines if macos_lines else []
             self.call_from_thread(self._finish_vm_list, result)
-        except Exception:
+        except (OSError, RuntimeError):
+            log.debug("Failed to list VMs", exc_info=True)
             self.call_from_thread(self._finish_vm_list, [])
 
     def _finish_vm_list(self, lines: list[str]) -> None:
@@ -1003,7 +1007,7 @@ class NextApp(App):
         btn = self.query_one("#manage_destroy_btn", Button)
         try:
             vmid = int(text)
-            btn.disabled = vmid < 100 or vmid > 999999
+            btn.disabled = vmid < MIN_VMID or vmid > MAX_VMID
         except ValueError:
             btn.disabled = True
 
@@ -1030,7 +1034,7 @@ class NextApp(App):
             vmid = int(text)
         except ValueError:
             return
-        if vmid < 100 or vmid > 999999:
+        if vmid < MIN_VMID or vmid > MAX_VMID:
             return
 
         self.state.uninstall_running = True
@@ -1047,13 +1051,13 @@ class NextApp(App):
         snapshot = create_snapshot(vmid)
         steps = build_destroy_plan(vmid, purge=self.state.uninstall_purge)
 
-        def on_step(idx: int, total: int, step: PlanStep, result: object) -> None:
+        def on_step(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
             self.call_from_thread(self._update_destroy_log, idx, total, step.title, result)
 
         result = apply_plan(steps, execute=True, on_step=on_step)
         self.call_from_thread(self._finish_destroy, result.ok, result.log_path)
 
-    def _update_destroy_log(self, idx: int, total: int, title: str, result: object) -> None:
+    def _update_destroy_log(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         if result is None:
             self.state.uninstall_log.append(f"Running {idx}/{total}: {title}")
         else:
@@ -1085,7 +1089,7 @@ class NextApp(App):
         checks = run_preflight()
         self.call_from_thread(self._finish_preflight, checks)
 
-    def _finish_preflight(self, checks: list) -> None:
+    def _finish_preflight(self, checks: list[PreflightCheck]) -> None:
         self.state.preflight_done = True
         self.state.preflight_checks = checks
         self.state.preflight_ok = all(c.ok for c in checks)
@@ -1095,16 +1099,14 @@ class NextApp(App):
     # ── Detection Helpers ───────────────────────────────────────────
 
     def _detect_storage_targets(self) -> list[str]:
-        try:
-            output = check_output(
-                ["pvesm", "status", "-content", "images"], text=True, timeout=2.0
-            )
-        except Exception:
+        res = _pve.pvesm("status", "-content", "images")
+        if not res.ok:
+            log.debug("Failed to detect storage targets: %s", res.output)
             return [DEFAULT_STORAGE, "local"]
         targets: list[str] = []
-        for line in output.splitlines()[1:]:
+        for line in res.output.splitlines()[1:]:
             parts = line.split()
-            if parts:
+            if len(parts) >= 3 and parts[2] == "active":
                 name = parts[0]
                 if name not in targets:
                     targets.append(name)
@@ -1113,35 +1115,37 @@ class NextApp(App):
         return targets[:5]
 
     def _detect_next_vmid(self) -> int:
-        try:
-            output = check_output(
-                ["pvesh", "get", "/cluster/nextid"], text=True, timeout=2.0
-            ).strip()
+        res = _pve.pvesh("get", "/cluster/nextid")
+        if res.ok:
+            output = res.output.strip()
             if output.isdigit():
                 vmid = int(output)
-                if 100 <= vmid <= 999999:
+                if MIN_VMID <= vmid <= MAX_VMID:
                     return vmid
-            parsed = json.loads(output)
-            if isinstance(parsed, int) and 100 <= parsed <= 999999:
-                return parsed  # pragma: no cover
-        except Exception:
-            pass
+            try:
+                parsed = json.loads(output)
+                if isinstance(parsed, int) and MIN_VMID <= parsed <= MAX_VMID:
+                    return parsed  # pragma: no cover
+            except (json.JSONDecodeError, ValueError):
+                log.debug("pvesh returned non-JSON/non-int: %s", output)
+        else:
+            log.debug("Failed to get next VMID via pvesh: %s", res.output)
 
-        try:
-            output = check_output(["qm", "list"], text=True, timeout=2.0)
+        res = _pve.qm("list")
+        if res.ok:
             vmids: list[int] = []
-            for line in output.splitlines()[1:]:
+            for line in res.output.splitlines()[1:]:
                 parts = line.split()
                 if parts and parts[0].isdigit():
                     vmids.append(int(parts[0]))
-            next_vmid = (max(vmids) + 1) if vmids else 900
-            if next_vmid < 100:
-                return 100
-            if next_vmid > 999999:
-                return 999999
+            next_vmid = (max(vmids) + 1) if vmids else DEFAULT_VMID
+            if next_vmid < MIN_VMID:
+                return MIN_VMID
+            if next_vmid > MAX_VMID:
+                return MAX_VMID
             return next_vmid
-        except Exception:
-            return 900
+        log.debug("Failed to detect next VMID via qm list: %s", res.output)
+        return DEFAULT_VMID
 
     # ── UI Helpers ──────────────────────────────────────────────────
 

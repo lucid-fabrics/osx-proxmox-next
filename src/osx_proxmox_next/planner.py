@@ -11,10 +11,20 @@ from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import CpuInfo, detect_cpu_info
 from .domain import SUPPORTED_MACOS, VmConfig, validate_config
 from .infrastructure import ProxmoxAdapter
-from .smbios import generate_rom_from_mac, generate_smbios, model_for_macos
+from .smbios import generate_mac, generate_rom_from_mac, generate_smbios, generate_vmgenid, model_for_macos
 
 
 _APPLE_OSK = "ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc"
+
+
+def _partprobe_retry_snippet(loop_var: str) -> str:
+    """Return bash snippet that retries partprobe up to 10 times for slow storage."""
+    return (
+        f"partprobe ${loop_var} 2>/dev/null; "
+        f"for _i in $(seq 1 10); do ls ${{{loop_var}}}p* &>/dev/null && break; "
+        f"sleep 1; partprobe ${loop_var} 2>/dev/null; "
+        f"blockdev --rereadpt ${loop_var} 2>/dev/null; done"
+    )
 
 
 def _sanitize_smbios(val: str, *, allow_comma: bool = False) -> str:
@@ -91,6 +101,9 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     # AMD needs kernel patches (AppleCpuPmCfgLock / AppleXcpmCfgLock).
     # Hybrid Intel does NOT — it only needs Cascadelake-Server emulation.
     is_amd = cpu.vendor == "AMD"
+
+    # Pre-generate SMBIOS identity so downstream steps just read config fields.
+    _populate_smbios(config)
 
     steps = [
         PlanStep(
@@ -178,7 +191,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 # then write OpenCore .contentFlavour + .contentDetails
                 "python3 -c '"
                 "import struct,subprocess; "
-                f"img={shquote(str(recovery_raw))}; "
+                f'img="{recovery_raw}"; '
                 "out=subprocess.check_output([\"sgdisk\",\"-i\",\"1\",img],text=True); "
                 "start=int([l for l in out.splitlines() if \"First sector\" in l][0].split(\":\")[1].split(\"(\")[0].strip()); "
                 "off=start*512+1024+4; "
@@ -192,8 +205,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 f'RLOOP=$(losetup -fP --show {shquote(str(recovery_raw))}) && '
                 "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
                 # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
-                "partprobe $RLOOP 2>/dev/null; "
-                "for _i in 1 2 3 4 5; do ls ${RLOOP}p* &>/dev/null && break; sleep 1; partprobe $RLOOP 2>/dev/null; done && "
+                f"{_partprobe_retry_snippet('RLOOP')} && "
                 "{ [ -b \"${RLOOP}p1\" ] || { echo \"ERROR: ${RLOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
                 "mount -t hfsplus -o rw ${RLOOP}p1 $OC_REC && "
                 "{ mountpoint -q $OC_REC || { echo \"ERROR: $OC_REC is not mounted. Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
@@ -352,8 +364,7 @@ def _mount_source_oc_script(opencore_path: Path) -> str:
     return (
         f'SRC_LOOP=$(losetup -fP --show {shquote(str(opencore_path))}) && '
         "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
-        "partprobe $SRC_LOOP 2>/dev/null; "
-        "for _i in 1 2 3 4 5; do ls ${SRC_LOOP}p* &>/dev/null && break; sleep 1; partprobe $SRC_LOOP 2>/dev/null; done && "
+        f"{_partprobe_retry_snippet('SRC_LOOP')} && "
         "SRC_PART=$(blkid -o device $SRC_LOOP ${SRC_LOOP}p* 2>/dev/null "
         "| xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' "
         "| head -1); "
@@ -372,8 +383,7 @@ def _format_dest_oc_script(dest: Path) -> str:
         f'sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {qp} && '
         f'DEST_LOOP=$(losetup -fP --show {qp}) && '
         "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
-        "partprobe $DEST_LOOP 2>/dev/null; "
-        "for _i in 1 2 3 4 5; do ls ${DEST_LOOP}p* &>/dev/null && break; sleep 1; partprobe $DEST_LOOP 2>/dev/null; done && "
+        f"{_partprobe_retry_snippet('DEST_LOOP')} && "
         "{ [ -b \"${DEST_LOOP}p1\" ] || { echo \"ERROR: ${DEST_LOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
         "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
         "mount ${DEST_LOOP}p1 $OC_DEST && "
@@ -421,33 +431,41 @@ def _encode_smbios_value(value: str) -> str:
     return base64.b64encode(value.encode()).decode()
 
 
+def _populate_smbios(config: VmConfig) -> None:
+    """Pre-generate SMBIOS identity and Apple services fields on config.
+
+    Called once at the top of build_plan so downstream helpers just read fields.
+    """
+    if config.no_smbios:
+        return
+    if not config.smbios_serial:
+        identity = generate_smbios(config.macos, config.apple_services)
+        config.smbios_serial = identity.serial
+        config.smbios_uuid = identity.uuid
+        config.smbios_model = identity.model
+        config.smbios_mlb = identity.mlb
+        config.smbios_rom = identity.rom
+        if identity.mac and not config.static_mac:
+            config.static_mac = identity.mac
+    if not config.smbios_model:
+        config.smbios_model = model_for_macos(config.macos)
+    if config.apple_services:
+        if not config.vmgenid:
+            config.vmgenid = generate_vmgenid()
+        if not config.static_mac:
+            config.static_mac = generate_mac()
+        config.smbios_rom = generate_rom_from_mac(config.static_mac)
+
+
 def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
     if config.no_smbios:
         return []
-    serial = config.smbios_serial
-    smbios_uuid = config.smbios_uuid
-    model = config.smbios_model
-    if not serial:
-        identity = generate_smbios(config.macos, config.apple_services)
-        serial = identity.serial
-        smbios_uuid = identity.uuid
-        model = identity.model
-        config.smbios_serial = serial
-        config.smbios_uuid = smbios_uuid
-        config.smbios_model = model
-        config.smbios_mlb = identity.mlb
-        config.smbios_rom = identity.rom
-        # Propagate MAC so _apple_services_steps doesn't generate a second one
-        if identity.mac and not config.static_mac:
-            config.static_mac = identity.mac
-    if not model:
-        model = model_for_macos(config.macos)
     smbios_value = (
-        f"uuid={smbios_uuid},"
+        f"uuid={config.smbios_uuid},"
         f"base64=1,"
-        f"serial={_encode_smbios_value(serial)},"
+        f"serial={_encode_smbios_value(config.smbios_serial)},"
         f"manufacturer={_encode_smbios_value('Apple Inc.')},"
-        f"product={_encode_smbios_value(model)},"
+        f"product={_encode_smbios_value(config.smbios_model)},"
         f"family={_encode_smbios_value('Mac')}"
     )
     return [
@@ -462,36 +480,16 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
     """Configure vmgenid and static MAC for Apple services (iMessage, FaceTime, etc.)."""
     if not config.apple_services:
         return []
-
-    steps = []
-
-    # Generate vmgenid if not set
-    if not config.vmgenid:
-        from .smbios import generate_vmgenid
-        config.vmgenid = generate_vmgenid()
-
-    # Generate static MAC if not set
-    if not config.static_mac:
-        from .smbios import generate_mac
-        config.static_mac = generate_mac()
-
-    # Derive ROM from MAC — macOS cross-checks ROM against NIC during Apple ID validation
-    config.smbios_rom = generate_rom_from_mac(config.static_mac)
-
-    # Add vmgenid for Apple services
-    steps.append(PlanStep(
-        title="Configure vmgenid for Apple services",
-        argv=["qm", "set", vmid, "--vmgenid", config.vmgenid],
-    ))
-
-    # Get current net0 config and update with static MAC
-    # We'll replace the existing net0 with a static MAC
-    steps.append(PlanStep(
-        title="Configure static MAC for Apple services",
-        argv=["qm", "set", vmid, "--net0", f"vmxnet3,bridge={config.bridge},macaddr={config.static_mac},firewall=0"],
-    ))
-
-    return steps
+    return [
+        PlanStep(
+            title="Configure vmgenid for Apple services",
+            argv=["qm", "set", vmid, "--vmgenid", config.vmgenid],
+        ),
+        PlanStep(
+            title="Configure static MAC for Apple services",
+            argv=["qm", "set", vmid, "--net0", f"vmxnet3,bridge={config.bridge},macaddr={config.static_mac},firewall=0"],
+        ),
+    ]
 
 
 # ── VM Destroy ──────────────────────────────────────────────────────
