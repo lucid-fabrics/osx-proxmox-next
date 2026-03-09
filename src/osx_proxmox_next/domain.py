@@ -11,6 +11,14 @@ SUPPORTED_MACOS = {
     "tahoe": {"label": "macOS Tahoe 26", "major": 26, "channel": "stable"},
 }
 
+# Validation constants — used by domain.validate_config() and app.py form validation
+MIN_VMID = 100
+MAX_VMID = 999999
+MIN_CORES = 2
+MIN_MEMORY_MB = 4096
+MIN_DISK_GB = 64
+DEFAULT_VMID = 900
+
 
 @dataclass
 class VmConfig:
@@ -39,20 +47,20 @@ class VmConfig:
 
 def validate_config(config: VmConfig) -> list[str]:
     issues: list[str] = []
-    if config.vmid < 100 or config.vmid > 999999:
-        issues.append("VMID must be between 100 and 999999.")
+    if config.vmid < MIN_VMID or config.vmid > MAX_VMID:
+        issues.append(f"VMID must be between {MIN_VMID} and {MAX_VMID}.")
     if not config.name or len(config.name) < 3:
         issues.append("VM name must be at least 3 characters.")
     if config.name and len(config.name) > 63:
         issues.append("VM name must be at most 63 characters.")
     if config.macos not in SUPPORTED_MACOS:
         issues.append(f"macOS version must be one of: {', '.join(SUPPORTED_MACOS)}.")
-    if config.cores < 2:
-        issues.append("At least 2 CPU cores are required.")
-    if config.memory_mb < 4096:
-        issues.append("At least 4096 MB RAM is required.")
-    if config.disk_gb < 64:
-        issues.append("At least 64 GB disk is required.")
+    if config.cores < MIN_CORES:
+        issues.append(f"At least {MIN_CORES} CPU cores are required.")
+    if config.memory_mb < MIN_MEMORY_MB:
+        issues.append(f"At least {MIN_MEMORY_MB} MB RAM is required.")
+    if config.disk_gb < MIN_DISK_GB:
+        issues.append(f"At least {MIN_DISK_GB} GB disk is required.")
     if not re.fullmatch(r"vmbr[0-9]+", config.bridge):
         issues.append("Bridge must match vmbr<N> (e.g. vmbr0).")
     if config.name and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.\-]*", config.name):

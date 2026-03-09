@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import logging
 import os
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .infrastructure import ProxmoxAdapter
+
+log = logging.getLogger(__name__)
 
 
 DEFAULT_STORAGE = "local-lvm"
@@ -127,40 +133,33 @@ DEFAULT_ISO_DIR = "/var/lib/vz/template/iso"
 
 def detect_iso_storage() -> list[str]:
     """Return ISO directory paths from Proxmox storage pools that support ISO content."""
-    import subprocess
+    from .infrastructure import ProxmoxAdapter
+    pve = ProxmoxAdapter()
     dirs: list[str] = []
-    try:
-        output = subprocess.check_output(
-            ["pvesm", "status", "-content", "iso"], text=True, timeout=2.0,
-        )
-        for line in output.splitlines()[1:]:
+    res = pve.pvesm("status", "-content", "iso")
+    if res.ok:
+        for line in res.output.splitlines()[1:]:
             parts = line.split()
             if len(parts) >= 7 and parts[2] == "active":
                 storage_id = parts[0]
-                path = _resolve_iso_path(storage_id)
+                path = _resolve_iso_path(pve, storage_id)
                 if path and path not in dirs:
                     dirs.append(path)
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        pass
+    else:
+        log.debug("Failed to detect ISO storage: %s", res.output)
     # Always include local as fallback
     if DEFAULT_ISO_DIR not in dirs:
         dirs.insert(0, DEFAULT_ISO_DIR)
     return dirs
 
 
-def _resolve_iso_path(storage_id: str) -> str | None:
+def _resolve_iso_path(pve: ProxmoxAdapter, storage_id: str) -> str | None:
     """Resolve a Proxmox storage ID to its ISO template directory."""
-    import subprocess
-    try:
-        output = subprocess.check_output(
-            ["pvesm", "path", f"{storage_id}:iso/probe.iso"],
-            text=True, timeout=2.0,
-        ).strip()
-        # pvesm path returns full file path; we want the directory
-        if output:
-            return str(Path(output).parent)
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        pass
+    res = pve.pvesm("path", f"{storage_id}:iso/probe.iso")
+    if res.ok and res.output.strip():
+        return str(Path(res.output.strip()).parent)
+    else:
+        log.debug("Failed to resolve ISO path for %s: %s", storage_id, res.output)
     # Fallback heuristics for common Proxmox layouts
     local_path = Path(f"/mnt/pve/{storage_id}/template/iso")
     if local_path.exists():

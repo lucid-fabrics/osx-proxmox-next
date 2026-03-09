@@ -1,24 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import tarfile
-
-from .preflight import run_preflight
-
-
-@dataclass
-class HealthStatus:
-    score: int
-    total: int
-    summary: str
-
-
-def build_health_status() -> HealthStatus:
-    checks = run_preflight()
-    ok = sum(1 for c in checks if c.ok)
-    return HealthStatus(score=ok, total=len(checks), summary=f"Health {ok}/{len(checks)} checks")
 
 
 def recovery_guide(reason: str) -> list[str]:
