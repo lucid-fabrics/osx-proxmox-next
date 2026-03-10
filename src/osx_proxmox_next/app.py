@@ -187,6 +187,12 @@ class NextApp(App):
 
     .nav_row { height: auto; margin-top: 1; }
     .nav_row Button { margin-right: 1; min-width: 14; }
+    #exit_btn, #exit_btn_2, #exit_btn_3, #exit_btn_4, #exit_btn_5, #exit_btn_6 {
+        dock: right;
+        background: #3a1a1a;
+        border: tall #d44f4f;
+        color: #d44f4f;
+    }
 
     .action_row { height: auto; margin-bottom: 1; }
     .action_row Button { margin-right: 1; min-width: 14; }
@@ -237,6 +243,7 @@ class NextApp(App):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
+        ("escape", "quit", "Quit"),
     ]
 
     current_step: reactive[int] = reactive(1)
@@ -259,6 +266,7 @@ class NextApp(App):
                 yield Static("Checking...", id="preflight_checks")
                 with Horizontal(classes="nav_row"):
                     yield Button("Continue", id="preflight_next_btn", disabled=True)
+                    yield Button("Exit", id="exit_btn")
 
             # Step 2 — Choose OS / Manage VMs
             with Vertical(id="step2", classes="step_container step_hidden"):
@@ -279,6 +287,7 @@ class NextApp(App):
                     with Horizontal(classes="nav_row"):
                         yield Button("Back", id="back_btn_2")
                         yield Button("Next", id="next_btn", disabled=True)
+                        yield Button("Exit", id="exit_btn_2")
                 # Manage panel
                 with Vertical(id="manage_panel", classes="hidden"):
                     yield Static("Manage VMs")
@@ -309,6 +318,7 @@ class NextApp(App):
                 with Horizontal(classes="nav_row"):
                     yield Button("Back", id="back_btn_3")
                     yield Button("Next", id="next_btn_3")
+                    yield Button("Exit", id="exit_btn_3")
 
             # Step 4 — Configuration
             with Vertical(id="step4", classes="step_container step_hidden"):
@@ -349,6 +359,7 @@ class NextApp(App):
                 with Horizontal(classes="nav_row"):
                     yield Button("Back", id="back_btn_4")
                     yield Button("Next", id="next_btn_4")
+                    yield Button("Exit", id="exit_btn_4")
 
             # Step 5 — Review & Dry Run
             with Vertical(id="step5", classes="step_container step_hidden"):
@@ -363,6 +374,7 @@ class NextApp(App):
                 with Horizontal(classes="nav_row"):
                     yield Button("Back", id="back_btn_5")
                     yield Button("Next: Install", id="next_btn_5", disabled=True)
+                    yield Button("Exit", id="exit_btn_5")
 
             # Step 6 — Install
             with Vertical(id="step6", classes="step_container step_hidden"):
@@ -373,6 +385,7 @@ class NextApp(App):
                 yield Static("", id="result_box", classes="hidden")
                 with Horizontal(classes="nav_row"):
                     yield Button("Back", id="back_btn_6")
+                    yield Button("Exit", id="exit_btn_6")
 
     def on_mount(self) -> None:
         self._update_step_bar()
@@ -428,6 +441,12 @@ class NextApp(App):
             "mode_manage": lambda: self._toggle_mode("manage"),
             "manage_refresh_btn": self._refresh_vm_list,
             "manage_destroy_btn": self._run_destroy,
+            "exit_btn": lambda: self.exit(),
+            "exit_btn_2": lambda: self.exit(),
+            "exit_btn_3": lambda: self.exit(),
+            "exit_btn_4": lambda: self.exit(),
+            "exit_btn_5": lambda: self.exit(),
+            "exit_btn_6": lambda: self.exit(),
         }
         handler = handlers.get(bid)
         if handler:
@@ -928,9 +947,14 @@ class NextApp(App):
 
         if ok:
             result_box.remove_class("result_fail")
+            vmid = self.state.config.vmid if self.state.config else "???"
             lines = [
                 "Install completed successfully!",
                 f"Log: {log_path}",
+                "",
+                "POST-INSTALL: After macOS finishes installing, fix the boot order",
+                "so the main disk boots first (instead of recovery):",
+                f"  qm set {vmid} --boot order=virtio0;ide0",
                 "",
                 "If this saved you time: https://ko-fi.com/lucidfabrics",
             ]
