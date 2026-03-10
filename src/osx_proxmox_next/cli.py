@@ -229,6 +229,10 @@ def run_cli(argv: list[str] | None = None) -> int:
     if result.ok:
         print(f"Apply OK. Log: {result.log_path}")
         print()
+        print("POST-INSTALL: After macOS finishes installing, fix the boot order")
+        print("so the main disk boots first (instead of recovery):")
+        print(f"  qm set {config.vmid} --boot order=virtio0;ide0")
+        print()
         print("If this saved you time: https://ko-fi.com/lucidfabrics | https://buymeacoffee.com/lucidfabrics")
         return 0
 
