@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from osx_proxmox_next import preflight
-from osx_proxmox_next.preflight import run_preflight
+from osx_proxmox_next.preflight import (
+    PreflightCheck,
+    run_preflight,
+    has_missing_build_deps,
+    find_missing_packages,
+    install_missing_packages,
+)
 
 
 def test_preflight_has_expected_checks() -> None:
@@ -137,3 +143,131 @@ def test_build_binary_missing_shows_install_hint(monkeypatch):
     partprobe = [c for c in checks if c.name == "partprobe available"][0]
     assert partprobe.ok is False
     assert "apt install parted" in partprobe.details
+
+
+# ── has_missing_build_deps tests ─────────────────────────────────
+
+
+def test_has_missing_build_deps_none_missing():
+    checks = [
+        PreflightCheck("dmg2img available", True, "/usr/bin/dmg2img"),
+        PreflightCheck("sgdisk available", True, "/usr/sbin/sgdisk"),
+        PreflightCheck("KVM ignore_msrs", False, "missing"),
+    ]
+    assert has_missing_build_deps(checks) is False
+
+
+def test_has_missing_build_deps_some_missing():
+    checks = [
+        PreflightCheck("dmg2img available", False, "Not found"),
+        PreflightCheck("sgdisk available", True, "/usr/sbin/sgdisk"),
+    ]
+    assert has_missing_build_deps(checks) is True
+
+
+def test_has_missing_build_deps_ignores_non_build_checks():
+    checks = [
+        PreflightCheck("qm available", False, "not found"),
+        PreflightCheck("KVM ignore_msrs", False, "missing"),
+    ]
+    assert has_missing_build_deps(checks) is False
+
+
+# ── Auto-install tests ──────────────────────────────────────────
+
+
+def test_find_missing_packages_all_present(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    assert find_missing_packages() == []
+
+
+def test_find_missing_packages_some_missing(monkeypatch):
+    present = {"sgdisk", "losetup", "mkfs.fat", "blkid"}
+    monkeypatch.setattr(
+        preflight.shutil, "which",
+        lambda cmd: f"/usr/bin/{cmd}" if cmd in present else None,
+    )
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    missing = find_missing_packages()
+    assert "dmg2img" in missing
+    assert "parted" in missing
+    assert "gdisk" not in missing
+
+
+def test_find_missing_packages_no_duplicates(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    missing = find_missing_packages()
+    assert len(missing) == len(set(missing))
+
+
+def test_install_missing_packages_not_root(monkeypatch):
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: 1000)
+    ok, pkgs = install_missing_packages()
+    assert ok is False
+    assert pkgs == []
+
+
+def test_install_missing_packages_none_missing(monkeypatch):
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(preflight.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    ok, pkgs = install_missing_packages()
+    assert ok is True
+    assert pkgs == []
+
+
+def test_install_missing_packages_success(monkeypatch):
+    from osx_proxmox_next.infrastructure import CommandResult
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: 0)
+    present = {"sgdisk", "losetup", "mkfs.fat", "blkid"}
+    monkeypatch.setattr(
+        preflight.shutil, "which",
+        lambda cmd: f"/usr/bin/{cmd}" if cmd in present else None,
+    )
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    messages = []
+    captured_argv = []
+
+    class FakeAdapter:
+        def run(self, argv):
+            captured_argv.extend(argv)
+            return CommandResult(ok=True, returncode=0, output="")
+
+    ok, pkgs = install_missing_packages(on_output=messages.append, adapter=FakeAdapter())
+    assert ok is True
+    assert "dmg2img" in pkgs
+    assert "parted" in pkgs
+    assert any("Installing" in m for m in messages)
+    assert captured_argv[0] == "apt-get"
+    assert "install" in captured_argv
+    assert "-y" in captured_argv
+
+
+def test_install_missing_packages_apt_failure(monkeypatch):
+    from osx_proxmox_next.infrastructure import CommandResult
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(preflight.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+
+    class FakeAdapter:
+        def run(self, argv):
+            return CommandResult(ok=False, returncode=1, output="E: Unable to locate package")
+
+    ok, pkgs = install_missing_packages(adapter=FakeAdapter())
+    assert ok is False
+    assert pkgs == []
+
+
+def test_install_missing_packages_command_not_found(monkeypatch):
+    from osx_proxmox_next.infrastructure import CommandResult
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(preflight.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+
+    class FakeAdapter:
+        def run(self, argv):
+            return CommandResult(ok=False, returncode=127, output="Command not found: apt-get")
+
+    ok, pkgs = install_missing_packages(adapter=FakeAdapter())
+    assert ok is False
+    assert pkgs == []
