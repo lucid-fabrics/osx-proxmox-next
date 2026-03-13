@@ -242,7 +242,7 @@ osx-next-cli uninstall --vmid 910 --purge --execute
 In the macOS installer:
 1. Open **Disk Utility**
 2. Click **View > Show All Devices**
-3. Select **QEMU HARDDISK Media**
+3. Select **QEMU VirtIO Block Device**
 4. Erase with format **APFS** and scheme **GUID Partition Map**
 5. Close Disk Utility and continue installation
 </details>
