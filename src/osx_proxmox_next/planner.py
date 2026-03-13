@@ -11,7 +11,7 @@ from shlex import join, quote as shquote
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import CpuInfo, detect_cpu_info
 from .domain import SUPPORTED_MACOS, VmConfig, validate_config
-from .infrastructure import ProxmoxAdapter
+from .infrastructure import ProxmoxAdapter, VmInfo, fetch_vm_info as fetch_vm_info  # noqa: F401 re-exported
 from .smbios import generate_mac, generate_rom_from_mac, generate_smbios, generate_vmgenid, model_for_macos
 
 
@@ -498,36 +498,6 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
 
 
 # ── VM Destroy ──────────────────────────────────────────────────────
-
-
-@dataclass
-class VmInfo:
-    vmid: int
-    name: str
-    status: str  # "running" | "stopped"
-    config_raw: str
-
-
-def fetch_vm_info(vmid: int, adapter: ProxmoxAdapter | None = None) -> VmInfo | None:
-    runtime = adapter or ProxmoxAdapter()
-    status_result = runtime.run(["qm", "status", str(vmid)])
-    if not status_result.ok:
-        return None
-    # Parse status line like "status: running" or "status: stopped"
-    status = "stopped"
-    for line in status_result.output.splitlines():
-        if "running" in line.lower():
-            status = "running"
-            break
-    config_result = runtime.run(["qm", "config", str(vmid)])
-    config_raw = config_result.output if config_result.ok else ""
-    # Parse name from config
-    name = ""
-    for line in config_raw.splitlines():
-        if line.startswith("name:"):
-            name = line.split(":", 1)[1].strip()
-            break
-    return VmInfo(vmid=vmid, name=name, status=status, config_raw=config_raw)
 
 
 def build_destroy_plan(vmid: int, purge: bool = False) -> list[PlanStep]:

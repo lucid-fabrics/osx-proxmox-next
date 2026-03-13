@@ -380,7 +380,7 @@ def test_storage_preselected() -> None:
         app = NextApp()
         async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
-            assert app.state.selected_storage == app.state.storage_targets[0]
+            assert app.state.selected_storage == app.state.storage_targets[0].name
 
     asyncio.run(_run())
 
@@ -394,7 +394,7 @@ def test_storage_click_selects() -> None:
             assert app.current_step == 3
             await pilot.click("#storage_0")
             await pilot.pause()
-            assert app.state.selected_storage == app.state.storage_targets[0]
+            assert app.state.selected_storage == app.state.storage_targets[0].name
 
     asyncio.run(_run())
 
@@ -446,7 +446,7 @@ def test_detect_storage_fallback() -> None:
         app = NextApp()
         targets = app.state.storage_targets
         assert len(targets) >= 1
-        assert targets[0] in ("local-lvm", "local")
+        assert targets[0].name in ("local-lvm", "local")
 
     asyncio.run(_run())
 
@@ -1534,58 +1534,77 @@ def test_detect_vmid_boundary_high(monkeypatch) -> None:
 
 def test_detect_storage_success(monkeypatch) -> None:
     def handler(cmd):
-        return CommandResult(ok=True, returncode=0, output="Name      Type  Status\nlocal-lvm dir   active\nnfs-store nfs   active")
+        return CommandResult(ok=True, returncode=0, output=(
+            "Name      Type  Status  Total    Used     Available  %\n"
+            "local-lvm dir   active  1000000  500000   500000     50.00%\n"
+            "nfs-store nfs   active  2000000  400000   1600000    20.00%"
+        ))
 
     monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
         targets = app._detect_storage_targets()
-        assert "local-lvm" in targets
-        assert "nfs-store" in targets
+        names = [t.name for t in targets]
+        assert "local-lvm" in names
+        assert "nfs-store" in names
 
     asyncio.run(_run())
 
 
 def test_detect_storage_no_default(monkeypatch) -> None:
     def handler(cmd):
-        return CommandResult(ok=True, returncode=0, output="Name     Type  Status\ncustom1  dir   active")
+        return CommandResult(ok=True, returncode=0, output=(
+            "Name    Type  Status  Total    Used    Available  %\n"
+            "custom1 dir   active  1000000  200000  800000     20.00%"
+        ))
 
     monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
         targets = app._detect_storage_targets()
-        assert targets[0] == "local-lvm"
-        assert "custom1" in targets
+        assert targets[0].name == "local-lvm"
+        names = [t.name for t in targets]
+        assert "custom1" in names
 
     asyncio.run(_run())
 
 
 def test_detect_storage_dedup(monkeypatch) -> None:
     def handler(cmd):
-        return CommandResult(ok=True, returncode=0, output="Name      Type\nlocal-lvm dir\nlocal-lvm dir\ncustom1   nfs")
+        return CommandResult(ok=True, returncode=0, output=(
+            "Name      Type  Status  Total    Used    Available  %\n"
+            "local-lvm dir   active  1000000  200000  800000     20.00%\n"
+            "local-lvm dir   active  1000000  200000  800000     20.00%\n"
+            "custom1   nfs   active  2000000  100000  1900000    5.00%"
+        ))
 
     monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
         targets = app._detect_storage_targets()
-        assert targets.count("local-lvm") == 1
+        names = [t.name for t in targets]
+        assert names.count("local-lvm") == 1
 
     asyncio.run(_run())
 
 
 def test_detect_storage_empty_line(monkeypatch) -> None:
     def handler(cmd):
-        return CommandResult(ok=True, returncode=0, output="Name  Type\n\n   \nlocal dir")
+        return CommandResult(ok=True, returncode=0, output=(
+            "Name  Type  Status  Total  Used  Available  %\n\n   \n"
+            "local dir   active  100000 50000 50000      50.00%"
+        ))
 
     monkeypatch.setattr(app_module, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
         targets = app._detect_storage_targets()
-        assert "local-lvm" in targets
+        names = [t.name for t in targets]
+        assert "local-lvm" in names
 
     asyncio.run(_run())
 

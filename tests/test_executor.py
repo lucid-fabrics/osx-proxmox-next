@@ -5,15 +5,15 @@ from osx_proxmox_next.infrastructure import ProxmoxAdapter
 from osx_proxmox_next.planner import PlanStep
 
 
-def test_apply_plan_dry_run_creates_success_results() -> None:
+def test_apply_plan_dry_run_creates_success_results(tmp_path) -> None:
     steps = [PlanStep(title="Echo", argv=["echo", "hello"])]
-    result = apply_plan(steps, execute=False)
+    result = apply_plan(steps, execute=False, log_dir=tmp_path)
     assert result.ok is True
     assert result.results[0].ok is True
     assert result.log_path.exists()
 
 
-def test_apply_plan_live_with_callback(monkeypatch):
+def test_apply_plan_live_with_callback(monkeypatch, tmp_path):
     def fake_run(argv, **kw):
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
@@ -28,7 +28,7 @@ def test_apply_plan_live_with_callback(monkeypatch):
     def on_step(idx, total, step, result):
         callback_log.append((idx, total, step.title, result))
 
-    result = apply_plan(steps, execute=True, adapter=adapter, on_step=on_step)
+    result = apply_plan(steps, execute=True, adapter=adapter, on_step=on_step, log_dir=tmp_path)
     assert result.ok is True
     assert len(result.results) == 2
     # Each step fires callback twice: once before (result=None), once after
@@ -38,7 +38,7 @@ def test_apply_plan_live_with_callback(monkeypatch):
     assert callback_log[1][3].ok is True
 
 
-def test_apply_plan_live_failure_aborts(monkeypatch):
+def test_apply_plan_live_failure_aborts(monkeypatch, tmp_path):
     call_count = [0]
 
     def fake_run(argv, **kw):
@@ -59,21 +59,21 @@ def test_apply_plan_live_failure_aborts(monkeypatch):
     def on_step(idx, total, step, result):
         callback_log.append((idx, step.title, result))
 
-    result = apply_plan(steps, execute=True, adapter=adapter, on_step=on_step)
+    result = apply_plan(steps, execute=True, adapter=adapter, on_step=on_step, log_dir=tmp_path)
     assert result.ok is False
     assert len(result.results) == 2
     assert result.results[0].ok is True
     assert result.results[1].ok is False
 
 
-def test_apply_plan_dry_with_callback():
+def test_apply_plan_dry_with_callback(tmp_path):
     steps = [PlanStep("Step X", ["echo", "x"])]
     callback_log = []
 
     def on_step(idx, total, step, result):
         callback_log.append((idx, result))
 
-    result = apply_plan(steps, execute=False, on_step=on_step)
+    result = apply_plan(steps, execute=False, on_step=on_step, log_dir=tmp_path)
     assert result.ok is True
     # Dry: callback called twice per step (before + after)
     assert len(callback_log) == 2
@@ -81,16 +81,16 @@ def test_apply_plan_dry_with_callback():
     assert callback_log[1][1] is not None
 
 
-def test_apply_plan_dry_no_callback():
+def test_apply_plan_dry_no_callback(tmp_path):
     """Cover branch where on_step is None during dry run (lines 50 and 57-59)."""
     steps = [PlanStep("Step Y", ["echo", "y"])]
-    result = apply_plan(steps, execute=False, on_step=None)
+    result = apply_plan(steps, execute=False, on_step=None, log_dir=tmp_path)
     assert result.ok is True
     assert len(result.results) == 1
     assert result.results[0].ok is True
 
 
-def test_apply_plan_live_no_callback(monkeypatch):
+def test_apply_plan_live_no_callback(monkeypatch, tmp_path):
     """Cover branch where on_step is None during live run."""
     def fake_run(argv, **kw):
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
@@ -98,6 +98,6 @@ def test_apply_plan_live_no_callback(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
     adapter = ProxmoxAdapter()
     steps = [PlanStep("Step Z", ["echo", "z"])]
-    result = apply_plan(steps, execute=True, adapter=adapter, on_step=None)
+    result = apply_plan(steps, execute=True, adapter=adapter, on_step=None, log_dir=tmp_path)
     assert result.ok is True
     assert len(result.results) == 1

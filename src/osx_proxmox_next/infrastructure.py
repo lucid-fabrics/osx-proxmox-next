@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import subprocess
+import logging
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -11,7 +14,7 @@ class CommandResult:
     output: str
 
 
-_SUBPROCESS_TIMEOUT = 300
+_SUBPROCESS_TIMEOUT = 600  # seconds; long-running ops (disk import, dmg conversion) can exceed 300s
 
 
 class ProxmoxAdapter:
@@ -36,3 +39,31 @@ class ProxmoxAdapter:
 
     def pvesh(self, *args: str) -> CommandResult:
         return self.run(["pvesh", *args])
+
+
+@dataclass
+class VmInfo:
+    vmid: int
+    name: str
+    status: str  # "running" | "stopped"
+    config_raw: str
+
+
+def fetch_vm_info(vmid: int, adapter: ProxmoxAdapter | None = None) -> VmInfo | None:
+    runtime = adapter or ProxmoxAdapter()
+    status_result = runtime.run(["qm", "status", str(vmid)])
+    if not status_result.ok:
+        return None
+    status = "stopped"
+    for line in status_result.output.splitlines():
+        if "running" in line.lower():
+            status = "running"
+            break
+    config_result = runtime.run(["qm", "config", str(vmid)])
+    config_raw = config_result.output if config_result.ok else ""
+    name = ""
+    for line in config_raw.splitlines():
+        if line.startswith("name:"):
+            name = line.split(":", 1)[1].strip()
+            break
+    return VmInfo(vmid=vmid, name=name, status=status, config_raw=config_raw)

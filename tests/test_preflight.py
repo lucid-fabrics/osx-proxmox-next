@@ -159,8 +159,8 @@ def test_has_missing_build_deps_none_missing():
 
 def test_has_missing_build_deps_some_missing():
     checks = [
-        PreflightCheck("dmg2img available", False, "Not found"),
-        PreflightCheck("sgdisk available", True, "/usr/sbin/sgdisk"),
+        PreflightCheck("dmg2img available", False, "Not found", kind="build_dep"),
+        PreflightCheck("sgdisk available", True, "/usr/sbin/sgdisk", kind="build_dep"),
     ]
     assert has_missing_build_deps(checks) is True
 
@@ -233,7 +233,8 @@ def test_install_missing_packages_success(monkeypatch):
             captured_argv.extend(argv)
             return CommandResult(ok=True, returncode=0, output="")
 
-    ok, pkgs = install_missing_packages(on_output=messages.append, adapter=FakeAdapter())
+    monkeypatch.setattr(preflight, "ProxmoxAdapter", lambda: FakeAdapter())
+    ok, pkgs = install_missing_packages(on_output=messages.append)
     assert ok is True
     assert "dmg2img" in pkgs
     assert "parted" in pkgs
@@ -253,7 +254,8 @@ def test_install_missing_packages_apt_failure(monkeypatch):
         def run(self, argv):
             return CommandResult(ok=False, returncode=1, output="E: Unable to locate package")
 
-    ok, pkgs = install_missing_packages(adapter=FakeAdapter())
+    monkeypatch.setattr(preflight, "ProxmoxAdapter", lambda: FakeAdapter())
+    ok, pkgs = install_missing_packages()
     assert ok is False
     assert pkgs == []
 
@@ -268,6 +270,7 @@ def test_install_missing_packages_command_not_found(monkeypatch):
         def run(self, argv):
             return CommandResult(ok=False, returncode=127, output="Command not found: apt-get")
 
-    ok, pkgs = install_missing_packages(adapter=FakeAdapter())
+    monkeypatch.setattr(preflight, "ProxmoxAdapter", lambda: FakeAdapter())
+    ok, pkgs = install_missing_packages()
     assert ok is False
     assert pkgs == []

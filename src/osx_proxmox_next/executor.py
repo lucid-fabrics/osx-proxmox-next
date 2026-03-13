@@ -28,14 +28,17 @@ class ApplyResult:
 
 StepCallback = Callable[[int, int, PlanStep, Optional[StepResult]], None]
 
+_DEFAULT_LOG_DIR = Path("/var/log/osx-proxmox-next")
+
 
 def apply_plan(
     steps: list[PlanStep],
     execute: bool = False,
     adapter: ProxmoxAdapter | None = None,
     on_step: StepCallback | None = None,
+    log_dir: Path | None = None,
 ) -> ApplyResult:
-    out_dir = Path.cwd() / "generated" / "logs"
+    out_dir = log_dir if log_dir is not None else _DEFAULT_LOG_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = out_dir / f"apply-{ts}.log"

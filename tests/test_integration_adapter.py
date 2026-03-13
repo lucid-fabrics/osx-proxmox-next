@@ -19,7 +19,7 @@ def test_adapter_qm_wraps_binary(monkeypatch) -> None:
     assert calls[0][:2] == ["qm", "status"]
 
 
-def test_apply_plan_executes_argv_without_shell(monkeypatch) -> None:
+def test_apply_plan_executes_argv_without_shell(monkeypatch, tmp_path) -> None:
     calls: list[list[str]] = []
 
     def fake_run(argv, capture_output, text, check, **kwargs):  # type: ignore[no-untyped-def]
@@ -32,6 +32,6 @@ def test_apply_plan_executes_argv_without_shell(monkeypatch) -> None:
         PlanStep("Step 1", ["qm", "status", "901"]),
         PlanStep("Step 2", ["qm", "start", "901"]),
     ]
-    result = apply_plan(steps, execute=True)
+    result = apply_plan(steps, execute=True, log_dir=tmp_path)
     assert result.ok is True
     assert calls == [["qm", "status", "901"], ["qm", "start", "901"]]

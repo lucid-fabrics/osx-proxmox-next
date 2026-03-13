@@ -16,7 +16,7 @@ from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
 from .assets import AssetCheck, required_assets
 from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb
-from .domain import DEFAULT_VMID, MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
+from .domain import DEFAULT_VMID, MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, StorageInfo, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import StepResult, apply_plan
 from .infrastructure import ProxmoxAdapter
@@ -37,14 +37,6 @@ def _get_pve() -> ProxmoxAdapter:
 
 
 @dataclass
-class StorageInfo:
-    name: str
-    pool_type: str
-    used_pct: float
-    avail_kb: int
-
-
-@dataclass
 class WizardState:
     selected_os: str = ""
     selected_storage: str = ""
@@ -54,11 +46,6 @@ class WizardState:
     # Form
     vmid: int = DEFAULT_VMID
     name: str = ""
-    cores: int = 8
-    memory_mb: int = 16384
-    disk_gb: int = 128
-    bridge: str = "vmbr0"
-    storage: str = "local-lvm"
     installer_path: str = ""
     smbios: SmbiosIdentity | None = None
     apple_services: bool = False
@@ -520,8 +507,12 @@ class NextApp(App):
             if issues:
                 self._show_form_errors(issues)
                 return
-            self.state.config = config
-            self.state.plan_steps = build_plan(config)
+            try:
+                self.state.config = config
+                self.state.plan_steps = build_plan(config)
+            except ValueError as exc:
+                self._show_form_errors([str(exc)])
+                return
             self._render_config_summary()
             self.current_step = 5
             self._check_and_download_assets()
@@ -859,13 +850,16 @@ class NextApp(App):
     def _rebuild_plan_after_download(self) -> None:
         """Rebuild config and plan so asset paths resolve to newly downloaded files."""
         config = self._read_form()
-        if config:
-            self.state.config = config
-            try:
-                self.state.plan_steps = build_plan(config)
-            except ValueError:
-                log.debug("Failed to rebuild plan after download", exc_info=True)
-            self._render_config_summary()
+        if not config:
+            return
+        self.state.config = config
+        try:
+            self.state.plan_steps = build_plan(config)
+        except ValueError as exc:
+            log.warning("Failed to rebuild plan after download: %s", exc)
+            self.notify(f"Plan rebuild failed: {exc}", severity="error")
+            return
+        self._render_config_summary()
 
     def _run_dry_apply(self) -> None:
         if self.state.apply_running:

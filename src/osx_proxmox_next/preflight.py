@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 
 from .defaults import detect_cpu_vendor
-from .infrastructure import CommandResult, ProxmoxAdapter
+from .infrastructure import ProxmoxAdapter
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ class PreflightCheck:
     name: str
     ok: bool
     details: str
+    kind: str = "system"  # "proxmox" | "build_dep" | "system"
 
 
 def _find_binary(cmd: str) -> str | None:
@@ -116,6 +117,7 @@ def run_preflight() -> list[PreflightCheck]:
                 name=f"{cmd} available",
                 ok=bool(binary),
                 details=binary or f"{cmd} not found in PATH or common system paths",
+                kind="proxmox",
             )
         )
 
@@ -126,6 +128,7 @@ def run_preflight() -> list[PreflightCheck]:
                 name=f"{cmd} available",
                 ok=bool(binary),
                 details=binary or f"Not found. Install with: apt install {pkg}",
+                kind="build_dep",
             )
         )
 
@@ -160,10 +163,7 @@ def run_preflight() -> list[PreflightCheck]:
 
 def has_missing_build_deps(checks: list[PreflightCheck]) -> bool:
     """Return True if any build dependency checks failed."""
-    return any(
-        not c.ok and c.name.endswith("available") and c.name.split()[0] in _BUILD_BINARIES
-        for c in checks
-    )
+    return any(not c.ok and c.kind == "build_dep" for c in checks)
 
 
 def find_missing_packages() -> list[str]:
@@ -178,7 +178,6 @@ def find_missing_packages() -> list[str]:
 
 def install_missing_packages(
     on_output: Callable[[str], None] | None = None,
-    adapter: ProxmoxAdapter | None = None,
 ) -> tuple[bool, list[str]]:
     """Auto-install missing build dependencies via apt-get.
 
@@ -199,7 +198,7 @@ def install_missing_packages(
 
     _emit(f"Installing: {', '.join(packages)}")
 
-    runtime = adapter or ProxmoxAdapter()
+    runtime = ProxmoxAdapter()
     result = runtime.run(["apt-get", "install", "-y", *packages])
     if result.ok:
         _emit("Installation complete")

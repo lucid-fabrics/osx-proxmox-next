@@ -4,6 +4,14 @@ import re
 from dataclasses import dataclass
 
 
+@dataclass
+class StorageInfo:
+    name: str
+    pool_type: str
+    used_pct: float
+    avail_kb: int
+
+
 SUPPORTED_MACOS = {
     "ventura": {"label": "macOS Ventura 13", "major": 13, "channel": "stable"},
     "sonoma": {"label": "macOS Sonoma 14", "major": 14, "channel": "stable"},
