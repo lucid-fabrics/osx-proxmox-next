@@ -612,10 +612,19 @@ class TestDownloadFileWithToken:
         assert progress_calls[0].phase == "recovery"
 
 
+class _FakeAdapter:
+    """Test helper that wraps a handler function as a ProxmoxAdapter."""
+    def __init__(self, handler):
+        self._handler = handler
+
+    def run(self, argv):
+        return self._handler(argv)
+
+
 class TestBuildRecoveryImage:
     def test_success(self, tmp_path, monkeypatch):
-        import subprocess as real_subprocess
         from osx_proxmox_next.downloader import _build_recovery_image
+        from osx_proxmox_next.infrastructure import CommandResult
 
         dmg = tmp_path / "BaseSystem.dmg"
         chunklist = tmp_path / "BaseSystem.chunklist"
@@ -623,21 +632,21 @@ class TestBuildRecoveryImage:
         chunklist.write_bytes(b"y" * 64)
         dest = tmp_path / "recovery.img"
 
-        def fake_run(argv, **kw):
+        def handler(argv):
             assert argv[0] == "dmg2img"
             assert argv[1] == str(dmg)
             assert argv[2] == str(dest)
             dest.write_bytes(b"\x00" * 2048)
-            return real_subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            return CommandResult(ok=True, returncode=0, output="")
 
-        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(dl_module, "ProxmoxAdapter", lambda: _FakeAdapter(handler))
 
         _build_recovery_image(dmg, chunklist, dest)
         assert dest.exists()
 
     def test_failure_cleans_up(self, tmp_path, monkeypatch):
-        import subprocess as real_subprocess
         from osx_proxmox_next.downloader import _build_recovery_image
+        from osx_proxmox_next.infrastructure import CommandResult
 
         dmg = tmp_path / "BaseSystem.dmg"
         chunklist = tmp_path / "BaseSystem.chunklist"
@@ -646,18 +655,18 @@ class TestBuildRecoveryImage:
         dest = tmp_path / "recovery.img"
         dest.write_bytes(b"partial")
 
-        def fake_run(argv, **kw):
-            raise real_subprocess.CalledProcessError(1, argv, stderr=b"dmg2img failed")
+        def handler(argv):
+            return CommandResult(ok=False, returncode=1, output="dmg2img failed")
 
-        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(dl_module, "ProxmoxAdapter", lambda: _FakeAdapter(handler))
 
         with pytest.raises(DownloadError, match="Failed to convert recovery DMG"):
             _build_recovery_image(dmg, chunklist, dest)
         assert not dest.exists()
 
     def test_failure_no_dest_to_clean(self, tmp_path, monkeypatch):
-        import subprocess as real_subprocess
         from osx_proxmox_next.downloader import _build_recovery_image
+        from osx_proxmox_next.infrastructure import CommandResult
 
         dmg = tmp_path / "BaseSystem.dmg"
         chunklist = tmp_path / "BaseSystem.chunklist"
@@ -665,10 +674,10 @@ class TestBuildRecoveryImage:
         chunklist.write_bytes(b"y" * 64)
         dest = tmp_path / "recovery.img"
 
-        def fake_run(argv, **kw):
-            raise real_subprocess.CalledProcessError(1, argv, stderr=b"dmg2img failed")
+        def handler(argv):
+            return CommandResult(ok=False, returncode=1, output="dmg2img failed")
 
-        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(dl_module, "ProxmoxAdapter", lambda: _FakeAdapter(handler))
 
         with pytest.raises(DownloadError, match="Failed to convert recovery DMG"):
             _build_recovery_image(dmg, chunklist, dest)
@@ -676,6 +685,7 @@ class TestBuildRecoveryImage:
 
     def test_failure_dmg2img_not_found(self, tmp_path, monkeypatch):
         from osx_proxmox_next.downloader import _build_recovery_image
+        from osx_proxmox_next.infrastructure import CommandResult
 
         dmg = tmp_path / "BaseSystem.dmg"
         chunklist = tmp_path / "BaseSystem.chunklist"
@@ -683,10 +693,10 @@ class TestBuildRecoveryImage:
         chunklist.write_bytes(b"y" * 64)
         dest = tmp_path / "recovery.img"
 
-        def fake_run(argv, **kw):
-            raise FileNotFoundError("dmg2img")
+        def handler(argv):
+            return CommandResult(ok=False, returncode=127, output="Command not found: dmg2img")
 
-        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(dl_module, "ProxmoxAdapter", lambda: _FakeAdapter(handler))
 
         with pytest.raises(DownloadError, match="dmg2img is required but not installed"):
             _build_recovery_image(dmg, chunklist, dest)

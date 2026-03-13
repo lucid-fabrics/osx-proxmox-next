@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 from .infrastructure import ProxmoxAdapter
 from .planner import PlanStep

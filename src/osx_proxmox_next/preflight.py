@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
 
 from .defaults import detect_cpu_vendor
+from .infrastructure import CommandResult, ProxmoxAdapter
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -37,12 +42,12 @@ def _is_root() -> bool:
 _PROXMOX_BINARIES = ("qm", "pvesm", "pvesh", "qemu-img")
 
 _BUILD_BINARIES: dict[str, str] = {
-    "dmg2img": "apt install dmg2img",
-    "sgdisk": "apt install gdisk",
-    "partprobe": "apt install parted",
-    "losetup": "apt install mount",
-    "mkfs.fat": "apt install dosfstools",
-    "blkid": "apt install util-linux",
+    "dmg2img": "dmg2img",
+    "sgdisk": "gdisk",
+    "partprobe": "parted",
+    "losetup": "mount",
+    "mkfs.fat": "dosfstools",
+    "blkid": "util-linux",
 }
 
 
@@ -114,13 +119,13 @@ def run_preflight() -> list[PreflightCheck]:
             )
         )
 
-    for cmd, install_hint in _BUILD_BINARIES.items():
+    for cmd, pkg in _BUILD_BINARIES.items():
         binary = _find_binary(cmd)
         checks.append(
             PreflightCheck(
                 name=f"{cmd} available",
                 ok=bool(binary),
-                details=binary or f"Not found. Install with: {install_hint}",
+                details=binary or f"Not found. Install with: apt install {pkg}",
             )
         )
 
@@ -151,3 +156,53 @@ def run_preflight() -> list[PreflightCheck]:
         )
     )
     return checks
+
+
+def has_missing_build_deps(checks: list[PreflightCheck]) -> bool:
+    """Return True if any build dependency checks failed."""
+    return any(
+        not c.ok and c.name.endswith("available") and c.name.split()[0] in _BUILD_BINARIES
+        for c in checks
+    )
+
+
+def find_missing_packages() -> list[str]:
+    """Return apt package names for missing build binaries."""
+    packages: list[str] = []
+    for cmd, pkg in _BUILD_BINARIES.items():
+        if not _find_binary(cmd):
+            if pkg not in packages:
+                packages.append(pkg)
+    return packages
+
+
+def install_missing_packages(
+    on_output: Callable[[str], None] | None = None,
+    adapter: ProxmoxAdapter | None = None,
+) -> tuple[bool, list[str]]:
+    """Auto-install missing build dependencies via apt-get.
+
+    Returns (success, list_of_installed_packages).
+    Calls *on_output* with status messages if provided.
+    """
+    if not _is_root():
+        return False, []
+
+    packages = find_missing_packages()
+    if not packages:
+        return True, []
+
+    def _emit(msg: str) -> None:
+        log.info(msg)
+        if on_output:
+            on_output(msg)
+
+    _emit(f"Installing: {', '.join(packages)}")
+
+    runtime = adapter or ProxmoxAdapter()
+    result = runtime.run(["apt-get", "install", "-y", *packages])
+    if result.ok:
+        _emit("Installation complete")
+        return True, packages
+    _emit(f"apt-get failed (exit {result.returncode}): {result.output}")
+    return False, []
