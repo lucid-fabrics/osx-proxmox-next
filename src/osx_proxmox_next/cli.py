@@ -13,7 +13,7 @@ from .domain import MIN_VMID, MAX_VMID, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
 from .planner import build_plan, build_destroy_plan, fetch_vm_info, render_script
-from .preflight import run_preflight
+from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints
 
 
@@ -146,7 +146,12 @@ def run_cli(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "preflight":
-        for check in run_preflight():
+        checks = run_preflight()
+        if has_missing_build_deps(checks):
+            ok, pkgs = install_missing_packages(on_output=lambda msg: print(f"  -> {msg}"))
+            if ok and pkgs:
+                checks = run_preflight()
+        for check in checks:
             print(f"{'OK' if check.ok else 'FAIL'} {check.name}: {check.details}")
         return 0
 

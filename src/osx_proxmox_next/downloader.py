@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import secrets
-import subprocess
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from json import loads as json_loads
 from pathlib import Path
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 from urllib.parse import urlparse
 
 from . import __version__
+from .infrastructure import ProxmoxAdapter
 
 
 @dataclass
@@ -120,20 +121,17 @@ def download_recovery(
 
 
 def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> None:
-    try:
-        subprocess.run(
-            ["dmg2img", str(dmg_path), str(dest)],
-            check=True, capture_output=True,
-        )
-    except subprocess.CalledProcessError as exc:
+    adapter = ProxmoxAdapter()
+    result = adapter.run(["dmg2img", str(dmg_path), str(dest)])
+    if not result.ok:
         if dest.exists():
             dest.unlink()
-        raise DownloadError(f"Failed to convert recovery DMG: {exc.stderr}") from exc
-    except FileNotFoundError:
-        raise DownloadError(
-            "dmg2img is required but not installed. "
-            "Install it with: apt install dmg2img"
-        )
+        if result.returncode == 127:
+            raise DownloadError(
+                "dmg2img is required but not installed. "
+                "Install it with: apt install dmg2img"
+            )
+        raise DownloadError(f"Failed to convert recovery DMG: {result.output}")
 
 
 def _fetch_github_releases(version: str) -> list[dict]:
@@ -251,7 +249,7 @@ def _retry_download(
     dest.parent.mkdir(parents=True, exist_ok=True)
     part_path = dest.parent / (dest.name + ".part")
 
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
     for attempt in range(_MAX_RETRIES):
         try:
             _do_download(url, part_path, on_progress, phase, extra_headers=extra_headers)

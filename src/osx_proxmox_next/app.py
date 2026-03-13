@@ -21,11 +21,19 @@ from .downloader import DownloadError, DownloadProgress, download_opencore, down
 from .executor import StepResult, apply_plan
 from .infrastructure import ProxmoxAdapter
 from .planner import PlanStep, build_plan, build_destroy_plan, fetch_vm_info
-from .preflight import PreflightCheck, run_preflight
+from .preflight import PreflightCheck, run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
 from .smbios import generate_smbios, SmbiosIdentity
 
-_pve = ProxmoxAdapter()
+_pve: ProxmoxAdapter | None = None
+
+
+def _get_pve() -> ProxmoxAdapter:
+    """Lazy singleton to avoid import-time side effects."""
+    global _pve  # noqa: PLW0603
+    if _pve is None:
+        _pve = ProxmoxAdapter()
+    return _pve
 
 
 @dataclass
@@ -867,9 +875,7 @@ class NextApp(App):
         if result is None:
             self._append_log("#dry_log", f"Running {idx}/{total}: {title}")
         else:
-            ok = getattr(result, "ok", False)
-            rc = getattr(result, "returncode", 0)
-            self._append_log("#dry_log", f"{'OK' if ok else 'FAIL'} {idx}/{total}: {title} (rc={rc})")
+            self._append_log("#dry_log", f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})")
 
     def _finish_dry_apply(self, ok: bool, log_path: Path) -> None:
         self.state.apply_running = False
@@ -930,9 +936,7 @@ class NextApp(App):
         if result is None:
             self._append_log("#live_log", f"Running {idx}/{total}: {title}")
         else:
-            ok = getattr(result, "ok", False)
-            rc = getattr(result, "returncode", 0)
-            self._append_log("#live_log", f"{'OK' if ok else 'FAIL'} {idx}/{total}: {title} (rc={rc})")
+            self._append_log("#live_log", f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})")
 
     def _finish_live_install(
         self, ok: bool, log_path: Path, snapshot: RollbackSnapshot | None
@@ -996,7 +1000,7 @@ class NextApp(App):
 
     def _vm_list_worker(self) -> None:
         try:
-            res = _pve.qm("list")
+            res = _get_pve().qm("list")
             if not res.ok:
                 self.call_from_thread(self._finish_vm_list, [])
                 return
@@ -1008,7 +1012,7 @@ class NextApp(App):
                 if not parts:
                     continue
                 vmid = parts[0]
-                cfg_res = _pve.qm("config", vmid)
+                cfg_res = _get_pve().qm("config", vmid)
                 if cfg_res.ok and "isa-applesmc" in cfg_res.output:
                     macos_lines.append(line)
             header = all_lines[0] if all_lines else ""
@@ -1085,8 +1089,7 @@ class NextApp(App):
         if result is None:
             self.state.uninstall_log.append(f"Running {idx}/{total}: {title}")
         else:
-            ok = getattr(result, "ok", False)
-            self.state.uninstall_log.append(f"{'OK' if ok else 'FAIL'} {idx}/{total}: {title}")
+            self.state.uninstall_log.append(f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title}")
         visible = self.state.uninstall_log[-10:]
         self.query_one("#manage_log", Static).update("\n".join(visible))
 
@@ -1111,7 +1114,16 @@ class NextApp(App):
 
     def _preflight_worker(self) -> None:
         checks = run_preflight()
+        if has_missing_build_deps(checks):
+            def _on_output(msg: str) -> None:
+                self.call_from_thread(self._update_preflight_status, msg)
+            ok, pkgs = install_missing_packages(on_output=_on_output)
+            if ok and pkgs:
+                checks = run_preflight()
         self.call_from_thread(self._finish_preflight, checks)
+
+    def _update_preflight_status(self, msg: str) -> None:
+        self.query_one("#preflight_checks", Static).update(f"  ⏳ {msg}")
 
     def _finish_preflight(self, checks: list[PreflightCheck]) -> None:
         self.state.preflight_done = True
@@ -1123,7 +1135,7 @@ class NextApp(App):
     # ── Detection Helpers ───────────────────────────────────────────
 
     def _detect_storage_targets(self) -> list[str]:
-        res = _pve.pvesm("status", "-content", "images")
+        res = _get_pve().pvesm("status", "-content", "images")
         if not res.ok:
             log.debug("Failed to detect storage targets: %s", res.output)
             return [DEFAULT_STORAGE, "local"]
@@ -1139,7 +1151,7 @@ class NextApp(App):
         return targets[:5]
 
     def _detect_next_vmid(self) -> int:
-        res = _pve.pvesh("get", "/cluster/nextid")
+        res = _get_pve().pvesh("get", "/cluster/nextid")
         if res.ok:
             output = res.output.strip()
             if output.isdigit():
@@ -1155,7 +1167,7 @@ class NextApp(App):
         else:
             log.debug("Failed to get next VMID via pvesh: %s", res.output)
 
-        res = _pve.qm("list")
+        res = _get_pve().qm("list")
         if res.ok:
             vmids: list[int] = []
             for line in res.output.splitlines()[1:]:

@@ -296,18 +296,25 @@ def test_cli_main_block(monkeypatch):
         assert e.code == 0
 
 
-def test_cli_progress_with_total():
+def test_cli_progress_with_total(capsys):
     from osx_proxmox_next.cli import _cli_progress
     from osx_proxmox_next.downloader import DownloadProgress
     p = DownloadProgress(downloaded=1048576, total=2097152, phase="opencore")
     _cli_progress(p)
+    out = capsys.readouterr().out
+    assert "opencore" in out
+    assert "50%" in out
+    assert "1.0" in out
 
 
-def test_cli_progress_without_total():
+def test_cli_progress_without_total(capsys):
     from osx_proxmox_next.cli import _cli_progress
     from osx_proxmox_next.downloader import DownloadProgress
     p = DownloadProgress(downloaded=1048576, total=0, phase="recovery")
     _cli_progress(p)
+    out = capsys.readouterr().out
+    assert "recovery" in out
+    assert "1.0" in out
 
 
 def test_auto_download_missing_opencore(monkeypatch, tmp_path):

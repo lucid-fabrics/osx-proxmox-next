@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -88,6 +89,10 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     issues = validate_config(config)
     if issues:
         raise ValueError(f"Invalid VM config: {'; '.join(issues)}")
+
+    # Work on a copy so callers don't see SMBIOS side effects.
+    config = copy.copy(config)
+
     meta = SUPPORTED_MACOS[config.macos]
     vmid = str(config.vmid)
 
