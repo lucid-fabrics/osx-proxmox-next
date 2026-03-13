@@ -37,10 +37,18 @@ def _get_pve() -> ProxmoxAdapter:
 
 
 @dataclass
+class StorageInfo:
+    name: str
+    pool_type: str
+    used_pct: float
+    avail_kb: int
+
+
+@dataclass
 class WizardState:
     selected_os: str = ""
     selected_storage: str = ""
-    storage_targets: list[str] = field(default_factory=list)
+    storage_targets: list[StorageInfo] = field(default_factory=list)
     iso_dirs: list[str] = field(default_factory=list)
     selected_iso_dir: str = ""
     # Form
@@ -247,6 +255,7 @@ class NextApp(App):
     .manage_result_fail { border: heavy #d44f4f; }
 
     .hint { color: #aaaaaa; margin-top: 1; }
+    .storage_warning { color: #e6a817; margin-top: 1; }
     """
 
     BINDINGS = [
@@ -320,9 +329,11 @@ class NextApp(App):
             with Vertical(id="step3", classes="step_container step_hidden"):
                 yield Static("Choose Storage Target")
                 with Horizontal(id="storage_row"):
-                    for idx, target in enumerate(self.state.storage_targets):
+                    for idx, info in enumerate(self.state.storage_targets):
                         cls = "storage_btn storage_selected" if idx == 0 else "storage_btn"
-                        yield Button(target, id=f"storage_{idx}", classes=cls)
+                        label = f"{info.name} ({info.pool_type}, {info.used_pct:.0f}%)"
+                        yield Button(label, id=f"storage_{idx}", classes=cls)
+                yield Static("", id="storage_warning", classes="storage_warning")
                 with Horizontal(classes="nav_row"):
                     yield Button("Back", id="back_btn_3")
                     yield Button("Next", id="next_btn_3")
@@ -398,7 +409,7 @@ class NextApp(App):
     def on_mount(self) -> None:
         self._update_step_bar()
         if self.state.storage_targets:
-            self.state.selected_storage = self.state.storage_targets[0]
+            self.state.selected_storage = self.state.storage_targets[0].name
         Thread(target=self._preflight_worker, daemon=True).start()
 
     def watch_current_step(self, old_value: int, new_value: int) -> None:
@@ -424,7 +435,7 @@ class NextApp(App):
         if bid.startswith("storage_"):
             try:
                 idx = int(bid.split("_")[1])
-                self._select_storage(self.state.storage_targets[idx])
+                self._select_storage(self.state.storage_targets[idx].name)
             except (ValueError, IndexError):
                 log.debug("Invalid storage button index: %s", bid)
             return
@@ -569,12 +580,20 @@ class NextApp(App):
 
     def _select_storage(self, target: str) -> None:
         self.state.selected_storage = target
-        for idx in range(len(self.state.storage_targets)):
+        for idx, info in enumerate(self.state.storage_targets):
             btn = self.query_one(f"#storage_{idx}", Button)
-            if self.state.storage_targets[idx] == target:
+            if info.name == target:
                 btn.add_class("storage_selected")
             else:
                 btn.remove_class("storage_selected")
+        pool = next((s for s in self.state.storage_targets if s.name == target), None)
+        warning = self.query_one("#storage_warning", Static)
+        if pool and pool.used_pct >= 80:
+            avail_gb = pool.avail_kb // 1024 // 1024
+            zfs_note = " ZFS write performance degrades above 80% — consider freeing space or picking another pool." if "zfs" in pool.pool_type.lower() else " Pool is nearly full — consider freeing space or picking another pool."
+            warning.update(f"⚠ {pool.name} is {pool.used_pct:.0f}% full ({avail_gb} GB free).{zfs_note}")
+        else:
+            warning.update("")
 
     # ── Step 4: Configuration ───────────────────────────────────────
 
@@ -1134,20 +1153,30 @@ class NextApp(App):
 
     # ── Detection Helpers ───────────────────────────────────────────
 
-    def _detect_storage_targets(self) -> list[str]:
+    def _detect_storage_targets(self) -> list[StorageInfo]:
         res = _get_pve().pvesm("status", "-content", "images")
         if not res.ok:
             log.debug("Failed to detect storage targets: %s", res.output)
-            return [DEFAULT_STORAGE, "local"]
-        targets: list[str] = []
+            return [StorageInfo(name=DEFAULT_STORAGE, pool_type="unknown", used_pct=0.0, avail_kb=0),
+                    StorageInfo(name="local", pool_type="unknown", used_pct=0.0, avail_kb=0)]
+        targets: list[StorageInfo] = []
+        seen: set[str] = set()
         for line in res.output.splitlines()[1:]:
             parts = line.split()
-            if len(parts) >= 3 and parts[2] == "active":
+            if len(parts) >= 7 and parts[2] == "active":
                 name = parts[0]
-                if name not in targets:
-                    targets.append(name)
-        if DEFAULT_STORAGE not in targets:
-            targets.insert(0, DEFAULT_STORAGE)
+                if name in seen:
+                    continue
+                seen.add(name)
+                try:
+                    avail_kb = int(parts[5])
+                    used_pct = float(parts[6].rstrip("%"))
+                except (ValueError, IndexError):
+                    avail_kb = 0
+                    used_pct = 0.0
+                targets.append(StorageInfo(name=name, pool_type=parts[1], used_pct=used_pct, avail_kb=avail_kb))
+        if not any(t.name == DEFAULT_STORAGE for t in targets):
+            targets.insert(0, StorageInfo(name=DEFAULT_STORAGE, pool_type="unknown", used_pct=0.0, avail_kb=0))
         return targets[:5]
 
     def _detect_next_vmid(self) -> int:
