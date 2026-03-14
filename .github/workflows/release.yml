@@ -160,7 +160,7 @@ jobs:
             echo "### Quick Start"
             echo ""
             echo '```bash'
-            echo 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"'
+            echo 'sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"'
             echo '```'
             echo ""
             echo "☕ Support: [Ko-fi](https://ko-fi.com/lucidfabrics) | [Buy Me a Coffee](https://buymeacoffee.com/lucidfabrics)"
