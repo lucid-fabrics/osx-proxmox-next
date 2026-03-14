@@ -123,9 +123,10 @@ jobs:
             RANGE="$PREV_TAG..HEAD"
           fi
 
-          {
-            echo "notes<<NOTESEOF"
+          NOTES_FILE="$(mktemp)"
+          echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
+          {
             # Features
             FEATS=$(git log --format="- %s" --no-decorate $RANGE | grep -E '^\- feat' || true)
             if [ -n "$FEATS" ]; then
@@ -159,19 +160,18 @@ jobs:
             echo ""
             echo "### Quick Start"
             echo ""
-            echo '```bash'
-            echo 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"'
-            echo '```'
+            printf '```bash\n'
+            printf 'sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"\n'
+            printf '```\n'
             echo ""
             echo "☕ Support: [Ko-fi](https://ko-fi.com/lucidfabrics) | [Buy Me a Coffee](https://buymeacoffee.com/lucidfabrics)"
-            echo "NOTESEOF"
-          } >> "$GITHUB_OUTPUT"
+          } > "$NOTES_FILE"
 
       - name: Create release
         if: steps.bump.outputs.bump != 'none' && steps.check.outputs.exists == 'false'
         run: |
           gh release create "v${{ steps.version.outputs.new }}" \
             --title "v${{ steps.version.outputs.new }}" \
-            --notes "${{ steps.notes.outputs.notes }}"
+            --notes-file "${{ steps.notes.outputs.notes_file }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
