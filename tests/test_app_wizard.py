@@ -2329,3 +2329,104 @@ def test_wizard_state_manage_defaults() -> None:
     assert state.uninstall_running is False
     assert state.uninstall_done is False
     assert state.uninstall_ok is False
+
+
+# ── Penryn CPU Detection Tests ────────────────────────────────────────
+
+
+def test_penryn_auto_checked_on_legacy_cpu(monkeypatch) -> None:
+    """When detect_cpu_info returns needs_penryn=True, penryn_cb is checked and cores=4."""
+    from osx_proxmox_next.defaults import CpuInfo
+    legacy_cpu = CpuInfo(vendor="Intel", model_name="Intel Xeon E5-2640 v4",
+                         family=6, model=79, needs_emulated_cpu=False, needs_penryn=True)
+    monkeypatch.setattr("osx_proxmox_next.app.detect_cpu_info", lambda: legacy_cpu)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            cb = app.query_one("#penryn_cb", Checkbox)
+            assert cb.value is True
+            assert app.state.use_penryn is True
+            cores = app.query_one("#cores", Input)
+            assert cores.value == "4"
+
+    asyncio.run(_run())
+
+
+def test_penryn_unchecked_on_modern_cpu(monkeypatch) -> None:
+    """When detect_cpu_info returns needs_penryn=False, penryn_cb is unchecked."""
+    from osx_proxmox_next.defaults import CpuInfo
+    modern_cpu = CpuInfo(vendor="Intel", model_name="12th Gen Intel Core i7-12700K",
+                         family=6, model=151, needs_emulated_cpu=True, needs_penryn=False)
+    monkeypatch.setattr("osx_proxmox_next.app.detect_cpu_info", lambda: modern_cpu)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            cb = app.query_one("#penryn_cb", Checkbox)
+            assert cb.value is False
+            assert app.state.use_penryn is False
+
+    asyncio.run(_run())
+
+
+def test_penryn_checkbox_sets_cpu_model_in_config(monkeypatch) -> None:
+    """Checking penryn_cb causes _read_form to return cpu_model='Penryn'."""
+    from osx_proxmox_next.defaults import CpuInfo
+    no_penryn = CpuInfo(vendor="Intel", model_name="Intel Core i7-6700K",
+                        family=6, model=94, needs_emulated_cpu=False, needs_penryn=False)
+    monkeypatch.setattr("osx_proxmox_next.app.detect_cpu_info", lambda: no_penryn)
+    monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4, monkeypatch)
+            # Enable penryn
+            await pilot.click("#penryn_cb")
+            await pilot.pause()
+            assert app.state.use_penryn is True
+            config = app._read_form()
+            assert config is not None
+            assert config.cpu_model == "Penryn"
+            # Disable penryn
+            await pilot.click("#penryn_cb")
+            await pilot.pause()
+            assert app.state.use_penryn is False
+            config = app._read_form()
+            assert config is not None
+            assert config.cpu_model == ""
+
+    asyncio.run(_run())
+
+
+def test_penryn_checkbox_updates_cores(monkeypatch) -> None:
+    """Checking penryn_cb sets cores input to '4'; unchecking restores detected count."""
+    from osx_proxmox_next.defaults import CpuInfo
+    no_penryn = CpuInfo(vendor="Intel", model_name="Intel Core i7-6700K",
+                        family=6, model=94, needs_emulated_cpu=False, needs_penryn=False)
+    monkeypatch.setattr("osx_proxmox_next.app.detect_cpu_info", lambda: no_penryn)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            cores_input = app.query_one("#cores", Input)
+            original_cores = cores_input.value
+            # Check penryn_cb → cores forced to 4
+            await pilot.click("#penryn_cb")
+            await pilot.pause()
+            assert cores_input.value == "4"
+            # Uncheck → cores restored to detected value
+            await pilot.click("#penryn_cb")
+            await pilot.pause()
+            assert cores_input.value == original_cores
+
+    asyncio.run(_run())
