@@ -54,6 +54,7 @@ class WizardState:
     installer_path: str = ""
     smbios: SmbiosIdentity | None = None
     apple_services: bool = False
+    use_penryn: bool = False
     form_errors: dict[str, str] = field(default_factory=dict)
     # Preflight
     preflight_done: bool = False
@@ -212,6 +213,7 @@ class NextApp(App):
     }
 
     .hidden { display: none; }
+    .penryn_hint { color: #e6a817; margin-top: 1; }
 
     .mode_btn { margin: 0 1 1 0; min-width: 18; }
     .mode_active { border: heavy #2ec27e; background: #0f2a1a; }
@@ -259,6 +261,8 @@ class NextApp(App):
     def __init__(self) -> None:
         super().__init__()
         self.state = WizardState()
+        self._cpu_info = detect_cpu_info()
+        self.state.use_penryn = self._cpu_info.needs_penryn
         self.state.storage_targets = self._detect_storage_targets()
         self.state.iso_dirs = detect_iso_storage()
         self.state.selected_iso_dir = self.state.iso_dirs[0] if self.state.iso_dirs else DEFAULT_ISO_DIR
@@ -354,6 +358,17 @@ class NextApp(App):
                     yield Input(value="", id="existing_uuid", placeholder="Preserve existing VM UUID")
                 with Horizontal(classes="action_row"):
                     yield Checkbox("Enable Apple Services (iMessage, FaceTime, iCloud)", id="apple_services_cb")
+                with Horizontal(classes="action_row"):
+                    yield Checkbox(
+                        "Use Penryn CPU mode (recommended for older Intel CPUs)",
+                        id="penryn_cb",
+                        value=self._cpu_info.needs_penryn,
+                    )
+                yield Static(
+                    "Older Intel CPU detected (pre-Skylake). Penryn mode improves macOS install stability on this hardware.",
+                    id="penryn_hint",
+                    classes="penryn_hint" + ("" if self._cpu_info.needs_penryn else " step_hidden"),
+                )
                 with Container(id="apple_services_fields", classes="hidden"):
                     yield Static("Custom vmgenid (optional)", classes="label")
                     yield Input(value="", id="custom_vmgenid", placeholder="Auto-generated if empty")
@@ -474,6 +489,14 @@ class NextApp(App):
             self.state.apple_services = event.checkbox.value
             self._generate_smbios()
             self._toggle_apple_services_fields()
+        if event.checkbox.id == "penryn_cb":
+            self.state.use_penryn = event.checkbox.value
+            if event.checkbox.value:
+                self.query_one("#cores", Input).value = "4"
+                self.query_one("#penryn_hint", Static).remove_class("step_hidden")
+            else:
+                self.query_one("#cores", Input).value = str(detect_cpu_cores())
+                self.query_one("#penryn_hint", Static).add_class("step_hidden")
 
     def _toggle_apple_services_fields(self) -> None:
         container = self.query_one("#apple_services_fields")
@@ -727,6 +750,7 @@ class NextApp(App):
             smbios_rom=smbios.rom if smbios else "",
             smbios_model=smbios.model if smbios else "",
             apple_services=self.state.apple_services,
+            cpu_model="Penryn" if self.state.use_penryn else "",
             vmgenid=self.query_one("#custom_vmgenid", Input).value.strip().upper() if self.state.apple_services else "",
             static_mac=self.query_one("#custom_mac", Input).value.strip().upper() if self.state.apple_services else "",
         )
