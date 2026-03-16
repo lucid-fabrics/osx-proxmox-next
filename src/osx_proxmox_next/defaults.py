@@ -29,6 +29,11 @@ _INTEL_HYBRID_MODELS: frozenset[int] = frozenset({
 # Models >= this threshold are assumed hybrid (future-proofing).
 _INTEL_HYBRID_THRESHOLD: int = 190
 
+# Intel Family 6 models below this threshold are pre-Skylake (Broadwell, Haswell,
+# Ivy Bridge, Sandy Bridge, etc.). These CPUs work more reliably with -cpu Penryn
+# during macOS installation than with -cpu host.
+_INTEL_LEGACY_THRESHOLD: int = 94  # Skylake desktop starts at model 94
+
 
 @dataclass
 class CpuInfo:
@@ -38,6 +43,7 @@ class CpuInfo:
     family: int             # cpu family from /proc/cpuinfo
     model: int              # model number from /proc/cpuinfo
     needs_emulated_cpu: bool  # True for AMD and Intel hybrid (12th gen+)
+    needs_penryn: bool = False  # True for pre-Skylake Intel (Broadwell and older)
 
 
 def detect_cpu_info() -> CpuInfo:
@@ -84,8 +90,16 @@ def detect_cpu_info() -> CpuInfo:
         family == 6
         and (model in _INTEL_HYBRID_MODELS or model >= _INTEL_HYBRID_THRESHOLD)
     )
+    # Pre-Skylake Intel (Broadwell, Haswell, Ivy Bridge, etc.) work more reliably
+    # with -cpu Penryn during macOS installation than with -cpu host.
+    is_legacy = (
+        family == 6
+        and model > 0
+        and not is_hybrid
+        and model < _INTEL_LEGACY_THRESHOLD
+    )
     return CpuInfo(vendor=vendor, model_name=model_name, family=family,
-                   model=model, needs_emulated_cpu=is_hybrid)
+                   model=model, needs_emulated_cpu=is_hybrid, needs_penryn=is_legacy)
 
 
 def detect_cpu_vendor() -> str:

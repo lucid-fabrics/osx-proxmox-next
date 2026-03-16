@@ -101,3 +101,59 @@ def test_apply_plan_live_no_callback(monkeypatch):
     result = apply_plan(steps, execute=True, adapter=adapter, on_step=None)
     assert result.ok is True
     assert len(result.results) == 1
+
+
+def test_apply_plan_step_failure_stops_execution(monkeypatch):
+    """First step fails — subsequent steps must not be executed."""
+    call_count = [0]
+
+    def fake_run(argv, **kw):
+        call_count[0] += 1
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="error")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    adapter = ProxmoxAdapter()
+    steps = [
+        PlanStep("Step Fail", ["false"]),
+        PlanStep("Step Never", ["echo", "never"]),
+        PlanStep("Step Also Never", ["echo", "also-never"]),
+    ]
+    result = apply_plan(steps, execute=True, adapter=adapter)
+    assert result.ok is False
+    assert len(result.results) == 1
+    assert result.results[0].ok is False
+    assert call_count[0] == 1  # only the first step ran
+
+
+def test_apply_plan_partial_failure_callback(monkeypatch):
+    """Callback receives a failed StepResult when a step fails."""
+    call_count = [0]
+
+    def fake_run(argv, **kw):
+        call_count[0] += 1
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    adapter = ProxmoxAdapter()
+    steps = [PlanStep("Failing Step", ["false"])]
+    received_results = []
+
+    def on_step(idx, total, step, result):
+        received_results.append(result)
+
+    apply_plan(steps, execute=True, adapter=adapter, on_step=on_step)
+    # Callback fires twice: before (None) and after (StepResult with ok=False)
+    assert len(received_results) == 2
+    assert received_results[0] is None
+    failed = received_results[1]
+    assert failed is not None
+    assert failed.ok is False
+    assert failed.returncode == 1
+
+
+def test_apply_plan_empty_plan():
+    """Empty plan returns ok=True immediately with no results."""
+    result = apply_plan([], execute=True)
+    assert result.ok is True
+    assert result.results == []
+    assert result.log_path.exists()

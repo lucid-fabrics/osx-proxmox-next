@@ -141,6 +141,50 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _handle_list_command(args: argparse.Namespace, config: VmConfig, steps: list) -> int:
+    """Render the plan as JSON or human-readable text."""
+    if getattr(args, "json", False):
+        plan_data = [
+            {"step": idx, "title": step.title, "command": step.command, "risk": step.risk}
+            for idx, step in enumerate(steps, start=1)
+        ]
+        print(json.dumps(plan_data, indent=2))
+    else:
+        for idx, step in enumerate(steps, start=1):
+            print(f"{idx:02d}. {step.title}")
+            print(f"    {step.command}")
+    return 0
+
+
+def _handle_script_command(args: argparse.Namespace, config: VmConfig, steps: list) -> None:
+    """Write the plan as a shell script if --script-out is set."""
+    if args.script_out:
+        out = Path(args.script_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(render_script(config, steps), encoding="utf-8")
+        print(f"Script written: {out}")
+
+
+def _handle_destroy_command(args: argparse.Namespace, config: VmConfig, steps: list) -> int:
+    """Execute the plan and report apply result."""
+    snapshot = create_snapshot(config.vmid)
+    result = apply_plan(steps, execute=bool(args.execute))
+    if result.ok:
+        print(f"Apply OK. Log: {result.log_path}")
+        print()
+        print("POST-INSTALL: After macOS finishes installing, fix the boot order")
+        print("so the main disk boots first (instead of recovery):")
+        print(f"  qm set {config.vmid} --boot order=virtio0;ide0")
+        print()
+        print("If this saved you time: https://ko-fi.com/lucidfabrics | https://buymeacoffee.com/lucidfabrics")
+        return 0
+
+    print(f"Apply FAILED. Log: {result.log_path}")
+    for hint in rollback_hints(snapshot):
+        print(f"ROLLBACK: {hint}")
+    return 4
+
+
 def run_cli(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -212,39 +256,11 @@ def run_cli(argv: list[str] | None = None) -> int:
     steps = build_plan(config)
 
     if args.cmd == "plan":
-        if getattr(args, "json", False):
-            plan_data = [
-                {"step": idx, "title": step.title, "command": step.command, "risk": step.risk}
-                for idx, step in enumerate(steps, start=1)
-            ]
-            print(json.dumps(plan_data, indent=2))
-        else:
-            for idx, step in enumerate(steps, start=1):
-                print(f"{idx:02d}. {step.title}")
-                print(f"    {step.command}")
-        if args.script_out:
-            out = Path(args.script_out)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(render_script(config, steps), encoding="utf-8")
-            print(f"Script written: {out}")
-        return 0
+        rc = _handle_list_command(args, config, steps)
+        _handle_script_command(args, config, steps)
+        return rc
 
-    snapshot = create_snapshot(config.vmid)
-    result = apply_plan(steps, execute=bool(args.execute))
-    if result.ok:
-        print(f"Apply OK. Log: {result.log_path}")
-        print()
-        print("POST-INSTALL: After macOS finishes installing, fix the boot order")
-        print("so the main disk boots first (instead of recovery):")
-        print(f"  qm set {config.vmid} --boot order=virtio0;ide0")
-        print()
-        print("If this saved you time: https://ko-fi.com/lucidfabrics | https://buymeacoffee.com/lucidfabrics")
-        return 0
-
-    print(f"Apply FAILED. Log: {result.log_path}")
-    for hint in rollback_hints(snapshot):
-        print(f"ROLLBACK: {hint}")
-    return 4
+    return _handle_destroy_command(args, config, steps)
 
 
 def _run_status(args: argparse.Namespace) -> int:
