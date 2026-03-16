@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .assets import required_assets, suggested_fetch_commands
-from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage
+from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage, detect_net_model
 from .diagnostics import export_log_bundle, recovery_guide
 from .domain import MIN_VMID, MAX_VMID, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
@@ -38,6 +38,7 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
         verbose_boot=args.verbose_boot,
         iso_dir=getattr(args, "iso_dir", "") or "",
         cpu_model=getattr(args, "cpu_model", "") or "",
+        net_model=getattr(args, "net_model", "") or detect_net_model(detect_cpu_info()),
     )
 
 
@@ -119,6 +120,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Directory for ISO/recovery images (default: auto-detect)")
     common.add_argument("--cpu-model", type=str, default="",
                         help="Override QEMU CPU model (e.g. Skylake-Server-IBRS). Default: auto-detect")
+    common.add_argument("--net-model", type=str, default="",
+                        help="NIC model: vmxnet3 (default) or e1000-82545em (recommended for Xeon/older Intel). Default: auto-detect")
 
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("--script-out", type=str, default="")

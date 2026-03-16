@@ -82,6 +82,9 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
             "kvm=on,"
             "vmware-cpuid-freq=on"
         )
+    # +kvm_pv_unhalt and +kvm_pv_eoi are KVM paravirtualization hints that macOS
+    # does not implement. They are no-ops at best and can cause instability on
+    # some firmware versions. Omit them for a cleaner passthrough profile.
     return "-cpu host,kvm=on,vendor=GenuineIntel,+hypervisor,+invtsc,vmware-cpuid-freq=on"
 
 
