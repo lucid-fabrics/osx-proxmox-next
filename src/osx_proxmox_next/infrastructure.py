@@ -36,3 +36,22 @@ class ProxmoxAdapter:
 
     def pvesh(self, *args: str) -> CommandResult:
         return self.run(["pvesh", *args])
+
+
+def run_command(cmd: list[str]) -> CommandResult:
+    """Run an arbitrary command and return a CommandResult.
+
+    Raises CommandResult with ok=False on FileNotFoundError or timeout;
+    raises the original exception for CalledProcessError so callers can
+    inspect stderr.
+    """
+    try:
+        proc = subprocess.run(cmd, check=True, capture_output=True)
+        output = (proc.stdout or b"").decode(errors="replace")
+        return CommandResult(ok=True, returncode=0, output=output.strip())
+    except subprocess.CalledProcessError as exc:
+        raise
+    except FileNotFoundError:
+        return CommandResult(ok=False, returncode=127, output=f"Command not found: {cmd[0]}")
+    except subprocess.TimeoutExpired as exc:
+        return CommandResult(ok=False, returncode=124, output=f"Command timed out: {' '.join(cmd)}")

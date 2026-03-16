@@ -271,6 +271,95 @@ def test_detect_cpu_info_non_family_6_intel(monkeypatch, tmp_path):
     assert info.needs_emulated_cpu is False
 
 
+# ── Penryn Detection Tests ────────────────────────────────────────────
+
+
+def test_detect_cpu_info_legacy_intel_broadwell(monkeypatch, tmp_path):
+    """Family 6, model 79 (Xeon E5-2640 v4, Broadwell) → needs_penryn=True."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text(
+        "vendor_id\t: GenuineIntel\n"
+        "cpu family\t: 6\n"
+        "model\t\t: 79\n"
+        "model name\t: Intel(R) Xeon(R) CPU E5-2640 v4\n"
+    )
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    info = detect_cpu_info()
+    assert info.vendor == "Intel"
+    assert info.family == 6
+    assert info.model == 79
+    assert info.needs_penryn is True
+    assert info.needs_emulated_cpu is False
+
+
+def test_detect_cpu_info_legacy_intel_haswell(monkeypatch, tmp_path):
+    """Family 6, model 60 (Haswell) → needs_penryn=True."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text(
+        "vendor_id\t: GenuineIntel\n"
+        "cpu family\t: 6\n"
+        "model\t\t: 60\n"
+        "model name\t: Intel(R) Core(TM) i7-4770K\n"
+    )
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    info = detect_cpu_info()
+    assert info.needs_penryn is True
+    assert info.needs_emulated_cpu is False
+
+
+def test_detect_cpu_info_skylake_no_penryn(monkeypatch, tmp_path):
+    """Family 6, model 94 (Skylake) is exactly at threshold → needs_penryn=False."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text(
+        "vendor_id\t: GenuineIntel\n"
+        "cpu family\t: 6\n"
+        "model\t\t: 94\n"
+        "model name\t: Intel(R) Core(TM) i7-6700K\n"
+    )
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    info = detect_cpu_info()
+    assert info.needs_penryn is False
+    assert info.needs_emulated_cpu is False
+
+
+def test_detect_cpu_info_modern_intel_no_penryn(monkeypatch, tmp_path):
+    """Family 6, model 151 (Alder Lake, hybrid) → needs_penryn=False, needs_emulated_cpu=True."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text(
+        "vendor_id\t: GenuineIntel\n"
+        "cpu family\t: 6\n"
+        "model\t\t: 151\n"
+        "model name\t: 12th Gen Intel(R) Core(TM) i7-12700K\n"
+    )
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    info = detect_cpu_info()
+    assert info.needs_penryn is False
+    assert info.needs_emulated_cpu is True
+
+
+def test_detect_cpu_info_amd_no_penryn(monkeypatch, tmp_path):
+    """AMD CPUs never need Penryn mode."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text(
+        "vendor_id\t: AuthenticAMD\n"
+        "cpu family\t: 25\n"
+        "model\t\t: 97\n"
+        "model name\t: AMD Ryzen 9 7950X\n"
+    )
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    info = detect_cpu_info()
+    assert info.needs_penryn is False
+    assert info.needs_emulated_cpu is True
+
+
+def test_detect_cpu_info_unknown_cpu_no_penryn(monkeypatch):
+    """model=0 (unknown/missing cpuinfo) → needs_penryn=False (guard condition)."""
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: Path("/nonexistent/cpuinfo"))
+    info = detect_cpu_info()
+    assert info.model == 0
+    assert info.needs_penryn is False
+
+
 # ── ISO Storage Tests ─────────────────────────────────────────────────
 
 

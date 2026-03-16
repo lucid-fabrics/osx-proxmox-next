@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-import copy
+import dataclasses
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -90,9 +90,6 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     if issues:
         raise ValueError(f"Invalid VM config: {'; '.join(issues)}")
 
-    # Work on a copy so callers don't see SMBIOS side effects.
-    config = copy.copy(config)
-
     meta = SUPPORTED_MACOS[config.macos]
     vmid = str(config.vmid)
 
@@ -108,9 +105,32 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     is_amd = cpu.vendor == "AMD"
 
     # Pre-generate SMBIOS identity so downstream steps just read config fields.
-    _populate_smbios(config)
+    config = _populate_smbios(config)
 
     steps = [
+        *_network_steps(config, vmid, cpu_flag),
+        *_disk_steps(config, vmid, is_amd, recovery_raw, opencore_path, oc_disk, macos_label),
+        *_boot_steps(config, vmid),
+    ]
+
+    if meta["channel"] == "preview":
+        steps.insert(
+            0,
+            PlanStep(
+                title="Preview warning",
+                argv=[
+                    "echo",
+                    f"Notice: {meta['label']} uses preview assets. Verify OpenCore and recovery sources before production use.",
+                ],
+                risk="warn",
+            ),
+        )
+    return steps
+
+
+def _network_steps(config: VmConfig, vmid: str, cpu_flag: str) -> list[PlanStep]:
+    """VM shell creation with network and CPU config."""
+    return [
         PlanStep(
             title="Create VM shell",
             argv=[
@@ -144,18 +164,19 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
         ),
         *_smbios_steps(config, vmid),
         *_apple_services_steps(config, vmid),
-        PlanStep(
-            title="Attach EFI + TPM",
-            argv=[
-                "qm", "set", vmid,
-                "--efidisk0", f"{config.storage}:0,efitype=4m,pre-enrolled-keys=0",
-                "--tpmstate0", f"{config.storage}:0,version=v2.0",
-            ],
-        ),
-        PlanStep(
-            title="Create main disk",
-            argv=["qm", "set", vmid, "--virtio0", f"{config.storage}:{config.disk_gb}"],
-        ),
+    ]
+
+
+def _opencore_steps(
+    config: VmConfig,
+    vmid: str,
+    is_amd: bool,
+    recovery_raw: Path,
+    opencore_path: Path,
+    oc_disk: Path,
+) -> list[PlanStep]:
+    """Build and import the OpenCore EFI disk."""
+    return [
         PlanStep(
             title="Build OpenCore boot disk",
             argv=[
@@ -185,6 +206,17 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 f'dd if={shquote(str(oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
             ],
         ),
+    ]
+
+
+def _recovery_steps(
+    config: VmConfig,
+    vmid: str,
+    recovery_raw: Path,
+    macos_label: str,
+) -> list[PlanStep]:
+    """Stamp and import the macOS recovery image."""
+    return [
         PlanStep(
             title="Stamp recovery with Apple icon flavour",
             argv=[
@@ -238,6 +270,40 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 f'qm set {shquote(vmid)} --ide2 "$REF",media=disk',
             ],
         ),
+    ]
+
+
+def _disk_steps(
+    config: VmConfig,
+    vmid: str,
+    is_amd: bool,
+    recovery_raw: Path,
+    opencore_path: Path,
+    oc_disk: Path,
+    macos_label: str,
+) -> list[PlanStep]:
+    """EFI/TPM disk, main disk, OpenCore build/import, and recovery import."""
+    return [
+        PlanStep(
+            title="Attach EFI + TPM",
+            argv=[
+                "qm", "set", vmid,
+                "--efidisk0", f"{config.storage}:0,efitype=4m,pre-enrolled-keys=0",
+                "--tpmstate0", f"{config.storage}:0,version=v2.0",
+            ],
+        ),
+        PlanStep(
+            title="Create main disk",
+            argv=["qm", "set", vmid, "--virtio0", f"{config.storage}:{config.disk_gb}"],
+        ),
+        *_opencore_steps(config, vmid, is_amd, recovery_raw, opencore_path, oc_disk),
+        *_recovery_steps(config, vmid, recovery_raw, macos_label),
+    ]
+
+
+def _boot_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
+    """Hardware profile, boot order, and start VM."""
+    return [
         PlanStep(
             title="Set boot order",
             argv=["qm", "set", vmid, "--boot", "order=ide2;virtio0;ide0"],
@@ -248,20 +314,6 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             risk="action",
         ),
     ]
-
-    if meta["channel"] == "preview":
-        steps.insert(
-            0,
-            PlanStep(
-                title="Preview warning",
-                argv=[
-                    "echo",
-                    f"Notice: {meta['label']} uses preview assets. Verify OpenCore and recovery sources before production use.",
-                ],
-                risk="warn",
-            ),
-        )
-    return steps
 
 
 def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
@@ -436,30 +488,35 @@ def _encode_smbios_value(value: str) -> str:
     return base64.b64encode(value.encode()).decode()
 
 
-def _populate_smbios(config: VmConfig) -> None:
+def _populate_smbios(config: VmConfig) -> VmConfig:
     """Pre-generate SMBIOS identity and Apple services fields on config.
 
     Called once at the top of build_plan so downstream helpers just read fields.
+    Returns a new VmConfig with the generated values applied.
     """
     if config.no_smbios:
-        return
+        return config
+    updates: dict = {}
     if not config.smbios_serial:
         identity = generate_smbios(config.macos, config.apple_services)
-        config.smbios_serial = identity.serial
-        config.smbios_uuid = identity.uuid
-        config.smbios_model = identity.model
-        config.smbios_mlb = identity.mlb
-        config.smbios_rom = identity.rom
+        updates["smbios_serial"] = identity.serial
+        updates["smbios_uuid"] = identity.uuid
+        updates["smbios_model"] = identity.model
+        updates["smbios_mlb"] = identity.mlb
+        updates["smbios_rom"] = identity.rom
         if identity.mac and not config.static_mac:
-            config.static_mac = identity.mac
-    if not config.smbios_model:
-        config.smbios_model = model_for_macos(config.macos)
+            updates["static_mac"] = identity.mac
+    if not config.smbios_model and "smbios_model" not in updates:
+        updates["smbios_model"] = model_for_macos(config.macos)
     if config.apple_services:
         if not config.vmgenid:
-            config.vmgenid = generate_vmgenid()
-        if not config.static_mac:
-            config.static_mac = generate_mac()
-        config.smbios_rom = generate_rom_from_mac(config.static_mac)
+            updates["vmgenid"] = generate_vmgenid()
+        static_mac = updates.get("static_mac") or config.static_mac
+        if not static_mac:
+            static_mac = generate_mac()
+            updates["static_mac"] = static_mac
+        updates["smbios_rom"] = generate_rom_from_mac(static_mac)
+    return dataclasses.replace(config, **updates)
 
 
 def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
