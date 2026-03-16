@@ -167,29 +167,16 @@ def _network_steps(config: VmConfig, vmid: str, cpu_flag: str) -> list[PlanStep]
     ]
 
 
-def _disk_steps(
+def _opencore_steps(
     config: VmConfig,
     vmid: str,
     is_amd: bool,
     recovery_raw: Path,
     opencore_path: Path,
     oc_disk: Path,
-    macos_label: str,
 ) -> list[PlanStep]:
-    """EFI/TPM disk, main disk, OpenCore build/import, and recovery import."""
+    """Build and import the OpenCore EFI disk."""
     return [
-        PlanStep(
-            title="Attach EFI + TPM",
-            argv=[
-                "qm", "set", vmid,
-                "--efidisk0", f"{config.storage}:0,efitype=4m,pre-enrolled-keys=0",
-                "--tpmstate0", f"{config.storage}:0,version=v2.0",
-            ],
-        ),
-        PlanStep(
-            title="Create main disk",
-            argv=["qm", "set", vmid, "--virtio0", f"{config.storage}:{config.disk_gb}"],
-        ),
         PlanStep(
             title="Build OpenCore boot disk",
             argv=[
@@ -283,6 +270,34 @@ def _recovery_steps(
                 f'qm set {shquote(vmid)} --ide2 "$REF",media=disk',
             ],
         ),
+    ]
+
+
+def _disk_steps(
+    config: VmConfig,
+    vmid: str,
+    is_amd: bool,
+    recovery_raw: Path,
+    opencore_path: Path,
+    oc_disk: Path,
+    macos_label: str,
+) -> list[PlanStep]:
+    """EFI/TPM disk, main disk, OpenCore build/import, and recovery import."""
+    return [
+        PlanStep(
+            title="Attach EFI + TPM",
+            argv=[
+                "qm", "set", vmid,
+                "--efidisk0", f"{config.storage}:0,efitype=4m,pre-enrolled-keys=0",
+                "--tpmstate0", f"{config.storage}:0,version=v2.0",
+            ],
+        ),
+        PlanStep(
+            title="Create main disk",
+            argv=["qm", "set", vmid, "--virtio0", f"{config.storage}:{config.disk_gb}"],
+        ),
+        *_opencore_steps(config, vmid, is_amd, recovery_raw, opencore_path, oc_disk),
+        *_recovery_steps(config, vmid, recovery_raw, macos_label),
     ]
 
 
