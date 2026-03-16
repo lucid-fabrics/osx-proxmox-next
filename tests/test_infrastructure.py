@@ -1,6 +1,6 @@
 import subprocess
 
-from osx_proxmox_next.infrastructure import ProxmoxAdapter
+from osx_proxmox_next.infrastructure import ProxmoxAdapter, run_command
 
 
 def test_run_timeout(monkeypatch):
@@ -89,3 +89,46 @@ def test_run_nonzero_returncode(monkeypatch):
     assert result.ok is False
     assert result.returncode == 1
     assert "fail" in result.output
+
+
+def test_run_command_success(monkeypatch):
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"hello\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = run_command(["echo", "hello"])
+    assert result.ok is True
+    assert result.returncode == 0
+    assert "hello" in result.output
+
+
+def test_run_command_failure(monkeypatch):
+    def fake_run(cmd, **kw):
+        raise subprocess.CalledProcessError(returncode=1, cmd=cmd, output=b"", stderr=b"fail")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    import pytest
+    with pytest.raises(subprocess.CalledProcessError):
+        run_command(["false"])
+
+
+def test_run_command_file_not_found(monkeypatch):
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = run_command(["nonexistent-cmd"])
+    assert result.ok is False
+    assert result.returncode == 127
+    assert "not found" in result.output
+
+
+def test_run_command_timeout(monkeypatch):
+    def fake_run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = run_command(["sleep", "100"])
+    assert result.ok is False
+    assert result.returncode == 124
+    assert "timed out" in result.output

@@ -53,3 +53,5 @@ def run_command(cmd: list[str]) -> CommandResult:
         raise
     except FileNotFoundError:
         return CommandResult(ok=False, returncode=127, output=f"Command not found: {cmd[0]}")
+    except subprocess.TimeoutExpired as exc:
+        return CommandResult(ok=False, returncode=124, output=f"Command timed out: {' '.join(cmd)}")
