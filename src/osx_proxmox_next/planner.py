@@ -82,7 +82,7 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
             "kvm=on,"
             "vmware-cpuid-freq=on"
         )
-    return "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc,vmware-cpuid-freq=on"
+    return "-cpu host,kvm=on,vendor=GenuineIntel,+hypervisor,+invtsc,vmware-cpuid-freq=on"
 
 
 def build_plan(config: VmConfig) -> list[PlanStep]:
@@ -145,7 +145,7 @@ def _network_steps(config: VmConfig, vmid: str, cpu_flag: str) -> list[PlanStep]
                 "--cpu", "host",
                 "--balloon", "0",
                 "--agent", "enabled=1",
-                "--net0", f"vmxnet3,bridge={config.bridge},firewall=0",
+                "--net0", f"{config.net_model},bridge={config.bridge},firewall=0",
             ],
         ),
         PlanStep(
@@ -549,7 +549,7 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
         ),
         PlanStep(
             title="Configure static MAC for Apple services",
-            argv=["qm", "set", vmid, "--net0", f"vmxnet3,bridge={config.bridge},macaddr={config.static_mac},firewall=0"],
+            argv=["qm", "set", vmid, "--net0", f"{config.net_model},bridge={config.bridge},macaddr={config.static_mac},firewall=0"],
         ),
     ]
 

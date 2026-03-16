@@ -10,6 +10,7 @@ from osx_proxmox_next.defaults import (
     detect_cpu_vendor,
     detect_iso_storage,
     detect_memory_mb,
+    detect_net_model,
 )
 from osx_proxmox_next.infrastructure import CommandResult
 
@@ -274,8 +275,27 @@ def test_detect_cpu_info_non_family_6_intel(monkeypatch, tmp_path):
 # ── Penryn Detection Tests ────────────────────────────────────────────
 
 
-def test_detect_cpu_info_legacy_intel_broadwell(monkeypatch, tmp_path):
-    """Family 6, model 79 (Xeon E5-2640 v4, Broadwell) → needs_penryn=True."""
+def test_detect_cpu_info_legacy_intel_broadwell_consumer(monkeypatch, tmp_path):
+    """Family 6, model 79 non-Xeon (Broadwell-E Core i7) → needs_penryn=True."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text(
+        "vendor_id\t: GenuineIntel\n"
+        "cpu family\t: 6\n"
+        "model\t\t: 79\n"
+        "model name\t: Intel(R) Core(TM) i7-6950X\n"
+    )
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    info = detect_cpu_info()
+    assert info.vendor == "Intel"
+    assert info.family == 6
+    assert info.model == 79
+    assert info.needs_penryn is True
+    assert info.needs_emulated_cpu is False
+    assert info.is_xeon is False
+
+
+def test_detect_cpu_info_xeon_e5_v4_no_penryn(monkeypatch, tmp_path):
+    """Family 6, model 79 Xeon E5-2640 v4 → is_xeon=True, needs_penryn=False (Xeon excluded from Penryn path)."""
     fake_cpuinfo = tmp_path / "cpuinfo"
     fake_cpuinfo.write_text(
         "vendor_id\t: GenuineIntel\n"
@@ -288,7 +308,24 @@ def test_detect_cpu_info_legacy_intel_broadwell(monkeypatch, tmp_path):
     assert info.vendor == "Intel"
     assert info.family == 6
     assert info.model == 79
-    assert info.needs_penryn is True
+    assert info.is_xeon is True
+    assert info.needs_penryn is False
+    assert info.needs_emulated_cpu is False
+
+
+def test_detect_cpu_info_xeon_e5_v3_no_penryn(monkeypatch, tmp_path):
+    """Family 6, model 63 Xeon E5-2690 v3 (Haswell-EP) → is_xeon=True, needs_penryn=False."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text(
+        "vendor_id\t: GenuineIntel\n"
+        "cpu family\t: 6\n"
+        "model\t\t: 63\n"
+        "model name\t: Intel(R) Xeon(R) CPU E5-2690 v3\n"
+    )
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    info = detect_cpu_info()
+    assert info.is_xeon is True
+    assert info.needs_penryn is False
     assert info.needs_emulated_cpu is False
 
 
@@ -358,6 +395,49 @@ def test_detect_cpu_info_unknown_cpu_no_penryn(monkeypatch):
     info = detect_cpu_info()
     assert info.model == 0
     assert info.needs_penryn is False
+
+
+# ── detect_net_model Tests ────────────────────────────────────────────
+
+
+def test_detect_net_model_xeon_returns_e1000():
+    """Xeon CPU → e1000-82545em (native macOS driver, no kext needed)."""
+    cpu = CpuInfo(vendor="Intel", model_name="Intel(R) Xeon(R) CPU E5-2640 v4",
+                  family=6, model=79, needs_emulated_cpu=False,
+                  needs_penryn=False, is_xeon=True)
+    assert detect_net_model(cpu) == "e1000-82545em"
+
+
+def test_detect_net_model_penryn_returns_e1000():
+    """Pre-Skylake consumer Intel → e1000-82545em."""
+    cpu = CpuInfo(vendor="Intel", model_name="Intel(R) Core(TM) i7-4770K",
+                  family=6, model=60, needs_emulated_cpu=False,
+                  needs_penryn=True, is_xeon=False)
+    assert detect_net_model(cpu) == "e1000-82545em"
+
+
+def test_detect_net_model_modern_intel_returns_vmxnet3():
+    """Modern non-Xeon Intel → vmxnet3."""
+    cpu = CpuInfo(vendor="Intel", model_name="Intel(R) Core(TM) i9-9900K",
+                  family=6, model=158, needs_emulated_cpu=False,
+                  needs_penryn=False, is_xeon=False)
+    assert detect_net_model(cpu) == "vmxnet3"
+
+
+def test_detect_net_model_amd_returns_vmxnet3():
+    """AMD → vmxnet3 (uses Cascadelake emulation, vmxnet3 kext loads fine)."""
+    cpu = CpuInfo(vendor="AMD", model_name="AMD Ryzen 9 7950X",
+                  family=25, model=97, needs_emulated_cpu=True,
+                  needs_penryn=False, is_xeon=False)
+    assert detect_net_model(cpu) == "vmxnet3"
+
+
+def test_detect_net_model_hybrid_intel_returns_vmxnet3():
+    """Hybrid Intel (12th gen+) → vmxnet3."""
+    cpu = CpuInfo(vendor="Intel", model_name="12th Gen Intel(R) Core(TM) i7-12700K",
+                  family=6, model=151, needs_emulated_cpu=True,
+                  needs_penryn=False, is_xeon=False)
+    assert detect_net_model(cpu) == "vmxnet3"
 
 
 # ── ISO Storage Tests ─────────────────────────────────────────────────

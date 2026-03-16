@@ -227,12 +227,13 @@ def test_render_script_simple() -> None:
 
 
 def test_cpu_args_intel() -> None:
-    """Legacy Intel → -cpu host passthrough."""
+    """Legacy Intel → -cpu host passthrough without KVM paravirt flags (macOS doesn't use them)."""
     cpu = _cpu(vendor="Intel", needs_emulated=False)
     args = _cpu_args(cpu)
     assert "-cpu host," in args
     assert "vendor=GenuineIntel" in args
-    assert "+kvm_pv_unhalt" in args
+    assert "kvm_pv_unhalt" not in args
+    assert "kvm_pv_eoi" not in args
     assert "vmware-cpuid-freq=on" in args
 
 
@@ -792,3 +793,35 @@ def test_build_plan_oc_base64_no_newlines(monkeypatch) -> None:
     encoded = base64.b64encode(b"C02LNGSERL12").decode()
     assert "\n" not in encoded
     assert f"serial={encoded}" in smbios.command
+
+
+def test_build_plan_net_model_vmxnet3_default() -> None:
+    """Default VmConfig uses vmxnet3 in VM creation step."""
+    cfg = _cfg("sequoia")
+    steps = build_plan(cfg)
+    create = next(s for s in steps if s.title == "Create VM shell")
+    assert "vmxnet3,bridge=vmbr0,firewall=0" in create.command
+
+
+def test_build_plan_net_model_e1000() -> None:
+    """VmConfig with net_model=e1000-82545em passes it into VM creation and Apple services steps."""
+    cfg = _cfg("sequoia")
+    cfg.net_model = "e1000-82545em"
+    cfg.apple_services = True
+    steps = build_plan(cfg)
+    create = next(s for s in steps if s.title == "Create VM shell")
+    assert "e1000-82545em,bridge=vmbr0,firewall=0" in create.command
+    mac_step = next(s for s in steps if s.title == "Configure static MAC for Apple services")
+    assert "e1000-82545em,bridge=vmbr0" in mac_step.command
+
+
+def test_build_plan_intel_host_no_kvm_pv_flags(monkeypatch) -> None:
+    """Intel -cpu host path must not include KVM paravirt flags (macOS doesn't use them)."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    cfg = _cfg("sequoia")
+    steps = build_plan(cfg)
+    profile = next(s for s in steps if s.title == "Apply macOS hardware profile")
+    assert "kvm_pv_unhalt" not in profile.command
+    assert "kvm_pv_eoi" not in profile.command
+    assert "-cpu host" in profile.command
