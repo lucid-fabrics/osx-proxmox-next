@@ -716,6 +716,7 @@ def test_plist_patch_script_default() -> None:
     assert "DmgLoading" in script
     assert "SecureBootModel" in script
     assert "VirtualSMC" in script
+    assert "RequestBootVarRouting" in script
     assert "AppleCpuPmCfgLock" not in script
     assert "PlatformInfo" not in script
 

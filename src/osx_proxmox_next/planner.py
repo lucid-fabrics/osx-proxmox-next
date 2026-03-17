@@ -396,6 +396,7 @@ def _plist_patch_script(
         "nv_del=p.setdefault(\"NVRAM\",{}).setdefault(\"Delete\",{}); "
         "nv_del[\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"]=[\"csr-active-config\",\"boot-args\",\"prev-lang:kbd\"]; "
         "p[\"NVRAM\"][\"WriteFlash\"]=True; "
+        "p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{})[\"RequestBootVarRouting\"]=True; "
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
         + amd_patch
         + platforminfo +
