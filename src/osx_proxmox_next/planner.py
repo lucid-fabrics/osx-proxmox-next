@@ -82,7 +82,10 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
             "kvm=on,"
             "vmware-cpuid-freq=on"
         )
-    return "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc,vmware-cpuid-freq=on"
+    # +kvm_pv_unhalt and +kvm_pv_eoi are KVM paravirtualization hints that macOS
+    # does not implement. They are no-ops at best and can cause instability on
+    # some firmware versions. Omit them for a cleaner passthrough profile.
+    return "-cpu host,kvm=on,vendor=GenuineIntel,+hypervisor,+invtsc,vmware-cpuid-freq=on"
 
 
 def build_plan(config: VmConfig) -> list[PlanStep]:
@@ -145,7 +148,7 @@ def _network_steps(config: VmConfig, vmid: str, cpu_flag: str) -> list[PlanStep]
                 "--cpu", "host",
                 "--balloon", "0",
                 "--agent", "enabled=1",
-                "--net0", f"vmxnet3,bridge={config.bridge},firewall=0",
+                "--net0", f"{config.net_model},bridge={config.bridge},firewall=0",
             ],
         ),
         PlanStep(
@@ -393,6 +396,7 @@ def _plist_patch_script(
         "nv_del=p.setdefault(\"NVRAM\",{}).setdefault(\"Delete\",{}); "
         "nv_del[\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"]=[\"csr-active-config\",\"boot-args\",\"prev-lang:kbd\"]; "
         "p[\"NVRAM\"][\"WriteFlash\"]=True; "
+        "p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{})[\"RequestBootVarRouting\"]=True; "
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
         + amd_patch
         + platforminfo +
@@ -549,7 +553,7 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
         ),
         PlanStep(
             title="Configure static MAC for Apple services",
-            argv=["qm", "set", vmid, "--net0", f"vmxnet3,bridge={config.bridge},macaddr={config.static_mac},firewall=0"],
+            argv=["qm", "set", vmid, "--net0", f"{config.net_model},bridge={config.bridge},macaddr={config.static_mac},firewall=0"],
         ),
     ]
 

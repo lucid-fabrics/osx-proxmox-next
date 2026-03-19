@@ -75,6 +75,32 @@ def test_cli_plan_cpu_override_display(monkeypatch, capsys):
     assert "override" in captured.out
 
 
+def test_cli_plan_net_model_e1000(monkeypatch, capsys):
+    """--net-model e1000-82545em flows into qm create command."""
+    from osx_proxmox_next.assets import AssetCheck
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
+    )
+    rc = run_cli(_plan_args() + ["--net-model", "e1000-82545em"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "e1000-82545em" in captured.out
+
+
+def test_cli_plan_net_model_default_vmxnet3(monkeypatch, capsys):
+    """Omitting --net-model defaults to vmxnet3 in plan output."""
+    from osx_proxmox_next.assets import AssetCheck
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
+    )
+    rc = run_cli(_plan_args())
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "vmxnet3" in captured.out
+
+
 def test_cli_preflight(monkeypatch):
     from osx_proxmox_next.preflight import PreflightCheck
     monkeypatch.setattr(

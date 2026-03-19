@@ -43,7 +43,8 @@ class CpuInfo:
     family: int             # cpu family from /proc/cpuinfo
     model: int              # model number from /proc/cpuinfo
     needs_emulated_cpu: bool  # True for AMD and Intel hybrid (12th gen+)
-    needs_penryn: bool = False  # True for pre-Skylake Intel (Broadwell and older)
+    needs_penryn: bool = False  # True for pre-Skylake Intel (Broadwell and older), excluding Xeon
+    is_xeon: bool = False   # True when "Xeon" appears in model name (server chips, always use -cpu host)
 
 
 def detect_cpu_info() -> CpuInfo:
@@ -90,21 +91,40 @@ def detect_cpu_info() -> CpuInfo:
         family == 6
         and (model in _INTEL_HYBRID_MODELS or model >= _INTEL_HYBRID_THRESHOLD)
     )
+    # Xeon CPUs are server/workstation chips that work fine with -cpu host even
+    # when below the Skylake model threshold (e.g. Xeon E5 v4 is model 79).
+    is_xeon = "Xeon" in model_name
     # Pre-Skylake Intel (Broadwell, Haswell, Ivy Bridge, etc.) work more reliably
     # with -cpu Penryn during macOS installation than with -cpu host.
+    # Xeon chips are excluded: they are modern enough and stripping features causes issues.
     is_legacy = (
         family == 6
         and model > 0
         and not is_hybrid
+        and not is_xeon
         and model < _INTEL_LEGACY_THRESHOLD
     )
     return CpuInfo(vendor=vendor, model_name=model_name, family=family,
-                   model=model, needs_emulated_cpu=is_hybrid, needs_penryn=is_legacy)
+                   model=model, needs_emulated_cpu=is_hybrid, needs_penryn=is_legacy,
+                   is_xeon=is_xeon)
 
 
 def detect_cpu_vendor() -> str:
     """Return 'AMD' or 'Intel' based on /proc/cpuinfo (default: Intel)."""
     return detect_cpu_info().vendor
+
+
+def detect_net_model(cpu: CpuInfo) -> str:
+    """Return the recommended NIC model for the given CPU.
+
+    Xeon and pre-Skylake Intel CPUs use e1000-82545em because vmxnet3
+    requires a kext from the OpenCore EFI that may not load cleanly during
+    installation on older hardware, silently degrading recovery downloads.
+    e1000-82545em has a native macOS driver and needs no kext.
+    """
+    if cpu.is_xeon or cpu.needs_penryn:
+        return "e1000-82545em"
+    return "vmxnet3"
 
 
 def _round_down_power_of_2(n: int) -> int:

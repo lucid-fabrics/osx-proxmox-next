@@ -43,6 +43,7 @@ class VmConfig:
     verbose_boot: bool = False
     iso_dir: str = ""
     cpu_model: str = ""
+    net_model: str = "vmxnet3"
 
 
 def validate_config(config: VmConfig) -> list[str]:
@@ -85,6 +86,8 @@ def validate_config(config: VmConfig) -> list[str]:
         issues.append("SMBIOS model must be alphanumeric (e.g., MacPro7,1).")
     if config.cpu_model and not re.fullmatch(r"[A-Za-z0-9\-]+", config.cpu_model):
         issues.append("CPU model must be alphanumeric/hyphens only (e.g., Skylake-Server-IBRS).")
+    if config.net_model not in ("vmxnet3", "e1000-82545em"):
+        issues.append("net_model must be 'vmxnet3' or 'e1000-82545em'.")
     if config.storage and not re.fullmatch(r"[a-zA-Z0-9_\-]+", config.storage):
         issues.append("Storage target must be alphanumeric, hyphens, underscores only.")
     if config.static_mac and not re.fullmatch(r"([0-9A-F]{2}:){5}[0-9A-F]{2}", config.static_mac):

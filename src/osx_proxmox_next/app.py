@@ -15,7 +15,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
 from .assets import AssetCheck, required_assets
-from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb
+from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb, detect_net_model
 from .domain import DEFAULT_VMID, MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import StepResult, apply_plan
@@ -55,6 +55,7 @@ class WizardState:
     smbios: SmbiosIdentity | None = None
     apple_services: bool = False
     use_penryn: bool = False
+    net_model: str = "vmxnet3"
     form_errors: dict[str, str] = field(default_factory=dict)
     # Preflight
     preflight_done: bool = False
@@ -263,6 +264,7 @@ class NextApp(App):
         self.state = WizardState()
         self._cpu_info = detect_cpu_info()
         self.state.use_penryn = self._cpu_info.needs_penryn
+        self.state.net_model = detect_net_model(self._cpu_info)
         self.state.storage_targets = self._detect_storage_targets()
         self.state.iso_dirs = detect_iso_storage()
         self.state.selected_iso_dir = self.state.iso_dirs[0] if self.state.iso_dirs else DEFAULT_ISO_DIR
@@ -371,9 +373,21 @@ class NextApp(App):
                     value=self._cpu_info.needs_penryn,
                 )
             yield Static(
-                "Older Intel CPU detected (pre-Skylake). Penryn mode improves macOS install stability on this hardware.",
+                "Older Intel CPU detected (pre-Skylake). Penryn mode improves macOS install stability on this hardware. (Xeon CPUs are automatically excluded — they use -cpu host.)",
                 id="penryn_hint",
                 classes="penryn_hint" + ("" if self._cpu_info.needs_penryn else " step_hidden"),
+            )
+            with Horizontal(classes="action_row"):
+                _e1000_default = self._cpu_info.is_xeon or self._cpu_info.needs_penryn
+                yield Checkbox(
+                    "Use e1000 network adapter (recommended for Xeon / older Intel — no kext needed)",
+                    id="e1000_cb",
+                    value=_e1000_default,
+                )
+            yield Static(
+                "Xeon or legacy Intel CPU detected. e1000 has a native macOS driver and avoids slow recovery downloads caused by vmxnet3 kext not loading during install.",
+                id="e1000_hint",
+                classes="penryn_hint" + ("" if _e1000_default else " step_hidden"),
             )
             with Container(id="apple_services_fields", classes="hidden"):
                 yield Static("Custom vmgenid (optional)", classes="label")
@@ -503,6 +517,12 @@ class NextApp(App):
             else:
                 self.query_one("#cores", Input).value = str(detect_cpu_cores())
                 self.query_one("#penryn_hint", Static).add_class("step_hidden")
+        if event.checkbox.id == "e1000_cb":
+            self.state.net_model = "e1000-82545em" if event.checkbox.value else "vmxnet3"
+            if event.checkbox.value:
+                self.query_one("#e1000_hint", Static).remove_class("step_hidden")
+            else:
+                self.query_one("#e1000_hint", Static).add_class("step_hidden")
 
     def _toggle_apple_services_fields(self) -> None:
         container = self.query_one("#apple_services_fields")
@@ -757,6 +777,7 @@ class NextApp(App):
             smbios_model=smbios.model if smbios else "",
             apple_services=self.state.apple_services,
             cpu_model="Penryn" if self.state.use_penryn else "",
+            net_model=self.state.net_model,
             vmgenid=self.query_one("#custom_vmgenid", Input).value.strip().upper() if self.state.apple_services else "",
             static_mac=self.query_one("#custom_mac", Input).value.strip().upper() if self.state.apple_services else "",
         )
