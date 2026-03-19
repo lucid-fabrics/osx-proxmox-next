@@ -37,7 +37,7 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 **You get:**
 - A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
 - Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
-- Intel and AMD CPU support — auto-detected, zero configuration needed
+- Intel, Xeon, and AMD CPU support — auto-detected, zero configuration needed
 - Automatic OpenCore and recovery/installer download — no manual file placement
 - Shared storage support — download ISOs to NAS or any Proxmox storage pool (`--iso-dir`)
 - Auto-generated SMBIOS identity (serial, UUID, model) — no OpenCore editing needed
@@ -124,7 +124,7 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | Storage | 64 GB free | 128+ GB SSD/NVMe |
 | GPU | Integrated | Discrete (for passthrough) |
 
-> **AMD CPUs** are fully supported. The tool auto-detects your CPU vendor and applies the correct configuration (Cascadelake-Server emulation for AMD, native host passthrough for Intel).
+> **AMD CPUs** are fully supported. The tool auto-detects your CPU vendor and applies the correct configuration (Cascadelake-Server emulation for AMD, native host passthrough for Intel). **Xeon and pre-Skylake Intel CPUs** are also handled automatically — Xeon stays on `-cpu host`, older consumer Intel gets Penryn mode, and both get `e1000` instead of `vmxnet3` for reliable network during installation.
 
 ### Host
 
@@ -313,6 +313,8 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 - Use `vga: std` during installation (switch after)
 - Change one setting at a time and measure the impact
 - **Intel CPUs** get native host passthrough — best performance
+- **Xeon CPUs** get native host passthrough — same as modern Intel, Penryn is skipped
+- **Pre-Skylake Intel** (Broadwell, Haswell, etc.) use Penryn mode with `e1000` NIC for install stability
 - **AMD CPUs** use Cascadelake-Server emulation — functional but slower due to CPU translation overhead
 
 ---
