@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from threading import Thread
 
@@ -14,9 +13,11 @@ from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
 from .assets import AssetCheck, required_assets
 from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb, detect_net_model
-from .domain import DEFAULT_VMID, MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
+from .domain import DEFAULT_VMID, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import StepResult, apply_plan
+from .forms import validate_form_values, build_vm_config_from_values
+from .forms.form_handler import FormValues
 from .infrastructure import ProxmoxAdapter
 from .models import WizardState
 from .planner import PlanStep, build_plan, build_destroy_plan
@@ -630,46 +631,10 @@ class NextApp(App):
         self.query_one("#smbios_preview", Static).update(text)
 
     def _validate_form(self, quiet: bool = False) -> bool:
-        errors: dict[str, str] = {}
+        values = self._read_form_values()
+        errors = validate_form_values(values)
 
-        vmid_text = self.query_one("#vmid", Input).value.strip()
-        name_text = self.query_one("#name", Input).value.strip()
-        memory_text = self.query_one("#memory", Input).value.strip()
-        disk_text = self.query_one("#disk", Input).value.strip()
-        bridge_text = self.query_one("#bridge", Input).value.strip()
-        storage_text = self.query_one("#storage_input", Input).value.strip()
-
-        try:
-            vmid_val = int(vmid_text)
-            if vmid_val < MIN_VMID or vmid_val > MAX_VMID:
-                raise ValueError
-        except ValueError:
-            errors["vmid"] = f"VMID must be {MIN_VMID}-{MAX_VMID}."
-
-        if len(name_text) < 3:
-            errors["name"] = "VM Name must be at least 3 chars."
-
-        try:
-            mem_val = int(memory_text)
-            if mem_val < MIN_MEMORY_MB:
-                raise ValueError
-        except ValueError:
-            errors["memory"] = f"Memory must be >= {MIN_MEMORY_MB} MB."
-
-        try:
-            disk_val = int(disk_text)
-            if disk_val < MIN_DISK_GB:
-                raise ValueError
-        except ValueError:
-            errors["disk"] = f"Disk must be >= {MIN_DISK_GB} GB."
-
-        if not re.fullmatch(r"vmbr[0-9]+", bridge_text):
-            errors["bridge"] = "Bridge must match vmbr<N> (e.g. vmbr0)."
-
-        if not storage_text:
-            errors["storage_input"] = "Storage target is required."
-
-        # Apply invalid classes
+        # Apply invalid CSS classes to widgets
         for field_id in ("vmid", "name", "memory", "disk", "bridge", "storage_input"):
             widget = self.query_one(f"#{field_id}", Input)
             if field_id in errors:
@@ -691,40 +656,30 @@ class NextApp(App):
         self.query_one("#form_errors", Static).update(" ".join(issues))
         self.notify("Validation failed", severity="error")
 
-    def _read_form(self) -> VmConfig | None:
-        try:
-            vmid = int(self.query_one("#vmid", Input).value.strip())
-            cores = int(self.query_one("#cores", Input).value.strip() or "8")
-            memory_mb = int(self.query_one("#memory", Input).value.strip() or "16384")
-            disk_gb = int(self.query_one("#disk", Input).value.strip() or "128")
-        except ValueError:
-            return None
-
-        macos = self.state.selected_os or "sequoia"
-        smbios = self.state.smbios
-
-        return VmConfig(
-            vmid=vmid,
+    def _read_form_values(self) -> FormValues:
+        """Read current widget values into a FormValues dataclass."""
+        return FormValues(
+            vmid=self.query_one("#vmid", Input).value.strip(),
             name=self.query_one("#name", Input).value.strip(),
-            macos=macos,
-            cores=cores,
-            memory_mb=memory_mb,
-            disk_gb=disk_gb,
-            bridge=self.query_one("#bridge", Input).value.strip() or DEFAULT_BRIDGE,
-            storage=self.query_one("#storage_input", Input).value.strip() or DEFAULT_STORAGE,
+            cores=self.query_one("#cores", Input).value.strip(),
+            memory=self.query_one("#memory", Input).value.strip(),
+            disk=self.query_one("#disk", Input).value.strip(),
+            bridge=self.query_one("#bridge", Input).value.strip(),
+            storage=self.query_one("#storage_input", Input).value.strip(),
+            iso_dir=self.query_one("#iso_dir", Input).value.strip(),
             installer_path=self.query_one("#installer_path", Input).value.strip(),
-            iso_dir=self.query_one("#iso_dir", Input).value.strip() or DEFAULT_ISO_DIR,
-            smbios_serial=smbios.serial if smbios else "",
-            smbios_uuid=smbios.uuid if smbios else "",
-            smbios_mlb=smbios.mlb if smbios else "",
-            smbios_rom=smbios.rom if smbios else "",
-            smbios_model=smbios.model if smbios else "",
+            existing_uuid=self.query_one("#existing_uuid", Input).value.strip().upper(),
+            custom_vmgenid=self.query_one("#custom_vmgenid", Input).value.strip() if self.state.apple_services else "",
+            custom_mac=self.query_one("#custom_mac", Input).value.strip() if self.state.apple_services else "",
+            selected_os=self.state.selected_os,
             apple_services=self.state.apple_services,
-            cpu_model="Penryn" if self.state.use_penryn else "",
+            use_penryn=self.state.use_penryn,
             net_model=self.state.net_model,
-            vmgenid=self.query_one("#custom_vmgenid", Input).value.strip().upper() if self.state.apple_services else "",
-            static_mac=self.query_one("#custom_mac", Input).value.strip().upper() if self.state.apple_services else "",
+            smbios=self.state.smbios,
         )
+
+    def _read_form(self) -> VmConfig | None:
+        return build_vm_config_from_values(self._read_form_values())
 
     # ── Step 5: Review & Dry Run ────────────────────────────────────
 
