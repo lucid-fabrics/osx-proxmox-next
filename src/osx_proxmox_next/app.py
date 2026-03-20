@@ -12,7 +12,17 @@ from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
 from .assets import AssetCheck, required_assets
-from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb, detect_net_model
+from .defaults import (
+    DEFAULT_BRIDGE,
+    DEFAULT_ISO_DIR,
+    DEFAULT_STORAGE,
+    default_disk_gb,
+    detect_cpu_cores,
+    detect_cpu_info,
+    detect_iso_storage,
+    detect_memory_mb,
+    detect_net_model,
+)
 from .domain import MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
 from .executor import StepResult
 from .forms import validate_form_values, build_vm_config_from_values
@@ -22,15 +32,6 @@ from .models import WizardState
 from .planner import PlanStep, build_plan
 from .preflight import PreflightCheck
 from .rollback import RollbackSnapshot, rollback_hints
-from .services import (
-    detect_storage_targets,
-    detect_next_vmid,
-    run_download_worker,
-    run_preflight_worker,
-    run_dry_apply,
-    run_live_install,
-    run_destroy_worker,
-)
 from .screens import (
     compose_step1,
     compose_step2,
@@ -39,6 +40,15 @@ from .screens import (
     compose_step5,
     compose_step6,
     build_config_summary_text,
+)
+from .services import (
+    detect_next_vmid,
+    detect_storage_targets,
+    run_destroy_worker,
+    run_download_worker,
+    run_dry_apply,
+    run_live_install,
+    run_preflight_worker,
 )
 from .smbios import generate_smbios
 
@@ -54,164 +64,7 @@ def _get_pve() -> ProxmoxAdapter:
 
 
 class NextApp(App):
-    CSS = """
-    Screen { background: #0b1118; color: #f6f8fa; }
-    Header { background: #103252; color: #f6f8fa; }
-
-    #step_bar {
-        dock: top;
-        height: 3;
-        padding: 0 2;
-        background: #0d1722;
-        border-bottom: heavy #2f6fa2;
-        content-align: center middle;
-    }
-
-    #body { height: 1fr; padding: 1 2; overflow-y: auto; }
-
-    .step_container { height: auto; padding: 1; }
-    .step_hidden { display: none; }
-
-    .os_card {
-        border: round #1f4f7a;
-        padding: 1 2;
-        margin: 0 1 1 0;
-        min-width: 28;
-        height: 5;
-        content-align: center middle;
-    }
-    .os_card:hover { border: round #2f6fa2; background: #162433; }
-    .os_selected { border: heavy #2ec27e; background: #0f2a1a; }
-
-    .storage_btn { margin: 0 1 1 0; min-width: 18; }
-    .storage_selected { border: heavy #2ec27e; }
-
-    #config_grid {
-        layout: grid;
-        grid-size: 2;
-        grid-columns: 20 1fr;
-        grid-gutter: 0 1;
-        height: auto;
-        width: 100%;
-    }
-    .label { color: #9fc6e8; content-align: right middle; height: 1; }
-    Input {
-        height: 3;
-        color: #f6f8fa;
-        background: #162433;
-        border: tall #2f6fa2;
-    }
-    Input:focus { border: tall #2ec27e; background: #1a2c3f; }
-    .invalid { border: tall #d44f4f; background: #2a1717; }
-
-    #preflight_checks {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    #smbios_preview {
-        height: auto;
-        margin-top: 1;
-        border: tall #1f4f7a;
-        padding: 0 1;
-    }
-
-    #config_summary {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    #download_status {
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    #dry_log, #live_log {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: 12;
-        overflow: auto;
-    }
-
-    #result_box {
-        border: heavy #2ec27e;
-        padding: 1;
-        height: auto;
-        margin-top: 1;
-        content-align: center middle;
-    }
-    .result_fail { border: heavy #d44f4f; }
-
-    #install_btn {
-        height: 5;
-        min-width: 40;
-        border: heavy #2ec27e;
-        content-align: center middle;
-    }
-
-    .nav_row { height: auto; margin-top: 1; }
-    .nav_row Button { margin-right: 1; min-width: 14; }
-    #exit_btn, #exit_btn_2, #exit_btn_3, #exit_btn_4, #exit_btn_5, #exit_btn_6 {
-        dock: right;
-        background: #3a1a1a;
-        border: tall #d44f4f;
-        color: #d44f4f;
-    }
-
-    .action_row { height: auto; margin-bottom: 1; }
-    .action_row Button { margin-right: 1; min-width: 14; }
-
-    #form_errors {
-        height: auto;
-        color: #d44f4f;
-        margin-bottom: 1;
-    }
-
-    .hidden { display: none; }
-    .penryn_hint { color: #e6a817; margin-top: 1; }
-
-    .mode_btn { margin: 0 1 1 0; min-width: 18; }
-    .mode_active { border: heavy #2ec27e; background: #0f2a1a; }
-
-    #manage_panel { height: auto; padding: 1; }
-
-    #manage_vmid { width: 30; }
-    #manage_vmid_label { color: #9fc6e8; margin-top: 1; }
-    #manage_purge_cb { margin-right: 2; }
-
-    #vm_list_display {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: 8;
-        overflow: auto;
-    }
-
-    #manage_log {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: 8;
-        overflow: auto;
-    }
-
-    #manage_result {
-        border: heavy #2ec27e;
-        padding: 1;
-        height: auto;
-        margin-top: 1;
-    }
-    .manage_result_fail { border: heavy #d44f4f; }
-
-    .hint { color: #aaaaaa; margin-top: 1; }
-    """
+    CSS_PATH = Path(__file__).with_suffix(".tcss")
 
     BINDINGS = [
         ("q", "quit", "Quit"),
@@ -234,30 +87,12 @@ class NextApp(App):
         yield Header(show_clock=True)
         yield Static("", id="step_bar")
         with Container(id="body"):
-            yield from self._compose_step1()
-            yield from self._compose_step2()
-            yield from self._compose_step3()
-            yield from self._compose_step4()
-            yield from self._compose_step5()
-            yield from self._compose_step6()
-
-    def _compose_step1(self) -> ComposeResult:
-        yield from compose_step1()
-
-    def _compose_step2(self) -> ComposeResult:
-        yield from compose_step2()
-
-    def _compose_step3(self) -> ComposeResult:
-        yield from compose_step3(self.state.storage_targets)
-
-    def _compose_step4(self) -> ComposeResult:
-        yield from compose_step4(self._cpu_info)
-
-    def _compose_step5(self) -> ComposeResult:
-        yield from compose_step5()
-
-    def _compose_step6(self) -> ComposeResult:
-        yield from compose_step6()
+            yield from compose_step1()
+            yield from compose_step2()
+            yield from compose_step3(self.state.storage_targets)
+            yield from compose_step4(self._cpu_info)
+            yield from compose_step5()
+            yield from compose_step6()
 
     def on_mount(self) -> None:
         self._update_step_bar()
@@ -929,6 +764,7 @@ class NextApp(App):
         self.query_one("#preflight_next_btn", Button).disabled = not self.state.preflight_ok
 
     # ── Detection Helpers ───────────────────────────────────────────
+    # These thin wrappers are intentionally kept as mockable seams for tests.
 
     def _detect_storage_targets(self) -> list[str]:
         return detect_storage_targets()
