@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 
 from .defaults import detect_cpu_vendor
-from .infrastructure import CommandResult, ProxmoxAdapter
+from .infrastructure import ProxmoxAdapter
 
 log = logging.getLogger(__name__)
 
