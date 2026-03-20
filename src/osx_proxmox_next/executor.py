@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Optional
 
 from .infrastructure import ProxmoxAdapter
-from .planner import PlanStep
+from .domain import PlanStep
 
 
 @dataclass

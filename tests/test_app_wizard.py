@@ -10,7 +10,7 @@ from osx_proxmox_next import app as app_module
 from osx_proxmox_next.app import NextApp, WizardState
 from osx_proxmox_next.executor import ApplyResult
 from osx_proxmox_next.infrastructure import CommandResult
-from osx_proxmox_next.planner import PlanStep
+from osx_proxmox_next.domain import PlanStep
 from osx_proxmox_next.services import detection_service
 from osx_proxmox_next.services import download_service
 from osx_proxmox_next.services import install_service
@@ -1217,7 +1217,7 @@ def test_live_install_blocked_no_config() -> None:
 
 def test_live_install_blocked_no_preflight() -> None:
     from osx_proxmox_next.domain import VmConfig
-    from osx_proxmox_next.planner import PlanStep
+    from osx_proxmox_next.domain import PlanStep
 
     async def _run() -> None:
         app = NextApp()
@@ -1239,7 +1239,7 @@ def test_live_install_blocked_no_preflight() -> None:
 def test_live_install_success(monkeypatch) -> None:
     from osx_proxmox_next.preflight import PreflightCheck
     from osx_proxmox_next.domain import VmConfig
-    from osx_proxmox_next.planner import PlanStep
+    from osx_proxmox_next.domain import PlanStep
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
@@ -1293,7 +1293,7 @@ def test_live_install_success(monkeypatch) -> None:
 def test_live_install_failure(monkeypatch) -> None:
     from osx_proxmox_next.preflight import PreflightCheck
     from osx_proxmox_next.domain import VmConfig
-    from osx_proxmox_next.planner import PlanStep
+    from osx_proxmox_next.domain import PlanStep
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(

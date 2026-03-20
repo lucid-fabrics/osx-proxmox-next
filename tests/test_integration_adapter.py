@@ -2,7 +2,7 @@ import subprocess
 
 from osx_proxmox_next.executor import apply_plan
 from osx_proxmox_next.infrastructure import ProxmoxAdapter
-from osx_proxmox_next.planner import PlanStep
+from osx_proxmox_next.domain import PlanStep
 
 
 def test_adapter_qm_wraps_binary(monkeypatch) -> None:

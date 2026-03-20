@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..domain import DEFAULT_VMID, VmConfig
-from ..planner import PlanStep
+from ..domain import DEFAULT_VMID, PlanStep, VmConfig
 from ..preflight import PreflightCheck
 from ..rollback import RollbackSnapshot
 from ..smbios import SmbiosIdentity

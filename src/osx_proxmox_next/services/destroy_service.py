@@ -4,7 +4,8 @@ import logging
 from collections.abc import Callable
 
 from ..executor import ApplyResult, StepResult, apply_plan
-from ..planner import PlanStep, build_destroy_plan
+from ..domain import PlanStep
+from ..planner import build_destroy_plan
 from ..rollback import RollbackSnapshot, create_snapshot
 
 log = logging.getLogger(__name__)

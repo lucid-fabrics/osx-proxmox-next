@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from ..defaults import CpuInfo
-from ..domain import SUPPORTED_MACOS, VmConfig
-from ..planner import PlanStep
+from ..domain import SUPPORTED_MACOS, PlanStep, VmConfig
 
 __all__ = ["build_config_summary_text"]
 

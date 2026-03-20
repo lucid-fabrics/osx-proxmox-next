@@ -3,11 +3,11 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from shlex import join, quote as shquote
+from shlex import quote as shquote
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import CpuInfo, detect_cpu_info
-from .domain import SUPPORTED_MACOS, VmConfig, validate_config
+from .domain import SUPPORTED_MACOS, VmConfig, PlanStep, validate_config
 from .infrastructure import ProxmoxAdapter
 from .script_renderer import (
     _APPLE_OSK,
@@ -18,17 +18,6 @@ from .smbios_planner import (
     _encode_smbios_value,
     _populate_smbios,
 )
-
-
-@dataclass
-class PlanStep:
-    title: str
-    argv: list[str]
-    risk: str = "safe"
-
-    @property
-    def command(self) -> str:
-        return join(self.argv)
 
 
 def _cpu_args(cpu: CpuInfo, override: str = "") -> str:

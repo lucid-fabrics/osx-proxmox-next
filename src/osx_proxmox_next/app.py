@@ -23,13 +23,13 @@ from .defaults import (
     detect_memory_mb,
     detect_net_model,
 )
-from .domain import MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
+from .domain import MIN_VMID, MAX_VMID, PlanStep, SUPPORTED_MACOS, VmConfig, validate_config
 from .executor import StepResult
 from .forms import validate_form_values, build_vm_config_from_values
 from .forms.form_handler import FormValues
 from .infrastructure import ProxmoxAdapter
 from .models import WizardState
-from .planner import PlanStep, build_plan
+from .planner import build_plan
 from .preflight import PreflightCheck
 from .rollback import RollbackSnapshot, rollback_hints
 from .screens import (
