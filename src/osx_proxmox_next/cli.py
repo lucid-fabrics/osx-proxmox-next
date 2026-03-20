@@ -12,7 +12,8 @@ from .diagnostics import export_log_bundle, recovery_guide
 from .domain import MIN_VMID, MAX_VMID, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
-from .planner import build_plan, build_destroy_plan, fetch_vm_info, render_script
+from .planner import build_plan, build_destroy_plan, fetch_vm_info
+from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints
 

@@ -1,9 +1,12 @@
 from osx_proxmox_next.defaults import CpuInfo
 from osx_proxmox_next.domain import VmConfig
 from osx_proxmox_next.planner import (
-    build_plan, render_script, _cpu_args, _plist_patch_script,
-    _loop_cleanup_script, _mount_source_oc_script, _format_dest_oc_script,
+    build_plan, _cpu_args,
     VmInfo, fetch_vm_info, build_destroy_plan,
+)
+from osx_proxmox_next.script_renderer import (
+    render_script, _plist_patch_script,
+    _loop_cleanup_script, _mount_source_oc_script, _format_dest_oc_script,
 )
 from osx_proxmox_next.infrastructure import CommandResult
 
@@ -698,7 +701,7 @@ def test_build_plan_paths_quoted(monkeypatch) -> None:
 
 def test_sanitize_smbios_strips_comma_for_non_model() -> None:
     """Commas must be stripped from serial/UUID/MLB/ROM but preserved in model."""
-    from osx_proxmox_next.planner import _sanitize_smbios
+    from osx_proxmox_next.smbios_planner import _sanitize_smbios
     # Model allows commas
     assert _sanitize_smbios("MacPro7,1", allow_comma=True) == "MacPro7,1"
     # Serial/MLB/ROM/UUID must not have commas
