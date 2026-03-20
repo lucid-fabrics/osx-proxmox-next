@@ -346,6 +346,7 @@ def test_cli_progress_without_total(capsys):
 def test_auto_download_missing_opencore(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
+    import osx_proxmox_next.cli as _cli_mod
 
     downloaded = []
 
@@ -354,8 +355,8 @@ def test_auto_download_missing_opencore(monkeypatch, tmp_path):
         lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        cli_module, "download_opencore",
-        lambda macos, dest, on_progress=None: (downloaded.append("oc"), tmp_path / "oc.iso")[1],
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: (downloaded.append("oc"), []),
     )
 
     from osx_proxmox_next.domain import VmConfig
@@ -368,6 +369,7 @@ def test_auto_download_missing_opencore(monkeypatch, tmp_path):
 def test_auto_download_missing_recovery(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
+    import osx_proxmox_next.cli as _cli_mod
 
     downloaded = []
 
@@ -376,8 +378,8 @@ def test_auto_download_missing_recovery(monkeypatch, tmp_path):
         lambda cfg: [AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        cli_module, "download_recovery",
-        lambda macos, dest, on_progress=None: (downloaded.append("rec"), tmp_path / "rec.img")[1],
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: (downloaded.append("rec"), []),
     )
 
     from osx_proxmox_next.domain import VmConfig
@@ -390,17 +392,16 @@ def test_auto_download_missing_recovery(monkeypatch, tmp_path):
 def test_auto_download_missing_opencore_error(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
-    from osx_proxmox_next.downloader import DownloadError
+    import osx_proxmox_next.cli as _cli_mod
 
     monkeypatch.setattr(
         cli_module, "required_assets",
         lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
     )
-
-    def fail_download(macos, dest, on_progress=None):
-        raise DownloadError("network error")
-
-    monkeypatch.setattr(cli_module, "download_opencore", fail_download)
+    monkeypatch.setattr(
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: ["OpenCore: network error"],
+    )
 
     from osx_proxmox_next.domain import VmConfig
     cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
@@ -411,17 +412,16 @@ def test_auto_download_missing_opencore_error(monkeypatch, tmp_path):
 def test_auto_download_missing_recovery_error(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
-    from osx_proxmox_next.downloader import DownloadError
+    import osx_proxmox_next.cli as _cli_mod
 
     monkeypatch.setattr(
         cli_module, "required_assets",
         lambda cfg: [AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True)],
     )
-
-    def fail_download(macos, dest, on_progress=None):
-        raise DownloadError("network error")
-
-    monkeypatch.setattr(cli_module, "download_recovery", fail_download)
+    monkeypatch.setattr(
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: ["Recovery: network error"],
+    )
 
     from osx_proxmox_next.domain import VmConfig
     cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
@@ -430,13 +430,19 @@ def test_auto_download_missing_recovery_error(monkeypatch, tmp_path):
 
 
 def test_auto_download_missing_unknown_asset_type(monkeypatch, tmp_path):
-    """Asset with unknown name is silently skipped."""
+    """Asset with unknown name is silently skipped (run_download_worker handles routing)."""
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
+    import osx_proxmox_next.cli as _cli_mod
 
+    called = []
     monkeypatch.setattr(
         cli_module, "required_assets",
         lambda cfg: [AssetCheck("Unknown Asset", Path("/tmp/unknown"), False, "missing", downloadable=True)],
+    )
+    monkeypatch.setattr(
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: (called.append(True), []),
     )
 
     from osx_proxmox_next.domain import VmConfig

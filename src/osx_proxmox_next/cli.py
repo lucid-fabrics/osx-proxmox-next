@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from .diagnostics import export_log_bundle, recovery_guide
 from .domain import MIN_VMID, MAX_VMID, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
+from .services.download_service import run_download_worker
 from .planner import build_plan, build_destroy_plan, fetch_vm_info
 from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
@@ -60,21 +62,17 @@ def _auto_download_missing(config: VmConfig, dest_dir: Path) -> None:
     if not missing:
         return
 
-    for asset in missing:
-        if "OpenCore" in asset.name:
-            print(f"Downloading OpenCore image for {config.macos}...")
-            try:
-                path = download_opencore(config.macos, dest_dir, on_progress=_cli_progress)
-                print(f"\nDownloaded: {path}")
-            except DownloadError as exc:
-                print(f"\nOpenCore download failed: {exc}")
-        elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():
-            print(f"Downloading recovery image for {config.macos}...")
-            try:
-                path = download_recovery(config.macos, dest_dir, on_progress=_cli_progress)
-                print(f"\nDownloaded: {path}")
-            except DownloadError as exc:
-                print(f"\nRecovery download failed: {exc}")
+    config_with_dir = config if config.iso_dir else \
+        dataclasses.replace(config, iso_dir=str(dest_dir))
+
+    def _on_progress(phase: str, pct: int) -> None:
+        sys.stdout.write(f"\r[{phase}] {pct}%")
+        sys.stdout.flush()
+
+    errors = run_download_worker(config_with_dir, missing, on_progress=_on_progress)
+    print()
+    for err in errors:
+        print(f"Download failed: {err}")
 
 
 def build_parser() -> argparse.ArgumentParser:
