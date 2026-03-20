@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path
@@ -23,6 +22,7 @@ from .models import WizardState
 from .planner import PlanStep, build_plan, build_destroy_plan
 from .preflight import PreflightCheck, run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
+from .services import detect_storage_targets, detect_next_vmid
 from .smbios import generate_smbios
 
 _pve: ProxmoxAdapter | None = None
@@ -1130,53 +1130,10 @@ class NextApp(App):
     # ── Detection Helpers ───────────────────────────────────────────
 
     def _detect_storage_targets(self) -> list[str]:
-        res = _get_pve().pvesm("status", "-content", "images")
-        if not res.ok:
-            log.debug("Failed to detect storage targets: %s", res.output)
-            return [DEFAULT_STORAGE, "local"]
-        targets: list[str] = []
-        for line in res.output.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 3 and parts[2] == "active":
-                name = parts[0]
-                if name not in targets:
-                    targets.append(name)
-        if DEFAULT_STORAGE not in targets:
-            targets.insert(0, DEFAULT_STORAGE)
-        return targets[:5]
+        return detect_storage_targets()
 
     def _detect_next_vmid(self) -> int:
-        res = _get_pve().pvesh("get", "/cluster/nextid")
-        if res.ok:
-            output = res.output.strip()
-            if output.isdigit():
-                vmid = int(output)
-                if MIN_VMID <= vmid <= MAX_VMID:
-                    return vmid
-            try:
-                parsed = json.loads(output)
-                if isinstance(parsed, int) and MIN_VMID <= parsed <= MAX_VMID:
-                    return parsed  # pragma: no cover
-            except (json.JSONDecodeError, ValueError):
-                log.debug("pvesh returned non-JSON/non-int: %s", output)
-        else:
-            log.debug("Failed to get next VMID via pvesh: %s", res.output)
-
-        res = _get_pve().qm("list")
-        if res.ok:
-            vmids: list[int] = []
-            for line in res.output.splitlines()[1:]:
-                parts = line.split()
-                if parts and parts[0].isdigit():
-                    vmids.append(int(parts[0]))
-            next_vmid = (max(vmids) + 1) if vmids else DEFAULT_VMID
-            if next_vmid < MIN_VMID:
-                return MIN_VMID
-            if next_vmid > MAX_VMID:
-                return MAX_VMID
-            return next_vmid
-        log.debug("Failed to detect next VMID via qm list: %s", res.output)
-        return DEFAULT_VMID
+        return detect_next_vmid()
 
     # ── UI Helpers ──────────────────────────────────────────────────
 
