@@ -14,16 +14,23 @@ from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 from .assets import AssetCheck, required_assets
 from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb, detect_net_model
 from .domain import DEFAULT_VMID, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
-from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
-from .executor import StepResult, apply_plan
+from .executor import StepResult
 from .forms import validate_form_values, build_vm_config_from_values
 from .forms.form_handler import FormValues
 from .infrastructure import ProxmoxAdapter
 from .models import WizardState
-from .planner import PlanStep, build_plan, build_destroy_plan
-from .preflight import PreflightCheck, run_preflight, has_missing_build_deps, install_missing_packages
-from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
-from .services import detect_storage_targets, detect_next_vmid
+from .planner import PlanStep, build_plan
+from .preflight import PreflightCheck
+from .rollback import RollbackSnapshot, rollback_hints
+from .services import (
+    detect_storage_targets,
+    detect_next_vmid,
+    run_download_worker,
+    run_preflight_worker,
+    run_dry_apply,
+    run_live_install,
+    run_destroy_worker,
+)
 from .smbios import generate_smbios
 
 _pve: ProxmoxAdapter | None = None
@@ -737,28 +744,10 @@ class NextApp(App):
             )
 
     def _download_worker(self, config: VmConfig, missing: list[AssetCheck]) -> None:
-        dest_dir = Path(config.iso_dir or DEFAULT_ISO_DIR)
-        errors: list[str] = []
+        def on_progress(phase: str, pct: int) -> None:
+            self.call_from_thread(self._update_download_progress, phase, pct)
 
-        def on_progress(p: DownloadProgress) -> None:
-            if p.total > 0:
-                pct = int(p.downloaded * 100 / p.total)
-                self.call_from_thread(self._update_download_progress, p.phase, pct)
-
-        for asset in missing:
-            if not asset.downloadable:
-                continue
-            if "OpenCore" in asset.name:
-                try:
-                    download_opencore(config.macos, dest_dir, on_progress=on_progress)
-                except DownloadError as exc:
-                    errors.append(f"OpenCore: {exc}")
-            elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():  # pragma: no branch
-                try:
-                    download_recovery(config.macos, dest_dir, on_progress=on_progress)
-                except DownloadError as exc:
-                    errors.append(f"Recovery: {exc}")
-
+        errors = run_download_worker(config, missing, on_progress=on_progress)
         self.call_from_thread(self._finish_download, errors)
 
     def _update_download_progress(self, phase: str, pct: int) -> None:
@@ -815,7 +804,7 @@ class NextApp(App):
             self.call_from_thread(self._update_dry_progress, idx, total, step.title, result)
 
         def worker() -> None:
-            result = apply_plan(self.state.plan_steps, execute=False, on_step=callback)
+            result = run_dry_apply(self.state.plan_steps, on_step=callback)
             self.call_from_thread(self._finish_dry_apply, result.ok, result.log_path)
 
         Thread(target=worker, daemon=True).start()
@@ -874,9 +863,10 @@ class NextApp(App):
             self.call_from_thread(self._update_live_progress, idx, total, step.title, result)
 
         def worker() -> None:
-            snapshot = create_snapshot(self.state.config.vmid)
+            result, snapshot = run_live_install(
+                self.state.config.vmid, self.state.plan_steps, on_step=callback
+            )
             self.state.snapshot = snapshot
-            result = apply_plan(self.state.plan_steps, execute=True, on_step=callback)
             self.call_from_thread(self._finish_live_install, result.ok, result.log_path, snapshot)
 
         Thread(target=worker, daemon=True).start()
@@ -1026,13 +1016,10 @@ class NextApp(App):
         Thread(target=self._destroy_worker, args=(vmid,), daemon=True).start()
 
     def _destroy_worker(self, vmid: int) -> None:
-        snapshot = create_snapshot(vmid)
-        steps = build_destroy_plan(vmid, purge=self.state.uninstall_purge)
-
         def on_step(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
             self.call_from_thread(self._update_destroy_log, idx, total, step.title, result)
 
-        result = apply_plan(steps, execute=True, on_step=on_step)
+        result, _snapshot = run_destroy_worker(vmid, purge=self.state.uninstall_purge, on_step=on_step)
         self.call_from_thread(self._finish_destroy, result.ok, result.log_path)
 
     def _update_destroy_log(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
@@ -1063,13 +1050,9 @@ class NextApp(App):
     # ── Preflight Worker ────────────────────────────────────────────
 
     def _preflight_worker(self) -> None:
-        checks = run_preflight()
-        if has_missing_build_deps(checks):
-            def _on_output(msg: str) -> None:
-                self.call_from_thread(self._update_preflight_status, msg)
-            ok, pkgs = install_missing_packages(on_output=_on_output)
-            if ok and pkgs:
-                checks = run_preflight()
+        def _on_status(msg: str) -> None:
+            self.call_from_thread(self._update_preflight_status, msg)
+        checks = run_preflight_worker(on_status=_on_status)
         self.call_from_thread(self._finish_preflight, checks)
 
     def _update_preflight_status(self, msg: str) -> None:

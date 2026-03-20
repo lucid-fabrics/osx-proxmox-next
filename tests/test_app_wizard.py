@@ -12,6 +12,10 @@ from osx_proxmox_next.executor import ApplyResult
 from osx_proxmox_next.infrastructure import CommandResult
 from osx_proxmox_next.planner import PlanStep
 from osx_proxmox_next.services import detection_service
+from osx_proxmox_next.services import download_service
+from osx_proxmox_next.services import install_service
+from osx_proxmox_next.services import destroy_service
+from osx_proxmox_next.services import preflight_service
 
 
 class FakePve:
@@ -880,8 +884,8 @@ def test_download_worker_success(monkeypatch) -> None:
             on_progress(DownloadProgress(downloaded=1000, total=1000, phase="recovery"))
         return dest / f"{macos}-recovery.img"
 
-    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
-    monkeypatch.setattr(app_module, "download_recovery", fake_download_recovery)
+    monkeypatch.setattr(download_service, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(download_service, "download_recovery", fake_download_recovery)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:
@@ -922,7 +926,7 @@ def test_download_worker_opencore_error(monkeypatch) -> None:
     def raise_dl_error(*a, **kw):
         raise DownloadError("fail")
 
-    monkeypatch.setattr(app_module, "download_opencore", raise_dl_error)
+    monkeypatch.setattr(download_service, "download_opencore", raise_dl_error)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:
@@ -961,7 +965,7 @@ def test_download_worker_recovery_error(monkeypatch) -> None:
     def raise_dl_error(*a, **kw):
         raise DownloadError("recovery fail")
 
-    monkeypatch.setattr(app_module, "download_recovery", raise_dl_error)
+    monkeypatch.setattr(download_service, "download_recovery", raise_dl_error)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:
@@ -1075,7 +1079,7 @@ def test_dry_run_success(monkeypatch) -> None:
                 on_step(idx, len(steps), step, _R())
         return ApplyResult(ok=True, results=[], log_path=Path("/tmp/dry.log"))
 
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(install_service, "apply_plan", fake_apply_plan)
 
     async def _run() -> None:
         app = NextApp()
@@ -1101,7 +1105,7 @@ def test_dry_run_failure(monkeypatch) -> None:
     def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
         return ApplyResult(ok=False, results=[], log_path=Path("/tmp/dry-fail.log"))
 
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(install_service, "apply_plan", fake_apply_plan)
 
     async def _run() -> None:
         app = NextApp()
@@ -1239,7 +1243,7 @@ def test_live_install_success(monkeypatch) -> None:
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "run_preflight",
+        preflight_service, "run_preflight",
         lambda: [PreflightCheck("qm", True, "ok"), PreflightCheck("root", True, "ok")],
     )
 
@@ -1253,8 +1257,8 @@ def test_live_install_success(monkeypatch) -> None:
                 on_step(idx, len(steps), step, _R())
         return ApplyResult(ok=True, results=[], log_path=Path("/tmp/live.log"))
 
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
-    monkeypatch.setattr(app_module, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
+    monkeypatch.setattr(install_service, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(install_service, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
 
     async def _run() -> None:
         app = NextApp()
@@ -1293,11 +1297,11 @@ def test_live_install_failure(monkeypatch) -> None:
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "run_preflight",
+        preflight_service, "run_preflight",
         lambda: [PreflightCheck("qm", True, "ok"), PreflightCheck("root", True, "ok")],
     )
-    monkeypatch.setattr(app_module, "apply_plan", lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(ok=False, results=[], log_path=Path("/tmp/fail.log")))
-    monkeypatch.setattr(app_module, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
+    monkeypatch.setattr(install_service, "apply_plan", lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(ok=False, results=[], log_path=Path("/tmp/fail.log")))
+    monkeypatch.setattr(install_service, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
 
     async def _run() -> None:
         app = NextApp()
@@ -1785,7 +1789,7 @@ def test_download_worker_skips_non_downloadable(monkeypatch) -> None:
         download_calls["opencore"] += 1
         return dest / f"opencore-{macos}.iso"
 
-    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(download_service, "download_opencore", fake_download_opencore)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:
@@ -2205,7 +2209,7 @@ def test_manage_destroy_success(monkeypatch) -> None:
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "create_snapshot",
+        destroy_service, "create_snapshot",
         lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
     )
 
@@ -2219,7 +2223,7 @@ def test_manage_destroy_success(monkeypatch) -> None:
                 on_step(idx, len(steps), step, _R())
         return ApplyResult(ok=True, results=[], log_path=Path("/tmp/destroy.log"))
 
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(destroy_service, "apply_plan", fake_apply_plan)
 
     async def _run() -> None:
         app = NextApp()
@@ -2247,11 +2251,11 @@ def test_manage_destroy_failure(monkeypatch) -> None:
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "create_snapshot",
+        destroy_service, "create_snapshot",
         lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
     )
     monkeypatch.setattr(
-        app_module, "apply_plan",
+        destroy_service, "apply_plan",
         lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(
             ok=False, results=[], log_path=Path("/tmp/fail.log")
         ),
