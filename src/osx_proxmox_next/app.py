@@ -13,7 +13,7 @@ from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
 from ._manage_mixin import ManageModeMixin
 from ._wizard_mixin import WizardStepsMixin
-from .assets import AssetCheck, required_assets
+from .assets import required_assets
 from .defaults import (
     DEFAULT_ISO_DIR,
     detect_cpu_cores,
@@ -21,7 +21,7 @@ from .defaults import (
     detect_iso_storage,
     detect_net_model,
 )
-from .domain import PlanStep, SUPPORTED_MACOS, VmConfig, validate_config
+from .domain import PlanStep, SUPPORTED_MACOS, validate_config
 from .executor import StepResult
 from .models import WizardState
 from .planner import build_plan
@@ -217,120 +217,6 @@ class NextApp(WizardStepsMixin, ManageModeMixin, App):
         self._update_preflight_display()
         Thread(target=self._preflight_worker, daemon=True).start()
 
-    def _select_os(self, key: str) -> None:
-        self.state.selected_os = key
-        self.state.smbios = resolve_smbios(key, self.state.apple_services)
-        for os_key in SUPPORTED_MACOS:
-            card = self.query_one(f"#os_{os_key}")
-            if os_key == key:
-                card.add_class("os_selected")
-            else:
-                card.remove_class("os_selected")
-        self.query_one("#next_btn", Button).disabled = False
-
-    def _select_storage(self, target: str) -> None:
-        self.state.selected_storage = target
-        for idx in range(len(self.state.storage_targets)):
-            btn = self.query_one(f"#storage_{idx}", Button)
-            if self.state.storage_targets[idx] == target:
-                btn.add_class("storage_selected")
-            else:
-                btn.remove_class("storage_selected")
-
-    def _fill_form(self, storage_fallback: str = "") -> None:
-        macos = self.state.selected_os or "sequoia"
-        self._set_input_value("#vmid", str(self._detect_next_vmid()))
-        self._set_input_value("#name", f"macos-{macos}")
-        self._set_input_value("#cores", str(detect_cpu_cores()))
-        self._set_input_value("#memory", str(detect_memory_mb()))
-        self._set_input_value("#disk", str(default_disk_gb(macos)))
-        self._set_input_value("#bridge", DEFAULT_BRIDGE)
-        self._set_input_value(
-            "#storage_input",
-            storage_fallback or self.state.selected_storage or DEFAULT_STORAGE,
-        )
-        self._set_input_value("#iso_dir", self.state.selected_iso_dir)
-        self._set_input_value("#installer_path", "")
-        self._update_smbios_preview()
-
-    def _apply_host_defaults(self) -> None:
-        self._fill_form(storage_fallback=self.state.selected_storage or DEFAULT_STORAGE)
-        if not self.state.smbios:
-            macos = self.state.selected_os or "sequoia"
-            existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
-            self.state.smbios = resolve_smbios(macos, self.state.apple_services, existing_uuid)
-        self._update_smbios_preview()
-
-    def _generate_smbios(self) -> None:
-        macos = self.state.selected_os or "sequoia"
-        existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
-        self.state.smbios = resolve_smbios(macos, self.state.apple_services, existing_uuid)
-        self._update_smbios_preview()
-
-    def _update_smbios_preview(self) -> None:
-        smbios = self.state.smbios
-        if smbios:
-            text = f"SMBIOS: serial={smbios.serial}  uuid={smbios.uuid}  model={smbios.model}"
-            if self.state.apple_services:
-                text += "  [Apple Services]"
-        else:
-            text = "SMBIOS: not generated yet."
-        self.query_one("#smbios_preview", Static).update(text)
-
-    def _validate_form(self, quiet: bool = False) -> bool:
-        values = self._read_form_values()
-        errors = validate_form_values(values)
-        for field_id in ("vmid", "name", "memory", "disk", "bridge", "storage_input"):
-            widget = self.query_one(f"#{field_id}", Input)
-            if field_id in errors:
-                widget.add_class("invalid")
-            else:
-                widget.remove_class("invalid")
-        self.state.form_errors = errors
-        if errors:
-            self.query_one("#form_errors", Static).update(" ".join(errors.values()))
-            if not quiet:
-                self.notify("Fix form errors before continuing", severity="warning")
-            return False
-        self.query_one("#form_errors", Static).update("")
-        return True
-
-    def _show_form_errors(self, issues: list[str]) -> None:
-        self.query_one("#form_errors", Static).update(" ".join(issues))
-        self.notify("Validation failed", severity="error")
-
-    def _read_form_values(self) -> FormValues:
-        return FormValues(
-            vmid=self.query_one("#vmid", Input).value.strip(),
-            name=self.query_one("#name", Input).value.strip(),
-            cores=self.query_one("#cores", Input).value.strip(),
-            memory=self.query_one("#memory", Input).value.strip(),
-            disk=self.query_one("#disk", Input).value.strip(),
-            bridge=self.query_one("#bridge", Input).value.strip(),
-            storage=self.query_one("#storage_input", Input).value.strip(),
-            iso_dir=self.query_one("#iso_dir", Input).value.strip(),
-            installer_path=self.query_one("#installer_path", Input).value.strip(),
-            existing_uuid=self.query_one("#existing_uuid", Input).value.strip().upper(),
-            custom_vmgenid=self.query_one("#custom_vmgenid", Input).value.strip() if self.state.apple_services else "",
-            custom_mac=self.query_one("#custom_mac", Input).value.strip() if self.state.apple_services else "",
-            selected_os=self.state.selected_os,
-            apple_services=self.state.apple_services,
-            use_penryn=self.state.use_penryn,
-            net_model=self.state.net_model,
-            smbios=self.state.smbios,
-        )
-
-    def _read_form(self) -> VmConfig | None:
-        return build_vm_config_from_values(self._read_form_values())
-
-    def _render_config_summary(self) -> None:
-        config = self.state.config
-        if not config:
-            return
-        cpu = detect_cpu_info()
-        text = build_config_summary_text(config, self.state.plan_steps, cpu)
-        self.query_one("#config_summary", Static).update(text)
-
     def _check_and_download_assets(self) -> None:
         config = self.state.config
         if not config:
@@ -358,47 +244,6 @@ class NextApp(WizardStepsMixin, ManageModeMixin, App):
             self.query_one("#download_status", Static).update(
                 f"Missing assets: {', '.join(a.name for a in missing)}. Provide path manually."
             )
-
-    def _download_worker(self, config: VmConfig, missing: list[AssetCheck]) -> None:
-        def on_progress(phase: str, pct: int) -> None:
-            self.call_from_thread(self._update_download_progress, phase, pct)
-        errors = run_download_worker(config, missing, on_progress=on_progress)
-        self.call_from_thread(self._finish_download, errors)
-
-    def _update_download_progress(self, phase: str, pct: int) -> None:
-        self.state.download_pct = pct
-        self.state.download_phase = phase
-        self.query_one("#download_progress", ProgressBar).update(total=100, progress=pct)
-        if pct >= 100:
-            self.query_one("#download_status", Static).update(f"Finalizing {phase}...")
-        else:
-            self.query_one("#download_status", Static).update(f"Downloading {phase}... {pct}%")
-
-    def _finish_download(self, errors: list[str]) -> None:
-        self.state.download_running = False
-        self.query_one("#download_progress").add_class("hidden")
-        if errors:
-            self.state.download_errors = errors
-            self.query_one("#download_status", Static).update(
-                "Download errors: " + "; ".join(errors)
-            )
-            self.notify("Some downloads failed", severity="error")
-        else:
-            self.state.downloads_complete = True
-            self._rebuild_plan_after_download()
-            self.query_one("#download_status", Static).update("Assets: downloaded and ready")
-            self.query_one("#dry_run_btn", Button).disabled = False
-            self.notify("Assets downloaded", severity="information")
-
-    def _rebuild_plan_after_download(self) -> None:
-        config = self._read_form()
-        if config:
-            self.state.config = config
-            try:
-                self.state.plan_steps = build_plan(config)
-            except ValueError:
-                log.debug("Failed to rebuild plan after download", exc_info=True)
-            self._render_config_summary()
 
     def _run_dry_apply(self) -> None:
         if self.state.apply_running:
