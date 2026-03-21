@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from shlex import join as shlex_join
 
 
 SUPPORTED_MACOS = {
@@ -44,6 +45,17 @@ class VmConfig:
     iso_dir: str = ""
     cpu_model: str = ""
     net_model: str = "vmxnet3"
+
+
+@dataclass
+class PlanStep:
+    title: str
+    argv: list[str]
+    risk: str = "safe"
+
+    @property
+    def command(self) -> str:
+        return shlex_join(self.argv)
 
 
 def validate_config(config: VmConfig) -> list[str]:

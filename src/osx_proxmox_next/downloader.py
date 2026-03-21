@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 import urllib.error
@@ -13,6 +14,8 @@ from urllib.parse import urlparse
 
 from . import __version__
 from .infrastructure import ProxmoxAdapter
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,6 +69,7 @@ def download_opencore(
     for name in candidates:
         dest = dest_dir / name
         if dest.exists():
+            log.debug("OpenCore cache hit: %s", dest)
             return dest
 
     # Check version-tagged release, latest release, then permanent 'assets' tag
@@ -75,6 +79,7 @@ def download_opencore(
             url = _find_release_asset(release, name, required=False)
             if url:
                 dest = dest_dir / name
+                log.debug("Downloading OpenCore %s from %s", name, url)
                 _download_file(url, dest, on_progress, "opencore")
                 return dest
 
@@ -95,10 +100,12 @@ def download_recovery(
 
     dest = dest_dir / f"{macos}-recovery.img"
     if dest.exists():
+        log.debug("Recovery cache hit: %s", dest)
         return dest
 
     board_id = RECOVERY_BOARD_IDS[macos]
     os_type = _RECOVERY_OS_TYPE.get(macos, "default")
+    log.debug("Fetching %s recovery (board=%s, os_type=%s)", macos, board_id, os_type)
     session = _get_recovery_session()
     image_info = _get_recovery_image_info(session, board_id, os_type)
     image_url = image_info["AU"]
@@ -121,7 +128,8 @@ def download_recovery(
 
 
 def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> None:
-    adapter = ProxmoxAdapter()
+    from .services import get_proxmox_adapter
+    adapter = get_proxmox_adapter()
     result = adapter.run(["dmg2img", str(dmg_path), str(dest)])
     if not result.ok:
         if dest.exists():
@@ -153,8 +161,8 @@ def _fetch_github_releases(version: str) -> list[dict]:
             if tag and tag not in seen_tags:
                 seen_tags.add(tag)
                 releases.append(data)
-        except (urllib.error.HTTPError, DownloadError):
-            pass
+        except (urllib.error.HTTPError, DownloadError) as exc:
+            log.debug("Release fetch failed for %s: %s", url, exc)
 
     if not releases:
         raise DownloadError(
@@ -257,6 +265,7 @@ def _retry_download(
             return
         except (OSError, urllib.error.URLError) as exc:
             last_error = exc
+            log.debug("Download attempt %d/%d failed for %s: %s", attempt + 1, _MAX_RETRIES, url, exc)
             if part_path.exists():
                 part_path.unlink()
             if attempt < _MAX_RETRIES - 1:

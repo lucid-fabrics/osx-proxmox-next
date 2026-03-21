@@ -12,6 +12,8 @@ class CommandResult:
 
 
 _SUBPROCESS_TIMEOUT = 300
+_EXIT_CODE_NOT_FOUND = 127
+_EXIT_CODE_TIMEOUT = 124
 
 
 class ProxmoxAdapter:
@@ -21,12 +23,12 @@ class ProxmoxAdapter:
             output = (proc.stdout or "") + (proc.stderr or "")
             return CommandResult(ok=(proc.returncode == 0), returncode=proc.returncode, output=output.strip())
         except FileNotFoundError:
-            return CommandResult(ok=False, returncode=127, output=f"Command not found: {argv[0]}")
+            return CommandResult(ok=False, returncode=_EXIT_CODE_NOT_FOUND, output=f"Command not found: {argv[0]}")
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             output = f"Command timed out after {_SUBPROCESS_TIMEOUT}s: {' '.join(argv)}\n{stdout}{stderr}"
-            return CommandResult(ok=False, returncode=124, output=output.strip())
+            return CommandResult(ok=False, returncode=_EXIT_CODE_TIMEOUT, output=output.strip())
 
     def qm(self, *args: str) -> CommandResult:
         return self.run(["qm", *args])
@@ -52,6 +54,6 @@ def run_command(cmd: list[str]) -> CommandResult:
     except subprocess.CalledProcessError as exc:
         raise
     except FileNotFoundError:
-        return CommandResult(ok=False, returncode=127, output=f"Command not found: {cmd[0]}")
+        return CommandResult(ok=False, returncode=_EXIT_CODE_NOT_FOUND, output=f"Command not found: {cmd[0]}")
     except subprocess.TimeoutExpired as exc:
-        return CommandResult(ok=False, returncode=124, output=f"Command timed out: {' '.join(cmd)}")
+        return CommandResult(ok=False, returncode=_EXIT_CODE_TIMEOUT, output=f"Command timed out: {' '.join(cmd)}")

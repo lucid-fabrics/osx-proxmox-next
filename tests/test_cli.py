@@ -346,6 +346,7 @@ def test_cli_progress_without_total(capsys):
 def test_auto_download_missing_opencore(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
+    import osx_proxmox_next.cli as _cli_mod
 
     downloaded = []
 
@@ -354,8 +355,8 @@ def test_auto_download_missing_opencore(monkeypatch, tmp_path):
         lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        cli_module, "download_opencore",
-        lambda macos, dest, on_progress=None: (downloaded.append("oc"), tmp_path / "oc.iso")[1],
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: (downloaded.append("oc"), []),
     )
 
     from osx_proxmox_next.domain import VmConfig
@@ -368,6 +369,7 @@ def test_auto_download_missing_opencore(monkeypatch, tmp_path):
 def test_auto_download_missing_recovery(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
+    import osx_proxmox_next.cli as _cli_mod
 
     downloaded = []
 
@@ -376,8 +378,8 @@ def test_auto_download_missing_recovery(monkeypatch, tmp_path):
         lambda cfg: [AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        cli_module, "download_recovery",
-        lambda macos, dest, on_progress=None: (downloaded.append("rec"), tmp_path / "rec.img")[1],
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: (downloaded.append("rec"), []),
     )
 
     from osx_proxmox_next.domain import VmConfig
@@ -390,17 +392,16 @@ def test_auto_download_missing_recovery(monkeypatch, tmp_path):
 def test_auto_download_missing_opencore_error(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
-    from osx_proxmox_next.downloader import DownloadError
+    import osx_proxmox_next.cli as _cli_mod
 
     monkeypatch.setattr(
         cli_module, "required_assets",
         lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
     )
-
-    def fail_download(macos, dest, on_progress=None):
-        raise DownloadError("network error")
-
-    monkeypatch.setattr(cli_module, "download_opencore", fail_download)
+    monkeypatch.setattr(
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: ["OpenCore: network error"],
+    )
 
     from osx_proxmox_next.domain import VmConfig
     cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
@@ -411,17 +412,16 @@ def test_auto_download_missing_opencore_error(monkeypatch, tmp_path):
 def test_auto_download_missing_recovery_error(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
-    from osx_proxmox_next.downloader import DownloadError
+    import osx_proxmox_next.cli as _cli_mod
 
     monkeypatch.setattr(
         cli_module, "required_assets",
         lambda cfg: [AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True)],
     )
-
-    def fail_download(macos, dest, on_progress=None):
-        raise DownloadError("network error")
-
-    monkeypatch.setattr(cli_module, "download_recovery", fail_download)
+    monkeypatch.setattr(
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: ["Recovery: network error"],
+    )
 
     from osx_proxmox_next.domain import VmConfig
     cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
@@ -430,13 +430,19 @@ def test_auto_download_missing_recovery_error(monkeypatch, tmp_path):
 
 
 def test_auto_download_missing_unknown_asset_type(monkeypatch, tmp_path):
-    """Asset with unknown name is silently skipped."""
+    """Asset with unknown name is silently skipped (run_download_worker handles routing)."""
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
+    import osx_proxmox_next.cli as _cli_mod
 
+    called = []
     monkeypatch.setattr(
         cli_module, "required_assets",
         lambda cfg: [AssetCheck("Unknown Asset", Path("/tmp/unknown"), False, "missing", downloadable=True)],
+    )
+    monkeypatch.setattr(
+        _cli_mod, "run_download_worker",
+        lambda cfg, missing, on_progress: (called.append(True), []),
     )
 
     from osx_proxmox_next.domain import VmConfig
@@ -602,7 +608,7 @@ def test_cli_status_invalid_vmid():
 
 
 def test_cli_status_vm_not_found(monkeypatch):
-    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid: None)
+    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid, adapter=None: None)
     rc = run_cli(["status", "--vmid", "106"])
     assert rc == 2
 
@@ -611,7 +617,7 @@ def test_cli_status_success(monkeypatch, capsys):
     from osx_proxmox_next.planner import VmInfo
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(
+        lambda vmid, adapter=None: VmInfo(
             vmid=vmid, name="macos-sonoma", status="running",
             config_raw="cores: 8\nmemory: 16384\nballoon: 0\nnet0: vmxnet3=AA:BB:CC:DD:EE:FF\ncpu: host\nmachine: q35\nide0: local:iso/opencore.iso\n",
         ),
@@ -632,7 +638,7 @@ def test_cli_status_no_config(monkeypatch, capsys):
     from osx_proxmox_next.planner import VmInfo
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="test-vm", status="stopped", config_raw=""),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="test-vm", status="stopped", config_raw=""),
     )
     rc = run_cli(["status", "--vmid", "200"])
     assert rc == 0
@@ -672,7 +678,7 @@ def test_cli_uninstall_invalid_vmid_high():
 
 
 def test_cli_uninstall_vm_not_found(monkeypatch):
-    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid: None)
+    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid, adapter=None: None)
     rc = run_cli(["uninstall", "--vmid", "106", "--execute"])
     assert rc == 2
 
@@ -684,7 +690,7 @@ def test_cli_uninstall_execute_success(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="macos-test", status="running", config_raw="cores: 8"),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-test", status="running", config_raw="cores: 8"),
     )
     monkeypatch.setattr(
         cli_module, "create_snapshot",
@@ -705,7 +711,7 @@ def test_cli_uninstall_execute_failure(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
     )
     monkeypatch.setattr(
         cli_module, "create_snapshot",
@@ -732,7 +738,7 @@ def test_cli_uninstall_execute_with_purge(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
     )
     monkeypatch.setattr(
         cli_module, "create_snapshot",
@@ -751,7 +757,7 @@ def test_cli_uninstall_vm_info_displayed(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="my-macos", status="running", config_raw="cores: 8"),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="my-macos", status="running", config_raw="cores: 8"),
     )
     monkeypatch.setattr(
         cli_module, "create_snapshot",

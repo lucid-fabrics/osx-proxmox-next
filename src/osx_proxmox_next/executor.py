@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Optional
 
 from .infrastructure import ProxmoxAdapter
-from .planner import PlanStep
+from .domain import PlanStep
 
 
 @dataclass
@@ -40,7 +40,10 @@ def apply_plan(
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = out_dir / f"apply-{ts}.log"
 
-    runtime = adapter or ProxmoxAdapter()
+    if adapter is None:
+        from .services import get_proxmox_adapter
+        adapter = get_proxmox_adapter()
+    runtime = adapter
     results: list[StepResult] = []
     total = len(steps)
 

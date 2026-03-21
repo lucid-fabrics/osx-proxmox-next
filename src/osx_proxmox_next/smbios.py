@@ -244,6 +244,22 @@ def model_for_macos(macos: str) -> str:
     return SMBIOS_MODELS.get(macos, DEFAULT_SMBIOS_MODEL)
 
 
+def resolve_smbios(
+    macos: str,
+    apple_services: bool = False,
+    existing_uuid: str = "",
+) -> SmbiosIdentity:
+    """Generate SMBIOS identity, optionally preserving an existing UUID.
+
+    If *existing_uuid* is non-empty, a fresh identity is generated and its
+    UUID field is replaced with the provided value.
+    """
+    identity = generate_smbios(macos, apple_services)
+    if existing_uuid:
+        identity.uuid = existing_uuid
+    return identity
+
+
 def generate_smbios(macos: str, apple_services: bool = False) -> SmbiosIdentity:
     model = model_for_macos(macos)
     mac = ""

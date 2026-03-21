@@ -1,52 +1,22 @@
 from __future__ import annotations
 
-import base64
-import dataclasses
-import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from shlex import join, quote as shquote
+from shlex import quote as shquote
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import CpuInfo, detect_cpu_info
-from .domain import SUPPORTED_MACOS, VmConfig, validate_config
+from .domain import SUPPORTED_MACOS, VmConfig, PlanStep, validate_config
 from .infrastructure import ProxmoxAdapter
-from .smbios import generate_mac, generate_rom_from_mac, generate_smbios, generate_vmgenid, model_for_macos
-
-
-_APPLE_OSK = "ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc"
-
-
-def _partprobe_retry_snippet(loop_var: str) -> str:
-    """Return bash snippet that retries partprobe up to 10 times for slow storage."""
-    return (
-        f"partprobe ${loop_var} 2>/dev/null; "
-        f"for _i in $(seq 1 10); do ls ${{{loop_var}}}p* &>/dev/null && break; "
-        f"sleep 1; partprobe ${loop_var} 2>/dev/null; "
-        f"blockdev --rereadpt ${loop_var} 2>/dev/null; done"
-    )
-
-
-def _sanitize_smbios(val: str, *, allow_comma: bool = False) -> str:
-    """Strip anything that isn't alphanumeric, hyphen, colon, or period.
-
-    Only *model* names need commas (e.g. ``MacPro7,1``).
-    """
-    if allow_comma:
-        return re.sub(r"[^a-zA-Z0-9\-:,.]", "", val)
-    return re.sub(r"[^a-zA-Z0-9\-:.]", "", val)
-
-
-@dataclass
-class PlanStep:
-    title: str
-    argv: list[str]
-    risk: str = "safe"
-
-    @property
-    def command(self) -> str:
-        return join(self.argv)
+from .script_renderer import (
+    _APPLE_OSK,
+    _build_oc_disk_script,
+    _partprobe_retry_snippet,
+)
+from .smbios_planner import (
+    _encode_smbios_value,
+    _populate_smbios,
+)
 
 
 def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
@@ -110,9 +80,17 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     # Pre-generate SMBIOS identity so downstream steps just read config fields.
     config = _populate_smbios(config)
 
+    ctx = _DiskBuildContext(
+        config=config,
+        vmid=vmid,
+        is_amd=is_amd,
+        recovery_raw=recovery_raw,
+        opencore_path=opencore_path,
+        oc_disk=oc_disk,
+    )
     steps = [
         *_network_steps(config, vmid, cpu_flag),
-        *_disk_steps(config, vmid, is_amd, recovery_raw, opencore_path, oc_disk, macos_label),
+        *_disk_steps(ctx, macos_label),
         *_boot_steps(config, vmid),
     ]
 
@@ -170,14 +148,18 @@ def _network_steps(config: VmConfig, vmid: str, cpu_flag: str) -> list[PlanStep]
     ]
 
 
-def _opencore_steps(
-    config: VmConfig,
-    vmid: str,
-    is_amd: bool,
-    recovery_raw: Path,
-    opencore_path: Path,
-    oc_disk: Path,
-) -> list[PlanStep]:
+@dataclass
+class _DiskBuildContext:
+    """Shared parameters for disk-building plan steps."""
+    config: VmConfig
+    vmid: str
+    is_amd: bool
+    recovery_raw: Path
+    opencore_path: Path
+    oc_disk: Path
+
+
+def _opencore_steps(ctx: _DiskBuildContext) -> list[PlanStep]:
     """Build and import the OpenCore EFI disk."""
     return [
         PlanStep(
@@ -185,14 +167,14 @@ def _opencore_steps(
             argv=[
                 "bash", "-c",
                 _build_oc_disk_script(
-                    opencore_path, recovery_raw, oc_disk, config.macos,
-                    is_amd, config.cores, config.verbose_boot,
-                    apple_services=config.apple_services,
-                    smbios_serial=config.smbios_serial,
-                    smbios_uuid=config.smbios_uuid,
-                    smbios_mlb=config.smbios_mlb,
-                    smbios_rom=config.smbios_rom,
-                    smbios_model=config.smbios_model,
+                    ctx.opencore_path, ctx.recovery_raw, ctx.oc_disk, ctx.config.macos,
+                    ctx.is_amd, ctx.config.cores, ctx.config.verbose_boot,
+                    apple_services=ctx.config.apple_services,
+                    smbios_serial=ctx.config.smbios_serial,
+                    smbios_uuid=ctx.config.smbios_uuid,
+                    smbios_mlb=ctx.config.smbios_mlb,
+                    smbios_rom=ctx.config.smbios_rom,
+                    smbios_model=ctx.config.smbios_model,
                 ),
             ],
         ),
@@ -201,12 +183,12 @@ def _opencore_steps(
             argv=[
                 "bash", "-c",
                 "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
-                f'REF=$($IMPORT_CMD {shquote(vmid)} {shquote(str(oc_disk))} {shquote(config.storage)} 2>&1 | '
+                f'REF=$($IMPORT_CMD {shquote(ctx.vmid)} {shquote(str(ctx.oc_disk))} {shquote(ctx.config.storage)} 2>&1 | '
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
-                f'qm set {shquote(vmid)} --ide0 "$REF",media=disk && '
+                f'qm set {shquote(ctx.vmid)} --ide0 "$REF",media=disk && '
                 # Fix GPT header corruption from thin-provisioned LVM importdisk
                 'DEV=$(pvesm path "$REF") && '
-                f'dd if={shquote(str(oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
+                f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
             ],
         ),
     ]
@@ -276,31 +258,23 @@ def _recovery_steps(
     ]
 
 
-def _disk_steps(
-    config: VmConfig,
-    vmid: str,
-    is_amd: bool,
-    recovery_raw: Path,
-    opencore_path: Path,
-    oc_disk: Path,
-    macos_label: str,
-) -> list[PlanStep]:
+def _disk_steps(ctx: _DiskBuildContext, macos_label: str) -> list[PlanStep]:
     """EFI/TPM disk, main disk, OpenCore build/import, and recovery import."""
     return [
         PlanStep(
             title="Attach EFI + TPM",
             argv=[
-                "qm", "set", vmid,
-                "--efidisk0", f"{config.storage}:0,efitype=4m,pre-enrolled-keys=0",
-                "--tpmstate0", f"{config.storage}:0,version=v2.0",
+                "qm", "set", ctx.vmid,
+                "--efidisk0", f"{ctx.config.storage}:0,efitype=4m,pre-enrolled-keys=0",
+                "--tpmstate0", f"{ctx.config.storage}:0,version=v2.0",
             ],
         ),
         PlanStep(
             title="Create main disk",
-            argv=["qm", "set", vmid, "--virtio0", f"{config.storage}:{config.disk_gb}"],
+            argv=["qm", "set", ctx.vmid, "--virtio0", f"{ctx.config.storage}:{ctx.config.disk_gb}"],
         ),
-        *_opencore_steps(config, vmid, is_amd, recovery_raw, opencore_path, oc_disk),
-        *_recovery_steps(config, vmid, recovery_raw, macos_label),
+        *_opencore_steps(ctx),
+        *_recovery_steps(ctx.config, ctx.vmid, ctx.recovery_raw, macos_label),
     ]
 
 
@@ -319,208 +293,6 @@ def _boot_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
     ]
 
 
-def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
-    meta = SUPPORTED_MACOS[config.macos]
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-    lines = [
-        "#!/usr/bin/env bash",
-        "set -euo pipefail",
-        "",
-        f"# Generated by osx-proxmox-next on {now}",
-        f"# Target: {meta['label']} (channel={meta['channel']})",
-        f"# VMID: {config.vmid}",
-        "",
-    ]
-    for idx, step in enumerate(steps, start=1):
-        lines.append(f"echo '[{idx}/{len(steps)}] {step.title}'")
-        lines.append(step.command)
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _plist_patch_script(
-    verbose_boot: bool = False,
-    is_amd: bool = False,
-    apple_services: bool = False,
-    smbios_serial: str = "",
-    smbios_uuid: str = "",
-    smbios_mlb: str = "",
-    smbios_rom: str = "",
-    smbios_model: str = "",
-) -> str:
-    """Return an inline python3 -c script that patches OpenCore's config.plist."""
-    # AMD: flip power management locks for Cascadelake-Server emulation
-    amd_patch = ""
-    if is_amd:
-        amd_patch = (
-            "kq=p[\"Kernel\"][\"Quirks\"]; "
-            "kq[\"AppleCpuPmCfgLock\"]=True; "
-            "kq[\"AppleXcpmCfgLock\"]=True; "
-        )
-
-    # PlatformInfo for Apple Services (iMessage, FaceTime, iCloud)
-    platforminfo = ""
-    if apple_services and smbios_serial:
-        s_serial = _sanitize_smbios(smbios_serial)
-        s_model = _sanitize_smbios(smbios_model, allow_comma=True)
-        s_uuid = _sanitize_smbios(smbios_uuid)
-        s_mlb = _sanitize_smbios(smbios_mlb)
-        s_rom = _sanitize_smbios(smbios_rom)
-        platforminfo = (
-            "pi=p.setdefault(\"PlatformInfo\",{}).setdefault(\"Generic\",{}); "
-            f"pi[\"SystemSerialNumber\"]=\"{s_serial}\"; "
-            f"pi[\"SystemProductName\"]=\"{s_model}\"; "
-            f"pi[\"SystemUUID\"]=\"{s_uuid}\"; "
-            f"pi[\"MLB\"]=\"{s_mlb}\"; "
-            f"pi[\"ROM\"]=bytes.fromhex(\"{s_rom}\"); "
-            "p[\"PlatformInfo\"][\"UpdateSMBIOS\"]=True; "
-            "p[\"PlatformInfo\"][\"UpdateDataHub\"]=True; "
-        )
-
-    return (
-        "python3 -c '"
-        "import plistlib; "
-        "import os; oc_dest=os.environ[\"OC_DEST\"]; "
-        "f=open(oc_dest+\"/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
-        "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
-        "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
-        "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
-        "p[\"Misc\"][\"Boot\"][\"Timeout\"]=15; "
-        "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
-        "p[\"Misc\"][\"Boot\"][\"HideAuxiliary\"]=True; "
-        "p[\"Misc\"][\"Boot\"][\"PickerMode\"]=\"External\"; "
-        "p[\"Misc\"][\"Boot\"][\"PickerVariant\"]=\"Acidanthera\\\\Syrah\"; "
-        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x67\\x0f\\x00\\x00\"; "
-        f"p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 debug=0x100{' -v' if verbose_boot else ''}\"; "
-        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"prev-lang:kbd\"]=\"en-US:0\".encode(); "
-        "nv_del=p.setdefault(\"NVRAM\",{}).setdefault(\"Delete\",{}); "
-        "nv_del[\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"]=[\"csr-active-config\",\"boot-args\",\"prev-lang:kbd\"]; "
-        "p[\"NVRAM\"][\"WriteFlash\"]=True; "
-        "p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{})[\"RequestBootVarRouting\"]=True; "
-        "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
-        + amd_patch
-        + platforminfo +
-        "f=open(oc_dest+\"/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
-        "print(\"config.plist patched\")'"
-    )
-
-
-def _loop_cleanup_script(opencore_path: Path, dest: Path) -> str:
-    """Return bash snippet for loop device trap and stale cleanup."""
-    return (
-        "SRC_LOOP=''; DEST_LOOP=''; "
-        "OC_SRC=$(mktemp -d) && OC_DEST=$(mktemp -d) && export OC_SRC OC_DEST && "
-        "trap 'umount $OC_SRC 2>/dev/null; umount $OC_DEST 2>/dev/null; "
-        "[ -n \"$SRC_LOOP\" ] && losetup -d $SRC_LOOP 2>/dev/null; "
-        "[ -n \"$DEST_LOOP\" ] && losetup -d $DEST_LOOP 2>/dev/null; "
-        "rm -rf $OC_SRC $OC_DEST' EXIT; "
-        "umount $OC_SRC 2>/dev/null; umount $OC_DEST 2>/dev/null; "
-        f'for lo in $(losetup -j {shquote(str(opencore_path))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
-        f'for lo in $(losetup -j {shquote(str(dest))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
-    )
-
-
-def _mount_source_oc_script(opencore_path: Path) -> str:
-    """Return bash snippet to loop-mount the source OpenCore ISO."""
-    return (
-        f'SRC_LOOP=$(losetup -fP --show {shquote(str(opencore_path))}) && '
-        "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
-        f"{_partprobe_retry_snippet('SRC_LOOP')} && "
-        "SRC_PART=$(blkid -o device $SRC_LOOP ${SRC_LOOP}p* 2>/dev/null "
-        "| xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' "
-        "| head -1); "
-        "if [ -n \"$SRC_PART\" ]; then mount \"$SRC_PART\" $OC_SRC; "
-        "else echo 'WARN: No vfat partition found on source ISO via blkid, trying raw mount'; mount $SRC_LOOP $OC_SRC; fi && "
-        "{ mountpoint -q $OC_SRC || { echo \"ERROR: $OC_SRC is not mounted. Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
-    )
-
-
-def _format_dest_oc_script(dest: Path) -> str:
-    """Return bash snippet to create, format, and mount the destination OpenCore disk."""
-    qp = shquote(str(dest))
-    return (
-        f'dd if=/dev/zero of={qp} bs=1M count=1024 && '
-        f'sgdisk -Z {qp} && '
-        f'sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {qp} && '
-        f'DEST_LOOP=$(losetup -fP --show {qp}) && '
-        "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
-        f"{_partprobe_retry_snippet('DEST_LOOP')} && "
-        "{ [ -b \"${DEST_LOOP}p1\" ] || { echo \"ERROR: ${DEST_LOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
-        "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
-        "mount ${DEST_LOOP}p1 $OC_DEST && "
-        "{ mountpoint -q $OC_DEST || { echo \"ERROR: $OC_DEST is not mounted. Hints: file ${DEST_LOOP}p1; blkid ${DEST_LOOP}p1; dmesg | tail -5\"; false; }; } && "
-    )
-
-
-def _build_oc_disk_script(
-    opencore_path: Path, recovery_path: Path, dest: Path, macos: str,
-    is_amd: bool = False, cores: int = 4, verbose_boot: bool = False,
-    apple_services: bool = False, smbios_serial: str = "",
-    smbios_uuid: str = "", smbios_mlb: str = "", smbios_rom: str = "",
-    smbios_model: str = "",
-) -> str:
-    """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
-    plist_script = _plist_patch_script(
-        verbose_boot=verbose_boot, is_amd=is_amd,
-        apple_services=apple_services, smbios_serial=smbios_serial,
-        smbios_uuid=smbios_uuid, smbios_mlb=smbios_mlb,
-        smbios_rom=smbios_rom, smbios_model=smbios_model,
-    )
-
-    return (
-        _loop_cleanup_script(opencore_path, dest)
-        + _format_dest_oc_script(dest)
-        + _mount_source_oc_script(opencore_path)
-        # Copy OpenCore files (including hidden files)
-        + "cp -a $OC_SRC/. $OC_DEST/ && "
-        # Validate EFI structure was copied
-        "{ [ -d $OC_DEST/EFI/OC ] || { echo 'ERROR: OpenCore ISO does not contain expected EFI/OC directory. ISO may be corrupt.'; false; }; } && "
-        # Patch config.plist
-        + plist_script + " && "
-        # Fix plistlib self-closing tags that OpenCore's OcXmlLib rejects
-        "sed -i 's|<array/>|<array></array>|g; s|<dict/>|<dict></dict>|g; s|<data/>|<data></data>|g' $OC_DEST/EFI/OC/config.plist && "
-        # Hide OC partition from boot picker (shown only when user presses Space)
-        "echo Auxiliary > $OC_DEST/.contentVisibility && "
-        # Cleanup mounts (lazy unmount fallback for busy mounts)
-        "{ umount $OC_SRC || umount -l $OC_SRC; } && losetup -d $SRC_LOOP && "
-        "{ umount $OC_DEST || umount -l $OC_DEST; } && losetup -d $DEST_LOOP"
-    )
-
-
-def _encode_smbios_value(value: str) -> str:
-    """Base64-encode a value for Proxmox smbios1 fields."""
-    return base64.b64encode(value.encode()).decode()
-
-
-def _populate_smbios(config: VmConfig) -> VmConfig:
-    """Pre-generate SMBIOS identity and Apple services fields on config.
-
-    Called once at the top of build_plan so downstream helpers just read fields.
-    Returns a new VmConfig with the generated values applied.
-    """
-    if config.no_smbios:
-        return config
-    updates: dict = {}
-    if not config.smbios_serial:
-        identity = generate_smbios(config.macos, config.apple_services)
-        updates["smbios_serial"] = identity.serial
-        updates["smbios_uuid"] = identity.uuid
-        updates["smbios_model"] = identity.model
-        updates["smbios_mlb"] = identity.mlb
-        updates["smbios_rom"] = identity.rom
-        if identity.mac and not config.static_mac:
-            updates["static_mac"] = identity.mac
-    if not config.smbios_model and "smbios_model" not in updates:
-        updates["smbios_model"] = model_for_macos(config.macos)
-    if config.apple_services:
-        if not config.vmgenid:
-            updates["vmgenid"] = generate_vmgenid()
-        static_mac = updates.get("static_mac") or config.static_mac
-        if not static_mac:
-            static_mac = generate_mac()
-            updates["static_mac"] = static_mac
-        updates["smbios_rom"] = generate_rom_from_mac(static_mac)
-    return dataclasses.replace(config, **updates)
 
 
 def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
@@ -560,35 +332,7 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
 
 # ── VM Destroy ──────────────────────────────────────────────────────
 
-
-@dataclass
-class VmInfo:
-    vmid: int
-    name: str
-    status: str  # "running" | "stopped"
-    config_raw: str
-
-
-def fetch_vm_info(vmid: int, adapter: ProxmoxAdapter | None = None) -> VmInfo | None:
-    runtime = adapter or ProxmoxAdapter()
-    status_result = runtime.run(["qm", "status", str(vmid)])
-    if not status_result.ok:
-        return None
-    # Parse status line like "status: running" or "status: stopped"
-    status = "stopped"
-    for line in status_result.output.splitlines():
-        if "running" in line.lower():
-            status = "running"
-            break
-    config_result = runtime.run(["qm", "config", str(vmid)])
-    config_raw = config_result.output if config_result.ok else ""
-    # Parse name from config
-    name = ""
-    for line in config_raw.splitlines():
-        if line.startswith("name:"):
-            name = line.split(":", 1)[1].strip()
-            break
-    return VmInfo(vmid=vmid, name=name, status=status, config_raw=config_raw)
+from .services import VmInfo, fetch_vm_info  # noqa: E402
 
 
 def build_destroy_plan(vmid: int, purge: bool = False) -> list[PlanStep]:
