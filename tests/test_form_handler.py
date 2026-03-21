@@ -213,36 +213,36 @@ def test_build_vm_config_from_values_smbios_populated_when_present() -> None:
     )
     values = _valid_values(smbios=smbios)
     result = build_vm_config_from_values(values)
-    assert result is not None and result.smbios_serial == smbios.serial
+    assert result.smbios_serial == smbios.serial
     assert result.smbios_model == smbios.model
 
 
 def test_build_vm_config_from_values_no_smbios_empty_strings() -> None:
     values = _valid_values(smbios=None)
     result = build_vm_config_from_values(values)
-    assert result is not None and result.smbios_serial == ""
+    assert result.smbios_serial == ""
     assert result.smbios_model == ""
 
 
 def test_build_vm_config_from_values_penryn_sets_cpu_model() -> None:
     values = _valid_values(use_penryn=True)
     result = build_vm_config_from_values(values)
-    assert result is not None and result.cpu_model == "Penryn"
+    assert result.cpu_model == "Penryn"
 
 
 def test_build_vm_config_from_values_no_penryn_empty_cpu_model() -> None:
     values = _valid_values(use_penryn=False)
     result = build_vm_config_from_values(values)
-    assert result is not None and result.cpu_model == ""
+    assert result.cpu_model == ""
 
 
 def test_build_vm_config_from_values_apple_services_vmgenid_uppercased() -> None:
     values = _valid_values(apple_services=True, custom_vmgenid="a1b2c3d4-e5f6-7890-abcd-ef1234567890")
     result = build_vm_config_from_values(values)
-    assert result is not None and result.vmgenid == "A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+    assert result.vmgenid == "A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
 
 
 def test_build_vm_config_from_values_no_apple_services_vmgenid_empty() -> None:
     values = _valid_values(apple_services=False, custom_vmgenid="some-id")
     result = build_vm_config_from_values(values)
-    assert result is not None and result.vmgenid == ""
+    assert result.vmgenid == ""

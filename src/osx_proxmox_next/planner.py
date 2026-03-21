@@ -332,7 +332,7 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
 
 # ── VM Destroy ──────────────────────────────────────────────────────
 
-from .services.detection_service import VmInfo, fetch_vm_info  # noqa: E402
+from .services import VmInfo, fetch_vm_info  # noqa: E402
 
 
 def build_destroy_plan(vmid: int, purge: bool = False) -> list[PlanStep]:

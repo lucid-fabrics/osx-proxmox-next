@@ -424,7 +424,7 @@ def test_fetch_vm_info_exists() -> None:
             return CommandResult(ok=False, returncode=1, output="")
 
     info = fetch_vm_info(106, adapter=FakeAdapter())
-    assert info is not None and info.vmid == 106
+    assert info.vmid == 106
     assert info.name == "macos-test"
     assert info.status == "running"
     assert "cores: 8" in info.config_raw
@@ -440,7 +440,7 @@ def test_fetch_vm_info_stopped() -> None:
             return CommandResult(ok=False, returncode=1, output="")
 
     info = fetch_vm_info(200, adapter=FakeAdapter())
-    assert info is not None and info.status == "stopped"
+    assert info.status == "stopped"
     assert info.name == "macos-vm"
 
 
@@ -461,7 +461,7 @@ def test_fetch_vm_info_config_failure() -> None:
             return CommandResult(ok=False, returncode=1, output="")
 
     info = fetch_vm_info(300, adapter=FakeAdapter())
-    assert info is not None and info.config_raw == ""
+    assert info.config_raw == ""
     assert info.name == ""
 
 
@@ -641,7 +641,7 @@ def test_fetch_vm_info_no_name_in_config() -> None:
             return CommandResult(ok=False, returncode=1, output="")
 
     info = fetch_vm_info(400, adapter=FakeAdapter())
-    assert info is not None and info.name == ""
+    assert info.name == ""
 
 
 # ── Phase 4: Defensive pattern tests ─────────────────────────────────

@@ -15,7 +15,8 @@ from .downloader import DownloadError, DownloadProgress, download_opencore, down
 from .executor import apply_plan
 from .services.download_service import run_download_worker
 from .services.proxmox_service import get_proxmox_adapter
-from .planner import build_plan, build_destroy_plan, fetch_vm_info
+from .planner import build_plan, build_destroy_plan
+from .services import fetch_vm_info
 from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints

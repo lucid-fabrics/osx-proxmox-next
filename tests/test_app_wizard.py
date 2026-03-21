@@ -2151,7 +2151,6 @@ def test_apply_host_defaults_with_existing_uuid() -> None:
             await pilot.pause()
             await pilot.click("#suggest_btn")
             await pilot.pause()
-            assert app.state.smbios is not None
             assert app.state.smbios.uuid == "AABBCCDD-1122-3344-5566-778899AABBCC"
 
     asyncio.run(_run())
@@ -2392,14 +2391,12 @@ def test_penryn_checkbox_sets_cpu_model_in_config(monkeypatch) -> None:
             await pilot.pause()
             assert app.state.use_penryn is True
             config = app._read_form()
-            assert config is not None
             assert config.cpu_model == "Penryn"
             # Disable penryn
             await pilot.click("#penryn_cb")
             await pilot.pause()
             assert app.state.use_penryn is False
             config = app._read_form()
-            assert config is not None
             assert config.cpu_model == ""
 
     asyncio.run(_run())

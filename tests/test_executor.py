@@ -34,8 +34,7 @@ def test_apply_plan_live_with_callback(monkeypatch):
     # Each step fires callback twice: once before (result=None), once after
     assert len(callback_log) == 4
     assert callback_log[0][3] is None  # before first step
-    assert callback_log[1][3] is not None  # after first step
-    assert callback_log[1][3].ok is True
+    assert callback_log[1][3].ok is True  # after first step
 
 
 def test_apply_plan_live_failure_aborts(monkeypatch):
@@ -78,7 +77,7 @@ def test_apply_plan_dry_with_callback():
     # Dry: callback called twice per step (before + after)
     assert len(callback_log) == 2
     assert callback_log[0][1] is None
-    assert callback_log[1][1] is not None
+    assert callback_log[1][1].ok is True
 
 
 def test_apply_plan_dry_no_callback():
@@ -146,7 +145,6 @@ def test_apply_plan_partial_failure_callback(monkeypatch):
     assert len(received_results) == 2
     assert received_results[0] is None
     failed = received_results[1]
-    assert failed is not None
     assert failed.ok is False
     assert failed.returncode == 1
 
