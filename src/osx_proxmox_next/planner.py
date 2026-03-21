@@ -338,7 +338,10 @@ class VmInfo:
 
 
 def fetch_vm_info(vmid: int, adapter: ProxmoxAdapter | None = None) -> VmInfo | None:
-    runtime = adapter or ProxmoxAdapter()
+    if adapter is None:
+        from .services.proxmox_service import get_proxmox_adapter
+        adapter = get_proxmox_adapter()
+    runtime = adapter
     status_result = runtime.run(["qm", "status", str(vmid)])
     if not status_result.ok:
         return None

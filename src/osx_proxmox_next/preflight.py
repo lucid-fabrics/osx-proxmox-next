@@ -199,7 +199,10 @@ def install_missing_packages(
 
     _emit(f"Installing: {', '.join(packages)}")
 
-    runtime = adapter or ProxmoxAdapter()
+    if adapter is None:
+        from .services.proxmox_service import get_proxmox_adapter
+        adapter = get_proxmox_adapter()
+    runtime = adapter
     result = runtime.run(["apt-get", "install", "-y", *packages])
     if result.ok:
         _emit("Installation complete")

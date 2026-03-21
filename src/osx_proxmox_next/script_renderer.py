@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from shlex import quote as shquote
 
 from .domain import SUPPORTED_MACOS, VmConfig
 from .smbios_planner import _sanitize_smbios
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "render_script",
@@ -48,6 +51,40 @@ def render_script(config: VmConfig, steps: list) -> str:
     return "\n".join(lines)
 
 
+def _amd_plist_keys() -> str:
+    """Return inline python fragment to set AMD CPU power management quirks."""
+    return (
+        "kq=p[\"Kernel\"][\"Quirks\"]; "
+        "kq[\"AppleCpuPmCfgLock\"]=True; "
+        "kq[\"AppleXcpmCfgLock\"]=True; "
+    )
+
+
+def _platforminfo_plist_keys(
+    smbios_serial: str,
+    smbios_uuid: str,
+    smbios_mlb: str,
+    smbios_rom: str,
+    smbios_model: str,
+) -> str:
+    """Return inline python fragment to set PlatformInfo for Apple Services."""
+    s_serial = _sanitize_smbios(smbios_serial)
+    s_model = _sanitize_smbios(smbios_model, allow_comma=True)
+    s_uuid = _sanitize_smbios(smbios_uuid)
+    s_mlb = _sanitize_smbios(smbios_mlb)
+    s_rom = _sanitize_smbios(smbios_rom)
+    return (
+        "pi=p.setdefault(\"PlatformInfo\",{}).setdefault(\"Generic\",{}); "
+        f"pi[\"SystemSerialNumber\"]=\"{s_serial}\"; "
+        f"pi[\"SystemProductName\"]=\"{s_model}\"; "
+        f"pi[\"SystemUUID\"]=\"{s_uuid}\"; "
+        f"pi[\"MLB\"]=\"{s_mlb}\"; "
+        f"pi[\"ROM\"]=bytes.fromhex(\"{s_rom}\"); "
+        "p[\"PlatformInfo\"][\"UpdateSMBIOS\"]=True; "
+        "p[\"PlatformInfo\"][\"UpdateDataHub\"]=True; "
+    )
+
+
 def _plist_patch_script(
     verbose_boot: bool = False,
     is_amd: bool = False,
@@ -59,33 +96,13 @@ def _plist_patch_script(
     smbios_model: str = "",
 ) -> str:
     """Return an inline python3 -c script that patches OpenCore's config.plist."""
-    # AMD: flip power management locks for Cascadelake-Server emulation
-    amd_patch = ""
-    if is_amd:
-        amd_patch = (
-            "kq=p[\"Kernel\"][\"Quirks\"]; "
-            "kq[\"AppleCpuPmCfgLock\"]=True; "
-            "kq[\"AppleXcpmCfgLock\"]=True; "
-        )
-
-    # PlatformInfo for Apple Services (iMessage, FaceTime, iCloud)
-    platforminfo = ""
-    if apple_services and smbios_serial:
-        s_serial = _sanitize_smbios(smbios_serial)
-        s_model = _sanitize_smbios(smbios_model, allow_comma=True)
-        s_uuid = _sanitize_smbios(smbios_uuid)
-        s_mlb = _sanitize_smbios(smbios_mlb)
-        s_rom = _sanitize_smbios(smbios_rom)
-        platforminfo = (
-            "pi=p.setdefault(\"PlatformInfo\",{}).setdefault(\"Generic\",{}); "
-            f"pi[\"SystemSerialNumber\"]=\"{s_serial}\"; "
-            f"pi[\"SystemProductName\"]=\"{s_model}\"; "
-            f"pi[\"SystemUUID\"]=\"{s_uuid}\"; "
-            f"pi[\"MLB\"]=\"{s_mlb}\"; "
-            f"pi[\"ROM\"]=bytes.fromhex(\"{s_rom}\"); "
-            "p[\"PlatformInfo\"][\"UpdateSMBIOS\"]=True; "
-            "p[\"PlatformInfo\"][\"UpdateDataHub\"]=True; "
-        )
+    amd_patch = _amd_plist_keys() if is_amd else ""
+    platforminfo = (
+        _platforminfo_plist_keys(smbios_serial, smbios_uuid, smbios_mlb, smbios_rom, smbios_model)
+        if apple_services and smbios_serial
+        else ""
+    )
+    boot_args = f"keepsyms=1 debug=0x100{' -v' if verbose_boot else ''}"
 
     return (
         "python3 -c '"
@@ -101,7 +118,7 @@ def _plist_patch_script(
         "p[\"Misc\"][\"Boot\"][\"PickerMode\"]=\"External\"; "
         "p[\"Misc\"][\"Boot\"][\"PickerVariant\"]=\"Acidanthera\\\\Syrah\"; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x67\\x0f\\x00\\x00\"; "
-        f"p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 debug=0x100{' -v' if verbose_boot else ''}\"; "
+        f"p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"{boot_args}\"; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"prev-lang:kbd\"]=\"en-US:0\".encode(); "
         "nv_del=p.setdefault(\"NVRAM\",{}).setdefault(\"Delete\",{}); "
         "nv_del[\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"]=[\"csr-active-config\",\"boot-args\",\"prev-lang:kbd\"]; "
@@ -111,7 +128,7 @@ def _plist_patch_script(
         + amd_patch
         + platforminfo +
         "f=open(oc_dest+\"/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
-        "print(\"config.plist patched\")'"
+        "import sys; sys.stderr.write(\"config.plist patched\\n\")'"
     )
 
 
