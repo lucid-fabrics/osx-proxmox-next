@@ -15,6 +15,9 @@ log = logging.getLogger(__name__)
 DEFAULT_STORAGE = "local-lvm"
 DEFAULT_BRIDGE = "vmbr0"
 
+_MIN_MEMORY_MB = 4096
+_MAX_MEMORY_MB = 32768
+
 # Intel Family 6 model numbers for hybrid (P+E core) architectures.
 # These CPUs need emulated CPU mode because macOS hardware validation
 # fails on hybrid core topology when using -cpu host with correct SMBIOS.
@@ -45,6 +48,33 @@ class CpuInfo:
     needs_emulated_cpu: bool  # True for AMD and Intel hybrid (12th gen+)
     needs_penryn: bool = False  # True for pre-Skylake Intel (Broadwell and older), excluding Xeon
     is_xeon: bool = False   # True when "Xeon" appears in model name (server chips, always use -cpu host)
+
+
+def _classify_intel_cpu(family: int, model: int, model_name: str) -> tuple[bool, bool, bool]:
+    """Classify an Intel CPU into (is_hybrid, is_xeon, is_legacy).
+
+    is_hybrid: Family 6 with P+E core topology (12th gen+) — needs emulated CPU.
+    is_xeon: Server/workstation chip — always uses -cpu host.
+    is_legacy: Pre-Skylake desktop (Broadwell and older) — needs Penryn mode.
+    """
+    is_hybrid = (
+        family == 6
+        and (model in _INTEL_HYBRID_MODELS or model >= _INTEL_HYBRID_THRESHOLD)
+    )
+    # Xeon CPUs are server/workstation chips that work fine with -cpu host even
+    # when below the Skylake model threshold (e.g. Xeon E5 v4 is model 79).
+    is_xeon = "Xeon" in model_name
+    # Pre-Skylake Intel (Broadwell, Haswell, Ivy Bridge, etc.) work more reliably
+    # with -cpu Penryn during macOS installation than with -cpu host.
+    # Xeon chips are excluded: they are modern enough and stripping features causes issues.
+    is_legacy = (
+        family == 6
+        and model > 0
+        and not is_hybrid
+        and not is_xeon
+        and model < _INTEL_LEGACY_THRESHOLD
+    )
+    return is_hybrid, is_xeon, is_legacy
 
 
 def detect_cpu_info() -> CpuInfo:
@@ -86,24 +116,7 @@ def detect_cpu_info() -> CpuInfo:
         return CpuInfo(vendor=vendor, model_name=model_name, family=family,
                        model=model, needs_emulated_cpu=True)
 
-    # Intel: check for hybrid architecture (Family 6 + known hybrid model)
-    is_hybrid = (
-        family == 6
-        and (model in _INTEL_HYBRID_MODELS or model >= _INTEL_HYBRID_THRESHOLD)
-    )
-    # Xeon CPUs are server/workstation chips that work fine with -cpu host even
-    # when below the Skylake model threshold (e.g. Xeon E5 v4 is model 79).
-    is_xeon = "Xeon" in model_name
-    # Pre-Skylake Intel (Broadwell, Haswell, Ivy Bridge, etc.) work more reliably
-    # with -cpu Penryn during macOS installation than with -cpu host.
-    # Xeon chips are excluded: they are modern enough and stripping features causes issues.
-    is_legacy = (
-        family == 6
-        and model > 0
-        and not is_hybrid
-        and not is_xeon
-        and model < _INTEL_LEGACY_THRESHOLD
-    )
+    is_hybrid, is_xeon, is_legacy = _classify_intel_cpu(family, model, model_name)
     return CpuInfo(vendor=vendor, model_name=model_name, family=family,
                    model=model, needs_emulated_cpu=is_hybrid, needs_penryn=is_legacy,
                    is_xeon=is_xeon)
@@ -159,7 +172,7 @@ def detect_memory_mb() -> int:
 
     mem_total_mb = mem_total_kb // 1024
     # Default to half of host memory with sane bounds.
-    return max(4096, min(32768, mem_total_mb // 2))
+    return max(_MIN_MEMORY_MB, min(_MAX_MEMORY_MB, mem_total_mb // 2))
 
 
 DEFAULT_ISO_DIR = "/var/lib/vz/template/iso"

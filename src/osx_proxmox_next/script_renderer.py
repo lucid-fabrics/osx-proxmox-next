@@ -16,6 +16,8 @@ __all__ = [
 # Imported by planner for use in _opencore_steps
 _APPLE_OSK = "ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc"
 
+_OC_DISK_SIZE_MB = 1024
+
 
 def _partprobe_retry_snippet(loop_var: str) -> str:
     """Return bash snippet that retries partprobe up to 10 times for slow storage."""
@@ -147,7 +149,7 @@ def _format_dest_oc_script(dest: Path) -> str:
     """Return bash snippet to create, format, and mount the destination OpenCore disk."""
     qp = shquote(str(dest))
     return (
-        f'dd if=/dev/zero of={qp} bs=1M count=1024 && '
+        f'dd if=/dev/zero of={qp} bs=1M count={_OC_DISK_SIZE_MB} && '
         f'sgdisk -Z {qp} && '
         f'sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {qp} && '
         f'DEST_LOOP=$(losetup -fP --show {qp}) && '
