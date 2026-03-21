@@ -41,7 +41,7 @@ def apply_plan(
     log_path = out_dir / f"apply-{ts}.log"
 
     if adapter is None:
-        from .services.proxmox_service import get_proxmox_adapter
+        from .services import get_proxmox_adapter
         adapter = get_proxmox_adapter()
     runtime = adapter
     results: list[StepResult] = []

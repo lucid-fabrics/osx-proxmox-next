@@ -639,8 +639,8 @@ class TestBuildRecoveryImage:
             dest.write_bytes(b"\x00" * 2048)
             return CommandResult(ok=True, returncode=0, output="")
 
-        import osx_proxmox_next.services.proxmox_service as _ps
-        monkeypatch.setattr(_ps, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
+        import osx_proxmox_next.services as _svc
+        monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         _build_recovery_image(dmg, chunklist, dest)
         assert dest.exists()
@@ -659,8 +659,8 @@ class TestBuildRecoveryImage:
         def handler(argv):
             return CommandResult(ok=False, returncode=1, output="dmg2img failed")
 
-        import osx_proxmox_next.services.proxmox_service as _ps
-        monkeypatch.setattr(_ps, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
+        import osx_proxmox_next.services as _svc
+        monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         with pytest.raises(DownloadError, match="Failed to convert recovery DMG"):
             _build_recovery_image(dmg, chunklist, dest)
@@ -679,8 +679,8 @@ class TestBuildRecoveryImage:
         def handler(argv):
             return CommandResult(ok=False, returncode=1, output="dmg2img failed")
 
-        import osx_proxmox_next.services.proxmox_service as _ps
-        monkeypatch.setattr(_ps, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
+        import osx_proxmox_next.services as _svc
+        monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         with pytest.raises(DownloadError, match="Failed to convert recovery DMG"):
             _build_recovery_image(dmg, chunklist, dest)
@@ -699,8 +699,8 @@ class TestBuildRecoveryImage:
         def handler(argv):
             return CommandResult(ok=False, returncode=127, output="Command not found: dmg2img")
 
-        import osx_proxmox_next.services.proxmox_service as _ps
-        monkeypatch.setattr(_ps, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
+        import osx_proxmox_next.services as _svc
+        monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         with pytest.raises(DownloadError, match="dmg2img is required but not installed"):
             _build_recovery_image(dmg, chunklist, dest)

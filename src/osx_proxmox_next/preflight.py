@@ -129,6 +129,10 @@ def run_preflight() -> list[PreflightCheck]:
             )
         )
 
+    for check in checks:
+        if not check.ok:
+            log.debug("Preflight fail: %s — %s", check.name, check.details)
+
     checks.append(_check_ignore_msrs())
     checks.append(_check_iommu())
     checks.append(_check_initcall_blacklist())
@@ -155,6 +159,8 @@ def run_preflight() -> list[PreflightCheck]:
             details="Current UID must be root (uid=0) for full workflow",
         )
     )
+    failed = [c for c in checks if not c.ok]
+    log.debug("Preflight complete: %d/%d checks passed", len(checks) - len(failed), len(checks))
     return checks
 
 
@@ -200,7 +206,7 @@ def install_missing_packages(
     _emit(f"Installing: {', '.join(packages)}")
 
     if adapter is None:
-        from .services.proxmox_service import get_proxmox_adapter
+        from .services import get_proxmox_adapter
         adapter = get_proxmox_adapter()
     runtime = adapter
     result = runtime.run(["apt-get", "install", "-y", *packages])

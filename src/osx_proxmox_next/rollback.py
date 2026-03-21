@@ -20,7 +20,7 @@ def create_snapshot(vmid: int, adapter: ProxmoxAdapter | None = None) -> Rollbac
     path = out_dir / f"vm-{vmid}-{ts}.conf"
 
     if adapter is None:
-        from .services.proxmox_service import get_proxmox_adapter
+        from .services import get_proxmox_adapter
         adapter = get_proxmox_adapter()
     runtime = adapter
     result = runtime.run(["qm", "config", str(vmid)])

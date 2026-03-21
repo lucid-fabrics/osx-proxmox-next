@@ -458,7 +458,7 @@ class FakePvesm:
 
 def test_detect_iso_storage_pvesm_fails(monkeypatch):
     """When pvesm is unavailable, fall back to DEFAULT_ISO_DIR."""
-    import osx_proxmox_next.services.proxmox_service as _ps
+    import osx_proxmox_next.services as _ps
     monkeypatch.setattr(_ps, "get_proxmox_adapter", lambda: FakePvesm())
     dirs = detect_iso_storage()
     assert DEFAULT_ISO_DIR in dirs
@@ -480,7 +480,7 @@ def test_detect_iso_storage_parses_pvesm(monkeypatch):
         return original_resolve(pve, sid)
 
     fake = FakePvesm({"status": CommandResult(ok=True, returncode=0, output=pvesm_output.strip())})
-    import osx_proxmox_next.services.proxmox_service as _ps
+    import osx_proxmox_next.services as _ps
     monkeypatch.setattr(_ps, "get_proxmox_adapter", lambda: fake)
     monkeypatch.setattr(dm, "_resolve_iso_path", tracking_resolve)
 
@@ -536,7 +536,7 @@ def test_detect_iso_storage_resolves_path(monkeypatch):
         "status": CommandResult(ok=True, returncode=0, output=pvesm_output.strip()),
         "path": CommandResult(ok=True, returncode=0, output="/mnt/pve/nas-iso/template/iso/probe.iso"),
     })
-    import osx_proxmox_next.services.proxmox_service as _ps
+    import osx_proxmox_next.services as _ps
     monkeypatch.setattr(_ps, "get_proxmox_adapter", lambda: fake)
     dirs = detect_iso_storage()
     assert "/mnt/pve/nas-iso/template/iso" in dirs
