@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -12,9 +13,13 @@ from .diagnostics import export_log_bundle, recovery_guide
 from .domain import MIN_VMID, MAX_VMID, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
-from .planner import build_plan, build_destroy_plan, fetch_vm_info, render_script
+from .planner import build_plan, build_destroy_plan
+from .services import fetch_vm_info, get_proxmox_adapter, run_download_worker
+from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints
+
+_MB = 1024 * 1024
 
 
 def _config_from_args(args: argparse.Namespace) -> VmConfig:
@@ -43,9 +48,9 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
 
 
 def _cli_progress(p: DownloadProgress) -> None:
-    mb_down = p.downloaded / (1024 * 1024)
+    mb_down = p.downloaded / _MB
     if p.total > 0:
-        mb_total = p.total / (1024 * 1024)
+        mb_total = p.total / _MB
         pct = int(p.downloaded * 100 / p.total)
         sys.stdout.write(f"\r[{p.phase}] {mb_down:.1f}/{mb_total:.1f} MB ({pct}%)")
     else:
@@ -59,41 +64,20 @@ def _auto_download_missing(config: VmConfig, dest_dir: Path) -> None:
     if not missing:
         return
 
-    for asset in missing:
-        if "OpenCore" in asset.name:
-            print(f"Downloading OpenCore image for {config.macos}...")
-            try:
-                path = download_opencore(config.macos, dest_dir, on_progress=_cli_progress)
-                print(f"\nDownloaded: {path}")
-            except DownloadError as exc:
-                print(f"\nOpenCore download failed: {exc}")
-        elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():
-            print(f"Downloading recovery image for {config.macos}...")
-            try:
-                path = download_recovery(config.macos, dest_dir, on_progress=_cli_progress)
-                print(f"\nDownloaded: {path}")
-            except DownloadError as exc:
-                print(f"\nRecovery download failed: {exc}")
+    config_with_dir = config if config.iso_dir else \
+        dataclasses.replace(config, iso_dir=str(dest_dir))
+
+    def _on_progress(phase: str, pct: int) -> None:
+        sys.stdout.write(f"\r[{phase}] {pct}%")
+        sys.stdout.flush()
+
+    errors = run_download_worker(config_with_dir, missing, on_progress=_on_progress)
+    print()
+    for err in errors:
+        print(f"Download failed: {err}")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="osx-next-cli")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    sub.add_parser("preflight")
-    sub.add_parser("bundle")
-
-    guide = sub.add_parser("guide")
-    guide.add_argument("reason", nargs="?", default="boot issue")
-
-    # Download subcommand
-    dl = sub.add_parser("download", help="Download OpenCore ISOs and macOS recovery images")
-    dl.add_argument("--macos", type=str, required=True, help="macOS target (ventura, sonoma, sequoia, tahoe)")
-    dl.add_argument("--dest", type=str, default=DEFAULT_ISO_DIR, help="Destination directory")
-    dl.add_argument("--opencore-only", action="store_true", help="Only download OpenCore ISO")
-    dl.add_argument("--recovery-only", action="store_true", help="Only download recovery image")
-
+def _build_common_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--vmid", type=int, required=True)
     common.add_argument("--name", type=str, required=True)
@@ -122,7 +106,25 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Override QEMU CPU model (e.g. Skylake-Server-IBRS). Default: auto-detect")
     common.add_argument("--net-model", type=str, default="",
                         help="NIC model: vmxnet3 (default) or e1000-82545em (recommended for Xeon/older Intel). Default: auto-detect")
+    return common
 
+
+def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
+    sub.add_parser("preflight")
+    sub.add_parser("bundle")
+    guide = sub.add_parser("guide")
+    guide.add_argument("reason", nargs="?", default="boot issue")
+
+
+def _add_download_subparser(sub: argparse._SubParsersAction) -> None:
+    dl = sub.add_parser("download", help="Download OpenCore ISOs and macOS recovery images")
+    dl.add_argument("--macos", type=str, required=True, help="macOS target (ventura, sonoma, sequoia, tahoe)")
+    dl.add_argument("--dest", type=str, default=DEFAULT_ISO_DIR, help="Destination directory")
+    dl.add_argument("--opencore-only", action="store_true", help="Only download OpenCore ISO")
+    dl.add_argument("--recovery-only", action="store_true", help="Only download recovery image")
+
+
+def _add_vm_subparsers(sub: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:
     plan = sub.add_parser("plan", parents=[common])
     plan.add_argument("--script-out", type=str, default="")
     plan.add_argument("--json", action="store_true", default=False,
@@ -131,16 +133,23 @@ def build_parser() -> argparse.ArgumentParser:
     apply_cmd = sub.add_parser("apply", parents=[common])
     apply_cmd.add_argument("--execute", action="store_true")
 
-    # Status subcommand
     status = sub.add_parser("status", help="Show info about an existing macOS VM")
     status.add_argument("--vmid", type=int, required=True, help="VM ID to query")
 
-    # Uninstall subcommand
     uninstall = sub.add_parser("uninstall", help="Destroy an existing macOS VM")
     uninstall.add_argument("--vmid", type=int, required=True, help="VM ID to destroy")
     uninstall.add_argument("--purge", action="store_true", help="Also delete all disk images")
     uninstall.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
 
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="osx-next-cli")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    _add_simple_subparsers(sub)
+    _add_download_subparser(sub)
+    common = _build_common_parser()
+    _add_vm_subparsers(sub, common)
     return parser
 
 
@@ -188,10 +197,8 @@ def _handle_destroy_command(args: argparse.Namespace, config: VmConfig, steps: l
     return 4
 
 
-def run_cli(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
+def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
+    """Handle commands that don't need VM config. Returns exit code or None to continue."""
     if args.cmd == "preflight":
         checks = run_preflight()
         if has_missing_build_deps(checks):
@@ -201,26 +208,24 @@ def run_cli(argv: list[str] | None = None) -> int:
         for check in checks:
             print(f"{'OK' if check.ok else 'FAIL'} {check.name}: {check.details}")
         return 0
-
     if args.cmd == "bundle":
         print(export_log_bundle())
         return 0
-
     if args.cmd == "guide":
         for line in recovery_guide(args.reason):
             print(line)
         return 0
-
     if args.cmd == "download":
         return _run_download(args)
-
     if args.cmd == "status":
         return _run_status(args)
-
     if args.cmd == "uninstall":
         return _run_uninstall(args)
+    return None
 
-    config = _config_from_args(args)
+
+def _validate_and_fetch_assets(args: argparse.Namespace, config: VmConfig) -> int | None:
+    """Validate config and ensure required assets exist. Returns error code or None."""
     issues = validate_config(config)
     if issues:
         for issue in issues:
@@ -244,6 +249,10 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(cmd)
         return 3
 
+    return None
+
+
+def _print_cpu_info(args: argparse.Namespace, config: VmConfig) -> None:
     cpu = detect_cpu_info()
     json_mode = args.cmd == "plan" and getattr(args, "json", False)
     if not json_mode:
@@ -256,6 +265,21 @@ def run_cli(argv: list[str] | None = None) -> int:
         cpu_label = cpu.model_name or cpu.vendor
         print(f"CPU: {cpu_label} ({cpu_mode})")
 
+
+def run_cli(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    rc = _dispatch_simple_commands(args)
+    if rc is not None:
+        return rc
+
+    config = _config_from_args(args)
+    rc = _validate_and_fetch_assets(args, config)
+    if rc is not None:
+        return rc
+
+    _print_cpu_info(args, config)
     steps = build_plan(config)
 
     if args.cmd == "plan":
@@ -272,7 +296,7 @@ def _run_status(args: argparse.Namespace) -> int:
         print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
         return 2
 
-    info = fetch_vm_info(vmid)
+    info = fetch_vm_info(vmid, adapter=get_proxmox_adapter())
     if info is None:
         print(f"ERROR: VM {vmid} not found.")
         return 2
@@ -294,7 +318,7 @@ def _run_uninstall(args: argparse.Namespace) -> int:
         return 2
 
     if args.execute:
-        info = fetch_vm_info(vmid)
+        info = fetch_vm_info(vmid, adapter=get_proxmox_adapter())
         if info is None:
             print(f"ERROR: VM {vmid} not found.")
             return 2

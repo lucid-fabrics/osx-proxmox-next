@@ -10,7 +10,13 @@ from osx_proxmox_next import app as app_module
 from osx_proxmox_next.app import NextApp, WizardState
 from osx_proxmox_next.executor import ApplyResult
 from osx_proxmox_next.infrastructure import CommandResult
-from osx_proxmox_next.planner import PlanStep
+from osx_proxmox_next.domain import PlanStep
+from osx_proxmox_next.services import detection_service
+from osx_proxmox_next.services import proxmox_service
+from osx_proxmox_next.services import download_service
+from osx_proxmox_next.services import install_service
+from osx_proxmox_next.services import destroy_service
+from osx_proxmox_next.services import preflight_service
 
 
 class FakePve:
@@ -276,7 +282,6 @@ def test_select_os_sonoma() -> None:
             await pilot.click("#os_sonoma")
             await pilot.pause()
             assert app.state.selected_os == "sonoma"
-            assert app.state.smbios is not None
             assert app.state.smbios.model == "MacPro7,1"
             assert app.query_one("#os_sonoma").has_class("os_selected")
             assert not app.query_one("#os_sequoia").has_class("os_selected")
@@ -321,7 +326,6 @@ def test_select_os_passes_apple_services_flag() -> None:
             app.state.apple_services = True
             await pilot.click("#os_sequoia")
             await pilot.pause()
-            assert app.state.smbios is not None
             # Apple-format serials start with "C"
             assert app.state.smbios.serial.startswith("C")
 
@@ -490,7 +494,6 @@ def test_generate_smbios_button() -> None:
             old_serial = app.state.smbios.serial if app.state.smbios else ""
             await pilot.click("#smbios_btn")
             await pilot.pause()
-            assert app.state.smbios is not None
             # May be same or different, but must be set
             assert app.state.smbios.serial != ""
 
@@ -652,7 +655,6 @@ def test_read_form_success() -> None:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             config = app._read_form()
-            assert config is not None
             assert config.macos == "sequoia"
             assert config.vmid == 900
 
@@ -667,7 +669,6 @@ def test_read_form_no_smbios() -> None:
             await _advance_to_step(pilot, app, 4)
             app.state.smbios = None
             config = app._read_form()
-            assert config is not None
             assert config.smbios_serial == ""
 
     asyncio.run(_run())
@@ -879,8 +880,8 @@ def test_download_worker_success(monkeypatch) -> None:
             on_progress(DownloadProgress(downloaded=1000, total=1000, phase="recovery"))
         return dest / f"{macos}-recovery.img"
 
-    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
-    monkeypatch.setattr(app_module, "download_recovery", fake_download_recovery)
+    monkeypatch.setattr(download_service, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(download_service, "download_recovery", fake_download_recovery)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:
@@ -921,7 +922,7 @@ def test_download_worker_opencore_error(monkeypatch) -> None:
     def raise_dl_error(*a, **kw):
         raise DownloadError("fail")
 
-    monkeypatch.setattr(app_module, "download_opencore", raise_dl_error)
+    monkeypatch.setattr(download_service, "download_opencore", raise_dl_error)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:
@@ -960,7 +961,7 @@ def test_download_worker_recovery_error(monkeypatch) -> None:
     def raise_dl_error(*a, **kw):
         raise DownloadError("recovery fail")
 
-    monkeypatch.setattr(app_module, "download_recovery", raise_dl_error)
+    monkeypatch.setattr(download_service, "download_recovery", raise_dl_error)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:
@@ -1074,7 +1075,7 @@ def test_dry_run_success(monkeypatch) -> None:
                 on_step(idx, len(steps), step, _R())
         return ApplyResult(ok=True, results=[], log_path=Path("/tmp/dry.log"))
 
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(install_service, "apply_plan", fake_apply_plan)
 
     async def _run() -> None:
         app = NextApp()
@@ -1100,7 +1101,7 @@ def test_dry_run_failure(monkeypatch) -> None:
     def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
         return ApplyResult(ok=False, results=[], log_path=Path("/tmp/dry-fail.log"))
 
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(install_service, "apply_plan", fake_apply_plan)
 
     async def _run() -> None:
         app = NextApp()
@@ -1212,7 +1213,7 @@ def test_live_install_blocked_no_config() -> None:
 
 def test_live_install_blocked_no_preflight() -> None:
     from osx_proxmox_next.domain import VmConfig
-    from osx_proxmox_next.planner import PlanStep
+    from osx_proxmox_next.domain import PlanStep
 
     async def _run() -> None:
         app = NextApp()
@@ -1234,11 +1235,11 @@ def test_live_install_blocked_no_preflight() -> None:
 def test_live_install_success(monkeypatch) -> None:
     from osx_proxmox_next.preflight import PreflightCheck
     from osx_proxmox_next.domain import VmConfig
-    from osx_proxmox_next.planner import PlanStep
+    from osx_proxmox_next.domain import PlanStep
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "run_preflight",
+        preflight_service, "run_preflight",
         lambda: [PreflightCheck("qm", True, "ok"), PreflightCheck("root", True, "ok")],
     )
 
@@ -1252,8 +1253,8 @@ def test_live_install_success(monkeypatch) -> None:
                 on_step(idx, len(steps), step, _R())
         return ApplyResult(ok=True, results=[], log_path=Path("/tmp/live.log"))
 
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
-    monkeypatch.setattr(app_module, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
+    monkeypatch.setattr(install_service, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(install_service, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
 
     async def _run() -> None:
         app = NextApp()
@@ -1288,15 +1289,15 @@ def test_live_install_success(monkeypatch) -> None:
 def test_live_install_failure(monkeypatch) -> None:
     from osx_proxmox_next.preflight import PreflightCheck
     from osx_proxmox_next.domain import VmConfig
-    from osx_proxmox_next.planner import PlanStep
+    from osx_proxmox_next.domain import PlanStep
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "run_preflight",
+        preflight_service, "run_preflight",
         lambda: [PreflightCheck("qm", True, "ok"), PreflightCheck("root", True, "ok")],
     )
-    monkeypatch.setattr(app_module, "apply_plan", lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(ok=False, results=[], log_path=Path("/tmp/fail.log")))
-    monkeypatch.setattr(app_module, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
+    monkeypatch.setattr(install_service, "apply_plan", lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(ok=False, results=[], log_path=Path("/tmp/fail.log")))
+    monkeypatch.setattr(install_service, "create_snapshot", lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")))
 
     async def _run() -> None:
         app = NextApp()
@@ -1383,7 +1384,7 @@ def test_detect_vmid_pvesh(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="910")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1400,7 +1401,7 @@ def test_detect_vmid_qm_list(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME\n900   macos-test\n905   macos-test2")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1410,7 +1411,7 @@ def test_detect_vmid_qm_list(monkeypatch) -> None:
 
 
 def test_detect_vmid_fallback(monkeypatch) -> None:
-    monkeypatch.setattr(app_module, "_pve", FakePve(lambda cmd: CommandResult(ok=False, returncode=1, output="no")))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(lambda cmd: CommandResult(ok=False, returncode=1, output="no")))
 
     async def _run() -> None:
         app = NextApp()
@@ -1425,7 +1426,7 @@ def test_detect_vmid_pvesh_non_digit(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="not-a-number")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1440,7 +1441,7 @@ def test_detect_vmid_pvesh_out_of_range(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="50")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1455,7 +1456,7 @@ def test_detect_vmid_pvesh_json_object(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output='{"data": 200}')
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1472,7 +1473,7 @@ def test_detect_vmid_qm_list_empty(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1489,7 +1490,7 @@ def test_detect_vmid_qm_list_non_digit(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME\n900   test\n      \nstatus running")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1506,7 +1507,7 @@ def test_detect_vmid_boundary_low(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME\n50    test")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1523,7 +1524,7 @@ def test_detect_vmid_boundary_high(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME\n999999 test")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1536,7 +1537,7 @@ def test_detect_storage_success(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=True, returncode=0, output="Name      Type  Status\nlocal-lvm dir   active\nnfs-store nfs   active")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1551,7 +1552,7 @@ def test_detect_storage_no_default(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=True, returncode=0, output="Name     Type  Status\ncustom1  dir   active")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1566,7 +1567,7 @@ def test_detect_storage_dedup(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=True, returncode=0, output="Name      Type\nlocal-lvm dir\nlocal-lvm dir\ncustom1   nfs")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1580,7 +1581,7 @@ def test_detect_storage_empty_line(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=True, returncode=0, output="Name  Type\n\n   \nlocal dir")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1717,7 +1718,7 @@ def test_suggest_defaults_generates_smbios_if_missing() -> None:
             await _advance_to_step(pilot, app, 4)
             app.state.smbios = None
             app._apply_host_defaults()
-            assert app.state.smbios is not None
+            assert app.state.smbios.serial != ""
 
     asyncio.run(_run())
 
@@ -1784,7 +1785,7 @@ def test_download_worker_skips_non_downloadable(monkeypatch) -> None:
         download_calls["opencore"] += 1
         return dest / f"opencore-{macos}.iso"
 
-    monkeypatch.setattr(app_module, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(download_service, "download_opencore", fake_download_opencore)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:
@@ -1900,7 +1901,7 @@ def test_manage_vm_list_populated(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="ostype: l26")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1926,7 +1927,7 @@ def test_manage_vm_list_empty(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=False, returncode=1, output="qm not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1951,7 +1952,7 @@ def test_manage_vm_list_no_macos_vms(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="ostype: l26")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1976,7 +1977,7 @@ def test_manage_vm_list_config_failure(monkeypatch) -> None:
             return CommandResult(ok=False, returncode=1, output="config failed")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -2088,7 +2089,6 @@ def test_apple_services_checkbox_toggle() -> None:
             assert cb.value is True
             assert app.state.apple_services is True
             assert not container.has_class("hidden")
-            assert app.state.smbios is not None
             assert app.state.smbios.serial.startswith("C")
             # Toggle OFF
             await pilot.click("#apple_services_cb")
@@ -2114,7 +2114,6 @@ def test_generate_smbios_with_existing_uuid() -> None:
             await pilot.pause()
             await pilot.click("#smbios_btn")
             await pilot.pause()
-            assert app.state.smbios is not None
             assert app.state.smbios.uuid == "12345678-1234-1234-1234-123456789ABC"
 
     asyncio.run(_run())
@@ -2152,7 +2151,6 @@ def test_apply_host_defaults_with_existing_uuid() -> None:
             await pilot.pause()
             await pilot.click("#suggest_btn")
             await pilot.pause()
-            assert app.state.smbios is not None
             assert app.state.smbios.uuid == "AABBCCDD-1122-3344-5566-778899AABBCC"
 
     asyncio.run(_run())
@@ -2204,7 +2202,7 @@ def test_manage_destroy_success(monkeypatch) -> None:
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "create_snapshot",
+        destroy_service, "create_snapshot",
         lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
     )
 
@@ -2218,7 +2216,7 @@ def test_manage_destroy_success(monkeypatch) -> None:
                 on_step(idx, len(steps), step, _R())
         return ApplyResult(ok=True, results=[], log_path=Path("/tmp/destroy.log"))
 
-    monkeypatch.setattr(app_module, "apply_plan", fake_apply_plan)
+    monkeypatch.setattr(destroy_service, "apply_plan", fake_apply_plan)
 
     async def _run() -> None:
         app = NextApp()
@@ -2246,11 +2244,11 @@ def test_manage_destroy_failure(monkeypatch) -> None:
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        app_module, "create_snapshot",
+        destroy_service, "create_snapshot",
         lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
     )
     monkeypatch.setattr(
-        app_module, "apply_plan",
+        destroy_service, "apply_plan",
         lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(
             ok=False, results=[], log_path=Path("/tmp/fail.log")
         ),
@@ -2393,14 +2391,12 @@ def test_penryn_checkbox_sets_cpu_model_in_config(monkeypatch) -> None:
             await pilot.pause()
             assert app.state.use_penryn is True
             config = app._read_form()
-            assert config is not None
             assert config.cpu_model == "Penryn"
             # Disable penryn
             await pilot.click("#penryn_cb")
             await pilot.pause()
             assert app.state.use_penryn is False
             config = app._read_form()
-            assert config is not None
             assert config.cpu_model == ""
 
     asyncio.run(_run())

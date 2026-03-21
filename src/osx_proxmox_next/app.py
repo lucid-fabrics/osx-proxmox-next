@@ -1,256 +1,53 @@
 from __future__ import annotations
 
-import json
 import logging
-import re
-from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Thread
 
 log = logging.getLogger(__name__)
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
-from .assets import AssetCheck, required_assets
-from .defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, default_disk_gb, detect_cpu_cores, detect_cpu_info, detect_iso_storage, detect_memory_mb, detect_net_model
-from .domain import DEFAULT_VMID, MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, validate_config
-from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
-from .executor import StepResult, apply_plan
-from .infrastructure import ProxmoxAdapter
-from .planner import PlanStep, build_plan, build_destroy_plan, fetch_vm_info
-from .preflight import PreflightCheck, run_preflight, has_missing_build_deps, install_missing_packages
-from .rollback import RollbackSnapshot, create_snapshot, rollback_hints
-from .smbios import generate_smbios, SmbiosIdentity
-
-_pve: ProxmoxAdapter | None = None
-
-
-def _get_pve() -> ProxmoxAdapter:
-    """Lazy singleton to avoid import-time side effects."""
-    global _pve  # noqa: PLW0603
-    if _pve is None:
-        _pve = ProxmoxAdapter()
-    return _pve
-
-
-@dataclass
-class WizardState:
-    selected_os: str = ""
-    selected_storage: str = ""
-    storage_targets: list[str] = field(default_factory=list)
-    iso_dirs: list[str] = field(default_factory=list)
-    selected_iso_dir: str = ""
-    # Form
-    vmid: int = DEFAULT_VMID
-    name: str = ""
-    cores: int = 8
-    memory_mb: int = 16384
-    disk_gb: int = 128
-    bridge: str = "vmbr0"
-    storage: str = "local-lvm"
-    installer_path: str = ""
-    smbios: SmbiosIdentity | None = None
-    apple_services: bool = False
-    use_penryn: bool = False
-    net_model: str = "vmxnet3"
-    form_errors: dict[str, str] = field(default_factory=dict)
-    # Preflight
-    preflight_done: bool = False
-    preflight_ok: bool = False
-    preflight_checks: list[PreflightCheck] = field(default_factory=list)
-    # Downloads
-    download_running: bool = False
-    download_phase: str = ""
-    download_pct: int = 0
-    download_errors: list[str] = field(default_factory=list)
-    downloads_complete: bool = False
-    # Config + Plan
-    config: VmConfig | None = None
-    plan_steps: list[PlanStep] = field(default_factory=list)
-    assets_ok: bool = False
-    assets_missing: list[str] = field(default_factory=list)
-    # Dry run
-    dry_run_done: bool = False
-    dry_run_ok: bool = False
-    apply_running: bool = False
-    apply_log: list[str] = field(default_factory=list)
-    # Live install
-    live_done: bool = False
-    live_ok: bool = False
-    live_log: Path | None = None
-    snapshot: RollbackSnapshot | None = None
-    # Manage mode
-    manage_mode: bool = False
-    uninstall_vm_list: list[str] = field(default_factory=list)
-    uninstall_purge: bool = True
-    uninstall_log: list[str] = field(default_factory=list)
-    uninstall_running: bool = False
-    uninstall_done: bool = False
-    uninstall_ok: bool = False
+from ._manage_mixin import ManageModeMixin
+from ._wizard_mixin import WizardStepsMixin
+from .assets import required_assets
+from .defaults import (
+    DEFAULT_ISO_DIR,
+    detect_cpu_cores,
+    detect_cpu_info,
+    detect_iso_storage,
+    detect_net_model,
+)
+from .domain import PlanStep, SUPPORTED_MACOS, validate_config
+from .executor import StepResult
+from .models import WizardState
+from .planner import build_plan
+from .preflight import PreflightCheck
+from .rollback import RollbackSnapshot
+from .screens import (
+    compose_step1,
+    compose_step2,
+    compose_step3,
+    compose_step4,
+    compose_step5,
+    compose_step6,
+    format_preflight_text,
+    format_install_result,
+)
+from .services import (
+    detect_next_vmid,
+    detect_storage_targets,
+    run_dry_apply,
+    run_live_install,
+    run_preflight_worker,
+)
 
 
-class NextApp(App):
-    CSS = """
-    Screen { background: #0b1118; color: #f6f8fa; }
-    Header { background: #103252; color: #f6f8fa; }
-
-    #step_bar {
-        dock: top;
-        height: 3;
-        padding: 0 2;
-        background: #0d1722;
-        border-bottom: heavy #2f6fa2;
-        content-align: center middle;
-    }
-
-    #body { height: 1fr; padding: 1 2; overflow-y: auto; }
-
-    .step_container { height: auto; padding: 1; }
-    .step_hidden { display: none; }
-
-    .os_card {
-        border: round #1f4f7a;
-        padding: 1 2;
-        margin: 0 1 1 0;
-        min-width: 28;
-        height: 5;
-        content-align: center middle;
-    }
-    .os_card:hover { border: round #2f6fa2; background: #162433; }
-    .os_selected { border: heavy #2ec27e; background: #0f2a1a; }
-
-    .storage_btn { margin: 0 1 1 0; min-width: 18; }
-    .storage_selected { border: heavy #2ec27e; }
-
-    #config_grid {
-        layout: grid;
-        grid-size: 2;
-        grid-columns: 20 1fr;
-        grid-gutter: 0 1;
-        height: auto;
-        width: 100%;
-    }
-    .label { color: #9fc6e8; content-align: right middle; height: 1; }
-    Input {
-        height: 3;
-        color: #f6f8fa;
-        background: #162433;
-        border: tall #2f6fa2;
-    }
-    Input:focus { border: tall #2ec27e; background: #1a2c3f; }
-    .invalid { border: tall #d44f4f; background: #2a1717; }
-
-    #preflight_checks {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    #smbios_preview {
-        height: auto;
-        margin-top: 1;
-        border: tall #1f4f7a;
-        padding: 0 1;
-    }
-
-    #config_summary {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    #download_status {
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    #dry_log, #live_log {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: 12;
-        overflow: auto;
-    }
-
-    #result_box {
-        border: heavy #2ec27e;
-        padding: 1;
-        height: auto;
-        margin-top: 1;
-        content-align: center middle;
-    }
-    .result_fail { border: heavy #d44f4f; }
-
-    #install_btn {
-        height: 5;
-        min-width: 40;
-        border: heavy #2ec27e;
-        content-align: center middle;
-    }
-
-    .nav_row { height: auto; margin-top: 1; }
-    .nav_row Button { margin-right: 1; min-width: 14; }
-    #exit_btn, #exit_btn_2, #exit_btn_3, #exit_btn_4, #exit_btn_5, #exit_btn_6 {
-        dock: right;
-        background: #3a1a1a;
-        border: tall #d44f4f;
-        color: #d44f4f;
-    }
-
-    .action_row { height: auto; margin-bottom: 1; }
-    .action_row Button { margin-right: 1; min-width: 14; }
-
-    #form_errors {
-        height: auto;
-        color: #d44f4f;
-        margin-bottom: 1;
-    }
-
-    .hidden { display: none; }
-    .penryn_hint { color: #e6a817; margin-top: 1; }
-
-    .mode_btn { margin: 0 1 1 0; min-width: 18; }
-    .mode_active { border: heavy #2ec27e; background: #0f2a1a; }
-
-    #manage_panel { height: auto; padding: 1; }
-
-    #manage_vmid { width: 30; }
-    #manage_vmid_label { color: #9fc6e8; margin-top: 1; }
-    #manage_purge_cb { margin-right: 2; }
-
-    #vm_list_display {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: 8;
-        overflow: auto;
-    }
-
-    #manage_log {
-        background: #0d1722;
-        border: tall #1f4f7a;
-        padding: 1;
-        height: 8;
-        overflow: auto;
-    }
-
-    #manage_result {
-        border: heavy #2ec27e;
-        padding: 1;
-        height: auto;
-        margin-top: 1;
-    }
-    .manage_result_fail { border: heavy #d44f4f; }
-
-    .hint { color: #aaaaaa; margin-top: 1; }
-    """
+class NextApp(WizardStepsMixin, ManageModeMixin, App):
+    CSS_PATH = Path(__file__).with_suffix(".tcss")
 
     BINDINGS = [
         ("q", "quit", "Quit"),
@@ -273,162 +70,12 @@ class NextApp(App):
         yield Header(show_clock=True)
         yield Static("", id="step_bar")
         with Container(id="body"):
-            yield from self._compose_step1()
-            yield from self._compose_step2()
-            yield from self._compose_step3()
-            yield from self._compose_step4()
-            yield from self._compose_step5()
-            yield from self._compose_step6()
-
-    def _compose_step1(self) -> ComposeResult:
-        with Vertical(id="step1", classes="step_container"):
-            yield Static("Host Preflight Checks")
-            yield Static("Checking...", id="preflight_checks")
-            with Horizontal(classes="nav_row"):
-                yield Button("Continue", id="preflight_next_btn", disabled=True)
-                yield Button("Exit", id="exit_btn")
-
-    def _compose_step2(self) -> ComposeResult:
-        with Vertical(id="step2", classes="step_container step_hidden"):
-            with Horizontal(classes="action_row"):
-                yield Button("Create VM", id="mode_create", classes="mode_btn mode_active")
-                yield Button("Manage VMs", id="mode_manage", classes="mode_btn")
-            # Create panel
-            with Vertical(id="create_panel"):
-                yield Static("Choose macOS Version")
-                with Horizontal(id="os_cards"):
-                    for key, meta in SUPPORTED_MACOS.items():
-                        channel = "STABLE" if meta["channel"] == "stable" else "PREVIEW"
-                        yield Button(
-                            f"{meta['label']}\n{channel}",
-                            id=f"os_{key}",
-                            classes="os_card",
-                        )
-                with Horizontal(classes="nav_row"):
-                    yield Button("Back", id="back_btn_2")
-                    yield Button("Next", id="next_btn", disabled=True)
-                    yield Button("Exit", id="exit_btn_2")
-            # Manage panel
-            with Vertical(id="manage_panel", classes="hidden"):
-                yield Static("Manage VMs")
-                yield Static("", id="vm_list_display")
-                with Horizontal(classes="action_row"):
-                    yield Button("Refresh List", id="manage_refresh_btn")
-                yield Static("Enter the VM ID to remove:", id="manage_vmid_label")
-                yield Input(value="", id="manage_vmid", placeholder="e.g. 106")
-                with Horizontal(classes="action_row"):
-                    yield Checkbox("Delete disk images", value=True, id="manage_purge_cb")
-                    yield Button("Remove VM", id="manage_destroy_btn", disabled=True)
-                yield Static(
-                    "This will stop the VM, remove its configuration,\n"
-                    "and delete all associated disk images.",
-                    id="manage_hint",
-                    classes="hint",
-                )
-                yield Static("", id="manage_log", classes="hidden")
-                yield Static("", id="manage_result", classes="hidden")
-
-    def _compose_step3(self) -> ComposeResult:
-        with Vertical(id="step3", classes="step_container step_hidden"):
-            yield Static("Choose Storage Target")
-            with Horizontal(id="storage_row"):
-                for idx, target in enumerate(self.state.storage_targets):
-                    cls = "storage_btn storage_selected" if idx == 0 else "storage_btn"
-                    yield Button(target, id=f"storage_{idx}", classes=cls)
-            with Horizontal(classes="nav_row"):
-                yield Button("Back", id="back_btn_3")
-                yield Button("Next", id="next_btn_3")
-                yield Button("Exit", id="exit_btn_3")
-
-    def _compose_step4(self) -> ComposeResult:
-        with Vertical(id="step4", classes="step_container step_hidden"):
-            yield Static("VM Configuration")
-            with Container(id="config_grid"):
-                yield Static("VMID", classes="label")
-                yield Input(value=str(DEFAULT_VMID), id="vmid")
-                yield Static("VM Name", classes="label")
-                yield Input(value="", id="name")
-                yield Static("CPU Cores", classes="label")
-                yield Input(value="8", id="cores", disabled=True)
-                yield Static("Memory MB", classes="label")
-                yield Input(value="16384", id="memory")
-                yield Static("Disk GB", classes="label")
-                yield Input(value="128", id="disk")
-                yield Static("Bridge", classes="label")
-                yield Input(value=DEFAULT_BRIDGE, id="bridge")
-                yield Static("Storage", classes="label")
-                yield Input(value=DEFAULT_STORAGE, id="storage_input")
-                yield Static("ISO Storage", classes="label")
-                yield Input(value=DEFAULT_ISO_DIR, id="iso_dir")
-                yield Static("Installer Path", classes="label")
-                yield Input(value="", id="installer_path")
-                yield Static("Existing UUID (optional)", classes="label")
-                yield Input(value="", id="existing_uuid", placeholder="Preserve existing VM UUID")
-            with Horizontal(classes="action_row"):
-                yield Checkbox("Enable Apple Services (iMessage, FaceTime, iCloud)", id="apple_services_cb")
-            with Horizontal(classes="action_row"):
-                yield Checkbox(
-                    "Use Penryn CPU mode (recommended for older Intel CPUs)",
-                    id="penryn_cb",
-                    value=self._cpu_info.needs_penryn,
-                )
-            yield Static(
-                "Older Intel CPU detected (pre-Skylake). Penryn mode improves macOS install stability on this hardware. (Xeon CPUs are automatically excluded — they use -cpu host.)",
-                id="penryn_hint",
-                classes="penryn_hint" + ("" if self._cpu_info.needs_penryn else " step_hidden"),
-            )
-            with Horizontal(classes="action_row"):
-                _e1000_default = self._cpu_info.is_xeon or self._cpu_info.needs_penryn
-                yield Checkbox(
-                    "Use e1000 network adapter (recommended for Xeon / older Intel — no kext needed)",
-                    id="e1000_cb",
-                    value=_e1000_default,
-                )
-            yield Static(
-                "Xeon or legacy Intel CPU detected. e1000 has a native macOS driver and avoids slow recovery downloads caused by vmxnet3 kext not loading during install.",
-                id="e1000_hint",
-                classes="penryn_hint" + ("" if _e1000_default else " step_hidden"),
-            )
-            with Container(id="apple_services_fields", classes="hidden"):
-                yield Static("Custom vmgenid (optional)", classes="label")
-                yield Input(value="", id="custom_vmgenid", placeholder="Auto-generated if empty")
-                yield Static("Custom MAC (optional)", classes="label")
-                yield Input(value="", id="custom_mac", placeholder="Auto-generated if empty")
-            yield Static("", id="form_errors")
-            with Horizontal(classes="action_row"):
-                yield Button("Suggest Defaults", id="suggest_btn")
-                yield Button("Generate SMBIOS", id="smbios_btn")
-            yield Static("SMBIOS: not generated yet.", id="smbios_preview")
-            with Horizontal(classes="nav_row"):
-                yield Button("Back", id="back_btn_4")
-                yield Button("Next", id="next_btn_4")
-                yield Button("Exit", id="exit_btn_4")
-
-    def _compose_step5(self) -> ComposeResult:
-        with Vertical(id="step5", classes="step_container step_hidden"):
-            yield Static("Review & Dry Run")
-            yield Static("", id="config_summary")
-            yield Static("", id="download_status")
-            yield ProgressBar(total=100, show_eta=False, id="download_progress", classes="hidden")
-            with Horizontal(classes="action_row"):
-                yield Button("Run Dry Apply", id="dry_run_btn", disabled=True)
-            yield ProgressBar(total=1, show_eta=False, id="dry_progress", classes="hidden")
-            yield Static("", id="dry_log", classes="hidden")
-            with Horizontal(classes="nav_row"):
-                yield Button("Back", id="back_btn_5")
-                yield Button("Next: Install", id="next_btn_5", disabled=True)
-                yield Button("Exit", id="exit_btn_5")
-
-    def _compose_step6(self) -> ComposeResult:
-        with Vertical(id="step6", classes="step_container step_hidden"):
-            yield Static("Install macOS")
-            yield Button("Install", id="install_btn", classes="hidden")
-            yield ProgressBar(total=1, show_eta=False, id="live_progress", classes="hidden")
-            yield Static("", id="live_log", classes="hidden")
-            yield Static("", id="result_box", classes="hidden")
-            with Horizontal(classes="nav_row"):
-                yield Button("Back", id="back_btn_6")
-                yield Button("Exit", id="exit_btn_6")
+            yield from compose_step1()
+            yield from compose_step2()
+            yield from compose_step3(self.state.storage_targets)
+            yield from compose_step4(self._cpu_info)
+            yield from compose_step5()
+            yield from compose_step6()
 
     def on_mount(self) -> None:
         self._update_step_bar()
@@ -448,14 +95,12 @@ class NextApp(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
 
-        # OS selection
         if bid.startswith("os_"):
             os_key = bid[3:]
             if os_key in SUPPORTED_MACOS:
                 self._select_os(os_key)
             return
 
-        # Storage selection
         if bid.startswith("storage_"):
             try:
                 idx = int(bid.split("_")[1])
@@ -464,36 +109,30 @@ class NextApp(App):
                 log.debug("Invalid storage button index: %s", bid)
             return
 
-        handlers = {
-            "preflight_next_btn": lambda: self._go_next(),
-            "next_btn": lambda: self._go_next(),
-            "next_btn_3": lambda: self._go_next(),
-            "next_btn_4": lambda: self._go_next(),
-            "next_btn_5": lambda: self._go_next(),
-            "back_btn_2": lambda: self._go_back(),
-            "back_btn_3": lambda: self._go_back(),
-            "back_btn_4": lambda: self._go_back(),
-            "back_btn_5": lambda: self._go_back(),
-            "back_btn_6": lambda: self._go_back(),
-            "preflight_rerun_btn": self._rerun_preflight,
-            "suggest_btn": self._apply_host_defaults,
-            "smbios_btn": self._generate_smbios,
-            "dry_run_btn": self._run_dry_apply,
-            "install_btn": self._run_live_install,
-            "mode_create": lambda: self._toggle_mode("create"),
-            "mode_manage": lambda: self._toggle_mode("manage"),
-            "manage_refresh_btn": self._refresh_vm_list,
-            "manage_destroy_btn": self._run_destroy,
-            "exit_btn": lambda: self.exit(),
-            "exit_btn_2": lambda: self.exit(),
-            "exit_btn_3": lambda: self.exit(),
-            "exit_btn_4": lambda: self.exit(),
-            "exit_btn_5": lambda: self.exit(),
-            "exit_btn_6": lambda: self.exit(),
-        }
-        handler = handlers.get(bid)
-        if handler:
-            handler()
+        _NEXT = {"preflight_next_btn", "next_btn", "next_btn_3", "next_btn_4", "next_btn_5"}
+        _BACK = {"back_btn_2", "back_btn_3", "back_btn_4", "back_btn_5", "back_btn_6"}
+        _EXIT = {"exit_btn", "exit_btn_2", "exit_btn_3", "exit_btn_4", "exit_btn_5", "exit_btn_6"}
+        if bid in _NEXT:
+            self._go_next()
+        elif bid in _BACK:
+            self._go_back()
+        elif bid in _EXIT:
+            self.exit()
+        else:
+            handlers = {
+                "preflight_rerun_btn": self._rerun_preflight,
+                "suggest_btn": self._apply_host_defaults,
+                "smbios_btn": self._generate_smbios,
+                "dry_run_btn": self._run_dry_apply,
+                "install_btn": self._run_live_install,
+                "mode_create": lambda: self._toggle_mode("create"),
+                "mode_manage": lambda: self._toggle_mode("manage"),
+                "manage_refresh_btn": self._refresh_vm_list,
+                "manage_destroy_btn": self._run_destroy,
+            }
+            handler = handlers.get(bid)
+            if handler:
+                handler()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         target_ids = {"vmid", "name", "memory", "disk", "bridge", "storage_input", "installer_path"}
@@ -525,13 +164,8 @@ class NextApp(App):
                 self.query_one("#e1000_hint", Static).add_class("step_hidden")
 
     def _toggle_apple_services_fields(self) -> None:
-        container = self.query_one("#apple_services_fields")
-        if self.state.apple_services:
-            container.remove_class("hidden")
-        else:
-            container.add_class("hidden")
-
-    # ── Navigation ──────────────────────────────────────────────────
+        c = self.query_one("#apple_services_fields")
+        (c.remove_class if self.state.apple_services else c.add_class)("hidden")
 
     def _go_next(self) -> None:
         step = self.current_step
@@ -546,7 +180,7 @@ class NextApp(App):
         elif step == 3:
             if not self.state.selected_storage:
                 return
-            self._prefill_form()
+            self._fill_form()
             self.current_step = 4
         elif step == 4:
             if not self._validate_form(quiet=False):
@@ -572,24 +206,8 @@ class NextApp(App):
     def _go_back(self) -> None:
         self.current_step = max(1, self.current_step - 1)
 
-    # ── Step 1: Preflight ────────────────────────────────────────────
-
     def _update_preflight_display(self) -> None:
-        if not self.state.preflight_done:
-            text = "Checking..."
-        else:
-            lines = []
-            passed = [c for c in self.state.preflight_checks if c.ok]
-            failed = [c for c in self.state.preflight_checks if not c.ok]
-            for c in passed:
-                lines.append(f"  ✓ {c.name}")
-            for c in failed:
-                lines.append(f"  ✗ {c.name}: {c.details}")
-            if failed:
-                header = f"{len(failed)} check(s) failed"
-            else:
-                header = f"All {len(passed)} checks passed"
-            text = header + "\n" + "\n".join(lines)
+        text = format_preflight_text(self.state.preflight_done, self.state.preflight_checks)
         self.query_one("#preflight_checks", Static).update(text)
 
     def _rerun_preflight(self) -> None:
@@ -599,213 +217,6 @@ class NextApp(App):
         self._update_preflight_display()
         Thread(target=self._preflight_worker, daemon=True).start()
 
-    # ── Step 2: OS Selection ────────────────────────────────────────
-
-    def _select_os(self, key: str) -> None:
-        self.state.selected_os = key
-        self.state.smbios = generate_smbios(key, self.state.apple_services)
-        # Update card styles
-        for os_key in SUPPORTED_MACOS:
-            card = self.query_one(f"#os_{os_key}")
-            if os_key == key:
-                card.add_class("os_selected")
-            else:
-                card.remove_class("os_selected")
-        # Enable Next
-        self.query_one("#next_btn", Button).disabled = False
-
-    # ── Step 3: Storage Selection ───────────────────────────────────
-
-    def _select_storage(self, target: str) -> None:
-        self.state.selected_storage = target
-        for idx in range(len(self.state.storage_targets)):
-            btn = self.query_one(f"#storage_{idx}", Button)
-            if self.state.storage_targets[idx] == target:
-                btn.add_class("storage_selected")
-            else:
-                btn.remove_class("storage_selected")
-
-    # ── Step 4: Configuration ───────────────────────────────────────
-
-    def _prefill_form(self) -> None:
-        macos = self.state.selected_os
-        self._set_input_value("#vmid", str(self._detect_next_vmid()))
-        self._set_input_value("#name", f"macos-{macos}")
-        self._set_input_value("#cores", str(detect_cpu_cores()))
-        self._set_input_value("#memory", str(detect_memory_mb()))
-        self._set_input_value("#disk", str(default_disk_gb(macos)))
-        self._set_input_value("#bridge", DEFAULT_BRIDGE)
-        self._set_input_value("#storage_input", self.state.selected_storage)
-        self._set_input_value("#iso_dir", self.state.selected_iso_dir)
-        self._set_input_value("#installer_path", "")
-        self._update_smbios_preview()
-
-    def _apply_host_defaults(self) -> None:
-        macos = self.state.selected_os or "sequoia"
-        self._set_input_value("#vmid", str(self._detect_next_vmid()))
-        self._set_input_value("#name", f"macos-{macos}")
-        self._set_input_value("#cores", str(detect_cpu_cores()))
-        self._set_input_value("#memory", str(detect_memory_mb()))
-        self._set_input_value("#disk", str(default_disk_gb(macos)))
-        self._set_input_value("#bridge", DEFAULT_BRIDGE)
-        self._set_input_value("#storage_input", self.state.selected_storage or DEFAULT_STORAGE)
-        self._set_input_value("#iso_dir", self.state.selected_iso_dir)
-        if not self.state.smbios:
-            existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
-            apple_services = self.state.apple_services
-            if existing_uuid:
-                identity = generate_smbios(macos, apple_services)
-                identity.uuid = existing_uuid
-                self.state.smbios = identity
-            else:
-                self.state.smbios = generate_smbios(macos, apple_services)
-        self._update_smbios_preview()
-
-    def _generate_smbios(self) -> None:
-        macos = self.state.selected_os or "sequoia"
-        existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
-        apple_services = self.state.apple_services
-
-        if existing_uuid:
-            # Preserve existing UUID, generate other fields
-            identity = generate_smbios(macos, apple_services)
-            identity.uuid = existing_uuid
-            self.state.smbios = identity
-        else:
-            self.state.smbios = generate_smbios(macos, apple_services)
-        self._update_smbios_preview()
-
-    def _update_smbios_preview(self) -> None:
-        smbios = self.state.smbios
-        if smbios:
-            text = f"SMBIOS: serial={smbios.serial}  uuid={smbios.uuid}  model={smbios.model}"
-            if self.state.apple_services:
-                text += "  [Apple Services]"
-        else:
-            text = "SMBIOS: not generated yet."
-        self.query_one("#smbios_preview", Static).update(text)
-
-    def _validate_form(self, quiet: bool = False) -> bool:
-        errors: dict[str, str] = {}
-
-        vmid_text = self.query_one("#vmid", Input).value.strip()
-        name_text = self.query_one("#name", Input).value.strip()
-        memory_text = self.query_one("#memory", Input).value.strip()
-        disk_text = self.query_one("#disk", Input).value.strip()
-        bridge_text = self.query_one("#bridge", Input).value.strip()
-        storage_text = self.query_one("#storage_input", Input).value.strip()
-
-        try:
-            vmid_val = int(vmid_text)
-            if vmid_val < MIN_VMID or vmid_val > MAX_VMID:
-                raise ValueError
-        except ValueError:
-            errors["vmid"] = f"VMID must be {MIN_VMID}-{MAX_VMID}."
-
-        if len(name_text) < 3:
-            errors["name"] = "VM Name must be at least 3 chars."
-
-        try:
-            mem_val = int(memory_text)
-            if mem_val < MIN_MEMORY_MB:
-                raise ValueError
-        except ValueError:
-            errors["memory"] = f"Memory must be >= {MIN_MEMORY_MB} MB."
-
-        try:
-            disk_val = int(disk_text)
-            if disk_val < MIN_DISK_GB:
-                raise ValueError
-        except ValueError:
-            errors["disk"] = f"Disk must be >= {MIN_DISK_GB} GB."
-
-        if not re.fullmatch(r"vmbr[0-9]+", bridge_text):
-            errors["bridge"] = "Bridge must match vmbr<N> (e.g. vmbr0)."
-
-        if not storage_text:
-            errors["storage_input"] = "Storage target is required."
-
-        # Apply invalid classes
-        for field_id in ("vmid", "name", "memory", "disk", "bridge", "storage_input"):
-            widget = self.query_one(f"#{field_id}", Input)
-            if field_id in errors:
-                widget.add_class("invalid")
-            else:
-                widget.remove_class("invalid")
-
-        self.state.form_errors = errors
-        if errors:
-            self.query_one("#form_errors", Static).update(" ".join(errors.values()))
-            if not quiet:
-                self.notify("Fix form errors before continuing", severity="warning")
-            return False
-
-        self.query_one("#form_errors", Static).update("")
-        return True
-
-    def _show_form_errors(self, issues: list[str]) -> None:
-        self.query_one("#form_errors", Static).update(" ".join(issues))
-        self.notify("Validation failed", severity="error")
-
-    def _read_form(self) -> VmConfig | None:
-        try:
-            vmid = int(self.query_one("#vmid", Input).value.strip())
-            cores = int(self.query_one("#cores", Input).value.strip() or "8")
-            memory_mb = int(self.query_one("#memory", Input).value.strip() or "16384")
-            disk_gb = int(self.query_one("#disk", Input).value.strip() or "128")
-        except ValueError:
-            return None
-
-        macos = self.state.selected_os or "sequoia"
-        smbios = self.state.smbios
-
-        return VmConfig(
-            vmid=vmid,
-            name=self.query_one("#name", Input).value.strip(),
-            macos=macos,
-            cores=cores,
-            memory_mb=memory_mb,
-            disk_gb=disk_gb,
-            bridge=self.query_one("#bridge", Input).value.strip() or DEFAULT_BRIDGE,
-            storage=self.query_one("#storage_input", Input).value.strip() or DEFAULT_STORAGE,
-            installer_path=self.query_one("#installer_path", Input).value.strip(),
-            iso_dir=self.query_one("#iso_dir", Input).value.strip() or DEFAULT_ISO_DIR,
-            smbios_serial=smbios.serial if smbios else "",
-            smbios_uuid=smbios.uuid if smbios else "",
-            smbios_mlb=smbios.mlb if smbios else "",
-            smbios_rom=smbios.rom if smbios else "",
-            smbios_model=smbios.model if smbios else "",
-            apple_services=self.state.apple_services,
-            cpu_model="Penryn" if self.state.use_penryn else "",
-            net_model=self.state.net_model,
-            vmgenid=self.query_one("#custom_vmgenid", Input).value.strip().upper() if self.state.apple_services else "",
-            static_mac=self.query_one("#custom_mac", Input).value.strip().upper() if self.state.apple_services else "",
-        )
-
-    # ── Step 5: Review & Dry Run ────────────────────────────────────
-
-    def _render_config_summary(self) -> None:
-        config = self.state.config
-        if not config:
-            return
-        meta = SUPPORTED_MACOS.get(config.macos, {})
-        cpu = detect_cpu_info()
-        cpu_label = cpu.model_name or cpu.vendor
-        lines = [
-            f"Target: {meta.get('label', config.macos)} ({meta.get('channel', '?')})",
-            f"VM: {config.vmid} / {config.name}",
-            f"CPU: {cpu_label} — {config.cores} cores | Memory: {config.memory_mb} MB | Disk: {config.disk_gb} GB",
-            f"Storage: {config.storage} | Bridge: {config.bridge}",
-        ]
-        if config.installer_path:
-            lines.append(f"Installer: {config.installer_path}")
-        lines.append("")
-        lines.append(f"Plan: {len(self.state.plan_steps)} steps")
-        for idx, step in enumerate(self.state.plan_steps, start=1):
-            prefix = "!" if step.risk in {"warn", "action"} else "-"
-            lines.append(f"  {idx:02d}. {prefix} {step.title}")
-        self.query_one("#config_summary", Static).update("\n".join(lines))
-
     def _check_and_download_assets(self) -> None:
         config = self.state.config
         if not config:
@@ -813,7 +224,6 @@ class NextApp(App):
         assets = required_assets(config)
         missing = [a for a in assets if not a.ok]
         downloadable = [a for a in missing if a.downloadable]
-
         if not missing:
             self.state.assets_ok = True
             self.state.assets_missing = []
@@ -821,10 +231,8 @@ class NextApp(App):
             self.query_one("#download_status", Static).update("Assets: OK")
             self.query_one("#dry_run_btn", Button).disabled = False
             return
-
         self.state.assets_ok = False
         self.state.assets_missing = missing
-
         if downloadable:
             names = ", ".join(a.name for a in downloadable)
             self.query_one("#download_status", Static).update(f"Downloading: {names}...")
@@ -836,68 +244,6 @@ class NextApp(App):
             self.query_one("#download_status", Static).update(
                 f"Missing assets: {', '.join(a.name for a in missing)}. Provide path manually."
             )
-
-    def _download_worker(self, config: VmConfig, missing: list[AssetCheck]) -> None:
-        dest_dir = Path(config.iso_dir or DEFAULT_ISO_DIR)
-        errors: list[str] = []
-
-        def on_progress(p: DownloadProgress) -> None:
-            if p.total > 0:
-                pct = int(p.downloaded * 100 / p.total)
-                self.call_from_thread(self._update_download_progress, p.phase, pct)
-
-        for asset in missing:
-            if not asset.downloadable:
-                continue
-            if "OpenCore" in asset.name:
-                try:
-                    download_opencore(config.macos, dest_dir, on_progress=on_progress)
-                except DownloadError as exc:
-                    errors.append(f"OpenCore: {exc}")
-            elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():  # pragma: no branch
-                try:
-                    download_recovery(config.macos, dest_dir, on_progress=on_progress)
-                except DownloadError as exc:
-                    errors.append(f"Recovery: {exc}")
-
-        self.call_from_thread(self._finish_download, errors)
-
-    def _update_download_progress(self, phase: str, pct: int) -> None:
-        self.state.download_pct = pct
-        self.state.download_phase = phase
-        self.query_one("#download_progress", ProgressBar).update(total=100, progress=pct)
-        if pct >= 100:
-            self.query_one("#download_status", Static).update(f"Finalizing {phase}...")
-        else:
-            self.query_one("#download_status", Static).update(f"Downloading {phase}... {pct}%")
-
-    def _finish_download(self, errors: list[str]) -> None:
-        self.state.download_running = False
-        self.query_one("#download_progress").add_class("hidden")
-        if errors:
-            self.state.download_errors = errors
-            self.query_one("#download_status", Static).update(
-                "Download errors: " + "; ".join(errors)
-            )
-            self.notify("Some downloads failed", severity="error")
-        else:
-            self.state.downloads_complete = True
-            # Rebuild plan now that downloaded assets exist on disk
-            self._rebuild_plan_after_download()
-            self.query_one("#download_status", Static).update("Assets: downloaded and ready")
-            self.query_one("#dry_run_btn", Button).disabled = False
-            self.notify("Assets downloaded", severity="information")
-
-    def _rebuild_plan_after_download(self) -> None:
-        """Rebuild config and plan so asset paths resolve to newly downloaded files."""
-        config = self._read_form()
-        if config:
-            self.state.config = config
-            try:
-                self.state.plan_steps = build_plan(config)
-            except ValueError:
-                log.debug("Failed to rebuild plan after download", exc_info=True)
-            self._render_config_summary()
 
     def _run_dry_apply(self) -> None:
         if self.state.apply_running:
@@ -916,17 +262,14 @@ class NextApp(App):
             self.call_from_thread(self._update_dry_progress, idx, total, step.title, result)
 
         def worker() -> None:
-            result = apply_plan(self.state.plan_steps, execute=False, on_step=callback)
+            result = run_dry_apply(self.state.plan_steps, on_step=callback)
             self.call_from_thread(self._finish_dry_apply, result.ok, result.log_path)
 
         Thread(target=worker, daemon=True).start()
 
     def _update_dry_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#dry_progress", ProgressBar).update(total=total, progress=idx)
-        if result is None:
-            self._append_log("#dry_log", f"Running {idx}/{total}: {title}")
-        else:
-            self._append_log("#dry_log", f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})")
+        self._append_log("#dry_log", self._step_log_line(idx, total, title, result))
 
     def _finish_dry_apply(self, ok: bool, log_path: Path) -> None:
         self.state.apply_running = False
@@ -941,14 +284,10 @@ class NextApp(App):
             self.query_one("#dry_run_btn", Button).disabled = False
             self.notify("Dry run failed", severity="error")
 
-    # ── Step 6: Live Install ────────────────────────────────────────
-
     def _prepare_install_step(self) -> None:
-        config = self.state.config
-        if not config:
+        if not self.state.config:
             return
-        meta = SUPPORTED_MACOS.get(config.macos, {})
-        label = meta.get("label", config.macos)
+        label = SUPPORTED_MACOS.get(self.state.config.macos, {}).get("label", self.state.config.macos)
         self.query_one("#install_btn", Button).label = f"Install {label}"
         self.query_one("#install_btn").remove_class("hidden")
 
@@ -960,7 +299,6 @@ class NextApp(App):
         if not self.state.preflight_ok:
             self.notify("Preflight has failures. Fix before install.", severity="error")
             return
-
         self.state.apply_running = True
         self.state.apply_log = []
         self.query_one("#install_btn").add_class("hidden")
@@ -975,19 +313,17 @@ class NextApp(App):
             self.call_from_thread(self._update_live_progress, idx, total, step.title, result)
 
         def worker() -> None:
-            snapshot = create_snapshot(self.state.config.vmid)
+            result, snapshot = run_live_install(
+                self.state.config.vmid, self.state.plan_steps, on_step=callback
+            )
             self.state.snapshot = snapshot
-            result = apply_plan(self.state.plan_steps, execute=True, on_step=callback)
             self.call_from_thread(self._finish_live_install, result.ok, result.log_path, snapshot)
 
         Thread(target=worker, daemon=True).start()
 
     def _update_live_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#live_progress", ProgressBar).update(total=total, progress=idx)
-        if result is None:
-            self._append_log("#live_log", f"Running {idx}/{total}: {title}")
-        else:
-            self._append_log("#live_log", f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})")
+        self._append_log("#live_log", self._step_log_line(idx, total, title, result))
 
     def _finish_live_install(
         self, ok: bool, log_path: Path, snapshot: RollbackSnapshot | None
@@ -996,181 +332,22 @@ class NextApp(App):
         self.state.live_done = True
         self.state.live_ok = ok
         self.state.live_log = log_path
-
+        vmid = self.state.config.vmid if self.state.config else "???"
         result_box = self.query_one("#result_box", Static)
         result_box.remove_class("hidden")
-
+        text = format_install_result(ok, vmid, log_path, snapshot)
         if ok:
             result_box.remove_class("result_fail")
-            vmid = self.state.config.vmid if self.state.config else "???"
-            lines = [
-                "Install completed successfully!",
-                f"Log: {log_path}",
-                "",
-                "POST-INSTALL: After macOS finishes installing, fix the boot order",
-                "so the main disk boots first (instead of recovery):",
-                f"  qm set {vmid} --boot order=virtio0;ide0",
-                "",
-                "If this saved you time: https://ko-fi.com/lucidfabrics",
-            ]
-            result_box.update("\n".join(lines))
             self.notify("macOS VM created", severity="information")
         else:
             result_box.add_class("result_fail")
-            lines = ["Install FAILED.", f"Log: {log_path}"]
-            if snapshot:
-                lines.append("")
-                lines.extend(rollback_hints(snapshot))
-            result_box.update("\n".join(lines))
             self.notify("Install failed", severity="error")
-
-    # ── Manage Mode ─────────────────────────────────────────────────
-
-    def _toggle_mode(self, mode: str) -> None:
-        is_manage = mode == "manage"
-        self.state.manage_mode = is_manage
-        create_btn = self.query_one("#mode_create", Button)
-        manage_btn = self.query_one("#mode_manage", Button)
-        create_panel = self.query_one("#create_panel")
-        manage_panel = self.query_one("#manage_panel")
-
-        if is_manage:
-            create_panel.add_class("hidden")
-            manage_panel.remove_class("hidden")
-            create_btn.remove_class("mode_active")
-            manage_btn.add_class("mode_active")
-            self._refresh_vm_list()
-        else:
-            manage_panel.add_class("hidden")
-            create_panel.remove_class("hidden")
-            manage_btn.remove_class("mode_active")
-            create_btn.add_class("mode_active")
-
-    def _refresh_vm_list(self) -> None:
-        Thread(target=self._vm_list_worker, daemon=True).start()
-
-    def _vm_list_worker(self) -> None:
-        try:
-            res = _get_pve().qm("list")
-            if not res.ok:
-                self.call_from_thread(self._finish_vm_list, [])
-                return
-            all_lines = res.output.strip().splitlines()
-            # Filter to macOS VMs only (have isa-applesmc in config)
-            macos_lines: list[str] = []
-            for line in all_lines[1:]:  # skip header
-                parts = line.split()
-                if not parts:
-                    continue
-                vmid = parts[0]
-                cfg_res = _get_pve().qm("config", vmid)
-                if cfg_res.ok and "isa-applesmc" in cfg_res.output:
-                    macos_lines.append(line)
-            header = all_lines[0] if all_lines else ""
-            result = [header] + macos_lines if macos_lines else []
-            self.call_from_thread(self._finish_vm_list, result)
-        except (OSError, RuntimeError):
-            log.debug("Failed to list VMs", exc_info=True)
-            self.call_from_thread(self._finish_vm_list, [])
-
-    def _finish_vm_list(self, lines: list[str]) -> None:
-        self.state.uninstall_vm_list = lines
-        display = self.query_one("#vm_list_display", Static)
-        if lines:
-            display.update("\n".join(lines[:20]))
-        else:
-            display.update("No macOS VMs found.")
-
-    def _validate_manage_vmid(self) -> None:
-        text = self.query_one("#manage_vmid", Input).value.strip()
-        btn = self.query_one("#manage_destroy_btn", Button)
-        try:
-            vmid = int(text)
-            btn.disabled = vmid < MIN_VMID or vmid > MAX_VMID
-        except ValueError:
-            btn.disabled = True
-
-    def _toggle_purge(self) -> None:
-        cb = self.query_one("#manage_purge_cb", Checkbox)
-        self.state.uninstall_purge = cb.value
-        hint = self.query_one("#manage_hint", Static)
-        if self.state.uninstall_purge:
-            hint.update(
-                "This will stop the VM, remove its configuration,\n"
-                "and delete all associated disk images."
-            )
-        else:
-            hint.update(
-                "This will stop the VM and remove its configuration.\n"
-                "Disk images will be kept on storage."
-            )
-
-    def _run_destroy(self) -> None:
-        if self.state.uninstall_running:
-            return
-        text = self.query_one("#manage_vmid", Input).value.strip()
-        try:
-            vmid = int(text)
-        except ValueError:
-            return
-        if vmid < MIN_VMID or vmid > MAX_VMID:
-            return
-
-        self.state.uninstall_running = True
-        self.state.uninstall_done = False
-        self.state.uninstall_log = []
-        self.query_one("#manage_destroy_btn", Button).disabled = True
-        self.query_one("#manage_log").remove_class("hidden")
-        self.query_one("#manage_log", Static).update("Removing VM...")
-        self.query_one("#manage_result").add_class("hidden")
-
-        Thread(target=self._destroy_worker, args=(vmid,), daemon=True).start()
-
-    def _destroy_worker(self, vmid: int) -> None:
-        snapshot = create_snapshot(vmid)
-        steps = build_destroy_plan(vmid, purge=self.state.uninstall_purge)
-
-        def on_step(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
-            self.call_from_thread(self._update_destroy_log, idx, total, step.title, result)
-
-        result = apply_plan(steps, execute=True, on_step=on_step)
-        self.call_from_thread(self._finish_destroy, result.ok, result.log_path)
-
-    def _update_destroy_log(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
-        if result is None:
-            self.state.uninstall_log.append(f"Running {idx}/{total}: {title}")
-        else:
-            self.state.uninstall_log.append(f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title}")
-        visible = self.state.uninstall_log[-10:]
-        self.query_one("#manage_log", Static).update("\n".join(visible))
-
-    def _finish_destroy(self, ok: bool, log_path: Path) -> None:
-        self.state.uninstall_running = False
-        self.state.uninstall_done = True
-        self.state.uninstall_ok = ok
-        self._validate_manage_vmid()
-
-        result_box = self.query_one("#manage_result", Static)
-        result_box.remove_class("hidden")
-
-        if ok:
-            result_box.remove_class("manage_result_fail")
-            result_box.update(f"VM removed successfully.\nLog: {log_path}")
-            self._refresh_vm_list()
-        else:
-            result_box.add_class("manage_result_fail")
-            result_box.update(f"Failed to remove VM.\nLog: {log_path}")
-
-    # ── Preflight Worker ────────────────────────────────────────────
+        result_box.update(text)
 
     def _preflight_worker(self) -> None:
-        checks = run_preflight()
-        if has_missing_build_deps(checks):
-            def _on_output(msg: str) -> None:
-                self.call_from_thread(self._update_preflight_status, msg)
-            ok, pkgs = install_missing_packages(on_output=_on_output)
-            if ok and pkgs:
-                checks = run_preflight()
+        def _on_status(msg: str) -> None:
+            self.call_from_thread(self._update_preflight_status, msg)
+        checks = run_preflight_worker(on_status=_on_status)
         self.call_from_thread(self._finish_preflight, checks)
 
     def _update_preflight_status(self, msg: str) -> None:
@@ -1183,58 +360,11 @@ class NextApp(App):
         self._update_preflight_display()
         self.query_one("#preflight_next_btn", Button).disabled = not self.state.preflight_ok
 
-    # ── Detection Helpers ───────────────────────────────────────────
-
     def _detect_storage_targets(self) -> list[str]:
-        res = _get_pve().pvesm("status", "-content", "images")
-        if not res.ok:
-            log.debug("Failed to detect storage targets: %s", res.output)
-            return [DEFAULT_STORAGE, "local"]
-        targets: list[str] = []
-        for line in res.output.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 3 and parts[2] == "active":
-                name = parts[0]
-                if name not in targets:
-                    targets.append(name)
-        if DEFAULT_STORAGE not in targets:
-            targets.insert(0, DEFAULT_STORAGE)
-        return targets[:5]
+        return detect_storage_targets()
 
     def _detect_next_vmid(self) -> int:
-        res = _get_pve().pvesh("get", "/cluster/nextid")
-        if res.ok:
-            output = res.output.strip()
-            if output.isdigit():
-                vmid = int(output)
-                if MIN_VMID <= vmid <= MAX_VMID:
-                    return vmid
-            try:
-                parsed = json.loads(output)
-                if isinstance(parsed, int) and MIN_VMID <= parsed <= MAX_VMID:
-                    return parsed  # pragma: no cover
-            except (json.JSONDecodeError, ValueError):
-                log.debug("pvesh returned non-JSON/non-int: %s", output)
-        else:
-            log.debug("Failed to get next VMID via pvesh: %s", res.output)
-
-        res = _get_pve().qm("list")
-        if res.ok:
-            vmids: list[int] = []
-            for line in res.output.splitlines()[1:]:
-                parts = line.split()
-                if parts and parts[0].isdigit():
-                    vmids.append(int(parts[0]))
-            next_vmid = (max(vmids) + 1) if vmids else DEFAULT_VMID
-            if next_vmid < MIN_VMID:
-                return MIN_VMID
-            if next_vmid > MAX_VMID:
-                return MAX_VMID
-            return next_vmid
-        log.debug("Failed to detect next VMID via qm list: %s", res.output)
-        return DEFAULT_VMID
-
-    # ── UI Helpers ──────────────────────────────────────────────────
+        return detect_next_vmid()
 
     def _set_input_value(self, selector: str, value: str) -> None:
         widget = self.query_one(selector, Input)
@@ -1243,23 +373,22 @@ class NextApp(App):
         widget.refresh(layout=True)
 
     def _update_step_bar(self) -> None:
-        step_labels = ["Preflight", "OS", "Storage", "Config", "Dry Run", "Install"]
-        parts: list[str] = []
-        for idx in range(6):
-            num = idx + 1
-            name = step_labels[idx]
-            if num < self.current_step:
-                parts.append(f"[x] {num}.{name}")
-            elif num == self.current_step:
-                parts.append(f"[>] {num}.{name}")
-            else:
-                parts.append(f"[ ] {num}.{name}")
+        labels = ["Preflight", "OS", "Storage", "Config", "Dry Run", "Install"]
+        s = self.current_step
+        parts = [
+            f"{'[x]' if n < s else '[>]' if n == s else '[ ]'} {n}.{labels[n-1]}"
+            for n in range(1, 7)
+        ]
         self.query_one("#step_bar", Static).update("  ".join(parts))
+
+    def _step_log_line(self, idx: int, total: int, title: str, result: StepResult | None) -> str:
+        if result is None:
+            return f"Running {idx}/{total}: {title}"
+        return f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})"
 
     def _append_log(self, selector: str, line: str) -> None:
         self.state.apply_log.append(line)
         widget = self.query_one(selector, Static)
-        # Keep rolling window
         visible = self.state.apply_log[-15:]
         widget.update("\n".join(visible))
 
