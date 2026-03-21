@@ -80,9 +80,17 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     # Pre-generate SMBIOS identity so downstream steps just read config fields.
     config = _populate_smbios(config)
 
+    ctx = _DiskBuildContext(
+        config=config,
+        vmid=vmid,
+        is_amd=is_amd,
+        recovery_raw=recovery_raw,
+        opencore_path=opencore_path,
+        oc_disk=oc_disk,
+    )
     steps = [
         *_network_steps(config, vmid, cpu_flag),
-        *_disk_steps(config, vmid, is_amd, recovery_raw, opencore_path, oc_disk, macos_label),
+        *_disk_steps(ctx, macos_label),
         *_boot_steps(config, vmid),
     ]
 
@@ -140,14 +148,18 @@ def _network_steps(config: VmConfig, vmid: str, cpu_flag: str) -> list[PlanStep]
     ]
 
 
-def _opencore_steps(
-    config: VmConfig,
-    vmid: str,
-    is_amd: bool,
-    recovery_raw: Path,
-    opencore_path: Path,
-    oc_disk: Path,
-) -> list[PlanStep]:
+@dataclass
+class _DiskBuildContext:
+    """Shared parameters for disk-building plan steps."""
+    config: VmConfig
+    vmid: str
+    is_amd: bool
+    recovery_raw: Path
+    opencore_path: Path
+    oc_disk: Path
+
+
+def _opencore_steps(ctx: _DiskBuildContext) -> list[PlanStep]:
     """Build and import the OpenCore EFI disk."""
     return [
         PlanStep(
@@ -155,14 +167,14 @@ def _opencore_steps(
             argv=[
                 "bash", "-c",
                 _build_oc_disk_script(
-                    opencore_path, recovery_raw, oc_disk, config.macos,
-                    is_amd, config.cores, config.verbose_boot,
-                    apple_services=config.apple_services,
-                    smbios_serial=config.smbios_serial,
-                    smbios_uuid=config.smbios_uuid,
-                    smbios_mlb=config.smbios_mlb,
-                    smbios_rom=config.smbios_rom,
-                    smbios_model=config.smbios_model,
+                    ctx.opencore_path, ctx.recovery_raw, ctx.oc_disk, ctx.config.macos,
+                    ctx.is_amd, ctx.config.cores, ctx.config.verbose_boot,
+                    apple_services=ctx.config.apple_services,
+                    smbios_serial=ctx.config.smbios_serial,
+                    smbios_uuid=ctx.config.smbios_uuid,
+                    smbios_mlb=ctx.config.smbios_mlb,
+                    smbios_rom=ctx.config.smbios_rom,
+                    smbios_model=ctx.config.smbios_model,
                 ),
             ],
         ),
@@ -171,12 +183,12 @@ def _opencore_steps(
             argv=[
                 "bash", "-c",
                 "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
-                f'REF=$($IMPORT_CMD {shquote(vmid)} {shquote(str(oc_disk))} {shquote(config.storage)} 2>&1 | '
+                f'REF=$($IMPORT_CMD {shquote(ctx.vmid)} {shquote(str(ctx.oc_disk))} {shquote(ctx.config.storage)} 2>&1 | '
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
-                f'qm set {shquote(vmid)} --ide0 "$REF",media=disk && '
+                f'qm set {shquote(ctx.vmid)} --ide0 "$REF",media=disk && '
                 # Fix GPT header corruption from thin-provisioned LVM importdisk
                 'DEV=$(pvesm path "$REF") && '
-                f'dd if={shquote(str(oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
+                f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
             ],
         ),
     ]
@@ -246,31 +258,23 @@ def _recovery_steps(
     ]
 
 
-def _disk_steps(
-    config: VmConfig,
-    vmid: str,
-    is_amd: bool,
-    recovery_raw: Path,
-    opencore_path: Path,
-    oc_disk: Path,
-    macos_label: str,
-) -> list[PlanStep]:
+def _disk_steps(ctx: _DiskBuildContext, macos_label: str) -> list[PlanStep]:
     """EFI/TPM disk, main disk, OpenCore build/import, and recovery import."""
     return [
         PlanStep(
             title="Attach EFI + TPM",
             argv=[
-                "qm", "set", vmid,
-                "--efidisk0", f"{config.storage}:0,efitype=4m,pre-enrolled-keys=0",
-                "--tpmstate0", f"{config.storage}:0,version=v2.0",
+                "qm", "set", ctx.vmid,
+                "--efidisk0", f"{ctx.config.storage}:0,efitype=4m,pre-enrolled-keys=0",
+                "--tpmstate0", f"{ctx.config.storage}:0,version=v2.0",
             ],
         ),
         PlanStep(
             title="Create main disk",
-            argv=["qm", "set", vmid, "--virtio0", f"{config.storage}:{config.disk_gb}"],
+            argv=["qm", "set", ctx.vmid, "--virtio0", f"{ctx.config.storage}:{ctx.config.disk_gb}"],
         ),
-        *_opencore_steps(config, vmid, is_amd, recovery_raw, opencore_path, oc_disk),
-        *_recovery_steps(config, vmid, recovery_raw, macos_label),
+        *_opencore_steps(ctx),
+        *_recovery_steps(ctx.config, ctx.vmid, ctx.recovery_raw, macos_label),
     ]
 
 
