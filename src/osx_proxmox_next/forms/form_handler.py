@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE
+from ..defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_MEMORY_MB, DEFAULT_STORAGE
 from ..domain import MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, VmConfig
 from ..smbios import SmbiosIdentity
 
@@ -17,7 +17,7 @@ class FormValues:
     vmid: str = ""
     name: str = ""
     cores: str = "8"
-    memory: str = "16384"
+    memory: str = str(DEFAULT_MEMORY_MB)
     disk: str = "128"
     bridge: str = DEFAULT_BRIDGE
     storage: str = DEFAULT_STORAGE
@@ -82,7 +82,7 @@ def build_vm_config_from_values(values: FormValues) -> VmConfig | None:
     try:
         vmid = int(values.vmid)
         cores = int(values.cores or "8")
-        memory_mb = int(values.memory or "16384")
+        memory_mb = int(values.memory or DEFAULT_MEMORY_MB)
         disk_gb = int(values.disk or "128")
     except ValueError:
         return None

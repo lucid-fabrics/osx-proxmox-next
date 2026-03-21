@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Button, Checkbox, Input, ProgressBar, Static
 
-from ..defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_STORAGE, CpuInfo
+from ..defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_MEMORY_MB, DEFAULT_STORAGE, CpuInfo
 from ..domain import DEFAULT_VMID, SUPPORTED_MACOS
 
 __all__ = [
@@ -90,7 +90,7 @@ def _compose_step4_vm_fields() -> ComposeResult:
         yield Static("CPU Cores", classes="label")
         yield Input(value="8", id="cores", disabled=True)
         yield Static("Memory MB", classes="label")
-        yield Input(value="16384", id="memory")
+        yield Input(value=str(DEFAULT_MEMORY_MB), id="memory")
         yield Static("Disk GB", classes="label")
         yield Input(value="128", id="disk")
         yield Static("Bridge", classes="label")

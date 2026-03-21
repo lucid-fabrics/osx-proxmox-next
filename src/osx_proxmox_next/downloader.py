@@ -121,7 +121,8 @@ def download_recovery(
 
 
 def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> None:
-    adapter = ProxmoxAdapter()
+    from .services.proxmox_service import get_proxmox_adapter
+    adapter = get_proxmox_adapter()
     result = adapter.run(["dmg2img", str(dmg_path), str(dest)])
     if not result.ok:
         if dest.exists():

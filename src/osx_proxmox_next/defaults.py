@@ -17,6 +17,7 @@ DEFAULT_BRIDGE = "vmbr0"
 
 _MIN_MEMORY_MB = 4096
 _MAX_MEMORY_MB = 32768
+DEFAULT_MEMORY_MB = 16384
 
 # Intel Family 6 model numbers for hybrid (P+E core) architectures.
 # These CPUs need emulated CPU mode because macOS hardware validation
@@ -180,8 +181,8 @@ DEFAULT_ISO_DIR = "/var/lib/vz/template/iso"
 
 def detect_iso_storage() -> list[str]:
     """Return ISO directory paths from Proxmox storage pools that support ISO content."""
-    from .infrastructure import ProxmoxAdapter
-    pve = ProxmoxAdapter()
+    from .services.proxmox_service import get_proxmox_adapter
+    pve = get_proxmox_adapter()
     dirs: list[str] = []
     res = pve.pvesm("status", "-content", "iso")
     if res.ok:
