@@ -13,10 +13,8 @@ from .diagnostics import export_log_bundle, recovery_guide
 from .domain import MIN_VMID, MAX_VMID, VmConfig, validate_config
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
-from .services.download_service import run_download_worker
-from .services.proxmox_service import get_proxmox_adapter
 from .planner import build_plan, build_destroy_plan
-from .services import fetch_vm_info
+from .services import fetch_vm_info, get_proxmox_adapter, run_download_worker
 from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints

@@ -69,6 +69,7 @@ def download_opencore(
     for name in candidates:
         dest = dest_dir / name
         if dest.exists():
+            log.debug("OpenCore cache hit: %s", dest)
             return dest
 
     # Check version-tagged release, latest release, then permanent 'assets' tag
@@ -78,6 +79,7 @@ def download_opencore(
             url = _find_release_asset(release, name, required=False)
             if url:
                 dest = dest_dir / name
+                log.debug("Downloading OpenCore %s from %s", name, url)
                 _download_file(url, dest, on_progress, "opencore")
                 return dest
 
@@ -98,10 +100,12 @@ def download_recovery(
 
     dest = dest_dir / f"{macos}-recovery.img"
     if dest.exists():
+        log.debug("Recovery cache hit: %s", dest)
         return dest
 
     board_id = RECOVERY_BOARD_IDS[macos]
     os_type = _RECOVERY_OS_TYPE.get(macos, "default")
+    log.debug("Fetching %s recovery (board=%s, os_type=%s)", macos, board_id, os_type)
     session = _get_recovery_session()
     image_info = _get_recovery_image_info(session, board_id, os_type)
     image_url = image_info["AU"]
@@ -261,6 +265,7 @@ def _retry_download(
             return
         except (OSError, urllib.error.URLError) as exc:
             last_error = exc
+            log.debug("Download attempt %d/%d failed for %s: %s", attempt + 1, _MAX_RETRIES, url, exc)
             if part_path.exists():
                 part_path.unlink()
             if attempt < _MAX_RETRIES - 1:
