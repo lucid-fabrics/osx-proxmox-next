@@ -27,7 +27,6 @@ from .domain import MIN_VMID, MAX_VMID, PlanStep, SUPPORTED_MACOS, VmConfig, val
 from .executor import StepResult
 from .forms import validate_form_values, build_vm_config_from_values
 from .forms.form_handler import FormValues
-from .infrastructure import ProxmoxAdapter
 from .models import WizardState
 from .planner import build_plan
 from .preflight import PreflightCheck
@@ -44,6 +43,7 @@ from .screens import (
 from .services import (
     detect_next_vmid,
     detect_storage_targets,
+    get_proxmox_adapter,
     run_destroy_worker,
     run_download_worker,
     run_dry_apply,
@@ -51,17 +51,6 @@ from .services import (
     run_preflight_worker,
 )
 from .smbios import generate_smbios
-
-_pve: ProxmoxAdapter | None = None
-
-
-def _get_pve() -> ProxmoxAdapter:
-    """Lazy singleton to avoid import-time side effects."""
-    global _pve  # noqa: PLW0603
-    if _pve is None:
-        _pve = ProxmoxAdapter()
-    return _pve
-
 
 class NextApp(App):
     CSS_PATH = Path(__file__).with_suffix(".tcss")
@@ -638,7 +627,7 @@ class NextApp(App):
 
     def _vm_list_worker(self) -> None:
         try:
-            res = _get_pve().qm("list")
+            res = get_proxmox_adapter().qm("list")
             if not res.ok:
                 self.call_from_thread(self._finish_vm_list, [])
                 return
@@ -650,7 +639,7 @@ class NextApp(App):
                 if not parts:
                     continue
                 vmid = parts[0]
-                cfg_res = _get_pve().qm("config", vmid)
+                cfg_res = get_proxmox_adapter().qm("config", vmid)
                 if cfg_res.ok and "isa-applesmc" in cfg_res.output:
                     macos_lines.append(line)
             header = all_lines[0] if all_lines else ""

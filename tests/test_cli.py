@@ -608,7 +608,7 @@ def test_cli_status_invalid_vmid():
 
 
 def test_cli_status_vm_not_found(monkeypatch):
-    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid: None)
+    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid, adapter=None: None)
     rc = run_cli(["status", "--vmid", "106"])
     assert rc == 2
 
@@ -617,7 +617,7 @@ def test_cli_status_success(monkeypatch, capsys):
     from osx_proxmox_next.planner import VmInfo
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(
+        lambda vmid, adapter=None: VmInfo(
             vmid=vmid, name="macos-sonoma", status="running",
             config_raw="cores: 8\nmemory: 16384\nballoon: 0\nnet0: vmxnet3=AA:BB:CC:DD:EE:FF\ncpu: host\nmachine: q35\nide0: local:iso/opencore.iso\n",
         ),
@@ -638,7 +638,7 @@ def test_cli_status_no_config(monkeypatch, capsys):
     from osx_proxmox_next.planner import VmInfo
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="test-vm", status="stopped", config_raw=""),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="test-vm", status="stopped", config_raw=""),
     )
     rc = run_cli(["status", "--vmid", "200"])
     assert rc == 0
@@ -678,7 +678,7 @@ def test_cli_uninstall_invalid_vmid_high():
 
 
 def test_cli_uninstall_vm_not_found(monkeypatch):
-    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid: None)
+    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid, adapter=None: None)
     rc = run_cli(["uninstall", "--vmid", "106", "--execute"])
     assert rc == 2
 
@@ -690,7 +690,7 @@ def test_cli_uninstall_execute_success(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="macos-test", status="running", config_raw="cores: 8"),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-test", status="running", config_raw="cores: 8"),
     )
     monkeypatch.setattr(
         cli_module, "create_snapshot",
@@ -711,7 +711,7 @@ def test_cli_uninstall_execute_failure(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
     )
     monkeypatch.setattr(
         cli_module, "create_snapshot",
@@ -738,7 +738,7 @@ def test_cli_uninstall_execute_with_purge(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
     )
     monkeypatch.setattr(
         cli_module, "create_snapshot",
@@ -757,7 +757,7 @@ def test_cli_uninstall_vm_info_displayed(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(
         cli_module, "fetch_vm_info",
-        lambda vmid: VmInfo(vmid=vmid, name="my-macos", status="running", config_raw="cores: 8"),
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="my-macos", status="running", config_raw="cores: 8"),
     )
     monkeypatch.setattr(
         cli_module, "create_snapshot",

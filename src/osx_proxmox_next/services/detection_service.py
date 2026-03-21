@@ -6,20 +6,11 @@ import logging
 from ..defaults import DEFAULT_STORAGE
 from ..domain import DEFAULT_VMID, MIN_VMID, MAX_VMID
 from ..infrastructure import ProxmoxAdapter
+from .proxmox_service import get_proxmox_adapter
 
 log = logging.getLogger(__name__)
 
 __all__ = ["detect_storage_targets", "detect_next_vmid"]
-
-_pve: ProxmoxAdapter | None = None
-
-
-def _get_pve() -> ProxmoxAdapter:
-    """Lazy singleton to avoid import-time side effects."""
-    global _pve  # noqa: PLW0603
-    if _pve is None:
-        _pve = ProxmoxAdapter()
-    return _pve
 
 
 def detect_storage_targets(adapter: ProxmoxAdapter | None = None) -> list[str]:
@@ -27,7 +18,7 @@ def detect_storage_targets(adapter: ProxmoxAdapter | None = None) -> list[str]:
 
     Falls back to ``[DEFAULT_STORAGE, "local"]`` when pvesm is unavailable.
     """
-    pve = adapter or _get_pve()
+    pve = adapter or get_proxmox_adapter()
     res = pve.pvesm("status", "-content", "images")
     if not res.ok:
         log.debug("Failed to detect storage targets: %s", res.output)
@@ -50,7 +41,7 @@ def detect_next_vmid(adapter: ProxmoxAdapter | None = None) -> int:
     Tries ``pvesh get /cluster/nextid`` first, then falls back to
     ``qm list`` + max+1.  Returns ``DEFAULT_VMID`` when both fail.
     """
-    pve = adapter or _get_pve()
+    pve = adapter or get_proxmox_adapter()
     res = pve.pvesh("get", "/cluster/nextid")
     if res.ok:
         output = res.output.strip()

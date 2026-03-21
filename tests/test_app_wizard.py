@@ -12,6 +12,7 @@ from osx_proxmox_next.executor import ApplyResult
 from osx_proxmox_next.infrastructure import CommandResult
 from osx_proxmox_next.domain import PlanStep
 from osx_proxmox_next.services import detection_service
+from osx_proxmox_next.services import proxmox_service
 from osx_proxmox_next.services import download_service
 from osx_proxmox_next.services import install_service
 from osx_proxmox_next.services import destroy_service
@@ -1388,7 +1389,7 @@ def test_detect_vmid_pvesh(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="910")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1405,7 +1406,7 @@ def test_detect_vmid_qm_list(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME\n900   macos-test\n905   macos-test2")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1415,7 +1416,7 @@ def test_detect_vmid_qm_list(monkeypatch) -> None:
 
 
 def test_detect_vmid_fallback(monkeypatch) -> None:
-    monkeypatch.setattr(detection_service, "_pve", FakePve(lambda cmd: CommandResult(ok=False, returncode=1, output="no")))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(lambda cmd: CommandResult(ok=False, returncode=1, output="no")))
 
     async def _run() -> None:
         app = NextApp()
@@ -1430,7 +1431,7 @@ def test_detect_vmid_pvesh_non_digit(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="not-a-number")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1445,7 +1446,7 @@ def test_detect_vmid_pvesh_out_of_range(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="50")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1460,7 +1461,7 @@ def test_detect_vmid_pvesh_json_object(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output='{"data": 200}')
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1477,7 +1478,7 @@ def test_detect_vmid_qm_list_empty(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1494,7 +1495,7 @@ def test_detect_vmid_qm_list_non_digit(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME\n900   test\n      \nstatus running")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1511,7 +1512,7 @@ def test_detect_vmid_boundary_low(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME\n50    test")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1528,7 +1529,7 @@ def test_detect_vmid_boundary_high(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="VMID  NAME\n999999 test")
         return CommandResult(ok=False, returncode=1, output="unknown")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1541,7 +1542,7 @@ def test_detect_storage_success(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=True, returncode=0, output="Name      Type  Status\nlocal-lvm dir   active\nnfs-store nfs   active")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1556,7 +1557,7 @@ def test_detect_storage_no_default(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=True, returncode=0, output="Name     Type  Status\ncustom1  dir   active")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1571,7 +1572,7 @@ def test_detect_storage_dedup(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=True, returncode=0, output="Name      Type\nlocal-lvm dir\nlocal-lvm dir\ncustom1   nfs")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1585,7 +1586,7 @@ def test_detect_storage_empty_line(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=True, returncode=0, output="Name  Type\n\n   \nlocal dir")
 
-    monkeypatch.setattr(detection_service, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1905,7 +1906,7 @@ def test_manage_vm_list_populated(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="ostype: l26")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1931,7 +1932,7 @@ def test_manage_vm_list_empty(monkeypatch) -> None:
     def handler(cmd):
         return CommandResult(ok=False, returncode=1, output="qm not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1956,7 +1957,7 @@ def test_manage_vm_list_no_macos_vms(monkeypatch) -> None:
             return CommandResult(ok=True, returncode=0, output="ostype: l26")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()
@@ -1981,7 +1982,7 @@ def test_manage_vm_list_config_failure(monkeypatch) -> None:
             return CommandResult(ok=False, returncode=1, output="config failed")
         return CommandResult(ok=False, returncode=1, output="not found")
 
-    monkeypatch.setattr(app_module, "_pve", FakePve(handler))
+    monkeypatch.setattr(proxmox_service, "_pve", FakePve(handler))
 
     async def _run() -> None:
         app = NextApp()

@@ -4,6 +4,7 @@ from .download_service import run_download_worker
 from .preflight_service import run_preflight_worker
 from .install_service import run_dry_apply, run_live_install
 from .destroy_service import run_destroy_worker
+from .proxmox_service import get_proxmox_adapter
 
 __all__ = [
     "detection_service",
@@ -14,4 +15,5 @@ __all__ = [
     "run_dry_apply",
     "run_live_install",
     "run_destroy_worker",
+    "get_proxmox_adapter",
 ]
