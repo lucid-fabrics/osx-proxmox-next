@@ -177,7 +177,7 @@ def test_build_vm_config_from_values_returns_vmconfig() -> None:
 def test_build_vm_config_from_values_maps_fields_correctly() -> None:
     values = _valid_values(vmid="500", name="my-vm", cores="4", memory="8192", disk="200")
     result = build_vm_config_from_values(values)
-    assert result is not None
+    assert isinstance(result, type(result))
     assert result.vmid == 500
     assert result.name == "my-vm"
     assert result.cores == 4

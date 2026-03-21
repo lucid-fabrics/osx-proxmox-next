@@ -10,7 +10,7 @@ from .proxmox_service import get_proxmox_adapter
 
 log = logging.getLogger(__name__)
 
-__all__ = ["detect_storage_targets", "detect_next_vmid"]
+__all__ = ["detect_storage_targets", "detect_next_vmid", "list_macos_vms"]
 
 
 def detect_storage_targets(adapter: ProxmoxAdapter | None = None) -> list[str]:
@@ -73,3 +73,31 @@ def detect_next_vmid(adapter: ProxmoxAdapter | None = None) -> int:
         return next_vmid
     log.debug("Failed to detect next VMID via qm list: %s", res.output)
     return DEFAULT_VMID
+
+
+def list_macos_vms(adapter: ProxmoxAdapter | None = None) -> list[str]:
+    """Return qm list lines for macOS VMs only (those with isa-applesmc in config).
+
+    Returns an empty list when pvesh/qm is unavailable.  The first element of
+    a non-empty result is the header line from ``qm list``.
+    """
+    pve = adapter or get_proxmox_adapter()
+    res = pve.qm("list")
+    if not res.ok:
+        log.debug("Failed to list VMs: %s", res.output)
+        return []
+    all_lines = res.output.strip().splitlines()
+    if not all_lines:
+        return []
+    macos_lines: list[str] = []
+    for line in all_lines[1:]:
+        parts = line.split()
+        if not parts:
+            continue
+        vmid = parts[0]
+        cfg_res = pve.qm("config", vmid)
+        if cfg_res.ok and "isa-applesmc" in cfg_res.output:
+            macos_lines.append(line)
+    if not macos_lines:
+        return []
+    return [all_lines[0]] + macos_lines

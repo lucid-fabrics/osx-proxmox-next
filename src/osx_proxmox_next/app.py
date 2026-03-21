@@ -11,26 +11,22 @@ from textual.containers import Container
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
+from ._manage_mixin import ManageModeMixin
+from ._wizard_mixin import WizardStepsMixin
 from .assets import AssetCheck, required_assets
 from .defaults import (
-    DEFAULT_BRIDGE,
     DEFAULT_ISO_DIR,
-    DEFAULT_STORAGE,
-    default_disk_gb,
     detect_cpu_cores,
     detect_cpu_info,
     detect_iso_storage,
-    detect_memory_mb,
     detect_net_model,
 )
-from .domain import MIN_VMID, MAX_VMID, PlanStep, SUPPORTED_MACOS, VmConfig, validate_config
+from .domain import PlanStep, SUPPORTED_MACOS, VmConfig, validate_config
 from .executor import StepResult
-from .forms import validate_form_values, build_vm_config_from_values
-from .forms.form_handler import FormValues
 from .models import WizardState
 from .planner import build_plan
 from .preflight import PreflightCheck
-from .rollback import RollbackSnapshot, rollback_hints
+from .rollback import RollbackSnapshot
 from .screens import (
     compose_step1,
     compose_step2,
@@ -38,21 +34,19 @@ from .screens import (
     compose_step4,
     compose_step5,
     compose_step6,
-    build_config_summary_text,
+    format_preflight_text,
+    format_install_result,
 )
 from .services import (
     detect_next_vmid,
     detect_storage_targets,
-    get_proxmox_adapter,
-    run_destroy_worker,
-    run_download_worker,
     run_dry_apply,
     run_live_install,
     run_preflight_worker,
 )
-from .smbios import generate_smbios
 
-class NextApp(App):
+
+class NextApp(WizardStepsMixin, ManageModeMixin, App):
     CSS_PATH = Path(__file__).with_suffix(".tcss")
 
     BINDINGS = [
@@ -101,14 +95,12 @@ class NextApp(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
 
-        # OS selection
         if bid.startswith("os_"):
             os_key = bid[3:]
             if os_key in SUPPORTED_MACOS:
                 self._select_os(os_key)
             return
 
-        # Storage selection
         if bid.startswith("storage_"):
             try:
                 idx = int(bid.split("_")[1])
@@ -117,36 +109,30 @@ class NextApp(App):
                 log.debug("Invalid storage button index: %s", bid)
             return
 
-        handlers = {
-            "preflight_next_btn": lambda: self._go_next(),
-            "next_btn": lambda: self._go_next(),
-            "next_btn_3": lambda: self._go_next(),
-            "next_btn_4": lambda: self._go_next(),
-            "next_btn_5": lambda: self._go_next(),
-            "back_btn_2": lambda: self._go_back(),
-            "back_btn_3": lambda: self._go_back(),
-            "back_btn_4": lambda: self._go_back(),
-            "back_btn_5": lambda: self._go_back(),
-            "back_btn_6": lambda: self._go_back(),
-            "preflight_rerun_btn": self._rerun_preflight,
-            "suggest_btn": self._apply_host_defaults,
-            "smbios_btn": self._generate_smbios,
-            "dry_run_btn": self._run_dry_apply,
-            "install_btn": self._run_live_install,
-            "mode_create": lambda: self._toggle_mode("create"),
-            "mode_manage": lambda: self._toggle_mode("manage"),
-            "manage_refresh_btn": self._refresh_vm_list,
-            "manage_destroy_btn": self._run_destroy,
-            "exit_btn": lambda: self.exit(),
-            "exit_btn_2": lambda: self.exit(),
-            "exit_btn_3": lambda: self.exit(),
-            "exit_btn_4": lambda: self.exit(),
-            "exit_btn_5": lambda: self.exit(),
-            "exit_btn_6": lambda: self.exit(),
-        }
-        handler = handlers.get(bid)
-        if handler:
-            handler()
+        _NEXT = {"preflight_next_btn", "next_btn", "next_btn_3", "next_btn_4", "next_btn_5"}
+        _BACK = {"back_btn_2", "back_btn_3", "back_btn_4", "back_btn_5", "back_btn_6"}
+        _EXIT = {"exit_btn", "exit_btn_2", "exit_btn_3", "exit_btn_4", "exit_btn_5", "exit_btn_6"}
+        if bid in _NEXT:
+            self._go_next()
+        elif bid in _BACK:
+            self._go_back()
+        elif bid in _EXIT:
+            self.exit()
+        else:
+            handlers = {
+                "preflight_rerun_btn": self._rerun_preflight,
+                "suggest_btn": self._apply_host_defaults,
+                "smbios_btn": self._generate_smbios,
+                "dry_run_btn": self._run_dry_apply,
+                "install_btn": self._run_live_install,
+                "mode_create": lambda: self._toggle_mode("create"),
+                "mode_manage": lambda: self._toggle_mode("manage"),
+                "manage_refresh_btn": self._refresh_vm_list,
+                "manage_destroy_btn": self._run_destroy,
+            }
+            handler = handlers.get(bid)
+            if handler:
+                handler()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         target_ids = {"vmid", "name", "memory", "disk", "bridge", "storage_input", "installer_path"}
@@ -178,13 +164,8 @@ class NextApp(App):
                 self.query_one("#e1000_hint", Static).add_class("step_hidden")
 
     def _toggle_apple_services_fields(self) -> None:
-        container = self.query_one("#apple_services_fields")
-        if self.state.apple_services:
-            container.remove_class("hidden")
-        else:
-            container.add_class("hidden")
-
-    # ── Navigation ──────────────────────────────────────────────────
+        c = self.query_one("#apple_services_fields")
+        (c.remove_class if self.state.apple_services else c.add_class)("hidden")
 
     def _go_next(self) -> None:
         step = self.current_step
@@ -199,7 +180,7 @@ class NextApp(App):
         elif step == 3:
             if not self.state.selected_storage:
                 return
-            self._prefill_form()
+            self._fill_form()
             self.current_step = 4
         elif step == 4:
             if not self._validate_form(quiet=False):
@@ -225,24 +206,8 @@ class NextApp(App):
     def _go_back(self) -> None:
         self.current_step = max(1, self.current_step - 1)
 
-    # ── Step 1: Preflight ────────────────────────────────────────────
-
     def _update_preflight_display(self) -> None:
-        if not self.state.preflight_done:
-            text = "Checking..."
-        else:
-            lines = []
-            passed = [c for c in self.state.preflight_checks if c.ok]
-            failed = [c for c in self.state.preflight_checks if not c.ok]
-            for c in passed:
-                lines.append(f"  ✓ {c.name}")
-            for c in failed:
-                lines.append(f"  ✗ {c.name}: {c.details}")
-            if failed:
-                header = f"{len(failed)} check(s) failed"
-            else:
-                header = f"All {len(passed)} checks passed"
-            text = header + "\n" + "\n".join(lines)
+        text = format_preflight_text(self.state.preflight_done, self.state.preflight_checks)
         self.query_one("#preflight_checks", Static).update(text)
 
     def _rerun_preflight(self) -> None:
@@ -252,22 +217,16 @@ class NextApp(App):
         self._update_preflight_display()
         Thread(target=self._preflight_worker, daemon=True).start()
 
-    # ── Step 2: OS Selection ────────────────────────────────────────
-
     def _select_os(self, key: str) -> None:
         self.state.selected_os = key
-        self.state.smbios = generate_smbios(key, self.state.apple_services)
-        # Update card styles
+        self.state.smbios = resolve_smbios(key, self.state.apple_services)
         for os_key in SUPPORTED_MACOS:
             card = self.query_one(f"#os_{os_key}")
             if os_key == key:
                 card.add_class("os_selected")
             else:
                 card.remove_class("os_selected")
-        # Enable Next
         self.query_one("#next_btn", Button).disabled = False
-
-    # ── Step 3: Storage Selection ───────────────────────────────────
 
     def _select_storage(self, target: str) -> None:
         self.state.selected_storage = target
@@ -278,54 +237,34 @@ class NextApp(App):
             else:
                 btn.remove_class("storage_selected")
 
-    # ── Step 4: Configuration ───────────────────────────────────────
-
-    def _prefill_form(self) -> None:
-        macos = self.state.selected_os
+    def _fill_form(self, storage_fallback: str = "") -> None:
+        macos = self.state.selected_os or "sequoia"
         self._set_input_value("#vmid", str(self._detect_next_vmid()))
         self._set_input_value("#name", f"macos-{macos}")
         self._set_input_value("#cores", str(detect_cpu_cores()))
         self._set_input_value("#memory", str(detect_memory_mb()))
         self._set_input_value("#disk", str(default_disk_gb(macos)))
         self._set_input_value("#bridge", DEFAULT_BRIDGE)
-        self._set_input_value("#storage_input", self.state.selected_storage)
+        self._set_input_value(
+            "#storage_input",
+            storage_fallback or self.state.selected_storage or DEFAULT_STORAGE,
+        )
         self._set_input_value("#iso_dir", self.state.selected_iso_dir)
         self._set_input_value("#installer_path", "")
         self._update_smbios_preview()
 
     def _apply_host_defaults(self) -> None:
-        macos = self.state.selected_os or "sequoia"
-        self._set_input_value("#vmid", str(self._detect_next_vmid()))
-        self._set_input_value("#name", f"macos-{macos}")
-        self._set_input_value("#cores", str(detect_cpu_cores()))
-        self._set_input_value("#memory", str(detect_memory_mb()))
-        self._set_input_value("#disk", str(default_disk_gb(macos)))
-        self._set_input_value("#bridge", DEFAULT_BRIDGE)
-        self._set_input_value("#storage_input", self.state.selected_storage or DEFAULT_STORAGE)
-        self._set_input_value("#iso_dir", self.state.selected_iso_dir)
+        self._fill_form(storage_fallback=self.state.selected_storage or DEFAULT_STORAGE)
         if not self.state.smbios:
+            macos = self.state.selected_os or "sequoia"
             existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
-            apple_services = self.state.apple_services
-            if existing_uuid:
-                identity = generate_smbios(macos, apple_services)
-                identity.uuid = existing_uuid
-                self.state.smbios = identity
-            else:
-                self.state.smbios = generate_smbios(macos, apple_services)
+            self.state.smbios = resolve_smbios(macos, self.state.apple_services, existing_uuid)
         self._update_smbios_preview()
 
     def _generate_smbios(self) -> None:
         macos = self.state.selected_os or "sequoia"
         existing_uuid = self.query_one("#existing_uuid", Input).value.strip().upper()
-        apple_services = self.state.apple_services
-
-        if existing_uuid:
-            # Preserve existing UUID, generate other fields
-            identity = generate_smbios(macos, apple_services)
-            identity.uuid = existing_uuid
-            self.state.smbios = identity
-        else:
-            self.state.smbios = generate_smbios(macos, apple_services)
+        self.state.smbios = resolve_smbios(macos, self.state.apple_services, existing_uuid)
         self._update_smbios_preview()
 
     def _update_smbios_preview(self) -> None:
@@ -341,22 +280,18 @@ class NextApp(App):
     def _validate_form(self, quiet: bool = False) -> bool:
         values = self._read_form_values()
         errors = validate_form_values(values)
-
-        # Apply invalid CSS classes to widgets
         for field_id in ("vmid", "name", "memory", "disk", "bridge", "storage_input"):
             widget = self.query_one(f"#{field_id}", Input)
             if field_id in errors:
                 widget.add_class("invalid")
             else:
                 widget.remove_class("invalid")
-
         self.state.form_errors = errors
         if errors:
             self.query_one("#form_errors", Static).update(" ".join(errors.values()))
             if not quiet:
                 self.notify("Fix form errors before continuing", severity="warning")
             return False
-
         self.query_one("#form_errors", Static).update("")
         return True
 
@@ -365,7 +300,6 @@ class NextApp(App):
         self.notify("Validation failed", severity="error")
 
     def _read_form_values(self) -> FormValues:
-        """Read current widget values into a FormValues dataclass."""
         return FormValues(
             vmid=self.query_one("#vmid", Input).value.strip(),
             name=self.query_one("#name", Input).value.strip(),
@@ -389,8 +323,6 @@ class NextApp(App):
     def _read_form(self) -> VmConfig | None:
         return build_vm_config_from_values(self._read_form_values())
 
-    # ── Step 5: Review & Dry Run ────────────────────────────────────
-
     def _render_config_summary(self) -> None:
         config = self.state.config
         if not config:
@@ -406,7 +338,6 @@ class NextApp(App):
         assets = required_assets(config)
         missing = [a for a in assets if not a.ok]
         downloadable = [a for a in missing if a.downloadable]
-
         if not missing:
             self.state.assets_ok = True
             self.state.assets_missing = []
@@ -414,10 +345,8 @@ class NextApp(App):
             self.query_one("#download_status", Static).update("Assets: OK")
             self.query_one("#dry_run_btn", Button).disabled = False
             return
-
         self.state.assets_ok = False
         self.state.assets_missing = missing
-
         if downloadable:
             names = ", ".join(a.name for a in downloadable)
             self.query_one("#download_status", Static).update(f"Downloading: {names}...")
@@ -433,7 +362,6 @@ class NextApp(App):
     def _download_worker(self, config: VmConfig, missing: list[AssetCheck]) -> None:
         def on_progress(phase: str, pct: int) -> None:
             self.call_from_thread(self._update_download_progress, phase, pct)
-
         errors = run_download_worker(config, missing, on_progress=on_progress)
         self.call_from_thread(self._finish_download, errors)
 
@@ -457,14 +385,12 @@ class NextApp(App):
             self.notify("Some downloads failed", severity="error")
         else:
             self.state.downloads_complete = True
-            # Rebuild plan now that downloaded assets exist on disk
             self._rebuild_plan_after_download()
             self.query_one("#download_status", Static).update("Assets: downloaded and ready")
             self.query_one("#dry_run_btn", Button).disabled = False
             self.notify("Assets downloaded", severity="information")
 
     def _rebuild_plan_after_download(self) -> None:
-        """Rebuild config and plan so asset paths resolve to newly downloaded files."""
         config = self._read_form()
         if config:
             self.state.config = config
@@ -498,10 +424,7 @@ class NextApp(App):
 
     def _update_dry_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#dry_progress", ProgressBar).update(total=total, progress=idx)
-        if result is None:
-            self._append_log("#dry_log", f"Running {idx}/{total}: {title}")
-        else:
-            self._append_log("#dry_log", f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})")
+        self._append_log("#dry_log", self._step_log_line(idx, total, title, result))
 
     def _finish_dry_apply(self, ok: bool, log_path: Path) -> None:
         self.state.apply_running = False
@@ -516,14 +439,10 @@ class NextApp(App):
             self.query_one("#dry_run_btn", Button).disabled = False
             self.notify("Dry run failed", severity="error")
 
-    # ── Step 6: Live Install ────────────────────────────────────────
-
     def _prepare_install_step(self) -> None:
-        config = self.state.config
-        if not config:
+        if not self.state.config:
             return
-        meta = SUPPORTED_MACOS.get(config.macos, {})
-        label = meta.get("label", config.macos)
+        label = SUPPORTED_MACOS.get(self.state.config.macos, {}).get("label", self.state.config.macos)
         self.query_one("#install_btn", Button).label = f"Install {label}"
         self.query_one("#install_btn").remove_class("hidden")
 
@@ -535,7 +454,6 @@ class NextApp(App):
         if not self.state.preflight_ok:
             self.notify("Preflight has failures. Fix before install.", severity="error")
             return
-
         self.state.apply_running = True
         self.state.apply_log = []
         self.query_one("#install_btn").add_class("hidden")
@@ -560,10 +478,7 @@ class NextApp(App):
 
     def _update_live_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#live_progress", ProgressBar).update(total=total, progress=idx)
-        if result is None:
-            self._append_log("#live_log", f"Running {idx}/{total}: {title}")
-        else:
-            self._append_log("#live_log", f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})")
+        self._append_log("#live_log", self._step_log_line(idx, total, title, result))
 
     def _finish_live_install(
         self, ok: bool, log_path: Path, snapshot: RollbackSnapshot | None
@@ -572,169 +487,17 @@ class NextApp(App):
         self.state.live_done = True
         self.state.live_ok = ok
         self.state.live_log = log_path
-
+        vmid = self.state.config.vmid if self.state.config else "???"
         result_box = self.query_one("#result_box", Static)
         result_box.remove_class("hidden")
-
+        text = format_install_result(ok, vmid, log_path, snapshot)
         if ok:
             result_box.remove_class("result_fail")
-            vmid = self.state.config.vmid if self.state.config else "???"
-            lines = [
-                "Install completed successfully!",
-                f"Log: {log_path}",
-                "",
-                "POST-INSTALL: After macOS finishes installing, fix the boot order",
-                "so the main disk boots first (instead of recovery):",
-                f"  qm set {vmid} --boot order=virtio0;ide0",
-                "",
-                "If this saved you time: https://ko-fi.com/lucidfabrics",
-            ]
-            result_box.update("\n".join(lines))
             self.notify("macOS VM created", severity="information")
         else:
             result_box.add_class("result_fail")
-            lines = ["Install FAILED.", f"Log: {log_path}"]
-            if snapshot:
-                lines.append("")
-                lines.extend(rollback_hints(snapshot))
-            result_box.update("\n".join(lines))
             self.notify("Install failed", severity="error")
-
-    # ── Manage Mode ─────────────────────────────────────────────────
-
-    def _toggle_mode(self, mode: str) -> None:
-        is_manage = mode == "manage"
-        self.state.manage_mode = is_manage
-        create_btn = self.query_one("#mode_create", Button)
-        manage_btn = self.query_one("#mode_manage", Button)
-        create_panel = self.query_one("#create_panel")
-        manage_panel = self.query_one("#manage_panel")
-
-        if is_manage:
-            create_panel.add_class("hidden")
-            manage_panel.remove_class("hidden")
-            create_btn.remove_class("mode_active")
-            manage_btn.add_class("mode_active")
-            self._refresh_vm_list()
-        else:
-            manage_panel.add_class("hidden")
-            create_panel.remove_class("hidden")
-            manage_btn.remove_class("mode_active")
-            create_btn.add_class("mode_active")
-
-    def _refresh_vm_list(self) -> None:
-        Thread(target=self._vm_list_worker, daemon=True).start()
-
-    def _vm_list_worker(self) -> None:
-        try:
-            res = get_proxmox_adapter().qm("list")
-            if not res.ok:
-                self.call_from_thread(self._finish_vm_list, [])
-                return
-            all_lines = res.output.strip().splitlines()
-            # Filter to macOS VMs only (have isa-applesmc in config)
-            macos_lines: list[str] = []
-            for line in all_lines[1:]:  # skip header
-                parts = line.split()
-                if not parts:
-                    continue
-                vmid = parts[0]
-                cfg_res = get_proxmox_adapter().qm("config", vmid)
-                if cfg_res.ok and "isa-applesmc" in cfg_res.output:
-                    macos_lines.append(line)
-            header = all_lines[0] if all_lines else ""
-            result = [header] + macos_lines if macos_lines else []
-            self.call_from_thread(self._finish_vm_list, result)
-        except (OSError, RuntimeError):
-            log.debug("Failed to list VMs", exc_info=True)
-            self.call_from_thread(self._finish_vm_list, [])
-
-    def _finish_vm_list(self, lines: list[str]) -> None:
-        self.state.uninstall_vm_list = lines
-        display = self.query_one("#vm_list_display", Static)
-        if lines:
-            display.update("\n".join(lines[:20]))
-        else:
-            display.update("No macOS VMs found.")
-
-    def _validate_manage_vmid(self) -> None:
-        text = self.query_one("#manage_vmid", Input).value.strip()
-        btn = self.query_one("#manage_destroy_btn", Button)
-        try:
-            vmid = int(text)
-            btn.disabled = vmid < MIN_VMID or vmid > MAX_VMID
-        except ValueError:
-            btn.disabled = True
-
-    def _toggle_purge(self) -> None:
-        cb = self.query_one("#manage_purge_cb", Checkbox)
-        self.state.uninstall_purge = cb.value
-        hint = self.query_one("#manage_hint", Static)
-        if self.state.uninstall_purge:
-            hint.update(
-                "This will stop the VM, remove its configuration,\n"
-                "and delete all associated disk images."
-            )
-        else:
-            hint.update(
-                "This will stop the VM and remove its configuration.\n"
-                "Disk images will be kept on storage."
-            )
-
-    def _run_destroy(self) -> None:
-        if self.state.uninstall_running:
-            return
-        text = self.query_one("#manage_vmid", Input).value.strip()
-        try:
-            vmid = int(text)
-        except ValueError:
-            return
-        if vmid < MIN_VMID or vmid > MAX_VMID:
-            return
-
-        self.state.uninstall_running = True
-        self.state.uninstall_done = False
-        self.state.uninstall_log = []
-        self.query_one("#manage_destroy_btn", Button).disabled = True
-        self.query_one("#manage_log").remove_class("hidden")
-        self.query_one("#manage_log", Static).update("Removing VM...")
-        self.query_one("#manage_result").add_class("hidden")
-
-        Thread(target=self._destroy_worker, args=(vmid,), daemon=True).start()
-
-    def _destroy_worker(self, vmid: int) -> None:
-        def on_step(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
-            self.call_from_thread(self._update_destroy_log, idx, total, step.title, result)
-
-        result, _snapshot = run_destroy_worker(vmid, purge=self.state.uninstall_purge, on_step=on_step)
-        self.call_from_thread(self._finish_destroy, result.ok, result.log_path)
-
-    def _update_destroy_log(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
-        if result is None:
-            self.state.uninstall_log.append(f"Running {idx}/{total}: {title}")
-        else:
-            self.state.uninstall_log.append(f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title}")
-        visible = self.state.uninstall_log[-10:]
-        self.query_one("#manage_log", Static).update("\n".join(visible))
-
-    def _finish_destroy(self, ok: bool, log_path: Path) -> None:
-        self.state.uninstall_running = False
-        self.state.uninstall_done = True
-        self.state.uninstall_ok = ok
-        self._validate_manage_vmid()
-
-        result_box = self.query_one("#manage_result", Static)
-        result_box.remove_class("hidden")
-
-        if ok:
-            result_box.remove_class("manage_result_fail")
-            result_box.update(f"VM removed successfully.\nLog: {log_path}")
-            self._refresh_vm_list()
-        else:
-            result_box.add_class("manage_result_fail")
-            result_box.update(f"Failed to remove VM.\nLog: {log_path}")
-
-    # ── Preflight Worker ────────────────────────────────────────────
+        result_box.update(text)
 
     def _preflight_worker(self) -> None:
         def _on_status(msg: str) -> None:
@@ -752,16 +515,11 @@ class NextApp(App):
         self._update_preflight_display()
         self.query_one("#preflight_next_btn", Button).disabled = not self.state.preflight_ok
 
-    # ── Detection Helpers ───────────────────────────────────────────
-    # These thin wrappers are intentionally kept as mockable seams for tests.
-
     def _detect_storage_targets(self) -> list[str]:
         return detect_storage_targets()
 
     def _detect_next_vmid(self) -> int:
         return detect_next_vmid()
-
-    # ── UI Helpers ──────────────────────────────────────────────────
 
     def _set_input_value(self, selector: str, value: str) -> None:
         widget = self.query_one(selector, Input)
@@ -770,23 +528,22 @@ class NextApp(App):
         widget.refresh(layout=True)
 
     def _update_step_bar(self) -> None:
-        step_labels = ["Preflight", "OS", "Storage", "Config", "Dry Run", "Install"]
-        parts: list[str] = []
-        for idx in range(6):
-            num = idx + 1
-            name = step_labels[idx]
-            if num < self.current_step:
-                parts.append(f"[x] {num}.{name}")
-            elif num == self.current_step:
-                parts.append(f"[>] {num}.{name}")
-            else:
-                parts.append(f"[ ] {num}.{name}")
+        labels = ["Preflight", "OS", "Storage", "Config", "Dry Run", "Install"]
+        s = self.current_step
+        parts = [
+            f"{'[x]' if n < s else '[>]' if n == s else '[ ]'} {n}.{labels[n-1]}"
+            for n in range(1, 7)
+        ]
         self.query_one("#step_bar", Static).update("  ".join(parts))
+
+    def _step_log_line(self, idx: int, total: int, title: str, result: StepResult | None) -> str:
+        if result is None:
+            return f"Running {idx}/{total}: {title}"
+        return f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})"
 
     def _append_log(self, selector: str, line: str) -> None:
         self.state.apply_log.append(line)
         widget = self.query_one(selector, Static)
-        # Keep rolling window
         visible = self.state.apply_log[-15:]
         widget.update("\n".join(visible))
 

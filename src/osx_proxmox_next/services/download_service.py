@@ -4,14 +4,14 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from ..assets import AssetCheck
+from ..assets import AssetCheck, required_assets
 from ..defaults import DEFAULT_ISO_DIR
 from ..domain import VmConfig
 from ..downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 
 log = logging.getLogger(__name__)
 
-__all__ = ["run_download_worker"]
+__all__ = ["run_download_worker", "check_assets"]
 
 
 def run_download_worker(
@@ -47,3 +47,15 @@ def run_download_worker(
                 errors.append(f"Recovery: {exc}")
 
     return errors
+
+
+def check_assets(config: VmConfig) -> tuple[list[AssetCheck], list[AssetCheck]]:
+    """Return (missing, downloadable) asset lists for *config*.
+
+    *missing* — assets that are not present on disk.
+    *downloadable* — subset of missing that can be auto-downloaded.
+    """
+    assets = required_assets(config)
+    missing = [a for a in assets if not a.ok]
+    downloadable = [a for a in missing if a.downloadable]
+    return missing, downloadable
