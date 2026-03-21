@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 import urllib.error
@@ -13,6 +14,8 @@ from urllib.parse import urlparse
 
 from . import __version__
 from .infrastructure import ProxmoxAdapter
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -154,8 +157,8 @@ def _fetch_github_releases(version: str) -> list[dict]:
             if tag and tag not in seen_tags:
                 seen_tags.add(tag)
                 releases.append(data)
-        except (urllib.error.HTTPError, DownloadError):
-            pass
+        except (urllib.error.HTTPError, DownloadError) as exc:
+            log.debug("Release fetch failed for %s: %s", url, exc)
 
     if not releases:
         raise DownloadError(

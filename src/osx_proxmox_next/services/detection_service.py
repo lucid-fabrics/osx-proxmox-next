@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 
 from ..defaults import DEFAULT_STORAGE
 from ..domain import DEFAULT_VMID, MIN_VMID, MAX_VMID
@@ -10,7 +11,39 @@ from .proxmox_service import get_proxmox_adapter
 
 log = logging.getLogger(__name__)
 
-__all__ = ["detect_storage_targets", "detect_next_vmid", "list_macos_vms"]
+__all__ = ["detect_storage_targets", "detect_next_vmid", "list_macos_vms", "VmInfo", "fetch_vm_info"]
+
+
+@dataclass
+class VmInfo:
+    vmid: int
+    name: str
+    status: str  # "running" | "stopped"
+    config_raw: str
+
+
+def fetch_vm_info(vmid: int, adapter: ProxmoxAdapter | None = None) -> VmInfo | None:
+    if adapter is None:
+        adapter = get_proxmox_adapter()
+    runtime = adapter
+    status_result = runtime.run(["qm", "status", str(vmid)])
+    if not status_result.ok:
+        return None
+    # Parse status line like "status: running" or "status: stopped"
+    status = "stopped"
+    for line in status_result.output.splitlines():
+        if "running" in line.lower():
+            status = "running"
+            break
+    config_result = runtime.run(["qm", "config", str(vmid)])
+    config_raw = config_result.output if config_result.ok else ""
+    # Parse name from config
+    name = ""
+    for line in config_raw.splitlines():
+        if line.startswith("name:"):
+            name = line.split(":", 1)[1].strip()
+            break
+    return VmInfo(vmid=vmid, name=name, status=status, config_raw=config_raw)
 
 
 def detect_storage_targets(adapter: ProxmoxAdapter | None = None) -> list[str]:

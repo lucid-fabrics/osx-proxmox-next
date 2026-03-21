@@ -282,7 +282,6 @@ def test_select_os_sonoma() -> None:
             await pilot.click("#os_sonoma")
             await pilot.pause()
             assert app.state.selected_os == "sonoma"
-            assert app.state.smbios is not None
             assert app.state.smbios.model == "MacPro7,1"
             assert app.query_one("#os_sonoma").has_class("os_selected")
             assert not app.query_one("#os_sequoia").has_class("os_selected")
@@ -327,7 +326,6 @@ def test_select_os_passes_apple_services_flag() -> None:
             app.state.apple_services = True
             await pilot.click("#os_sequoia")
             await pilot.pause()
-            assert app.state.smbios is not None
             # Apple-format serials start with "C"
             assert app.state.smbios.serial.startswith("C")
 
@@ -496,7 +494,6 @@ def test_generate_smbios_button() -> None:
             old_serial = app.state.smbios.serial if app.state.smbios else ""
             await pilot.click("#smbios_btn")
             await pilot.pause()
-            assert app.state.smbios is not None
             # May be same or different, but must be set
             assert app.state.smbios.serial != ""
 
@@ -658,7 +655,6 @@ def test_read_form_success() -> None:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             config = app._read_form()
-            assert config is not None
             assert config.macos == "sequoia"
             assert config.vmid == 900
 
@@ -673,7 +669,6 @@ def test_read_form_no_smbios() -> None:
             await _advance_to_step(pilot, app, 4)
             app.state.smbios = None
             config = app._read_form()
-            assert config is not None
             assert config.smbios_serial == ""
 
     asyncio.run(_run())
@@ -1723,7 +1718,7 @@ def test_suggest_defaults_generates_smbios_if_missing() -> None:
             await _advance_to_step(pilot, app, 4)
             app.state.smbios = None
             app._apply_host_defaults()
-            assert app.state.smbios is not None
+            assert app.state.smbios.serial != ""
 
     asyncio.run(_run())
 
@@ -2094,7 +2089,6 @@ def test_apple_services_checkbox_toggle() -> None:
             assert cb.value is True
             assert app.state.apple_services is True
             assert not container.has_class("hidden")
-            assert app.state.smbios is not None
             assert app.state.smbios.serial.startswith("C")
             # Toggle OFF
             await pilot.click("#apple_services_cb")
@@ -2120,7 +2114,6 @@ def test_generate_smbios_with_existing_uuid() -> None:
             await pilot.pause()
             await pilot.click("#smbios_btn")
             await pilot.pause()
-            assert app.state.smbios is not None
             assert app.state.smbios.uuid == "12345678-1234-1234-1234-123456789ABC"
 
     asyncio.run(_run())

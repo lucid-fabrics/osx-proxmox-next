@@ -137,8 +137,7 @@ def test_find_iso_extra_dirs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(assets_module, "Path", fake_path)
     result = _find_iso(["opencore-osx-proxmox-vm.iso"], extra_dirs=[custom_dir])
-    assert result is not None
-    assert result.name == "opencore-osx-proxmox-vm.iso"
+    assert result is not None and result.name == "opencore-osx-proxmox-vm.iso"
 
 
 def test_find_iso_skips_dirs(tmp_path, monkeypatch):
@@ -283,8 +282,7 @@ def test_find_iso_real_with_existing_root(tmp_path, monkeypatch):
 
     # Match in /mnt/pve storage
     result4 = am._find_iso(["special.iso"])
-    assert result4 is not None
-    assert result4.name == "special.iso"
+    assert result4 is not None and result4.name == "special.iso"
 
 
 def test_asset_check_downloadable_opencore(monkeypatch):
