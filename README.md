@@ -13,12 +13,15 @@
   <a href="https://github.com/lucid-fabrics/osx-proxmox-next/actions/workflows/test.yml">
     <img alt="Tests" src="https://github.com/lucid-fabrics/osx-proxmox-next/actions/workflows/test.yml/badge.svg">
   </a>
-  <a href="https://github.com/wmehanna/osx-proxmox-next">
+  <a href="https://github.com/lucid-fabrics/osx-proxmox-next">
     <img alt="Proxmox" src="https://img.shields.io/badge/Proxmox-9%20Ready-E57000?logo=proxmox&logoColor=white">
   </a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-Ventura%2013%20%7C%20Sonoma%2014%20%7C%20Sequoia%2015%20%7C%20Tahoe%2026-111111?logo=apple&logoColor=white">
   <a href="https://discord.gg/2M5RJSGd">
     <img alt="Join Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white">
+  </a>
+  <a href="https://lucid-fabrics.github.io/osx-proxmox-next/">
+    <img alt="Documentation" src="https://img.shields.io/badge/Docs-Read%20the%20Docs-blue?logo=readthedocs&logoColor=white">
   </a>
   <a href="https://ko-fi.com/lucidfabrics">
     <img alt="Support on Ko-fi" src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white">
@@ -81,7 +84,7 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 Run this on your Proxmox 9 host as root:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/wmehanna/osx-proxmox-next/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"
 ```
 
 This clones the repo, sets up a Python venv, and launches the TUI wizard.
@@ -110,6 +113,8 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | **6️⃣ Install** | Creates the VM, builds OpenCore, imports disks, and starts the VM |
 
 **Most users:** pick your macOS version, pick your storage, click through to **Install**. Preflight and CPU detection run automatically.
+
+> **Smart caching:** OpenCore and recovery images are downloaded once and reused across VM installs. Creating a second Sonoma VM? No re-download needed. Use `--iso-dir` on shared storage to cache across Proxmox nodes.
 
 ---
 
@@ -254,7 +259,7 @@ The tool requires OpenCore and recovery/installer images. It scans `/var/lib/vz/
 - `opencore-osx-proxmox-vm.iso` or `opencore-{version}.iso`
 - `{version}-recovery.img` or `{version}-recovery.iso`
 
-Use `osx-next-cli download --macos <version>` to auto-fetch missing assets. The TUI wizard auto-downloads missing assets in step 4.
+Use `osx-next-cli download --macos <version>` to auto-fetch missing assets. The TUI wizard auto-downloads missing assets in step 5.
 </details>
 
 <details>
@@ -409,7 +414,7 @@ When `--apple-services` is enabled, this tool automatically:
 
 ### SMBIOS Identity (Auto-Generated)
 
-- **TUI:** SMBIOS is auto-generated when you select a macOS version in step 1. Click **Generate SMBIOS** in step 3 to regenerate.
+- **TUI:** SMBIOS is auto-generated when you select a macOS version in step 2. Click **Generate SMBIOS** in step 4 to regenerate.
 - **CLI:** SMBIOS is auto-generated unless you pass `--no-smbios` or provide your own values via `--smbios-serial`, `--smbios-uuid`, `--smbios-mlb`, `--smbios-rom`, `--smbios-model`.
 - **Existing UUID:** Enter an existing UUID in step 4 to preserve it (useful for re-running on an existing VM).
 
@@ -491,7 +496,7 @@ Verification Failed — An unknown error occurred.
 
 ```
 src/osx_proxmox_next/
-  app.py          # TUI wizard (Textual) — 5-step reactive state machine
+  app.py          # TUI wizard (Textual) — 6-step reactive state machine
   cli.py          # Non-interactive CLI
   domain.py       # VM config model + validation
   planner.py      # qm command generation
