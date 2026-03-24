@@ -58,7 +58,15 @@ const config: Config = {
   ],
 
   themeConfig: {
+    announcementBar: {
+      id: 'v0_16',
+      content: 'v0.16.0 is out — Xeon CPU detection, e1000 NIC support, and architectural improvements. <a href="https://github.com/lucid-fabrics/osx-proxmox-next/releases/latest">See release notes</a>',
+      backgroundColor: '#e57000',
+      textColor: '#fff',
+      isCloseable: true,
+    },
     colorMode: {
+      defaultMode: 'dark',
       respectPrefersColorScheme: true,
     },
     navbar: {
@@ -96,6 +104,10 @@ const config: Config = {
               label: 'CLI Reference',
               to: '/docs/guides/cli-reference',
             },
+            {
+              label: 'FAQ',
+              to: '/docs/guides/faq',
+            },
           ],
         },
         {
@@ -106,8 +118,25 @@ const config: Config = {
               href: 'https://github.com/lucid-fabrics/osx-proxmox-next/issues',
             },
             {
+              label: 'Discord',
+              href: 'https://discord.gg/2M5RJSGd',
+            },
+          ],
+        },
+        {
+          title: 'Support',
+          items: [
+            {
               label: 'Ko-fi',
               href: 'https://ko-fi.com/lucidfabrics',
+            },
+            {
+              label: 'Buy Me a Coffee',
+              href: 'https://buymeacoffee.com/lucidfabrics',
+            },
+            {
+              label: 'GitHub Sponsors',
+              href: 'https://github.com/sponsors/lucid-fabrics',
             },
           ],
         },
