@@ -53,27 +53,27 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 <table>
   <tr>
     <td align="center">
-      <img src="docs/screenshots/step1-preflight.svg" alt="Step 1: Preflight Checks" width="400"><br>
+      <img src="docs/static/img/screenshots/step1-preflight.svg" alt="Step 1: Preflight Checks" width="400"><br>
       <strong>Step 1:</strong> Preflight Checks
     </td>
     <td align="center">
-      <img src="docs/screenshots/step2-choose-os.svg" alt="Step 2: OS Selection" width="400"><br>
+      <img src="docs/static/img/screenshots/step2-choose-os.svg" alt="Step 2: OS Selection" width="400"><br>
       <strong>Step 2:</strong> OS Selection
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="docs/screenshots/step4-config-filled.svg" alt="Step 3: VM Configuration" width="400"><br>
+      <img src="docs/static/img/screenshots/step4-config-filled.svg" alt="Step 3: VM Configuration" width="400"><br>
       <strong>Step 3:</strong> VM Configuration
     </td>
     <td align="center">
-      <img src="docs/screenshots/step5-review.svg" alt="Step 4: Review & Dry Run" width="400"><br>
+      <img src="docs/static/img/screenshots/step5-review.svg" alt="Step 4: Review & Dry Run" width="400"><br>
       <strong>Step 4:</strong> Review & Dry Run
     </td>
   </tr>
 </table>
 
-![macOS Desktop via VNC](docs/images/macos-vnc-desktop.png)
+![macOS Desktop via VNC](docs/static/img/macos-vnc-desktop.png)
 
 > **Note:** Dynamic wallpapers are known to not display correctly without GPU passthrough on VNC. Use a static wallpaper instead.
 
