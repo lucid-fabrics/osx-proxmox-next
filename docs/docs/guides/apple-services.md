@@ -65,21 +65,31 @@ To skip SMBIOS generation entirely, use `--no-smbios`.
 3. Sign in order: **Apple ID** (System Settings) first, then **Messages**, then **FaceTime**
 4. Reboot once after login to confirm session persistence
 
-## Sequoia/Tahoe Limitation
+## Sequoia/Tahoe Apple Services
 
-Starting with macOS Sequoia 15, Apple requires **hardware device attestation** (DeviceCheck/App Attest) for Apple ID sign-in. This uses the Secure Enclave, which VMs cannot emulate.
+Starting with macOS Sequoia 15, Apple performs **hardware device attestation** (DeviceCheck/App Attest) during Apple ID sign-in. Standard VM detection — where `hv_vmm_present` sysctl returns `1` — causes Apple's servers to reject authentication.
 
-The error appears as:
+### Kernel Patch (Applied Automatically)
+
+When `--apple-services` is enabled, the tool now injects an OpenCore `Kernel/Patch` that redirects the `hv_vmm_present` sysctl to `hibernatecount` (always `0`). This makes DeviceCheck see what appears to be a physical machine.
+
+:::note
+This fix is community-attested on Sequoia 15 and Tahoe 26. It has not been officially verified by Apple or this project. Results may vary — report your experience on Discord or GitHub Issues.
+:::
+
+The error without this patch appears as:
 
 ```
 Verification Failed -- An unknown error occurred.
 ```
 
-:::warning
-This affects all VM platforms (Proxmox, Parallels, VMware, KVM). It is a server-side restriction by Apple, not a bug in this tool or OpenCore. `RestrictEvents.kext` with `revpatch=sbvmm` does not fix this.
+:::info
+`RestrictEvents.kext` with `revpatch=sbvmm` alone does **not** fix this. The kernel patch injected by `--apple-services` is required.
 :::
 
-## Workaround: Install Sonoma First
+### Fallback: Install Sonoma First
+
+If the kernel patch does not work in your setup, the Sonoma upgrade path remains a reliable fallback:
 
 1. Create a **Sonoma 14** VM with `--apple-services`
 2. Complete macOS setup, sign into Apple ID in System Settings
@@ -95,7 +105,7 @@ This affects all VM platforms (Proxmox, Parallels, VMware, KVM). It is a server-
 | "iMessage activation failed" | Verify ROM matches NIC MAC and MAC is static. Check date/time sync. |
 | Works once then breaks | VM config is regenerating SMBIOS or NIC MAC between boots. |
 | PlatformInfo not applied | Ensure `--apple-services` flag is set. Check OpenCore `config.plist` for PlatformInfo section. |
-| "Verification Failed" on Sequoia/Tahoe | Apple enforces hardware attestation. Use the Sonoma workaround above. |
+| "Verification Failed" on Sequoia/Tahoe | The kernel patch via `--apple-services` should fix this. If it doesn't, use the Sonoma upgrade fallback above. |
 
 :::note
 Apple controls service activation server-side. Even with a correct setup, activation may require multiple attempts or a call to Apple Support. Never share SMBIOS values publicly or reuse them across VMs.
