@@ -5,6 +5,7 @@ from pathlib import Path
 
 from osx_proxmox_next.domain import PlanStep, VmConfig
 from osx_proxmox_next.script_renderer import (
+    _apple_id_bypass_patch_keys,
     _build_oc_disk_script,
     _plist_patch_script,
     render_script,
@@ -161,6 +162,42 @@ def test_plist_patch_script_apple_services_no_serial_no_platform_info() -> None:
     # apple_services=True but no serial → should not inject PlatformInfo
     result = _plist_patch_script(apple_services=True, smbios_serial="")
     assert "SystemSerialNumber" not in result
+
+
+def test_plist_patch_script_apple_services_includes_bypass_patch() -> None:
+    result = _plist_patch_script(apple_services=True)
+    assert "hv_vmm_present" in result
+    assert "Apple ID VM bypass" in result
+
+
+def test_plist_patch_script_no_apple_services_no_bypass_patch() -> None:
+    result = _plist_patch_script(apple_services=False)
+    assert "hv_vmm_present" not in result
+
+
+# ---------------------------------------------------------------------------
+# _apple_id_bypass_patch_keys
+# ---------------------------------------------------------------------------
+
+
+def test_apple_id_bypass_patch_keys_returns_string() -> None:
+    result = _apple_id_bypass_patch_keys()
+    assert isinstance(result, str)
+
+
+def test_apple_id_bypass_patch_keys_contains_find_hex() -> None:
+    result = _apple_id_bypass_patch_keys()
+    assert "68696265726e61746568696472656164790068696265726e617465636f756e7400" in result
+
+
+def test_apple_id_bypass_patch_keys_contains_replace_hex() -> None:
+    result = _apple_id_bypass_patch_keys()
+    assert "68696265726e61746568696472656164790068765f766d6d5f70726573656e7400" in result
+
+
+def test_apple_id_bypass_patch_keys_scoped_to_sequoia() -> None:
+    result = _apple_id_bypass_patch_keys()
+    assert "24.0.0" in result  # MinKernel for Sequoia (Darwin 24.x)
 
 
 # ---------------------------------------------------------------------------

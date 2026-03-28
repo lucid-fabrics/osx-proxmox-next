@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 __all__ = [
     "render_script",
     "_plist_patch_script",
+    "_apple_id_bypass_patch_keys",
     "_build_oc_disk_script",
 ]
 
@@ -60,6 +61,39 @@ def _amd_plist_keys() -> str:
     )
 
 
+def _apple_id_bypass_patch_keys() -> str:
+    """Return inline python fragment to add kernel patches that bypass Apple's VM detection.
+
+    These patches replace the hibernatecount sysctl name with hv_vmm_present in the
+    kernel's string table. macOS reads hv_vmm_present=0 (the hibernate counter value)
+    instead of 1 (the actual VM flag), so Apple's DeviceCheck sees a physical machine
+    and allows Apple ID sign-in on Sequoia/Tahoe VMs.
+    """
+    find_hex = "68696265726e61746568696472656164790068696265726e617465636f756e7400"
+    replace_hex = "68696265726e61746568696472656164790068765f766d6d5f70726573656e7400"
+    return (
+        "kp=p.setdefault(\"Kernel\",{}).setdefault(\"Patch\",[]); "
+        f"_f=bytes.fromhex(\"{find_hex}\"); "
+        "(_f not in [x.get(\"Find\") for x in kp]) and kp.append("
+        "{"
+        "\"Arch\":\"x86_64\","
+        "\"Base\":\"\","
+        "\"Comment\":\"Apple ID VM bypass - hv_vmm_present\","
+        "\"Count\":1,"
+        "\"Enabled\":True,"
+        f"\"Find\":bytes.fromhex(\"{find_hex}\"),"
+        "\"Identifier\":\"kernel\","
+        "\"Limit\":0,"
+        "\"Mask\":b\"\","
+        "\"MaxKernel\":\"\","
+        "\"MinKernel\":\"24.0.0\","
+        f"\"Replace\":bytes.fromhex(\"{replace_hex}\"),"
+        "\"ReplaceMask\":b\"\","
+        "\"Skip\":0"
+        "}); "
+    )
+
+
 def _platforminfo_plist_keys(
     smbios_serial: str,
     smbios_uuid: str,
@@ -102,6 +136,7 @@ def _plist_patch_script(
         if apple_services and smbios_serial
         else ""
     )
+    apple_id_bypass = _apple_id_bypass_patch_keys() if apple_services else ""
     boot_args = f"keepsyms=1 debug=0x100{' -v' if verbose_boot else ''}"
 
     return (
@@ -126,8 +161,9 @@ def _plist_patch_script(
         "p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{})[\"RequestBootVarRouting\"]=True; "
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
         + amd_patch
-        + platforminfo +
-        "f=open(oc_dest+\"/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
+        + platforminfo
+        + apple_id_bypass
+        + "f=open(oc_dest+\"/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "import sys; sys.stderr.write(\"config.plist patched\\n\")'"
     )
 

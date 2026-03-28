@@ -16,6 +16,7 @@ title: Troubleshooting
 | UEFI Shell instead of macOS boot | Boot media path or order mismatch | Ensure OpenCore is on `ide0`, recovery on `ide2`, boot order: `ide2;virtio0;ide0`. |
 | "Guest has not initialized the display" | Display profile mismatch during early boot | Use `vga: std` for stable noVNC during installation. |
 | Stuck on Apple logo (flat CPU) | Non-power-of-2 CPU core count | Use 2, 4, 8, or 16 cores. Values like 6 or 12 cause kernel hangs. |
+| "Verification Failed" — Apple ID on Sequoia/Tahoe | `hv_vmm_present` sysctl returning `1` causes DeviceCheck to reject sign-in | Ensure `--apple-services` was used — it injects a kernel patch redirecting `hv_vmm_present` to `hibernatecount`. Note: `RestrictEvents.kext revpatch=sbvmm` alone does **not** fix this. If the patch doesn't work, use the Sonoma upgrade path (see [Apple Services guide](./apple-services.md)). |
 | macOS is slow on AMD | Expected -- AMD uses CPU emulation | AMD hosts use `Cascadelake-Server` emulation instead of native passthrough. Intel hosts get native performance. |
 | Installer doesn't show disk | Disk not formatted | Open Disk Utility > View > Show All Devices > Select QEMU VirtIO > Erase as APFS + GUID Partition Map. |
 
