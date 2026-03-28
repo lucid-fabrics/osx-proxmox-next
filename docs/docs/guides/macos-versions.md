@@ -13,8 +13,8 @@ OSX Proxmox Next supports four macOS versions. This guide helps you pick the rig
 |---------|-----------|----------------|-------------|-----------------|
 | Ventura 13 | Excellent | Full (iCloud, iMessage, FaceTime) | Good | Older hardware, maximum compatibility |
 | Sonoma 14 | Excellent | Full (iCloud, iMessage, FaceTime) | Very Good | Best all-around choice |
-| Sequoia 15 | Good | Limited (hardware attestation) | Very Good | Users who need latest features |
-| Tahoe 26 | Beta | Limited (hardware attestation) | Good | Early adopters, testing |
+| Sequoia 15 | Good | Community-tested with kernel patch | Very Good | Users who need latest features |
+| Tahoe 26 | Beta | Community-tested with kernel patch | Good | Early adopters, testing |
 
 ## Version Details
 
@@ -57,8 +57,7 @@ For users who want the latest stable release.
 - Good VM performance
 
 **Cons:**
-- Apple Services are limited due to hardware attestation checks
-- iCloud sign-in and iMessage activation may fail or be unreliable
+- Apple Services require the kernel patch applied by `--apple-services` (community-attested, not officially verified)
 - Requires CryptexFixup kext
 
 ### Tahoe 26
@@ -71,7 +70,7 @@ The bleeding-edge option, currently in beta.
 
 **Cons:**
 - Beta software with potential bugs and instability
-- Apple Services limited due to hardware attestation
+- Apple Services require the kernel patch applied by `--apple-services` (community-attested, not officially verified)
 - Not recommended for production or daily-driver use
 - May require updates to OpenCore configuration as betas progress
 
@@ -80,7 +79,8 @@ The bleeding-edge option, currently in beta.
 Follow this decision path:
 
 1. **Do you need Apple Services (iCloud, iMessage, FaceTime)?**
-   - Yes: **Sonoma 14** is your best option. Full Apple Services support with modern features.
+   - Yes, on Sequoia or Tahoe: Use `--apple-services` — a kernel patch is applied automatically and is community-attested to work. Sonoma 14 remains the safest choice with full verified support.
+   - Yes, on Sonoma: **Sonoma 14** with `--apple-services` gives fully verified Apple Services support.
    - No: Continue to step 2.
 
 2. **Do you want the latest macOS features?**
@@ -96,15 +96,16 @@ Follow this decision path:
 
 ## Hardware Attestation (Sequoia and Tahoe)
 
-Starting with Sequoia 15, Apple introduced hardware attestation checks for Apple Services. These checks verify that the device is genuine Apple hardware, which virtual machines cannot pass.
+Starting with Sequoia 15, Apple performs hardware attestation checks during Apple ID sign-in. These checks use the `hv_vmm_present` sysctl — which normally returns `1` in a VM — to detect virtualized environments.
 
-This means:
-- iCloud sign-in may fail or behave inconsistently
-- iMessage and FaceTime activation will likely not work
-- App Store downloads and purchases still function normally
-- The OS itself runs fine; only Apple account services are affected
+When `--apple-services` is enabled, an OpenCore `Kernel/Patch` is automatically injected that redirects `hv_vmm_present` to `hibernatecount` (always `0`), making DeviceCheck see what appears to be a physical machine.
 
-This is an Apple-side restriction, not a bug in the installer or OpenCore configuration.
+Community reports indicate this resolves Apple ID, iCloud, iMessage, and FaceTime sign-in on Sequoia 15 and Tahoe 26. This is **not officially verified** — use Sonoma 14 if you need a guaranteed-working baseline.
+
+Notes:
+- `RestrictEvents.kext` with `revpatch=sbvmm` alone does **not** fix this
+- App Store downloads and purchases work regardless
+- The OS itself runs fine; only Apple account services are affected by attestation
 
 ## In-Place Upgrade Path
 
