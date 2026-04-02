@@ -59,11 +59,11 @@ If the macOS installer does not show your disk, you need to format it first. Ope
 |-------|--------|---------------|-------|
 | Ventura 13 | Stable | Works | Lightweight, great for older hardware |
 | Sonoma 14 | Stable | Works | Best tested, most reliable |
-| Sequoia 15 | Stable | Limited | Apple blocks Apple ID sign-in on VMs |
-| Tahoe 26 | Stable | Limited | Apple blocks Apple ID sign-in on VMs |
+| Sequoia 15 | Stable | Works (with `--apple-services`) | Kernel patch applied automatically |
+| Tahoe 26 | Stable | Works (with `--apple-services`) | Kernel patch applied automatically |
 
 :::note
-**Apple Services on Sequoia/Tahoe:** Apple enforces hardware device attestation starting with Sequoia 15, which blocks Apple ID sign-in on all VM platforms. **Workaround:** Install Sonoma 14 first, sign into Apple ID, then upgrade in-place to Sequoia or Tahoe.
+**Apple Services on Sequoia/Tahoe:** Pass `--apple-services` when creating the VM. A kernel-level patch is injected automatically that prevents Apple's DeviceCheck from detecting the VM, enabling full Apple ID, iCloud, iMessage, and FaceTime sign-in. See [Apple Services](../guides/apple-services) for details.
 :::
 
 ## Next Steps
