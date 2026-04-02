@@ -122,8 +122,10 @@ class PlanStep:
 | `_edit_mixin.py`    | TUI VM edit flow: verifies VM exists, creates snapshot, stops VM, applies `EditChanges`, optionally restarts |
 | `_manage_mixin.py`  | TUI manage mode: lists macOS VMs, provides per-VM edit/start/stop/destroy actions |
 | `script_renderer.py`| Generates shell scripts for OpenCore disk creation (GPT + ESP partitioning, config.plist patching) |
-| `services/`         | Detection service (storage targets, next VMID, VM listing), edit service (worker for applying `EditChanges`) |
-| `models/`           | `WizardState` dataclass — reactive TUI state shared across all mixin steps |
+| `preflight.py`      | Asset presence checks (`required_assets`): verifies OpenCore ISO and recovery image exist before apply |
+| `assets.py`         | Asset path resolution and download hint generation for missing OpenCore/recovery files |
+| `services/`         | Detection service (storage targets, next VMID with overflow protection, VM listing), edit service (worker for applying `EditChanges`) |
+| `models/`           | `WizardState` dataclass — reactive TUI state shared across all mixin steps (`dry_log`, `live_log_lines`, form field values) |
 
 ## CPU Strategy
 

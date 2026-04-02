@@ -109,14 +109,14 @@ Notes:
 
 ## In-Place Upgrade Path
 
-If you need Apple Services now but want Sequoia or Tahoe later, use this approach:
+If you want Sequoia or Tahoe but prefer to establish your Apple Services session on Sonoma first (the fully-verified baseline), use this approach:
 
 1. Install **Sonoma 14** using the wizard
 2. Sign in to your Apple ID, activate iCloud and iMessage
 3. Once signed in, upgrade in-place to **Sequoia 15** or **Tahoe 26** via System Settings > Software Update
 4. Your Apple Services session carries over from the Sonoma sign-in
 
-This workaround lets you keep Apple Services functional on newer macOS versions, since the initial authentication was performed on a version without hardware attestation.
+This is an alternative to using `--apple-services` directly on Sequoia or Tahoe. Both approaches work — use this path if you prefer the Sonoma-verified baseline before upgrading.
 
 :::note
 In-place upgrades preserve your data but take longer than a fresh install. Back up your VM (snapshot) before upgrading.
