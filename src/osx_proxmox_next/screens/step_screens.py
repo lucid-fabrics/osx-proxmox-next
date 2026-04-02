@@ -65,6 +65,27 @@ def compose_step2() -> ComposeResult:
             )
             yield Static("", id="manage_log", classes="hidden")
             yield Static("", id="manage_result", classes="hidden")
+            # ── Edit VM ──────────────────────────────────────────────
+            yield Static("Edit VM", classes="manage_section_header")
+            yield Static("VM ID to edit:", id="edit_vmid_label")
+            yield Input(value="", id="edit_vmid", placeholder="e.g. 106")
+            with Vertical(id="edit_form", classes="hidden"):
+                with Container(id="edit_grid"):
+                    yield Static("Name", classes="label")
+                    yield Input(value="", id="edit_name", placeholder="leave blank to keep")
+                    yield Static("CPU Cores", classes="label")
+                    yield Input(value="", id="edit_cores", placeholder="leave blank to keep")
+                    yield Static("Memory MB", classes="label")
+                    yield Input(value="", id="edit_memory", placeholder="leave blank to keep")
+                    yield Static("Bridge", classes="label")
+                    yield Input(value="", id="edit_bridge", placeholder="leave blank to keep")
+                    yield Static("Add Disk GB", classes="label")
+                    yield Input(value="", id="edit_disk_add", placeholder="GB to add, e.g. 64")
+                with Horizontal(classes="action_row"):
+                    yield Checkbox("Start VM after", value=False, id="edit_start_after_cb")
+                    yield Button("Apply Changes", id="edit_apply_btn", disabled=True)
+            yield Static("", id="edit_log", classes="hidden")
+            yield Static("", id="edit_result", classes="hidden")
 
 
 def compose_step3(storage_targets: list[str]) -> ComposeResult:

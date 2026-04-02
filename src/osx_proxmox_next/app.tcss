@@ -127,6 +127,7 @@ Input:focus { border: tall #2ec27e; background: #1a2c3f; }
 
 #manage_vmid { width: 30; }
 #manage_vmid_label { color: #9fc6e8; margin-top: 1; }
+#edit_vmid_label { color: #9fc6e8; }
 #manage_purge_cb { margin-right: 2; }
 
 #vm_list_display {
@@ -154,3 +155,36 @@ Input:focus { border: tall #2ec27e; background: #1a2c3f; }
 .manage_result_fail { border: heavy #d44f4f; }
 
 .hint { color: #aaaaaa; margin-top: 1; }
+
+.manage_section_header {
+    color: #9fc6e8;
+    margin-top: 2;
+    border-top: solid #2f6fa2;
+    padding-top: 1;
+}
+
+#edit_grid {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 14 1fr;
+    grid-gutter: 0 1;
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#edit_log {
+    background: #0d1722;
+    border: tall #1f4f7a;
+    padding: 1;
+    height: 8;
+    overflow: auto;
+}
+
+#edit_result {
+    border: heavy #2ec27e;
+    padding: 1;
+    height: auto;
+    margin-top: 1;
+}
+.edit_result_fail { border: heavy #d44f4f; }

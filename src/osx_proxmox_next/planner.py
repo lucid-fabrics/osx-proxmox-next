@@ -6,7 +6,7 @@ from shlex import quote as shquote
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import CpuInfo, detect_cpu_info
-from .domain import SUPPORTED_MACOS, VmConfig, PlanStep, validate_config
+from .domain import SUPPORTED_MACOS, VmConfig, PlanStep, EditChanges, validate_config
 from .infrastructure import ProxmoxAdapter
 from .script_renderer import (
     _APPLE_OSK,
@@ -330,9 +330,7 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
     ]
 
 
-# ── VM Destroy ──────────────────────────────────────────────────────
-
-from .services import VmInfo, fetch_vm_info  # noqa: E402
+# ── VM Destroy (defined before services import to break circular dep) ─
 
 
 def build_destroy_plan(vmid: int, purge: bool = False) -> list[PlanStep]:
@@ -344,3 +342,59 @@ def build_destroy_plan(vmid: int, purge: bool = False) -> list[PlanStep]:
         PlanStep(title="Stop VM", argv=["qm", "stop", vid], risk="warn"),
         PlanStep(title="Destroy VM", argv=destroy_argv, risk="warn"),
     ]
+
+
+# ── VM Edit ─────────────────────────────────────────────────────────
+
+
+def build_edit_plan(
+    vmid: int,
+    changes: EditChanges,
+    start_after: bool = False,
+) -> list[PlanStep]:
+    """Generate a plan to modify an existing macOS VM.
+
+    Stops the VM, applies each requested change via ``qm set``/``qm resize``,
+    then optionally starts the VM again.  *start_after* is False by default
+    so the caller controls when the VM comes back up.
+    """
+    vid = str(vmid)
+    steps: list[PlanStep] = [
+        PlanStep(title="Stop VM", argv=["qm", "stop", vid], risk="warn"),
+    ]
+    if changes.name is not None:
+        steps.append(PlanStep(
+            title=f"Rename VM to {changes.name}",
+            argv=["qm", "set", vid, "--name", changes.name],
+        ))
+    if changes.cores is not None:
+        steps.append(PlanStep(
+            title=f"Set CPU cores to {changes.cores}",
+            argv=["qm", "set", vid, "--cores", str(changes.cores)],
+        ))
+    if changes.memory_mb is not None:
+        steps.append(PlanStep(
+            title=f"Set memory to {changes.memory_mb} MB",
+            argv=["qm", "set", vid, "--memory", str(changes.memory_mb)],
+        ))
+    if changes.bridge is not None:
+        steps.append(PlanStep(
+            title=f"Update network bridge to {changes.bridge} (NIC: {changes.nic_model})",
+            argv=["qm", "set", vid, "--net0", f"{changes.nic_model},bridge={changes.bridge},firewall=0"],
+        ))
+    if changes.disk_gb_add is not None:
+        steps.append(PlanStep(
+            title=f"Extend {changes.disk_name} by {changes.disk_gb_add} GB",
+            argv=["qm", "resize", vid, changes.disk_name, f"+{changes.disk_gb_add}G"],
+            risk="action",
+        ))
+    if start_after:
+        steps.append(PlanStep(
+            title="Start VM",
+            argv=["qm", "start", vid],
+            risk="action",
+        ))
+    return steps
+
+
+from .services import VmInfo, fetch_vm_info  # noqa: E402
