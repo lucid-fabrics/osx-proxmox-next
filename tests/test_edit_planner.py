@@ -136,4 +136,28 @@ def test_build_edit_plan_only_stop_when_no_changes_requested():
     # Empty EditChanges produces only the stop step — caller should validate first.
     steps = build_edit_plan(900, EditChanges())
     assert len(steps) == 1
+
+
+def test_validate_rejects_bad_nic_model():
+    issues = validate_edit_changes(900, EditChanges(cores=4, nic_model="bad model!"))
+    assert any("NIC model" in i for i in issues)
+
+
+def test_validate_rejects_bad_disk_name():
+    issues = validate_edit_changes(900, EditChanges(cores=4, disk_name="xvda1"))
+    assert any("Disk name" in i for i in issues)
+
+
+def test_build_edit_plan_custom_nic_model():
+    steps = build_edit_plan(900, EditChanges(bridge="vmbr1", nic_model="e1000"))
+    net_step = next(s for s in steps if "--net0" in " ".join(s.argv))
+    assert "e1000" in net_step.argv[-1]
+    assert "vmxnet3" not in net_step.argv[-1]
+
+
+def test_build_edit_plan_custom_disk_name():
+    steps = build_edit_plan(900, EditChanges(disk_gb_add=32, disk_name="sata0"))
+    resize = next(s for s in steps if "resize" in " ".join(s.argv))
+    assert "sata0" in resize.argv
+    assert "virtio0" not in resize.argv
     assert steps[0].argv[:2] == ["qm", "stop"]

@@ -89,7 +89,7 @@ def validate_edit_changes(vmid: int, changes: EditChanges) -> list[str]:
             issues.append("VM name must be at least 3 characters.")
         if len(changes.name) > 63:
             issues.append("VM name must be at most 63 characters.")
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.\-]*", changes.name):
+        if not re.fullmatch(r"[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?", changes.name):
             issues.append("VM name must start with alphanumeric and contain only [a-zA-Z0-9.-].")
     if changes.cores is not None and changes.cores < MIN_CORES:
         issues.append(f"At least {MIN_CORES} CPU cores are required.")
@@ -124,7 +124,7 @@ def validate_config(config: VmConfig) -> list[str]:
         issues.append(f"At least {MIN_DISK_GB} GB disk is required.")
     if not re.fullmatch(r"vmbr[0-9]+", config.bridge):
         issues.append("Bridge must match vmbr<N> (e.g. vmbr0).")
-    if config.name and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.\-]*", config.name):
+    if config.name and not re.fullmatch(r"[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?", config.name):
         issues.append("VM name must start with alphanumeric and contain only [a-zA-Z0-9.-].")
     if config.installer_path and not re.fullmatch(r"[a-zA-Z0-9/._\-]+", config.installer_path):
         issues.append("Installer path contains invalid characters.")
