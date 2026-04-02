@@ -70,6 +70,15 @@ These flags are shared by `apply` and `plan`:
 
 At least one change flag (`--name`, `--cores`, `--memory`, `--bridge`, `--add-disk`) is required.
 
+## plan -- Flags
+
+These flags apply only to the `plan` subcommand:
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` | flag | Output the plan as JSON (useful for scripting and CI) |
+| `--script-out` | string | Write the plan as an executable shell script to the given path |
+
 ## Usage Examples
 
 ### apply -- Create a VM

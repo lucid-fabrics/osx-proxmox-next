@@ -41,11 +41,10 @@ The recommended default for most users.
 - Full Apple Services support (iCloud, iMessage, FaceTime)
 - Modern feature set (widgets on desktop, screen sharing improvements)
 - Excellent stability in Proxmox VMs
-- Requires CryptexFixup kext (included automatically by the installer)
 
 **Cons:**
 - Slightly higher resource usage than Ventura
-- Requires CryptexFixup to avoid `EXITBS:START` hang at boot
+- Requires CryptexFixup kext to avoid `EXITBS:START` hang at boot (included automatically)
 
 ### Sequoia 15
 

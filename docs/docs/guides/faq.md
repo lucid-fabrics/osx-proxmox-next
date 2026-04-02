@@ -84,9 +84,7 @@ Sonoma 14 is the best-tested and most reliable option. Sequoia 15 and Tahoe 26 r
 <details>
 <summary><strong>Can I upgrade macOS inside the VM?</strong></summary>
 
-Yes. In-place upgrades via System Settings > Software Update work. Snapshot your VM before upgrading to preserve a rollback point.
-
-Snapshot your VM before upgrading so you can roll back if something goes wrong.
+Yes. In-place upgrades via System Settings > Software Update work. Snapshot your VM before upgrading so you can roll back if something goes wrong.
 
 </details>
 
