@@ -7,9 +7,12 @@ from pathlib import Path
 
 from textual.widgets import Button, Checkbox, Input, Static
 
+from osx_proxmox_next import _edit_mixin as edit_mixin_module
 from osx_proxmox_next.app import NextApp
 from osx_proxmox_next.executor import ApplyResult
+from osx_proxmox_next.rollback import RollbackSnapshot
 from osx_proxmox_next.services import edit_service
+from osx_proxmox_next.services import VmInfo
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -32,7 +35,7 @@ async def _advance_to_manage(pilot, app) -> None:
 def test_edit_form_hidden_until_valid_vmid() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             # edit_form should start hidden
@@ -48,7 +51,7 @@ def test_edit_form_hidden_until_valid_vmid() -> None:
 def test_edit_form_shows_on_valid_vmid() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_vmid", Input).value = "900"
@@ -61,7 +64,7 @@ def test_edit_form_shows_on_valid_vmid() -> None:
 def test_edit_apply_btn_disabled_without_any_field() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_vmid", Input).value = "900"
@@ -75,7 +78,7 @@ def test_edit_apply_btn_disabled_without_any_field() -> None:
 def test_edit_apply_btn_enabled_with_one_field() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_vmid", Input).value = "900"
@@ -90,7 +93,7 @@ def test_edit_apply_btn_enabled_with_one_field() -> None:
 def test_edit_vmid_out_of_range_keeps_form_hidden() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_vmid", Input).value = "5"
@@ -106,7 +109,7 @@ def test_edit_vmid_out_of_range_keeps_form_hidden() -> None:
 def test_edit_run_edit_blocked_while_running() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.state.edit_running = True
@@ -119,7 +122,7 @@ def test_edit_run_edit_blocked_while_running() -> None:
 def test_edit_run_edit_invalid_vmid_noop() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_vmid", Input).value = "abc"
@@ -132,7 +135,7 @@ def test_edit_run_edit_invalid_vmid_noop() -> None:
 def test_edit_run_edit_shows_validation_errors() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_vmid", Input).value = "900"
@@ -155,7 +158,7 @@ def test_edit_run_edit_shows_validation_errors() -> None:
 def test_edit_start_after_checkbox_updates_state() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             # Enter valid VMID so the edit form (and checkbox) become visible
@@ -176,6 +179,15 @@ def test_edit_start_after_checkbox_updates_state() -> None:
 
 
 def test_edit_apply_success(monkeypatch) -> None:
+    monkeypatch.setattr(
+        edit_mixin_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="test-vm", status="running", config_raw=""),
+    )
+    monkeypatch.setattr(
+        edit_mixin_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
+    )
+
     def fake_apply_plan(steps, execute=False, on_step=None, adapter=None):
         for idx, step in enumerate(steps, start=1):
             if on_step:
@@ -192,7 +204,7 @@ def test_edit_apply_success(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_vmid", Input).value = "900"
@@ -214,6 +226,14 @@ def test_edit_apply_success(monkeypatch) -> None:
 
 def test_edit_apply_failure(monkeypatch) -> None:
     monkeypatch.setattr(
+        edit_mixin_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="test-vm", status="running", config_raw=""),
+    )
+    monkeypatch.setattr(
+        edit_mixin_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
+    )
+    monkeypatch.setattr(
         edit_service,
         "apply_plan",
         lambda steps, execute=False, on_step=None, adapter=None: ApplyResult(
@@ -223,7 +243,7 @@ def test_edit_apply_failure(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_vmid", Input).value = "900"
@@ -249,7 +269,7 @@ def test_edit_apply_failure(monkeypatch) -> None:
 def test_edit_update_log_before_result() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_log").remove_class("hidden")
@@ -263,7 +283,7 @@ def test_edit_update_log_before_result() -> None:
 def test_edit_update_log_with_ok_result() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.query_one("#edit_log").remove_class("hidden")
@@ -284,7 +304,7 @@ def test_edit_update_log_with_ok_result() -> None:
 def test_edit_finish_edit_success_clears_running() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.state.edit_running = True
@@ -302,12 +322,43 @@ def test_edit_finish_edit_success_clears_running() -> None:
 def test_edit_finish_edit_failure_marks_fail() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 80)) as pilot:
             await pilot.pause()
             await _advance_to_manage(pilot, app)
             app.state.edit_running = True
             app._finish_edit(ok=False, log_path=Path("/tmp/fail.log"))
             await pilot.pause()
+            assert app.state.edit_ok is False
+            result_box = app.query_one("#edit_result", Static)
+            assert result_box.has_class("edit_result_fail")
+
+    asyncio.run(_run())
+
+
+# ── VM not found ────────────────────────────────────────────────────
+
+
+def test_edit_apply_vm_not_found(monkeypatch) -> None:
+    monkeypatch.setattr(
+        edit_mixin_module, "fetch_vm_info",
+        lambda vmid, adapter=None: None,
+    )
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 80)) as pilot:
+            await pilot.pause()
+            await _advance_to_manage(pilot, app)
+            app.query_one("#edit_vmid", Input).value = "900"
+            await pilot.pause()
+            app.query_one("#edit_cores", Input).value = "4"
+            await pilot.pause()
+            await pilot.click("#edit_apply_btn")
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if app.state.edit_done:
+                    break
             assert app.state.edit_ok is False
             result_box = app.query_one("#edit_result", Static)
             assert result_box.has_class("edit_result_fail")

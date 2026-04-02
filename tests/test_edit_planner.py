@@ -72,8 +72,9 @@ def test_validate_passes_valid_changes():
 
 def test_build_edit_plan_always_starts_with_stop():
     steps = build_edit_plan(900, EditChanges(cores=4))
-    assert steps[0].argv[:2] == ["qm", "stop"]
-    assert steps[0].argv[2] == "900"
+    assert steps[0].title == "Stop VM (if running)"
+    assert "qm stop" in steps[0].command
+    assert "900" in steps[0].command
 
 
 def test_build_edit_plan_name_change():
@@ -129,23 +130,38 @@ def test_build_edit_plan_multiple_changes():
     assert any("memory" in t.lower() for t in titles)
     assert any("Rename" in t for t in titles)
     # stop is always first
-    assert steps[0].title == "Stop VM"
+    assert steps[0].title == "Stop VM (if running)"
 
 
-def test_build_edit_plan_only_stop_when_no_changes_requested():
-    # Empty EditChanges produces only the stop step — caller should validate first.
+def test_build_edit_plan_returns_empty_for_no_changes():
+    # Empty EditChanges returns no steps — planner is a no-op without changes.
     steps = build_edit_plan(900, EditChanges())
-    assert len(steps) == 1
+    assert steps == []
 
 
 def test_validate_rejects_bad_nic_model():
-    issues = validate_edit_changes(900, EditChanges(cores=4, nic_model="bad model!"))
+    # nic_model is only validated when bridge is also being changed
+    issues = validate_edit_changes(900, EditChanges(bridge="vmbr0", nic_model="bad model!"))
     assert any("NIC model" in i for i in issues)
 
 
+def test_validate_ignores_nic_model_when_no_bridge_change():
+    # nic_model default "vmxnet3" is always valid, but even an invalid value is
+    # not checked when bridge is not being changed
+    issues = validate_edit_changes(900, EditChanges(cores=4, nic_model="bad model!"))
+    assert not any("NIC model" in i for i in issues)
+
+
 def test_validate_rejects_bad_disk_name():
-    issues = validate_edit_changes(900, EditChanges(cores=4, disk_name="xvda1"))
+    # disk_name is only validated when disk_gb_add is also being changed
+    issues = validate_edit_changes(900, EditChanges(disk_gb_add=64, disk_name="xvda1"))
     assert any("Disk name" in i for i in issues)
+
+
+def test_validate_ignores_disk_name_when_no_disk_change():
+    # disk_name is not checked when disk_gb_add is not being changed
+    issues = validate_edit_changes(900, EditChanges(cores=4, disk_name="xvda1"))
+    assert not any("Disk name" in i for i in issues)
 
 
 def test_build_edit_plan_custom_nic_model():
@@ -160,4 +176,4 @@ def test_build_edit_plan_custom_disk_name():
     resize = next(s for s in steps if "resize" in " ".join(s.argv))
     assert "sata0" in resize.argv
     assert "virtio0" not in resize.argv
-    assert steps[0].argv[:2] == ["qm", "stop"]
+    assert steps[0].title == "Stop VM (if running)"

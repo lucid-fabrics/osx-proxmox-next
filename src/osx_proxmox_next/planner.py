@@ -358,9 +358,15 @@ def build_edit_plan(
     then optionally starts the VM again.  *start_after* is False by default
     so the caller controls when the VM comes back up.
     """
+    if not any([changes.name, changes.cores, changes.memory_mb, changes.bridge, changes.disk_gb_add]):
+        return []
     vid = str(vmid)
     steps: list[PlanStep] = [
-        PlanStep(title="Stop VM", argv=["qm", "stop", vid], risk="warn"),
+        PlanStep(
+            title="Stop VM (if running)",
+            argv=["bash", "-c", f"qm status {vid} | grep -q stopped || qm stop {vid}"],
+            risk="warn",
+        ),
     ]
     if changes.name is not None:
         steps.append(PlanStep(

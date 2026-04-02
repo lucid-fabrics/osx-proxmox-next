@@ -193,7 +193,7 @@ def _handle_script_command(args: argparse.Namespace, config: VmConfig, steps: li
         print(f"Script written: {out}")
 
 
-def _handle_destroy_command(args: argparse.Namespace, config: VmConfig, steps: list) -> int:
+def _handle_apply_command(args: argparse.Namespace, config: VmConfig, steps: list) -> int:
     """Execute the plan and report apply result."""
     snapshot = create_snapshot(config.vmid)
     result = apply_plan(steps, execute=bool(args.execute))
@@ -305,7 +305,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         _handle_script_command(args, config, steps)
         return rc
 
-    return _handle_destroy_command(args, config, steps)
+    return _handle_apply_command(args, config, steps)
 
 
 def _run_status(args: argparse.Namespace) -> int:
@@ -423,12 +423,14 @@ def _run_edit(args: argparse.Namespace) -> int:
 
     steps = build_edit_plan(vmid, changes, start_after=args.start)
 
+    if not args.execute:
+        print("DRY RUN — pass --execute to apply:\n")
+
     for idx, step in enumerate(steps, start=1):
         print(f"{idx:02d}. {step.title}")
         print(f"    {step.command}")
 
     if not args.execute:
-        print("\n(dry run — pass --execute to apply)")
         return 0
 
     result = apply_plan(steps, execute=True)
