@@ -71,7 +71,7 @@ class EditModeMixin:
             memory_mb=_opt_int("#edit_memory"),
             bridge=_opt_str("#edit_bridge"),
             disk_gb_add=_opt_int("#edit_disk_add"),
-            nic_model=_opt_str("#edit_nic_model") or "vmxnet3",
+            nic_model=_opt_str("#edit_nic_model"),
             disk_name=_opt_str("#edit_disk_name") or "virtio0",
         )
 
@@ -109,7 +109,10 @@ class EditModeMixin:
                 return
 
             create_snapshot(vmid)
-            result = run_edit_worker(vmid, changes, start_after=start_after, on_step=on_step)
+            result = run_edit_worker(
+                vmid, changes, start_after=start_after, on_step=on_step,
+                current_net0=info.config_raw,
+            )
             self.call_from_thread(self._finish_edit, result.ok, result.log_path)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
             log.exception("Unexpected error in edit worker: %s", exc)

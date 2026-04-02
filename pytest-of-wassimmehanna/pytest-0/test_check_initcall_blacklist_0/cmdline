@@ -1,0 +1,1 @@
+BOOT_IMAGE=/boot/vmlinuz initcall_blacklist=sysfb_init

@@ -347,10 +347,54 @@ def build_destroy_plan(vmid: int, purge: bool = False) -> list[PlanStep]:
 # ── VM Edit ─────────────────────────────────────────────────────────
 
 
+def _updated_net0(current_net0: str | None, new_bridge: str, nic_model: str | None) -> str:
+    """Build a net0 string that preserves existing params (MAC, VLAN, etc.)
+    while updating the bridge.  When *nic_model* is None the existing model is
+    kept; when it is explicitly provided the new model is used instead.
+
+    Falls back to a clean ``vmxnet3,bridge=<new_bridge>,firewall=0`` string when
+    *current_net0* is unavailable.
+    """
+    fallback_model = nic_model or "vmxnet3"
+    if not current_net0:
+        return f"{fallback_model},bridge={new_bridge},firewall=0"
+
+    for line in current_net0.splitlines():
+        if not line.startswith("net0:"):
+            continue
+        raw = line.split(":", 1)[1].strip()
+        parts = raw.split(",")
+        model_part = parts[0]
+        # model_part is either "vmxnet3" or "vmxnet3=XX:XX:XX:XX:XX:XX"
+        if "=" in model_part and not model_part.startswith("bridge"):
+            existing_model, mac = model_part.split("=", 1)
+            chosen_model = nic_model if nic_model is not None else existing_model
+            new_model_part = f"{chosen_model}={mac}"
+        else:
+            chosen_model = nic_model if nic_model is not None else model_part
+            new_model_part = chosen_model
+        # Replace bridge in remaining params; keep everything else intact
+        other: list[str] = []
+        bridge_seen = False
+        for part in parts[1:]:
+            if part.startswith("bridge="):
+                other.append(f"bridge={new_bridge}")
+                bridge_seen = True
+            else:
+                other.append(part)
+        if not bridge_seen:
+            other.append(f"bridge={new_bridge}")
+        return ",".join([new_model_part] + other)
+
+    # net0 line not found — fall back to clean config
+    return f"{fallback_model},bridge={new_bridge},firewall=0"
+
+
 def build_edit_plan(
     vmid: int,
     changes: EditChanges,
     start_after: bool = False,
+    current_net0: str | None = None,
 ) -> list[PlanStep]:
     """Generate a plan to modify an existing macOS VM.
 
@@ -384,9 +428,11 @@ def build_edit_plan(
             argv=["qm", "set", vid, "--memory", str(changes.memory_mb)],
         ))
     if changes.bridge is not None:
+        net0_val = _updated_net0(current_net0, changes.bridge, changes.nic_model)
+        nic_label = changes.nic_model or "existing model"
         steps.append(PlanStep(
-            title=f"Update network bridge to {changes.bridge} (NIC: {changes.nic_model})",
-            argv=["qm", "set", vid, "--net0", f"{changes.nic_model},bridge={changes.bridge},firewall=0"],
+            title=f"Update network bridge to {changes.bridge} (NIC: {nic_label})",
+            argv=["qm", "set", vid, "--net0", net0_val],
         ))
     if changes.disk_gb_add is not None:
         steps.append(PlanStep(

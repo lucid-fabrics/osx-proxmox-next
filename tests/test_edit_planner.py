@@ -99,8 +99,26 @@ def test_build_edit_plan_bridge():
     steps = build_edit_plan(900, EditChanges(bridge="vmbr2"))
     cmds = [" ".join(s.argv) for s in steps]
     assert any("--net0" in c and "vmbr2" in c for c in cmds)
-    # must preserve vmxnet3 NIC model
+    # no current_net0 → falls back to vmxnet3 default
     assert any("vmxnet3" in c for c in cmds)
+
+
+def test_build_edit_plan_bridge_preserves_mac_from_current_net0():
+    config_raw = "name: macos-test\nnet0: vmxnet3=AA:BB:CC:DD:EE:FF,bridge=vmbr0,firewall=0\n"
+    steps = build_edit_plan(900, EditChanges(bridge="vmbr1"), current_net0=config_raw)
+    net_step = next(s for s in steps if "--net0" in " ".join(s.argv))
+    net0_val = net_step.argv[-1]
+    assert "vmbr1" in net0_val
+    assert "AA:BB:CC:DD:EE:FF" in net0_val  # MAC preserved
+
+
+def test_build_edit_plan_bridge_preserves_existing_nic_model():
+    config_raw = "net0: e1000=AA:BB:CC:DD:EE:FF,bridge=vmbr0,firewall=0\n"
+    steps = build_edit_plan(900, EditChanges(bridge="vmbr1"), current_net0=config_raw)
+    net_step = next(s for s in steps if "--net0" in " ".join(s.argv))
+    net0_val = net_step.argv[-1]
+    assert "e1000" in net0_val   # original model preserved
+    assert "vmxnet3" not in net0_val
 
 
 def test_build_edit_plan_disk_extend():
@@ -140,14 +158,19 @@ def test_build_edit_plan_returns_empty_for_no_changes():
 
 
 def test_validate_rejects_bad_nic_model():
-    # nic_model is only validated when bridge is also being changed
+    # nic_model is only validated when bridge is also being changed and nic_model is not None
     issues = validate_edit_changes(900, EditChanges(bridge="vmbr0", nic_model="bad model!"))
     assert any("NIC model" in i for i in issues)
 
 
+def test_validate_ignores_nic_model_none():
+    # nic_model=None (default) is never validated — means "preserve existing"
+    issues = validate_edit_changes(900, EditChanges(bridge="vmbr0", nic_model=None))
+    assert not any("NIC model" in i for i in issues)
+
+
 def test_validate_ignores_nic_model_when_no_bridge_change():
-    # nic_model default "vmxnet3" is always valid, but even an invalid value is
-    # not checked when bridge is not being changed
+    # nic_model is not checked when bridge is not being changed
     issues = validate_edit_changes(900, EditChanges(cores=4, nic_model="bad model!"))
     assert not any("NIC model" in i for i in issues)
 
@@ -165,10 +188,22 @@ def test_validate_ignores_disk_name_when_no_disk_change():
 
 
 def test_build_edit_plan_custom_nic_model():
+    # Explicit nic_model overrides the fallback
     steps = build_edit_plan(900, EditChanges(bridge="vmbr1", nic_model="e1000"))
     net_step = next(s for s in steps if "--net0" in " ".join(s.argv))
     assert "e1000" in net_step.argv[-1]
     assert "vmxnet3" not in net_step.argv[-1]
+
+
+def test_build_edit_plan_explicit_nic_model_overrides_existing():
+    # If user explicitly sets nic_model, it wins over the preserved model
+    config_raw = "net0: vmxnet3=AA:BB:CC:DD:EE:FF,bridge=vmbr0,firewall=0\n"
+    steps = build_edit_plan(900, EditChanges(bridge="vmbr1", nic_model="e1000"), current_net0=config_raw)
+    net_step = next(s for s in steps if "--net0" in " ".join(s.argv))
+    net0_val = net_step.argv[-1]
+    assert "e1000" in net0_val
+    assert "vmxnet3" not in net0_val
+    assert "AA:BB:CC:DD:EE:FF" in net0_val  # MAC still preserved
 
 
 def test_build_edit_plan_custom_disk_name():

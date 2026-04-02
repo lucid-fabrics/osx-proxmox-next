@@ -80,11 +80,11 @@ def compose_step2() -> ComposeResult:
                     yield Static("Bridge", classes="label")
                     yield Input(value="", id="edit_bridge", placeholder="leave blank to keep")
                     yield Static("NIC Model", classes="label")
-                    yield Input(value="vmxnet3", id="edit_nic_model", placeholder="vmxnet3 or e1000")
+                    yield Input(value="", id="edit_nic_model", placeholder="leave blank to preserve existing")
                     yield Static("Add Disk GB", classes="label")
                     yield Input(value="", id="edit_disk_add", placeholder="GB to add, e.g. 64")
                     yield Static("Disk Name", classes="label")
-                    yield Input(value="virtio0", id="edit_disk_name", placeholder="virtio0, sata0, …")
+                    yield Input(value="", id="edit_disk_name", placeholder="leave blank for virtio0")
                 with Horizontal(classes="action_row"):
                     yield Checkbox("Start VM after", value=False, id="edit_start_after_cb")
                     yield Button("Apply Changes", id="edit_apply_btn", disabled=True)
