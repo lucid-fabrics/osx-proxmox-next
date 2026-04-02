@@ -66,9 +66,26 @@ If the macOS installer does not show your disk, you need to format it first. Ope
 **Apple Services on Sequoia/Tahoe:** Pass `--apple-services` when creating the VM. A kernel-level patch is injected automatically that prevents Apple's DeviceCheck from detecting the VM, enabling full Apple ID, iCloud, iMessage, and FaceTime sign-in. See [Apple Services](../guides/apple-services) for details.
 :::
 
+## Managing Existing VMs
+
+After a VM is created, use the TUI to manage it:
+
+```bash
+osx-next --manage
+```
+
+This opens a VM list where you can edit settings (CPU, memory, disk, network), start, stop, or destroy existing macOS VMs without using the CLI.
+
+From the CLI, use the `edit` subcommand directly:
+
+```bash
+osx-next-cli edit --vmid 910 --cores 4 --memory 8192 --execute
+```
+
 ## Next Steps
 
 - **CLI usage** -- Run `osx-next-cli --help` for headless/scripted VM creation
+- **Manage existing VMs** -- Run `osx-next --manage` to edit, start, or stop VMs from the TUI
 - **GPU passthrough** -- Attach a discrete GPU for native graphics performance
 - **Apple Services** -- Enable iCloud, iMessage, and FaceTime with `--apple-services`
 - **Performance profiles** -- Apply guest-side tuning scripts for snappier UI

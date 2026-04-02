@@ -176,3 +176,53 @@ qm resize <vmid> virtio0 +50G
 After resizing, boot macOS and use Disk Utility to expand the APFS container to fill the new space. Snapshot the VM before resizing.
 
 </details>
+
+<details>
+<summary><strong>How do I change an existing VM's CPU, memory, or disk?</strong></summary>
+
+Use the `edit` subcommand. It stops the VM, applies your changes, saves a config snapshot, and optionally restarts.
+
+```bash
+# Change cores and memory (dry-run by default)
+osx-next-cli edit --vmid 910 --cores 4 --memory 8192
+
+# Apply for real
+osx-next-cli edit --vmid 910 --cores 4 --memory 8192 --execute
+
+# Extend disk by 50 GB and restart automatically
+osx-next-cli edit --vmid 910 --add-disk 50 --start --execute
+```
+
+Available change flags: `--name`, `--cores`, `--memory`, `--bridge`, `--add-disk`. At least one is required.
+
+See the [CLI Reference](./cli-reference.md#edit----flags) for the full flag list.
+
+</details>
+
+<details>
+<summary><strong>My VM won't start after I edited it. How do I recover?</strong></summary>
+
+The `edit` subcommand saves a config snapshot to `generated/snapshots/` before making any changes. If the VM fails to start after an edit, rollback hints are printed at the end of the command output.
+
+Manual recovery steps:
+
+1. Find the snapshot file: `ls generated/snapshots/`
+2. Review the saved config to identify what changed
+3. Revert the specific setting via `qm set`:
+
+```bash
+# Example: revert cores
+qm set <vmid> --cores <original-value>
+
+# Example: revert memory
+qm set <vmid> --memory <original-value>
+
+# Example: revert bridge
+qm set <vmid> --net0 vmxnet3,bridge=<original-bridge>,firewall=0
+```
+
+4. Start the VM: `qm start <vmid>`
+
+If disk extension caused the issue, the disk size cannot be shrunk. Boot macOS in recovery mode and use Disk Utility to repair the APFS container.
+
+</details>

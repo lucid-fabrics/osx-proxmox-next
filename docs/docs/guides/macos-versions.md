@@ -13,8 +13,8 @@ OSX Proxmox Next supports four macOS versions. This guide helps you pick the rig
 |---------|-----------|----------------|-------------|-----------------|
 | Ventura 13 | Excellent | Full (iCloud, iMessage, FaceTime) | Good | Older hardware, maximum compatibility |
 | Sonoma 14 | Excellent | Full (iCloud, iMessage, FaceTime) | Very Good | Best all-around choice |
-| Sequoia 15 | Good | Community-tested with kernel patch | Very Good | Users who need latest features |
-| Tahoe 26 | Beta | Community-tested with kernel patch | Good | Early adopters, testing |
+| Sequoia 15 | Good | Full with `--apple-services` (kernel patch auto-applied) | Very Good | Users who need latest features |
+| Tahoe 26 | Beta | Full with `--apple-services` (kernel patch auto-applied) | Good | Early adopters, testing |
 
 ## Version Details
 
