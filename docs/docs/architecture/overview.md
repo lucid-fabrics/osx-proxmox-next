@@ -9,6 +9,8 @@ OSX Proxmox Next follows a **plan-then-execute** architecture. User input flows 
 
 ## Data Flow
 
+### VM Creation
+
 ```mermaid
 flowchart TD
     A[VmConfig\nuser input] --> B{validate_config}
@@ -19,6 +21,22 @@ flowchart TD
     F -->|dry-run| G[Preview commands\nno side effects]
     F -->|live| H[Execute on Proxmox]
     H --> I[VM ready]
+```
+
+### VM Edit
+
+```mermaid
+flowchart TD
+    A[EditChanges\nuser input] --> B{validate_edit_changes}
+    B -->|errors| E[Show validation errors]
+    B -->|valid| S[Save config snapshot\ngenerated/snapshots/]
+    S --> C[build_edit_plan\nPlanner]
+    C --> D[PlanStep array\nstop + patch + optional start]
+    D --> F{apply_plan\nExecutor}
+    F -->|dry-run| G[Preview commands\nno side effects]
+    F -->|live| H[Stop VM, apply changes]
+    H -->|success| I[VM updated]
+    H -->|failure| J[Print rollback hints]
 ```
 
 ## Key Domain Types
@@ -45,10 +63,20 @@ class VmConfig:
     # ... additional fields
 
 @dataclass
+class EditChanges:
+    name: str | None = None         # rename VM
+    cores: int | None = None        # new core count
+    memory_mb: int | None = None    # new RAM in MB
+    bridge: str | None = None       # new network bridge
+    disk_gb_add: int | None = None  # extend disk by N GB
+    disk_name: str = "virtio0"      # disk device to resize
+    nic_model: str | None = None    # None = preserve existing
+
+@dataclass
 class PlanStep:
     title: str
     argv: list[str]
-    risk: str           # "safe" | other risk levels
+    risk: str           # "safe" | "action"
 
     @property
     def command(self) -> str:
@@ -77,17 +105,25 @@ class PlanStep:
 
 ## Module Responsibilities
 
-| Module         | Responsibility |
-|----------------|----------------|
-| `domain.py`    | Core types (`VmConfig`, `PlanStep`), validation rules, supported OS map |
-| `planner.py`   | Converts a `VmConfig` into an ordered `list[PlanStep]`. Handles CPU arg selection (host vs. Cascadelake emulation), SMBIOS population, OpenCore disk scripting |
-| `executor.py`  | Runs `PlanStep[]` against Proxmox via `ProxmoxAdapter`. Supports dry-run (log only) and live execution. Emits `StepResult` per step with return codes and output |
-| `downloader.py`| Downloads OpenCore ISO from GitHub releases and macOS recovery images from Apple's osrecovery API. Handles retries, progress callbacks, and board-ID mapping per OS version |
-| `smbios.py`    | Generates Apple-format serial numbers, MLB with mod-34 checksum, UUID, and ROM. Pure Python, no external binaries |
+| Module              | Responsibility |
+|---------------------|----------------|
+| `domain.py`         | Core types (`VmConfig`, `EditChanges`, `PlanStep`), validation rules, supported OS map |
+| `planner.py`        | Converts a `VmConfig` into an ordered `list[PlanStep]` (`build_plan`). Also builds edit plans (`build_edit_plan`) from `EditChanges`, preserving MAC/NIC when changing bridge |
+| `executor.py`       | Runs `PlanStep[]` against Proxmox via `ProxmoxAdapter`. Supports dry-run (log only) and live execution. Emits `StepResult` per step with return codes and output |
+| `downloader.py`     | Downloads OpenCore ISO from GitHub releases and macOS recovery images from Apple's osrecovery API. Handles retries, progress callbacks, and board-ID mapping per OS version |
+| `smbios.py`         | Generates Apple-format serial numbers, MLB with mod-34 checksum, UUID, and ROM. Pure Python, no external binaries |
+| `smbios_planner.py` | Builds SMBIOS-related `PlanStep` objects for inclusion in VM creation plans |
 | `infrastructure.py` | `ProxmoxAdapter` abstraction for shell command execution on the Proxmox host |
-| `defaults.py`  | Hardware detection: CPU vendor, core count, hybrid topology, RAM |
-| `app.py`       | TUI wizard (6-step flow): Preflight, OS selection, Storage, Config, Dry Run, Install |
-| `script_renderer.py` | Generates shell scripts for OpenCore disk creation (GPT + ESP partitioning, config.plist patching) |
+| `defaults.py`       | Hardware detection: CPU vendor, core count, hybrid topology, RAM |
+| `rollback.py`       | Config snapshot (saved to `generated/snapshots/` before destructive ops) and rollback hints for manual recovery |
+| `diagnostics.py`    | Diagnostic log bundle export |
+| `app.py`            | TUI wizard entry point. Composes `_WizardMixin`, `_EditMixin`, and `_ManageMixin` |
+| `_wizard_mixin.py`  | TUI 6-step VM creation flow: Preflight, OS selection, Storage, Config, Dry Run, Install |
+| `_edit_mixin.py`    | TUI VM edit flow: verifies VM exists, creates snapshot, stops VM, applies `EditChanges`, optionally restarts |
+| `_manage_mixin.py`  | TUI manage mode: lists macOS VMs, provides per-VM edit/start/stop/destroy actions |
+| `script_renderer.py`| Generates shell scripts for OpenCore disk creation (GPT + ESP partitioning, config.plist patching) |
+| `services/`         | Detection service (storage targets, next VMID, VM listing), edit service (worker for applying `EditChanges`) |
+| `models/`           | `WizardState` dataclass — reactive TUI state shared across all mixin steps |
 
 ## CPU Strategy
 

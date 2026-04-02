@@ -17,6 +17,7 @@ osx-next-cli --version
 |------------|-------------|
 | `apply` | Create a macOS VM (dry-run by default, `--execute` to run) |
 | `plan` | Preview the command plan without creating anything |
+| `edit` | Modify an existing macOS VM (stop, apply changes, optionally restart) |
 | `download` | Download OpenCore and recovery images |
 | `preflight` | Check host readiness |
 | `status` | Show info about an existing VM |
@@ -51,6 +52,23 @@ These flags are shared by `apply` and `plan`:
 | `--smbios-rom` | string | No | Custom ROM value |
 | `--smbios-model` | string | No | Custom Mac model (e.g., `MacPro7,1`) |
 | `--installer-path` | string | No | Path to installer image |
+
+## edit -- Flags
+
+| Flag | Type | Required | Description |
+|------|------|----------|-------------|
+| `--vmid` | int | Yes | VM ID to modify |
+| `--name` | string | No | New VM display name |
+| `--cores` | int | No | New CPU core count |
+| `--memory` | int | No | New RAM in MB |
+| `--bridge` | string | No | New network bridge (e.g. `vmbr1`) |
+| `--add-disk` | int | No | Extend the target disk by N GB |
+| `--disk-name` | string | No | Disk device to resize (default: `virtio0`) |
+| `--nic-model` | string | No | NIC model when updating bridge (default: preserve existing) |
+| `--start` | flag | No | Start VM after changes are applied |
+| `--execute` | flag | No | Actually run (default is dry run) |
+
+At least one change flag (`--name`, `--cores`, `--memory`, `--bridge`, `--add-disk`) is required.
 
 ## Usage Examples
 
@@ -155,6 +173,48 @@ Execute with disk cleanup:
 osx-next-cli uninstall --vmid 910 --purge --execute
 ```
 
+### edit -- Modify an Existing VM
+
+Dry-run (preview what will change):
+
+```bash
+osx-next-cli edit --vmid 910 --cores 4 --memory 8192
+```
+
+Execute for real:
+
+```bash
+osx-next-cli edit --vmid 910 --cores 4 --memory 8192 --execute
+```
+
+Rename a VM and extend its disk:
+
+```bash
+osx-next-cli edit --vmid 910 --name macos-sequoia-v2 --add-disk 64 --execute
+```
+
+Change network bridge (preserves existing NIC model and MAC):
+
+```bash
+osx-next-cli edit --vmid 910 --bridge vmbr1 --execute
+```
+
+Change bridge with an explicit NIC model:
+
+```bash
+osx-next-cli edit --vmid 910 --bridge vmbr1 --nic-model e1000 --execute
+```
+
+Apply changes and restart the VM automatically:
+
+```bash
+osx-next-cli edit --vmid 910 --cores 8 --memory 16384 --start --execute
+```
+
+:::note
+The `edit` subcommand always stops the VM before making changes. A config snapshot is saved to `generated/snapshots/` before any modifications. On failure, rollback hints are printed so you can restore manually.
+:::
+
 ### bundle -- Export Diagnostics
 
 ```bash
@@ -181,3 +241,4 @@ Prints recovery steps for the given issue description.
 | 4 | Apply failed |
 | 5 | Download failed |
 | 6 | Destroy failed |
+| 7 | Edit failed |
