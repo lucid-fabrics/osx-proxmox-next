@@ -11,6 +11,7 @@ from textual.containers import Container
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
+from ._edit_mixin import EditModeMixin
 from ._manage_mixin import ManageModeMixin
 from ._wizard_mixin import WizardStepsMixin
 from .assets import required_assets
@@ -46,7 +47,7 @@ from .services import (
 )
 
 
-class NextApp(WizardStepsMixin, ManageModeMixin, App):
+class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
     CSS_PATH = Path(__file__).with_suffix(".tcss")
 
     BINDINGS = [
@@ -129,6 +130,7 @@ class NextApp(WizardStepsMixin, ManageModeMixin, App):
                 "mode_manage": lambda: self._toggle_mode("manage"),
                 "manage_refresh_btn": self._refresh_vm_list,
                 "manage_destroy_btn": self._run_destroy,
+                "edit_apply_btn": self._run_edit,
             }
             handler = handlers.get(bid)
             if handler:
@@ -140,10 +142,14 @@ class NextApp(WizardStepsMixin, ManageModeMixin, App):
             self._validate_form(quiet=True)
         if event.input.id == "manage_vmid":
             self._validate_manage_vmid()
+        if event.input.id in {"edit_vmid", "edit_name", "edit_cores", "edit_memory", "edit_bridge", "edit_disk_add"}:
+            self._validate_edit_form()
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id == "manage_purge_cb":
             self._toggle_purge()
+        if event.checkbox.id == "edit_start_after_cb":
+            self.state.edit_start_after = event.checkbox.value
         if event.checkbox.id == "apple_services_cb":
             self.state.apple_services = event.checkbox.value
             self._generate_smbios()

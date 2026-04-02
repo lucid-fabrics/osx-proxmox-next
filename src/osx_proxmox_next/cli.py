@@ -10,10 +10,10 @@ from . import __version__
 from .assets import required_assets, suggested_fetch_commands
 from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage, detect_net_model
 from .diagnostics import export_log_bundle, recovery_guide
-from .domain import MIN_VMID, MAX_VMID, VmConfig, validate_config
+from .domain import MIN_VMID, MAX_VMID, VmConfig, EditChanges, validate_config, validate_edit_changes
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
-from .planner import build_plan, build_destroy_plan
+from .planner import build_plan, build_destroy_plan, build_edit_plan
 from .services import fetch_vm_info, get_proxmox_adapter, run_download_worker
 from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
@@ -141,6 +141,22 @@ def _add_vm_subparsers(sub: argparse._SubParsersAction, common: argparse.Argumen
     uninstall.add_argument("--purge", action="store_true", help="Also delete all disk images")
     uninstall.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
 
+    edit = sub.add_parser("edit", help="Modify an existing macOS VM (stops VM, applies changes)")
+    edit.add_argument("--vmid", type=int, required=True, help="VM ID to edit")
+    edit.add_argument("--name", type=str, default=None, help="New VM name")
+    edit.add_argument("--cores", type=int, default=None, help="New CPU core count")
+    edit.add_argument("--memory", type=int, default=None, help="New memory in MB")
+    edit.add_argument("--bridge", type=str, default=None, help="New network bridge (e.g. vmbr1)")
+    edit.add_argument("--add-disk", type=int, default=None, dest="disk_gb_add",
+                      help="Extend the target disk by N GB")
+    edit.add_argument("--disk-name", type=str, default="virtio0", dest="disk_name",
+                      help="Disk device to resize (default: virtio0)")
+    edit.add_argument("--nic-model", type=str, default="vmxnet3", dest="nic_model",
+                      help="NIC model to use when updating bridge (default: vmxnet3)")
+    edit.add_argument("--start", action="store_true", default=False,
+                      help="Start VM after applying changes")
+    edit.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="osx-next-cli")
@@ -221,6 +237,8 @@ def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
         return _run_status(args)
     if args.cmd == "uninstall":
         return _run_uninstall(args)
+    if args.cmd == "edit":
+        return _run_edit(args)
     return None
 
 
@@ -370,6 +388,56 @@ def _run_download(args: argparse.Namespace) -> int:
             ok = False
 
     return 0 if ok else 5
+
+
+def _run_edit(args: argparse.Namespace) -> int:
+    vmid = args.vmid
+    if vmid < MIN_VMID or vmid > MAX_VMID:
+        print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
+        return 2
+
+    changes = EditChanges(
+        name=args.name,
+        cores=args.cores,
+        memory_mb=args.memory,
+        bridge=args.bridge,
+        disk_gb_add=args.disk_gb_add,
+        nic_model=args.nic_model,
+        disk_name=args.disk_name,
+    )
+
+    issues = validate_edit_changes(vmid, changes)
+    if issues:
+        for issue in issues:
+            print(f"ERROR: {issue}")
+        return 2
+
+    if args.execute:
+        info = fetch_vm_info(vmid, adapter=get_proxmox_adapter())
+        if info is None:
+            print(f"ERROR: VM {vmid} not found.")
+            return 2
+        print(f"VM {vmid}: {info.name} ({info.status})")
+        snapshot = create_snapshot(vmid)
+        print(f"Snapshot saved: {snapshot.path}")
+
+    steps = build_edit_plan(vmid, changes, start_after=args.start)
+
+    for idx, step in enumerate(steps, start=1):
+        print(f"{idx:02d}. {step.title}")
+        print(f"    {step.command}")
+
+    if not args.execute:
+        print("\n(dry run — pass --execute to apply)")
+        return 0
+
+    result = apply_plan(steps, execute=True)
+    if result.ok:
+        print(f"Edit OK. Log: {result.log_path}")
+        return 0
+
+    print(f"Edit FAILED. Log: {result.log_path}")
+    return 7
 
 
 if __name__ == "__main__":

@@ -771,3 +771,107 @@ def test_cli_uninstall_vm_info_displayed(monkeypatch, tmp_path, capsys):
     captured = capsys.readouterr()
     assert "my-macos" in captured.out
     assert "running" in captured.out
+
+
+# ── edit command ──────────────────────────────────────────────────────
+
+
+def test_cli_edit_parser_registered() -> None:
+    from osx_proxmox_next.cli import build_parser
+    parser = build_parser()
+    cmds = parser._subparsers._group_actions[0].choices  # type: ignore[attr-defined]
+    assert "edit" in cmds
+
+
+def test_cli_edit_invalid_vmid() -> None:
+    rc = run_cli(["edit", "--vmid", "5", "--cores", "4"])
+    assert rc == 2
+
+
+def test_cli_edit_no_changes() -> None:
+    rc = run_cli(["edit", "--vmid", "900"])
+    assert rc == 2
+
+
+def test_cli_edit_dry_run(capsys) -> None:
+    rc = run_cli(["edit", "--vmid", "900", "--cores", "4"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dry run" in out.lower() or "qm stop" in out
+
+
+def test_cli_edit_dry_run_shows_steps(capsys) -> None:
+    rc = run_cli(["edit", "--vmid", "900", "--name", "my-vm", "--memory", "8192"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "qm stop" in out
+    assert "my-vm" in out
+    assert "8192" in out
+
+
+def test_cli_edit_invalid_bridge() -> None:
+    rc = run_cli(["edit", "--vmid", "900", "--bridge", "eth0"])
+    assert rc == 2
+
+
+def test_cli_edit_execute_success(monkeypatch, tmp_path) -> None:
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-test", status="running", config_raw="cores: 4"),
+    )
+    monkeypatch.setattr(
+        cli_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["edit", "--vmid", "900", "--cores", "4", "--execute"])
+    assert rc == 0
+
+
+def test_cli_edit_execute_failure(monkeypatch, tmp_path) -> None:
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-test", status="stopped", config_raw=""),
+    )
+    monkeypatch.setattr(
+        cli_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=False, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["edit", "--vmid", "900", "--memory", "8192", "--execute"])
+    assert rc == 7
+
+
+def test_cli_edit_start_flag(capsys) -> None:
+    rc = run_cli(["edit", "--vmid", "900", "--cores", "4", "--start"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "qm start" in out
+
+
+def test_cli_edit_add_disk(capsys) -> None:
+    rc = run_cli(["edit", "--vmid", "900", "--add-disk", "64"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "+64G" in out
+
+
+def test_cli_edit_bridge_update(capsys) -> None:
+    rc = run_cli(["edit", "--vmid", "900", "--bridge", "vmbr1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "vmbr1" in out

@@ -58,6 +58,54 @@ class PlanStep:
         return shlex_join(self.argv)
 
 
+@dataclass
+class EditChanges:
+    name: str | None = None
+    cores: int | None = None
+    memory_mb: int | None = None
+    bridge: str | None = None
+    disk_gb_add: int | None = None
+    # NIC model used when updating bridge (default matches VMs created by this tool)
+    nic_model: str = "vmxnet3"
+    # Disk device name used for resize (default matches VMs created by this tool)
+    disk_name: str = "virtio0"
+
+
+def validate_edit_changes(vmid: int, changes: EditChanges) -> list[str]:
+    issues: list[str] = []
+    if vmid < MIN_VMID or vmid > MAX_VMID:
+        issues.append(f"VMID must be between {MIN_VMID} and {MAX_VMID}.")
+    has_any = any([
+        changes.name is not None,
+        changes.cores is not None,
+        changes.memory_mb is not None,
+        changes.bridge is not None,
+        changes.disk_gb_add is not None,
+    ])
+    if not has_any:
+        issues.append("At least one change must be specified.")
+    if changes.name is not None:
+        if len(changes.name) < 3:
+            issues.append("VM name must be at least 3 characters.")
+        if len(changes.name) > 63:
+            issues.append("VM name must be at most 63 characters.")
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.\-]*", changes.name):
+            issues.append("VM name must start with alphanumeric and contain only [a-zA-Z0-9.-].")
+    if changes.cores is not None and changes.cores < MIN_CORES:
+        issues.append(f"At least {MIN_CORES} CPU cores are required.")
+    if changes.memory_mb is not None and changes.memory_mb < MIN_MEMORY_MB:
+        issues.append(f"At least {MIN_MEMORY_MB} MB RAM is required.")
+    if changes.bridge is not None and not re.fullmatch(r"vmbr[0-9]+", changes.bridge):
+        issues.append("Bridge must match vmbr<N> (e.g. vmbr0).")
+    if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9]+", changes.nic_model):
+        issues.append("NIC model must be alphanumeric (e.g. vmxnet3, e1000).")
+    if not re.fullmatch(r"(virtio|sata|scsi|ide)[0-9]+", changes.disk_name):
+        issues.append("Disk name must match virtio/sata/scsi/ide followed by a number (e.g. virtio0).")
+    if changes.disk_gb_add is not None and changes.disk_gb_add <= 0:
+        issues.append("Disk extension must be a positive number of GB.")
+    return issues
+
+
 def validate_config(config: VmConfig) -> list[str]:
     issues: list[str] = []
     if config.vmid < MIN_VMID or config.vmid > MAX_VMID:

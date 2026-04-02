@@ -65,3 +65,9 @@ class WizardState:
     uninstall_running: bool = False
     uninstall_done: bool = False
     uninstall_ok: bool = False
+    # Edit mode
+    edit_running: bool = False
+    edit_done: bool = False
+    edit_ok: bool = False
+    edit_log: list[str] = field(default_factory=list)
+    edit_start_after: bool = False
