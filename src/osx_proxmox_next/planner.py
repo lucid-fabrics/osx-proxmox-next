@@ -192,7 +192,7 @@ def _opencore_steps(ctx: _DiskBuildContext) -> list[PlanStep]:
                 # both plain paths and rbd: URIs natively.
                 'DEV=$(pvesm path "$REF") && '
                 f'if [[ "$DEV" == rbd:* ]]; then '
-                f'qemu-img dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 2>/dev/null; '
+                f'qemu-img dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048; '
                 f'else '
                 f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null; '
                 f'fi',
