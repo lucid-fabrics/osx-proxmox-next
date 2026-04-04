@@ -186,9 +186,17 @@ def _opencore_steps(ctx: _DiskBuildContext) -> list[PlanStep]:
                 f'REF=$($IMPORT_CMD {shquote(ctx.vmid)} {shquote(str(ctx.oc_disk))} {shquote(ctx.config.storage)} 2>&1 | '
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
                 f'qm set {shquote(ctx.vmid)} --ide0 "$REF",media=disk && '
-                # Fix GPT header corruption from thin-provisioned LVM importdisk
+                # Fix GPT header corruption from thin-provisioned LVM importdisk.
+                # For Ceph/RBD storage, pvesm path returns an rbd: URI which dd
+                # cannot open directly — use qemu-img dd instead, which handles
+                # both plain paths and rbd: URIs natively.
                 'DEV=$(pvesm path "$REF") && '
-                f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
+                '[[ -n "$DEV" ]] && '
+                f'if [[ "$DEV" == rbd:* || "$DEV" == rbd://* ]]; then '
+                f'qemu-img dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 2>/dev/null; '
+                f'else '
+                f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null; '
+                f'fi',
             ],
         ),
     ]

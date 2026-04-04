@@ -133,6 +133,8 @@ def test_build_plan_uses_importdisk_for_opencore(monkeypatch) -> None:
     assert "media=disk" in oc.command
     assert "pvesm path" in oc.command
     assert "dd if=" in oc.command
+    assert "qemu-img dd" in oc.command
+    assert 'rbd:*' in oc.command
 
 
 def test_build_plan_uses_importdisk_for_recovery(monkeypatch) -> None:
