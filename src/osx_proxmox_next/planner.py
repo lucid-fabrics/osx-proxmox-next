@@ -191,8 +191,7 @@ def _opencore_steps(ctx: _DiskBuildContext) -> list[PlanStep]:
                 # cannot open directly — use qemu-img dd instead, which handles
                 # both plain paths and rbd: URIs natively.
                 'DEV=$(pvesm path "$REF") && '
-                '[[ -n "$DEV" ]] && '
-                f'if [[ "$DEV" == rbd:* || "$DEV" == rbd://* ]]; then '
+                f'if [[ "$DEV" == rbd:* ]]; then '
                 f'qemu-img dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 2>/dev/null; '
                 f'else '
                 f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null; '
