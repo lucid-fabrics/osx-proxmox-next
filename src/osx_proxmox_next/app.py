@@ -257,7 +257,7 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
         if not self.state.plan_steps:
             return
         self.state.apply_running = True
-        self.state.apply_log = []
+        self.state.dry_log = []
         self.query_one("#dry_progress").remove_class("hidden")
         self.query_one("#dry_log").remove_class("hidden")
         self.query_one("#dry_progress", ProgressBar).update(total=len(self.state.plan_steps), progress=0)
@@ -275,18 +275,18 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
 
     def _update_dry_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#dry_progress", ProgressBar).update(total=total, progress=idx)
-        self._append_log("#dry_log", self._step_log_line(idx, total, title, result))
+        self._append_log("#dry_log", self._step_log_line(idx, total, title, result), self.state.dry_log)
 
     def _finish_dry_apply(self, ok: bool, log_path: Path) -> None:
         self.state.apply_running = False
         self.state.dry_run_done = True
         self.state.dry_run_ok = ok
         if ok:
-            self._append_log("#dry_log", f"Dry run complete. Log: {log_path}")
+            self._append_log("#dry_log", f"Dry run complete. Log: {log_path}", self.state.dry_log)
             self.query_one("#next_btn_5", Button).disabled = False
             self.notify("Dry run passed", severity="information")
         else:
-            self._append_log("#dry_log", f"Dry run FAILED. Log: {log_path}")
+            self._append_log("#dry_log", f"Dry run FAILED. Log: {log_path}", self.state.dry_log)
             self.query_one("#dry_run_btn", Button).disabled = False
             self.notify("Dry run failed", severity="error")
 
@@ -306,7 +306,7 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
             self.notify("Preflight has failures. Fix before install.", severity="error")
             return
         self.state.apply_running = True
-        self.state.apply_log = []
+        self.state.live_log_lines = []
         self.query_one("#install_btn").add_class("hidden")
         self.query_one("#live_progress").remove_class("hidden")
         self.query_one("#live_log").remove_class("hidden")
@@ -322,14 +322,13 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
             result, snapshot = run_live_install(
                 self.state.config.vmid, self.state.plan_steps, on_step=callback
             )
-            self.state.snapshot = snapshot
             self.call_from_thread(self._finish_live_install, result.ok, result.log_path, snapshot)
 
         Thread(target=worker, daemon=True).start()
 
     def _update_live_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         self.query_one("#live_progress", ProgressBar).update(total=total, progress=idx)
-        self._append_log("#live_log", self._step_log_line(idx, total, title, result))
+        self._append_log("#live_log", self._step_log_line(idx, total, title, result), self.state.live_log_lines)
 
     def _finish_live_install(
         self, ok: bool, log_path: Path, snapshot: RollbackSnapshot | None
@@ -338,6 +337,7 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
         self.state.live_done = True
         self.state.live_ok = ok
         self.state.live_log = log_path
+        self.state.snapshot = snapshot
         vmid = self.state.config.vmid if self.state.config else "???"
         result_box = self.query_one("#result_box", Static)
         result_box.remove_class("hidden")
@@ -392,11 +392,10 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
             return f"Running {idx}/{total}: {title}"
         return f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})"
 
-    def _append_log(self, selector: str, line: str) -> None:
-        self.state.apply_log.append(line)
+    def _append_log(self, selector: str, line: str, log: list[str]) -> None:
+        log.append(line)
         widget = self.query_one(selector, Static)
-        visible = self.state.apply_log[-15:]
-        widget.update("\n".join(visible))
+        widget.update("\n".join(log[-15:]))
 
 
 def run() -> None:

@@ -57,15 +57,13 @@ It depends on the macOS version:
 | macOS | Apple Services |
 |-------|---------------|
 | Ventura 13 | Works |
-| Sonoma 14 | Works -- last version with full support on VMs |
-| Sequoia 15 | Limited -- Apple blocks Apple ID sign-in on VMs |
-| Tahoe 26 | Limited -- Apple blocks Apple ID sign-in on VMs |
+| Sonoma 14 | Works |
+| Sequoia 15 | Works (with `--apple-services`) |
+| Tahoe 26 | Works (with `--apple-services`) |
 
-Starting with Sequoia, Apple enforces hardware device attestation (Secure Enclave) that VMs cannot provide. This affects all VM platforms, not just Proxmox.
+Use the `--apple-services` flag when creating the VM. It auto-generates the required SMBIOS identity, static MAC, and OpenCore PlatformInfo, and injects a kernel-level patch that prevents Apple's DeviceCheck from detecting the VM. This enables full Apple ID, iCloud, iMessage, and FaceTime sign-in on all supported macOS versions.
 
-**Workaround:** Install Sonoma 14 first with `--apple-services`, sign into Apple ID, then upgrade in-place to Sequoia or Tahoe. Apple Services stay connected because the device was already authenticated.
-
-Use the `--apple-services` flag to auto-generate the required SMBIOS identity, static MAC, and OpenCore PlatformInfo.
+See the [Apple Services guide](./apple-services.md) for details.
 
 </details>
 
@@ -74,21 +72,19 @@ Use the `--apple-services` flag to auto-generate the required SMBIOS identity, s
 
 | Use Case | Version |
 |----------|---------|
-| Best stability and Apple Services | **Sonoma 14** |
+| Best stability | **Sonoma 14** |
 | Lightweight, older hardware | **Ventura 13** |
-| Latest features, no Apple ID needed | **Sequoia 15** or **Tahoe 26** |
-| Apple Services on latest macOS | **Sonoma 14**, then upgrade in-place |
+| Latest features | **Sequoia 15** or **Tahoe 26** |
+| Full Apple Services on latest macOS | **Sequoia 15** or **Tahoe 26** with `--apple-services` |
 
-Sonoma 14 is the best-tested and most reliable option. It's also the last version with full Apple Services support on VMs.
+Sonoma 14 is the best-tested and most reliable option. Sequoia 15 and Tahoe 26 require `--apple-services` for Apple ID sign-in but are otherwise fully functional.
 
 </details>
 
 <details>
 <summary><strong>Can I upgrade macOS inside the VM?</strong></summary>
 
-Yes. In-place upgrades via System Settings > Software Update work. This is actually the recommended path for keeping Apple Services on Sequoia/Tahoe: install Sonoma first, sign into Apple ID, then upgrade.
-
-Snapshot your VM before upgrading so you can roll back if something goes wrong.
+Yes. In-place upgrades via System Settings > Software Update work. Snapshot your VM before upgrading so you can roll back if something goes wrong.
 
 </details>
 
@@ -163,12 +159,68 @@ Snapshot before any major changes (macOS upgrades, profile changes, kext updates
 <details>
 <summary><strong>Can I resize the disk after creation?</strong></summary>
 
-Yes. Proxmox supports online disk resizing (grow only, not shrink):
+Yes. Use the `edit` subcommand to extend the disk without manual `qm` commands:
+
+```bash
+osx-next-cli edit --vmid 910 --add-disk 50 --execute
+```
+
+Or use Proxmox directly (grow only, not shrink):
 
 ```bash
 qm resize <vmid> virtio0 +50G
 ```
 
-After resizing in Proxmox, boot macOS and use Disk Utility to expand the APFS container to fill the new space. Snapshot the VM before resizing.
+After resizing, boot macOS and use Disk Utility to expand the APFS container to fill the new space. Snapshot the VM before resizing.
+
+</details>
+
+<details>
+<summary><strong>How do I change an existing VM's CPU, memory, or disk?</strong></summary>
+
+Use the `edit` subcommand. It stops the VM, applies your changes, saves a config snapshot, and optionally restarts.
+
+```bash
+# Change cores and memory (dry-run by default)
+osx-next-cli edit --vmid 910 --cores 4 --memory 8192
+
+# Apply for real
+osx-next-cli edit --vmid 910 --cores 4 --memory 8192 --execute
+
+# Extend disk by 50 GB and restart automatically
+osx-next-cli edit --vmid 910 --add-disk 50 --start --execute
+```
+
+Available change flags: `--name`, `--cores`, `--memory`, `--bridge`, `--add-disk`. At least one is required.
+
+See the [CLI Reference](./cli-reference.md#edit----flags) for the full flag list.
+
+</details>
+
+<details>
+<summary><strong>My VM won't start after I edited it. How do I recover?</strong></summary>
+
+The `edit` subcommand saves a config snapshot to `generated/snapshots/` before making any changes. If the VM fails to start after an edit, rollback hints are printed at the end of the command output.
+
+Manual recovery steps:
+
+1. Find the snapshot file: `ls generated/snapshots/`
+2. Review the saved config to identify what changed
+3. Revert the specific setting via `qm set`:
+
+```bash
+# Example: revert cores
+qm set <vmid> --cores <original-value>
+
+# Example: revert memory
+qm set <vmid> --memory <original-value>
+
+# Example: revert bridge
+qm set <vmid> --net0 vmxnet3,bridge=<original-bridge>,firewall=0
+```
+
+4. Start the VM: `qm start <vmid>`
+
+If disk extension caused the issue, the disk size cannot be shrunk. Boot macOS in recovery mode and use Disk Utility to repair the APFS container.
 
 </details>

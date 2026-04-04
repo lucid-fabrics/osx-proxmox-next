@@ -69,3 +69,5 @@ lscpu | grep -E 'Model name|Flags'
 ```
 
 Look for `constant_tsc` and `nonstop_tsc` in the output. Most modern CPUs have these flags.
+
+Once your hardware is confirmed, proceed to [Installation](./installation.md).

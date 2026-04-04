@@ -10,7 +10,7 @@ from osx_proxmox_next import app as app_module
 from osx_proxmox_next.app import NextApp, WizardState
 from osx_proxmox_next.executor import ApplyResult
 from osx_proxmox_next.infrastructure import CommandResult
-from osx_proxmox_next.domain import PlanStep
+from osx_proxmox_next.domain import DEFAULT_VMID, PlanStep
 from osx_proxmox_next.services import detection_service
 from osx_proxmox_next.services import proxmox_service
 from osx_proxmox_next.services import download_service
@@ -1528,7 +1528,8 @@ def test_detect_vmid_boundary_high(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        assert app._detect_next_vmid() == 999999
+        # max VMID is 999999, so next would be 1000000 which overflows — returns DEFAULT_VMID
+        assert app._detect_next_vmid() == DEFAULT_VMID
 
     asyncio.run(_run())
 
@@ -1689,8 +1690,9 @@ def test_append_log_rolling_window() -> None:
         async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             app.query_one("#dry_log").remove_class("hidden")
+            log_list: list[str] = []
             for i in range(20):
-                app._append_log("#dry_log", f"line {i}")
+                app._append_log("#dry_log", f"line {i}", log_list)
             log_text = str(app.query_one("#dry_log", Static).content)
             assert "line 19" in log_text
             assert "line 0" not in log_text
@@ -2199,8 +2201,14 @@ def test_manage_destroy_vmid_out_of_range_noop() -> None:
 
 
 def test_manage_destroy_success(monkeypatch) -> None:
+    from osx_proxmox_next import _manage_mixin as manage_mixin_module
     from osx_proxmox_next.rollback import RollbackSnapshot
+    from osx_proxmox_next.services import VmInfo
 
+    monkeypatch.setattr(
+        manage_mixin_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="test-vm", status="running", config_raw=""),
+    )
     monkeypatch.setattr(
         destroy_service, "create_snapshot",
         lambda vmid: RollbackSnapshot(vmid=vmid, path=Path("/tmp/snap.conf")),
@@ -2312,7 +2320,7 @@ def test_manage_finish_destroy_refreshes_list(monkeypatch) -> None:
             app.query_one("#manage_vmid", Input).value = "106"
             await pilot.pause()
             app.state.uninstall_running = True
-            app._finish_destroy(ok=True, log_path=Path("/tmp/log.txt"))
+            app._finish_destroy(ok=True, log_path=Path("/tmp/log.txt"), snapshot=None)
             assert app.state.uninstall_running is False
             assert len(refresh_calls) > 0
 

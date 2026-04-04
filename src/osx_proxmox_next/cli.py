@@ -151,8 +151,8 @@ def _add_vm_subparsers(sub: argparse._SubParsersAction, common: argparse.Argumen
                       help="Extend the target disk by N GB")
     edit.add_argument("--disk-name", type=str, default="virtio0", dest="disk_name",
                       help="Disk device to resize (default: virtio0)")
-    edit.add_argument("--nic-model", type=str, default="vmxnet3", dest="nic_model",
-                      help="NIC model to use when updating bridge (default: vmxnet3)")
+    edit.add_argument("--nic-model", type=str, default=None, dest="nic_model",
+                      help="NIC model to use when updating bridge (default: preserve existing)")
     edit.add_argument("--start", action="store_true", default=False,
                       help="Start VM after applying changes")
     edit.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
@@ -193,7 +193,7 @@ def _handle_script_command(args: argparse.Namespace, config: VmConfig, steps: li
         print(f"Script written: {out}")
 
 
-def _handle_destroy_command(args: argparse.Namespace, config: VmConfig, steps: list) -> int:
+def _handle_apply_command(args: argparse.Namespace, config: VmConfig, steps: list) -> int:
     """Execute the plan and report apply result."""
     snapshot = create_snapshot(config.vmid)
     result = apply_plan(steps, execute=bool(args.execute))
@@ -305,7 +305,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         _handle_script_command(args, config, steps)
         return rc
 
-    return _handle_destroy_command(args, config, steps)
+    return _handle_apply_command(args, config, steps)
 
 
 def _run_status(args: argparse.Namespace) -> int:
@@ -412,6 +412,7 @@ def _run_edit(args: argparse.Namespace) -> int:
             print(f"ERROR: {issue}")
         return 2
 
+    current_net0 = None
     if args.execute:
         info = fetch_vm_info(vmid, adapter=get_proxmox_adapter())
         if info is None:
@@ -420,15 +421,18 @@ def _run_edit(args: argparse.Namespace) -> int:
         print(f"VM {vmid}: {info.name} ({info.status})")
         snapshot = create_snapshot(vmid)
         print(f"Snapshot saved: {snapshot.path}")
+        current_net0 = info.config_raw
 
-    steps = build_edit_plan(vmid, changes, start_after=args.start)
+    steps = build_edit_plan(vmid, changes, start_after=args.start, current_net0=current_net0)
+
+    if not args.execute:
+        print("DRY RUN — pass --execute to apply:\n")
 
     for idx, step in enumerate(steps, start=1):
         print(f"{idx:02d}. {step.title}")
         print(f"    {step.command}")
 
     if not args.execute:
-        print("\n(dry run — pass --execute to apply)")
         return 0
 
     result = apply_plan(steps, execute=True)
