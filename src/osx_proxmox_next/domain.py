@@ -65,8 +65,8 @@ class EditChanges:
     memory_mb: int | None = None
     bridge: str | None = None
     disk_gb_add: int | None = None
-    # NIC model used when updating bridge (default matches VMs created by this tool)
-    nic_model: str = "vmxnet3"
+    # NIC model used when updating bridge. None = preserve existing model from VM config.
+    nic_model: str | None = None
     # Disk device name used for resize (default matches VMs created by this tool)
     disk_name: str = "virtio0"
 
@@ -97,9 +97,10 @@ def validate_edit_changes(vmid: int, changes: EditChanges) -> list[str]:
         issues.append(f"At least {MIN_MEMORY_MB} MB RAM is required.")
     if changes.bridge is not None and not re.fullmatch(r"vmbr[0-9]+", changes.bridge):
         issues.append("Bridge must match vmbr<N> (e.g. vmbr0).")
-    if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9]+", changes.nic_model):
+    if (changes.bridge is not None and changes.nic_model is not None
+            and not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9]+", changes.nic_model)):
         issues.append("NIC model must be alphanumeric (e.g. vmxnet3, e1000).")
-    if not re.fullmatch(r"(virtio|sata|scsi|ide)[0-9]+", changes.disk_name):
+    if changes.disk_gb_add is not None and not re.fullmatch(r"(virtio|sata|scsi|ide)[0-9]+", changes.disk_name):
         issues.append("Disk name must match virtio/sata/scsi/ide followed by a number (e.g. virtio0).")
     if changes.disk_gb_add is not None and changes.disk_gb_add <= 0:
         issues.append("Disk extension must be a positive number of GB.")

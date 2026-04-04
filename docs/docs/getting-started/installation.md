@@ -27,12 +27,24 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmo
 
 No Python or virtual environment needed.
 
+## Entry Points
+
+After installation, two commands are available:
+
+| Command | Description |
+|---------|-------------|
+| `osx-next` | TUI wizard — guided 6-step interactive setup |
+| `osx-next-cli` | CLI — flags-based, suitable for scripting and headless servers |
+
 ## Verifying Installation
 
-After installing via Method 1, confirm the tool is available:
+After installing via Method 1, confirm both entry points are available:
 
 ```bash
-# Check version
+# Launch the TUI wizard
+osx-next
+
+# Check CLI version
 osx-next-cli --version
 
 # Run preflight checks (validates host readiness)

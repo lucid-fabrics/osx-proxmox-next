@@ -41,8 +41,8 @@ Select your target macOS version from the list.
 |-------|---------------|-------|
 | Ventura 13 | Works | Lightweight, good for older hardware |
 | Sonoma 14 | Works | Best tested, most reliable |
-| Sequoia 15 | Limited | Apple blocks VM sign-in (see [Apple Services](./apple-services.md)) |
-| Tahoe 26 | Limited | Apple blocks VM sign-in (see [Apple Services](./apple-services.md)) |
+| Sequoia 15 | Works (with `--apple-services`) | Kernel patch applied automatically |
+| Tahoe 26 | Works (with `--apple-services`) | Kernel patch applied automatically |
 
 SMBIOS identity (serial, UUID, model) is auto-generated when you select a version.
 
@@ -116,3 +116,23 @@ After macOS finishes installing, fix the boot order so the main disk boots first
 ```bash
 qm set <vmid> --boot order=virtio0;ide0
 ```
+
+---
+
+## Manage Mode
+
+After creating VMs, launch the wizard with the `--manage` flag to manage existing macOS VMs:
+
+```bash
+osx-next --manage
+```
+
+Manage mode lists all macOS VMs detected on the host (identified by `isa-applesmc` in their config) and provides three actions per VM:
+
+| Action | What It Does |
+|--------|-------------|
+| **Edit** | Opens an edit form to change cores, memory, name, network bridge, or disk size. Changes are previewed before applying. |
+| **Start / Stop** | Toggles the VM power state. |
+| **Destroy** | Stops and destroys the VM. A config snapshot is saved to `generated/snapshots/` before destruction. Rollback hints are shown on failure. |
+
+The edit form in manage mode behaves the same as the `edit` subcommand: the VM is stopped before changes are applied, existing MAC address and NIC model are preserved when changing the bridge, and the VM can optionally be restarted after.

@@ -143,6 +143,17 @@ def test_detect_next_vmid_respects_max_vmid() -> None:
     assert result <= MAX_VMID
 
 
+def test_detect_next_vmid_overflow_returns_default_vmid() -> None:
+    # When max(vmids)+1 > MAX_VMID, return DEFAULT_VMID (not MAX_VMID which may conflict)
+    qm_output = f"      VMID Name\n       {MAX_VMID} bigvm\n"
+    adapter = _adapter(
+        pvesh_result=CommandResult(ok=False, returncode=1, output=""),
+        qm_result=CommandResult(ok=True, returncode=0, output=qm_output),
+    )
+    result = detect_next_vmid(adapter=adapter)
+    assert result == DEFAULT_VMID
+
+
 def test_detect_next_vmid_pvesh_out_of_range_falls_back_to_qm() -> None:
     # pvesh returns a value outside valid range
     qm_output = "      VMID Name\n       500 vm500\n"

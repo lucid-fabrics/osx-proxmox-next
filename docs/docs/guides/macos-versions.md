@@ -13,8 +13,8 @@ OSX Proxmox Next supports four macOS versions. This guide helps you pick the rig
 |---------|-----------|----------------|-------------|-----------------|
 | Ventura 13 | Excellent | Full (iCloud, iMessage, FaceTime) | Good | Older hardware, maximum compatibility |
 | Sonoma 14 | Excellent | Full (iCloud, iMessage, FaceTime) | Very Good | Best all-around choice |
-| Sequoia 15 | Good | Community-tested with kernel patch | Very Good | Users who need latest features |
-| Tahoe 26 | Beta | Community-tested with kernel patch | Good | Early adopters, testing |
+| Sequoia 15 | Good | Full with `--apple-services` (kernel patch auto-applied) | Very Good | Users who need latest features |
+| Tahoe 26 | Beta | Full with `--apple-services` (kernel patch auto-applied) | Good | Early adopters, testing |
 
 ## Version Details
 
@@ -41,11 +41,10 @@ The recommended default for most users.
 - Full Apple Services support (iCloud, iMessage, FaceTime)
 - Modern feature set (widgets on desktop, screen sharing improvements)
 - Excellent stability in Proxmox VMs
-- Requires CryptexFixup kext (included automatically by the installer)
 
 **Cons:**
 - Slightly higher resource usage than Ventura
-- Requires CryptexFixup to avoid `EXITBS:START` hang at boot
+- Requires CryptexFixup kext to avoid `EXITBS:START` hang at boot (included automatically)
 
 ### Sequoia 15
 
@@ -109,14 +108,14 @@ Notes:
 
 ## In-Place Upgrade Path
 
-If you need Apple Services now but want Sequoia or Tahoe later, use this approach:
+If you want Sequoia or Tahoe but prefer to establish your Apple Services session on Sonoma first (the fully-verified baseline), use this approach:
 
 1. Install **Sonoma 14** using the wizard
 2. Sign in to your Apple ID, activate iCloud and iMessage
 3. Once signed in, upgrade in-place to **Sequoia 15** or **Tahoe 26** via System Settings > Software Update
 4. Your Apple Services session carries over from the Sonoma sign-in
 
-This workaround lets you keep Apple Services functional on newer macOS versions, since the initial authentication was performed on a version without hardware attestation.
+This is an alternative to using `--apple-services` directly on Sequoia or Tahoe. Both approaches work — use this path if you prefer the Sonoma-verified baseline before upgrading.
 
 :::note
 In-place upgrades preserve your data but take longer than a fresh install. Back up your VM (snapshot) before upgrading.

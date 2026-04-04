@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import tempfile
+import traceback
 from pathlib import Path
 from threading import Thread
 
@@ -8,7 +10,8 @@ from textual.widgets import Button, Checkbox, Input, Static
 
 from .domain import MIN_VMID, MAX_VMID, PlanStep
 from .executor import StepResult
-from .services import list_macos_vms, run_destroy_worker
+from .rollback import RollbackSnapshot, rollback_hints
+from .services import list_macos_vms, run_destroy_worker, fetch_vm_info, get_proxmox_adapter
 
 log = logging.getLogger(__name__)
 
@@ -102,8 +105,27 @@ class ManageModeMixin:
     def _destroy_worker(self, vmid: int) -> None:
         def on_step(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
             self.call_from_thread(self._update_destroy_log, idx, total, step.title, result)  # type: ignore[attr-defined]
-        result, _snapshot = run_destroy_worker(vmid, purge=self.state.uninstall_purge, on_step=on_step)  # type: ignore[attr-defined]
-        self.call_from_thread(self._finish_destroy, result.ok, result.log_path)  # type: ignore[attr-defined]
+
+        try:
+            info = fetch_vm_info(vmid, adapter=get_proxmox_adapter())
+            if info is None:
+                fd, err_path = tempfile.mkstemp(prefix="destroy_notfound_", suffix=".log")
+                with open(fd, "w") as f:
+                    f.write(f"VM {vmid} not found.\n")
+                self.call_from_thread(self._finish_destroy, False, Path(err_path), None)  # type: ignore[attr-defined]
+                return
+
+            result, snapshot = run_destroy_worker(vmid, purge=self.state.uninstall_purge, on_step=on_step)  # type: ignore[attr-defined]
+            self.call_from_thread(self._finish_destroy, result.ok, result.log_path, snapshot)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Unexpected error in destroy worker: %s", exc)
+            try:
+                fd, err_path = tempfile.mkstemp(prefix="destroy_error_", suffix=".log")
+                with open(fd, "w") as f:
+                    traceback.print_exc(file=f)
+            except Exception:
+                err_path = str(Path(tempfile.gettempdir()) / "destroy_error.log")
+            self.call_from_thread(self._finish_destroy, False, Path(err_path), None)  # type: ignore[attr-defined]
 
     def _update_destroy_log(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
         if result is None:
@@ -113,17 +135,24 @@ class ManageModeMixin:
         visible = self.state.uninstall_log[-10:]  # type: ignore[attr-defined]
         self.query_one("#manage_log", Static).update("\n".join(visible))
 
-    def _finish_destroy(self, ok: bool, log_path: Path) -> None:
+    def _finish_destroy(self, ok: bool, log_path: Path, snapshot: RollbackSnapshot | None) -> None:
         self.state.uninstall_running = False  # type: ignore[attr-defined]
         self.state.uninstall_done = True  # type: ignore[attr-defined]
         self.state.uninstall_ok = ok  # type: ignore[attr-defined]
-        self._validate_manage_vmid()
         result_box = self.query_one("#manage_result", Static)
         result_box.remove_class("hidden")
         if ok:
+            self.query_one("#manage_vmid", Input).value = ""
+            self._validate_manage_vmid()
             result_box.remove_class("manage_result_fail")
             result_box.update(f"VM removed successfully.\nLog: {log_path}")
             self._refresh_vm_list()
         else:
+            self._validate_manage_vmid()
             result_box.add_class("manage_result_fail")
-            result_box.update(f"Failed to remove VM.\nLog: {log_path}")
+            hints = rollback_hints(snapshot) if snapshot else []
+            hint_text = "\n".join(hints)
+            msg = f"Failed to remove VM.\nLog: {log_path}"
+            if hint_text:
+                msg += f"\n\n{hint_text}"
+            result_box.update(msg)

@@ -19,3 +19,4 @@ htmlcov/
 
 # generated runtime artifacts
 generated/
+pytest-of-*/

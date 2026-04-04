@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from ..defaults import DEFAULT_STORAGE
@@ -102,7 +103,7 @@ def detect_next_vmid(adapter: ProxmoxAdapter | None = None) -> int:
         if next_vmid < MIN_VMID:
             return MIN_VMID
         if next_vmid > MAX_VMID:
-            return MAX_VMID
+            return DEFAULT_VMID
         return next_vmid
     log.debug("Failed to detect next VMID via qm list: %s", res.output)
     return DEFAULT_VMID
@@ -113,6 +114,9 @@ def list_macos_vms(adapter: ProxmoxAdapter | None = None) -> list[str]:
 
     Returns an empty list when pvesh/qm is unavailable.  The first element of
     a non-empty result is the header line from ``qm list``.
+
+    Config checks run in parallel (up to 10 workers) to avoid O(n) sequential
+    latency on nodes with many VMs.
     """
     pve = adapter or get_proxmox_adapter()
     res = pve.qm("list")
@@ -122,15 +126,21 @@ def list_macos_vms(adapter: ProxmoxAdapter | None = None) -> list[str]:
     all_lines = res.output.strip().splitlines()
     if not all_lines:
         return []
-    macos_lines: list[str] = []
-    for line in all_lines[1:]:
-        parts = line.split()
-        if not parts:
-            continue
-        vmid = parts[0]
+
+    vm_lines = [line for line in all_lines[1:] if line.split()]
+
+    def _is_macos(line: str) -> bool:
+        vmid = line.split()[0]
         cfg_res = pve.qm("config", vmid)
-        if cfg_res.ok and "isa-applesmc" in cfg_res.output:
-            macos_lines.append(line)
+        return cfg_res.ok and "isa-applesmc" in cfg_res.output
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_is_macos, line): line for line in vm_lines}
+        macos_lines = [futures[f] for f in as_completed(futures) if f.result()]
+
     if not macos_lines:
         return []
+    # Restore original qm list order (ThreadPoolExecutor completes out of order)
+    order = {line: idx for idx, line in enumerate(vm_lines)}
+    macos_lines.sort(key=lambda l: order.get(l, 0))
     return [all_lines[0]] + macos_lines

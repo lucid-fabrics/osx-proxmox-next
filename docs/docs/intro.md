@@ -24,7 +24,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmo
 
 | | TUI Wizard | CLI |
 |--|-----------|-----|
-| **Command** | `osx-next` | `osx-next-cli create ...` |
+| **Command** | `osx-next` | `osx-next-cli apply ...` |
 | **Best for** | First-time setup, exploring options | Scripting, automation, headless servers |
 | **Experience** | Guided 6-step flow with live validation | Flags and JSON output |
 
@@ -34,11 +34,11 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmo
 |---------|----------|----------------|----------|
 | 13 | Ventura | Full | Older or limited hardware |
 | 14 | **Sonoma** | **Full** | **Most users** (best tested, most reliable) |
-| 15 | Sequoia | Limited | Latest features, but Apple blocks VM sign-in |
-| 26 | Tahoe | Limited | Bleeding edge |
+| 15 | Sequoia | Full (with `--apple-services`) | Latest features |
+| 26 | Tahoe | Full (with `--apple-services`) | Bleeding edge |
 
 :::note
-Sequoia and Tahoe enforce hardware attestation for Apple ID. Workaround: install Sonoma first, sign in, then upgrade in-place. See [Apple Services](guides/apple-services) for details.
+Sequoia and Tahoe require `--apple-services` to be set during VM creation. A kernel-level patch is injected automatically that prevents Apple's DeviceCheck from detecting the VM, allowing full Apple ID, iCloud, iMessage, and FaceTime sign-in. See [Apple Services](guides/apple-services) for details.
 :::
 
 ## Where to start

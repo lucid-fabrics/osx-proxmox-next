@@ -233,6 +233,21 @@ osx-next-cli uninstall --vmid 910
 
 # Destroy a VM (execute for real, including disk images)
 osx-next-cli uninstall --vmid 910 --purge --execute
+
+# Edit an existing VM (dry run — preview commands)
+osx-next-cli edit --vmid 910 --cores 4 --memory 8192
+
+# Edit an existing VM (rename + extend disk, execute for real)
+osx-next-cli edit --vmid 910 --name macos-sequoia-v2 --add-disk 64 --execute
+
+# Edit an existing VM (change bridge, preserve existing NIC model and MAC)
+osx-next-cli edit --vmid 910 --bridge vmbr1 --execute
+
+# Edit an existing VM (change bridge with explicit NIC model)
+osx-next-cli edit --vmid 910 --bridge vmbr1 --nic-model e1000 --execute
+
+# Edit and restart VM automatically after changes
+osx-next-cli edit --vmid 910 --cores 8 --memory 16384 --start --execute
 ```
 
 ---
@@ -493,20 +508,29 @@ Verification Failed — An unknown error occurred.
 
 ```
 src/osx_proxmox_next/
-  app.py          # TUI wizard (Textual) — 6-step reactive state machine
-  cli.py          # Non-interactive CLI
-  domain.py       # VM config model + validation
-  planner.py      # qm command generation
-  executor.py     # Dry-run and live execution engine
-  assets.py       # OpenCore/installer ISO detection
-  downloader.py   # Auto-download OpenCore + recovery images
-  defaults.py     # Host-aware hardware defaults
-  preflight.py    # Host capability checks
-  rollback.py     # VM snapshot/rollback hints
-  smbios.py       # SMBIOS identity generation (serial, UUID, MLB, ROM, model)
-  profiles.py     # VM config profile management
-  infrastructure.py # Proxmox command adapter
-  py.typed        # PEP 561 type marker
+  app.py              # TUI wizard (Textual) — 6-step reactive state machine
+  cli.py              # Non-interactive CLI
+  domain.py           # VM config model + validation (VmConfig, EditChanges, PlanStep)
+  planner.py          # qm command generation (build_plan, build_edit_plan)
+  executor.py         # Dry-run and live execution engine
+  assets.py           # OpenCore/installer ISO detection
+  downloader.py       # Auto-download OpenCore + recovery images
+  defaults.py         # Host-aware hardware defaults
+  preflight.py        # Host capability checks
+  rollback.py         # VM snapshot/rollback hints
+  smbios.py           # SMBIOS identity generation (serial, UUID, MLB, ROM, model)
+  smbios_planner.py   # SMBIOS PlanStep builder
+  profiles.py         # VM config profile management
+  infrastructure.py   # Proxmox command adapter
+  diagnostics.py      # Diagnostic log bundle export
+  _wizard_mixin.py    # TUI mixin: VM creation wizard steps
+  _edit_mixin.py      # TUI mixin: VM edit flow (stop, patch, optionally restart)
+  _manage_mixin.py    # TUI mixin: VM list, edit, and destroy in manage mode
+  models/             # WizardState dataclass and related models
+  services/           # Detection, edit, and Proxmox query services
+  forms/              # Textual form widgets
+  screens/            # TUI screen components (step screens, manage screen)
+  py.typed            # PEP 561 type marker
 ```
 
 ---

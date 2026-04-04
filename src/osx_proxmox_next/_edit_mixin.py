@@ -10,7 +10,8 @@ from textual.widgets import Button, Checkbox, Input, Static
 
 from .domain import MIN_VMID, MAX_VMID, EditChanges, PlanStep, validate_edit_changes
 from .executor import StepResult
-from .services import run_edit_worker
+from .rollback import create_snapshot
+from .services import run_edit_worker, fetch_vm_info, get_proxmox_adapter
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,8 @@ class EditModeMixin:
             memory_mb=_opt_int("#edit_memory"),
             bridge=_opt_str("#edit_bridge"),
             disk_gb_add=_opt_int("#edit_disk_add"),
+            nic_model=_opt_str("#edit_nic_model"),
+            disk_name=_opt_str("#edit_disk_name") or "virtio0",
         )
 
         issues = validate_edit_changes(vmid, changes)
@@ -97,7 +100,19 @@ class EditModeMixin:
             self.call_from_thread(self._update_edit_log, idx, total, step.title, result)  # type: ignore[attr-defined]
 
         try:
-            result = run_edit_worker(vmid, changes, start_after=start_after, on_step=on_step)
+            info = fetch_vm_info(vmid, adapter=get_proxmox_adapter())
+            if info is None:
+                fd, err_path = tempfile.mkstemp(prefix="edit_notfound_", suffix=".log")
+                with open(fd, "w") as f:
+                    f.write(f"VM {vmid} not found.\n")
+                self.call_from_thread(self._finish_edit, False, Path(err_path))  # type: ignore[attr-defined]
+                return
+
+            create_snapshot(vmid)
+            result = run_edit_worker(
+                vmid, changes, start_after=start_after, on_step=on_step,
+                current_net0=info.config_raw,
+            )
             self.call_from_thread(self._finish_edit, result.ok, result.log_path)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
             log.exception("Unexpected error in edit worker: %s", exc)

@@ -51,7 +51,9 @@ class WizardState:
     dry_run_done: bool = False
     dry_run_ok: bool = False
     apply_running: bool = False
-    apply_log: list[str] = field(default_factory=list)
+    apply_log: list[str] = field(default_factory=list)  # legacy alias kept for compat
+    dry_log: list[str] = field(default_factory=list)
+    live_log_lines: list[str] = field(default_factory=list)
     # Live install
     live_done: bool = False
     live_ok: bool = False

@@ -71,6 +71,8 @@ def test_wizard_state_list_fields_are_lists() -> None:
     assert isinstance(state.plan_steps, list)
     assert isinstance(state.assets_missing, list)
     assert isinstance(state.apply_log, list)
+    assert isinstance(state.dry_log, list)
+    assert isinstance(state.live_log_lines, list)
     assert isinstance(state.uninstall_vm_list, list)
     assert isinstance(state.uninstall_log, list)
 
