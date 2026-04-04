@@ -187,13 +187,12 @@ def _opencore_steps(ctx: _DiskBuildContext) -> list[PlanStep]:
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
                 f'qm set {shquote(ctx.vmid)} --ide0 "$REF",media=disk && '
                 # Fix GPT header corruption from thin-provisioned LVM importdisk.
-                # For Ceph/RBD storage, pvesm path returns an rbd: URI which dd
-                # cannot open directly — use qemu-img dd instead, which handles
-                # both plain paths and rbd: URIs natively.
+                # Ceph/RBD imports via qemu-img convert preserve the header
+                # correctly, so the rewrite is only needed for non-RBD paths.
+                # (qemu-img dd would try to create a new RBD image and fail
+                # with "File exists" because qm importdisk already created it.)
                 'DEV=$(pvesm path "$REF") && '
-                f'if [[ "$DEV" == rbd:* ]]; then '
-                f'qemu-img dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048; '
-                f'else '
+                f'if [[ "$DEV" != rbd:* ]]; then '
                 f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null; '
                 f'fi',
             ],
