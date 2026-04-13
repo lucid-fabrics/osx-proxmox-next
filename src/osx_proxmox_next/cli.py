@@ -10,7 +10,7 @@ from . import __version__
 from .assets import required_assets, suggested_fetch_commands
 from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage, detect_net_model
 from .diagnostics import export_log_bundle, recovery_guide
-from .domain import MIN_VMID, MAX_VMID, VmConfig, EditChanges, validate_config, validate_edit_changes
+from .domain import MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, EditChanges, validate_config, validate_edit_changes
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
 from .planner import build_plan, build_destroy_plan, build_edit_plan, build_clone_plan
@@ -474,6 +474,20 @@ def _run_clone(args: argparse.Namespace) -> int:
     if src_vmid == dst_vmid:
         print("ERROR: Source and destination VMID must differ.")
         return 2
+
+    if args.macos not in SUPPORTED_MACOS:
+        supported = ", ".join(SUPPORTED_MACOS)
+        print(f"ERROR: --macos must be one of: {supported}.")
+        return 2
+
+    if args.name is not None:
+        import re as _re
+        if len(args.name) < 3 or len(args.name) > 63:
+            print("ERROR: VM name must be between 3 and 63 characters.")
+            return 2
+        if not _re.fullmatch(r"[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?", args.name):
+            print("ERROR: VM name must start with alphanumeric and contain only [a-zA-Z0-9.-].")
+            return 2
 
     current_net0 = None
     if args.execute:
