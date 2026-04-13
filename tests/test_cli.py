@@ -875,3 +875,145 @@ def test_cli_edit_bridge_update(capsys) -> None:
     assert rc == 0
     out = capsys.readouterr().out
     assert "vmbr1" in out
+
+
+# ── clone command ─────────────────────────────────────────────────────
+
+
+def test_cli_clone_parser_registered() -> None:
+    from osx_proxmox_next.cli import build_parser
+    parser = build_parser()
+    cmds = parser._subparsers._group_actions[0].choices  # type: ignore[attr-defined]
+    assert "clone" in cmds
+
+
+def test_cli_clone_dry_run(capsys) -> None:
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert "qm clone" in out
+    assert "--smbios1" in out
+
+
+def test_cli_clone_dry_run_shows_vmgenid(capsys) -> None:
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "vmgenid" in out
+
+
+def test_cli_clone_dry_run_no_apple_services(capsys) -> None:
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--no-apple-services"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "vmgenid" not in out
+
+
+def test_cli_clone_invalid_source_vmid_low() -> None:
+    rc = run_cli(["clone", "--source-vmid", "5", "--new-vmid", "901"])
+    assert rc == 2
+
+
+def test_cli_clone_invalid_source_vmid_high() -> None:
+    rc = run_cli(["clone", "--source-vmid", "9999999", "--new-vmid", "901"])
+    assert rc == 2
+
+
+def test_cli_clone_invalid_dst_vmid() -> None:
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "5"])
+    assert rc == 2
+
+
+def test_cli_clone_same_vmid() -> None:
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "900"])
+    assert rc == 2
+
+
+def test_cli_clone_invalid_macos(capsys) -> None:
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--macos", "invalid"])
+    assert rc == 2
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_cli_clone_invalid_name_too_short(capsys) -> None:
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--name", "ab"])
+    assert rc == 2
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_cli_clone_invalid_name_bad_chars(capsys) -> None:
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--name", "has spaces!"])
+    assert rc == 2
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_cli_clone_with_name(capsys) -> None:
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--name", "my-clone"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "my-clone" in out
+
+
+def test_cli_clone_vm_not_found(monkeypatch) -> None:
+    monkeypatch.setattr(cli_module, "fetch_vm_info", lambda vmid, adapter=None: None)
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--execute"])
+    assert rc == 2
+
+
+def test_cli_clone_execute_success(monkeypatch, tmp_path, capsys) -> None:
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-src", status="running",
+                                           config_raw="net0: vmxnet3=AA:BB:CC:DD:EE:FF,bridge=vmbr0,firewall=0"),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--execute"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Clone OK" in out
+    assert "901" in out
+
+
+def test_cli_clone_execute_failure(monkeypatch, tmp_path) -> None:
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="macos-src", status="stopped", config_raw=""),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=False, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--execute"])
+    assert rc == 8
+
+
+def test_cli_clone_preserves_bridge_from_source(monkeypatch, tmp_path, capsys) -> None:
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+
+    captured_steps = []
+
+    def fake_apply(steps, execute=False):
+        captured_steps.extend(steps)
+        return ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt")
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="src", status="stopped",
+                                           config_raw="net0: vmxnet3=AA:BB:CC:DD:EE:FF,bridge=vmbr5,firewall=0"),
+    )
+    monkeypatch.setattr(cli_module, "apply_plan", fake_apply)
+    run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--execute"])
+    mac_step = next((s for s in captured_steps if "--net0" in s.argv), None)
+    assert mac_step is not None
+    assert "vmbr5" in mac_step.argv[-1]

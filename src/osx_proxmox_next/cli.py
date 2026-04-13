@@ -10,10 +10,10 @@ from . import __version__
 from .assets import required_assets, suggested_fetch_commands
 from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage, detect_net_model
 from .diagnostics import export_log_bundle, recovery_guide
-from .domain import MIN_VMID, MAX_VMID, VmConfig, EditChanges, validate_config, validate_edit_changes
+from .domain import MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, EditChanges, validate_config, validate_edit_changes
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
-from .planner import build_plan, build_destroy_plan, build_edit_plan
+from .planner import build_plan, build_destroy_plan, build_edit_plan, build_clone_plan
 from .services import fetch_vm_info, get_proxmox_adapter, run_download_worker
 from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
@@ -157,6 +157,21 @@ def _add_vm_subparsers(sub: argparse._SubParsersAction, common: argparse.Argumen
                       help="Start VM after applying changes")
     edit.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
 
+    clone = sub.add_parser("clone", help="Clone a macOS VM with a fresh SMBIOS identity")
+    clone.add_argument("--source-vmid", type=int, required=True, dest="source_vmid",
+                       help="VM ID to clone from")
+    clone.add_argument("--new-vmid", type=int, required=True, dest="new_vmid",
+                       help="VM ID for the clone")
+    clone.add_argument("--name", type=str, default=None,
+                       help="Name for the cloned VM (default: Proxmox auto-generates)")
+    clone.add_argument("--macos", type=str, default="sequoia",
+                       help="macOS version hint for SMBIOS model selection (default: sequoia)")
+    clone.add_argument("--no-apple-services", action="store_true", default=False,
+                       dest="no_apple_services",
+                       help="Skip vmgenid and MAC regeneration (not recommended — breaks Apple services isolation)")
+    clone.add_argument("--execute", action="store_true",
+                       help="Actually run (default is dry run)")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="osx-next-cli")
@@ -239,6 +254,8 @@ def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
         return _run_uninstall(args)
     if args.cmd == "edit":
         return _run_edit(args)
+    if args.cmd == "clone":
+        return _run_clone(args)
     return None
 
 
@@ -442,6 +459,75 @@ def _run_edit(args: argparse.Namespace) -> int:
 
     print(f"Edit FAILED. Log: {result.log_path}")
     return 7
+
+
+def _run_clone(args: argparse.Namespace) -> int:
+    src_vmid = args.source_vmid
+    dst_vmid = args.new_vmid
+
+    if src_vmid < MIN_VMID or src_vmid > MAX_VMID:
+        print(f"ERROR: Source VMID must be between {MIN_VMID} and {MAX_VMID}.")
+        return 2
+    if dst_vmid < MIN_VMID or dst_vmid > MAX_VMID:
+        print(f"ERROR: New VMID must be between {MIN_VMID} and {MAX_VMID}.")
+        return 2
+    if src_vmid == dst_vmid:
+        print("ERROR: Source and destination VMID must differ.")
+        return 2
+
+    if args.macos not in SUPPORTED_MACOS:
+        supported = ", ".join(SUPPORTED_MACOS)
+        print(f"ERROR: --macos must be one of: {supported}.")
+        return 2
+
+    if args.name is not None:
+        import re as _re
+        if len(args.name) < 3 or len(args.name) > 63:
+            print("ERROR: VM name must be between 3 and 63 characters.")
+            return 2
+        if not _re.fullmatch(r"[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?", args.name):
+            print("ERROR: VM name must start with alphanumeric and contain only [a-zA-Z0-9.-].")
+            return 2
+
+    current_net0 = None
+    if args.execute:
+        info = fetch_vm_info(src_vmid, adapter=get_proxmox_adapter())
+        if info is None:
+            print(f"ERROR: VM {src_vmid} not found.")
+            return 2
+        print(f"Source: VM {src_vmid}: {info.name} ({info.status})")
+        current_net0 = info.config_raw
+
+    apple_services = not args.no_apple_services
+    steps = build_clone_plan(
+        src_vmid=src_vmid,
+        dst_vmid=dst_vmid,
+        new_name=args.name,
+        macos=args.macos,
+        apple_services=apple_services,
+        current_net0=current_net0,
+    )
+
+    if not args.execute:
+        print("DRY RUN — pass --execute to apply:\n")
+
+    for idx, step in enumerate(steps, start=1):
+        print(f"{idx:02d}. {step.title}")
+        print(f"    {step.command}")
+
+    if not args.execute:
+        return 0
+
+    result = apply_plan(steps, execute=True)
+    if result.ok:
+        print(f"\nClone OK. Log: {result.log_path}")
+        print(f"VM {dst_vmid} is ready with a fresh SMBIOS identity.")
+        if apple_services:
+            print("Apple services (iMessage, FaceTime, iCloud) are isolated from the source VM.")
+        return 0
+
+    print(f"\nClone FAILED. Log: {result.log_path}")
+    return 8
 
 
 if __name__ == "__main__":
