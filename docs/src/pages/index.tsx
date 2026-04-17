@@ -356,7 +356,7 @@ function CTA() {
           </Link>
           <Link
             className="button button--secondary button--lg"
-            href="https://discord.gg/2M5RJSGd">
+            href="https://discord.gg/Ub6TunHYre">
             Join Discord
           </Link>
         </div>
