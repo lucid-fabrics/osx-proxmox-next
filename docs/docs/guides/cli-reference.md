@@ -22,6 +22,7 @@ osx-next-cli --version
 | `preflight` | Check host readiness |
 | `status` | Show info about an existing VM |
 | `uninstall` | Destroy an existing VM |
+| `clone` | Clone a VM with a fresh SMBIOS identity |
 | `bundle` | Export diagnostic log bundle |
 | `guide` | Show recovery guide for a given issue |
 
@@ -69,6 +70,19 @@ These flags are shared by `apply` and `plan`:
 | `--execute` | flag | No | Actually run (default is dry run) |
 
 At least one change flag (`--name`, `--cores`, `--memory`, `--bridge`, `--add-disk`) is required.
+
+## clone -- Flags
+
+| Flag | Type | Required | Description |
+|------|------|----------|-------------|
+| `--source-vmid` | int | Yes | VMID of the VM to clone (100-999999) |
+| `--new-vmid` | int | Yes | VMID for the cloned VM (must differ from source) |
+| `--name` | string | No | Display name for the clone (3-63 chars, alphanumeric/dot/hyphen) |
+| `--macos` | string | No | macOS version hint for SMBIOS model selection (default: `sequoia`) |
+| `--no-apple-services` | flag | No | Skip vmgenid and MAC regeneration (not recommended) |
+| `--execute` | flag | No | Actually run (default is dry run) |
+
+Without `--no-apple-services` (the default), the clone step regenerates serial, UUID, MLB, ROM, vmgenid, and MAC address so both VMs remain fully independent on iCloud, iMessage, and FaceTime.
 
 ## plan -- Flags
 
@@ -224,6 +238,38 @@ osx-next-cli edit --vmid 910 --cores 8 --memory 16384 --start --execute
 The `edit` subcommand always stops the VM before making changes. A config snapshot is saved to `generated/snapshots/` before any modifications. On failure, rollback hints are printed so you can restore manually.
 :::
 
+### clone -- Clone a VM with Fresh Identity
+
+Cloning a macOS VM on Proxmox duplicates its SMBIOS — both VMs share the same serial number, UUID, and MLB, which causes Apple to block both from iCloud, iMessage, and FaceTime. The `clone` subcommand handles this automatically.
+
+Dry-run (preview commands):
+
+```bash
+osx-next-cli clone --source-vmid 910 --new-vmid 911 --name macos-sequoia-clone
+```
+
+Execute for real:
+
+```bash
+osx-next-cli clone --source-vmid 910 --new-vmid 911 --name macos-sequoia-clone --execute
+```
+
+With explicit macOS version hint:
+
+```bash
+osx-next-cli clone --source-vmid 910 --new-vmid 911 --macos sonoma --execute
+```
+
+Without Apple services identity reset (not recommended):
+
+```bash
+osx-next-cli clone --source-vmid 910 --new-vmid 911 --no-apple-services --execute
+```
+
+:::note
+The clone always performs a full disk copy (`qm clone --full`). The bridge and NIC model are preserved from the source VM. The new VM gets a fresh serial, UUID, MLB, ROM, vmgenid, and MAC address.
+:::
+
 ### bundle -- Export Diagnostics
 
 ```bash
@@ -251,3 +297,4 @@ Prints recovery steps for the given issue description.
 | 5 | Download failed |
 | 6 | Destroy failed |
 | 7 | Edit failed |
+| 8 | Clone failed |

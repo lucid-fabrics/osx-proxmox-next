@@ -248,6 +248,18 @@ osx-next-cli edit --vmid 910 --bridge vmbr1 --nic-model e1000 --execute
 
 # Edit and restart VM automatically after changes
 osx-next-cli edit --vmid 910 --cores 8 --memory 16384 --start --execute
+
+# Clone a VM with a fresh SMBIOS identity (dry run — preview commands)
+osx-next-cli clone --source-vmid 910 --new-vmid 911 --name macos-sequoia-clone
+
+# Clone and execute (regenerates serial, UUID, MLB, ROM, vmgenid — both VMs stay independent on Apple services)
+osx-next-cli clone --source-vmid 910 --new-vmid 911 --name macos-sequoia-clone --execute
+
+# Clone with explicit macOS version hint
+osx-next-cli clone --source-vmid 910 --new-vmid 911 --macos sonoma --execute
+
+# Clone without Apple services identity reset
+osx-next-cli clone --source-vmid 910 --new-vmid 911 --no-apple-services --execute
 ```
 
 ---

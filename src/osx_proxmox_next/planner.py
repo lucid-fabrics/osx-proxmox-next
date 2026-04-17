@@ -13,6 +13,7 @@ from .script_renderer import (
     _build_oc_disk_script,
     _partprobe_retry_snippet,
 )
+from .smbios import generate_mac, generate_smbios, generate_vmgenid
 from .smbios_planner import (
     _encode_smbios_value,
     _populate_smbios,
@@ -186,9 +187,15 @@ def _opencore_steps(ctx: _DiskBuildContext) -> list[PlanStep]:
                 f'REF=$($IMPORT_CMD {shquote(ctx.vmid)} {shquote(str(ctx.oc_disk))} {shquote(ctx.config.storage)} 2>&1 | '
                 "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
                 f'qm set {shquote(ctx.vmid)} --ide0 "$REF",media=disk && '
-                # Fix GPT header corruption from thin-provisioned LVM importdisk
+                # Fix GPT header corruption from thin-provisioned LVM importdisk.
+                # Ceph/RBD imports via qemu-img convert preserve the header
+                # correctly, so the rewrite is only needed for non-RBD paths.
+                # (qemu-img dd would try to create a new RBD image and fail
+                # with "File exists" because qm importdisk already created it.)
                 'DEV=$(pvesm path "$REF") && '
-                f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
+                f'if [[ "$DEV" != rbd:* ]]; then '
+                f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null; '
+                f'fi',
             ],
         ),
     ]
@@ -446,6 +453,99 @@ def build_edit_plan(
             argv=["qm", "start", vid],
             risk="action",
         ))
+    return steps
+
+
+# ── VM Clone ────────────────────────────────────────────────────────
+
+
+def _parse_net0(current_net0: str | None) -> tuple[str, str]:
+    """Extract bridge and NIC model from a raw Proxmox VM config dump.
+
+    Returns ``(bridge, net_model)`` with safe defaults when not found.
+    """
+    bridge = "vmbr0"
+    net_model = "vmxnet3"
+    if not current_net0:
+        return bridge, net_model
+    for line in current_net0.splitlines():
+        if not line.startswith("net0:"):
+            continue
+        raw = line.split(":", 1)[1].strip()
+        parts = raw.split(",")
+        model_part = parts[0]
+        if "=" in model_part and not model_part.startswith("bridge"):
+            net_model = model_part.split("=", 1)[0]
+        elif not model_part.startswith("bridge"):
+            net_model = model_part
+        for part in parts[1:]:
+            if part.startswith("bridge="):
+                bridge = part.split("=", 1)[1]
+        break
+    return bridge, net_model
+
+
+def build_clone_plan(
+    src_vmid: int,
+    dst_vmid: int,
+    new_name: str | None = None,
+    macos: str = "sequoia",
+    apple_services: bool = True,
+    current_net0: str | None = None,
+) -> list[PlanStep]:
+    """Generate a plan to clone a macOS VM with a fresh SMBIOS identity.
+
+    Clones via ``qm clone --full``, then injects a newly generated serial,
+    UUID, MLB, ROM, and vmgenid so the clone is treated as a distinct machine
+    by Apple and by QEMU.  Without this step, iCloud/iMessage silently share
+    the source VM's identity and Apple may ban both.
+    """
+    src = str(src_vmid)
+    dst = str(dst_vmid)
+
+    clone_argv = ["qm", "clone", src, dst, "--full"]
+    if new_name:
+        clone_argv += ["--name", new_name]
+
+    identity = generate_smbios(macos, apple_services=apple_services)
+
+    smbios_value = (
+        f"uuid={identity.uuid},"
+        f"base64=1,"
+        f"serial={_encode_smbios_value(identity.serial)},"
+        f"manufacturer={_encode_smbios_value('Apple Inc.')},"
+        f"product={_encode_smbios_value(identity.model)},"
+        f"family={_encode_smbios_value('Mac')}"
+    )
+
+    steps: list[PlanStep] = [
+        PlanStep(
+            title=f"Full clone: VM {src_vmid} → {dst_vmid}",
+            argv=clone_argv,
+            risk="action",
+        ),
+        PlanStep(
+            title="Inject fresh SMBIOS identity",
+            argv=["qm", "set", dst, "--smbios1", smbios_value],
+        ),
+    ]
+
+    if apple_services:
+        vmgenid = generate_vmgenid()
+        steps.append(PlanStep(
+            title="Regenerate vmgenid (Apple services isolation)",
+            argv=["qm", "set", dst, "--vmgenid", vmgenid],
+        ))
+        bridge, net_model = _parse_net0(current_net0)
+        fresh_mac = generate_mac()
+        steps.append(PlanStep(
+            title="Assign fresh static MAC (Apple services isolation)",
+            argv=[
+                "qm", "set", dst,
+                "--net0", f"{net_model},bridge={bridge},macaddr={fresh_mac},firewall=0",
+            ],
+        ))
+
     return steps
 
 
