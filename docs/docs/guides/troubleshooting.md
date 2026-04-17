@@ -115,7 +115,7 @@ Then reboot the Proxmox host.
 ## Getting Help
 
 - **GitHub Issues**: [lucid-fabrics/osx-proxmox-next/issues](https://github.com/lucid-fabrics/osx-proxmox-next/issues)
-- **Discord**: [Join the community](https://discord.gg/2M5RJSGd)
+- **Discord**: [Join the community](https://discord.gg/Ub6TunHYre)
 
 When reporting an issue, include:
 

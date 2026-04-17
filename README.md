@@ -17,7 +17,7 @@
     <img alt="Proxmox" src="https://img.shields.io/badge/Proxmox-9%20Ready-E57000?logo=proxmox&logoColor=white">
   </a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-Ventura%2013%20%7C%20Sonoma%2014%20%7C%20Sequoia%2015%20%7C%20Tahoe%2026-111111?logo=apple&logoColor=white">
-  <a href="https://discord.gg/2M5RJSGd">
+  <a href="https://discord.gg/Ub6TunHYre">
     <img alt="Join Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white">
   </a>
   <a href="https://lucid-fabrics.github.io/osx-proxmox-next/">
@@ -493,7 +493,7 @@ Verification Failed — An unknown error occurred.
 
 **This tool fixes it automatically.** When `--apple-services` is enabled, a kernel-level OpenCore patch is injected into `config.plist` that redirects the `hv_vmm_present` sysctl lookup to read from `hibernatecount` instead (always 0 = not a VM). Apple's DeviceCheck sees a physical machine and allows sign-in.
 
-**Community-attested:** Multiple testers have reported Apple ID, iCloud, iMessage, and FaceTime working on Sequoia 15 and Tahoe 26 with this patch. Results may vary — if it works for you, consider sharing your experience on [Discord](https://discord.gg/2M5RJSGd).
+**Community-attested:** Multiple testers have reported Apple ID, iCloud, iMessage, and FaceTime working on Sequoia 15 and Tahoe 26 with this patch. Results may vary — if it works for you, consider sharing your experience on [Discord](https://discord.gg/Ub6TunHYre).
 
 > `RestrictEvents.kext` with `revpatch=sbvmm` alone does **not** fix this — that only hides `kern.hv_vmm_present` from userspace. The kernel patch operates at the sysctl string table level, which is what Apple's attestation stack reads directly.
 
@@ -573,7 +573,7 @@ This project is free and open source. Sponsors keep it alive and shape what gets
     <img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
   </a>
   &nbsp;
-  <a href="https://discord.gg/2M5RJSGd">
+  <a href="https://discord.gg/Ub6TunHYre">
     <img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white" alt="Join our Discord">
   </a>
 </p>
