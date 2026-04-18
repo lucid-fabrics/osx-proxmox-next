@@ -10,6 +10,7 @@ from . import __version__
 from .assets import required_assets, suggested_fetch_commands
 from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage, detect_net_model
 from .diagnostics import export_log_bundle, recovery_guide
+from .doctor import run_doctor, Severity
 from .domain import MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, EditChanges, validate_config, validate_edit_changes
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
@@ -114,6 +115,8 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
     sub.add_parser("bundle")
     guide = sub.add_parser("guide")
     guide.add_argument("reason", nargs="?", default="boot issue")
+    doctor = sub.add_parser("doctor", help="Diagnose a running or stopped macOS VM for common config issues")
+    doctor.add_argument("--vmid", type=int, required=True, help="VM ID to inspect")
 
 
 def _add_download_subparser(sub: argparse._SubParsersAction) -> None:
@@ -246,6 +249,8 @@ def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
         for line in recovery_guide(args.reason):
             print(line)
         return 0
+    if args.cmd == "doctor":
+        return _run_doctor(args)
     if args.cmd == "download":
         return _run_download(args)
     if args.cmd == "status":
@@ -299,6 +304,42 @@ def _print_cpu_info(args: argparse.Namespace, config: VmConfig) -> None:
             cpu_mode = "native host passthrough"
         cpu_label = cpu.model_name or cpu.vendor
         print(f"CPU: {cpu_label} ({cpu_mode})")
+
+
+def _run_doctor(args: argparse.Namespace) -> int:
+    vmid = args.vmid
+    if vmid < MIN_VMID or vmid > MAX_VMID:
+        print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
+        return 2
+
+    checks = run_doctor(vmid)
+
+    _ICONS = {Severity.OK: " OK  ", Severity.WARN: "WARN ", Severity.FAIL: "FAIL "}
+    failures = 0
+    warnings = 0
+
+    print(f"\nDoctor report — VM {vmid}\n")
+    for check in checks:
+        icon = _ICONS[check.severity]
+        print(f"  [{icon}] {check.message}")
+        if check.fix:
+            print(f"          Fix: {check.fix}")
+        if check.severity == Severity.FAIL:
+            failures += 1
+        elif check.severity == Severity.WARN:
+            warnings += 1
+
+    print()
+    if failures == 0 and warnings == 0:
+        print("  All checks passed.")
+        return 0
+    parts = []
+    if failures:
+        parts.append(f"{failures} failure{'s' if failures > 1 else ''}")
+    if warnings:
+        parts.append(f"{warnings} warning{'s' if warnings > 1 else ''}")
+    print("  " + ", ".join(parts))
+    return 1 if failures == 0 else 4
 
 
 def run_cli(argv: list[str] | None = None) -> int:
