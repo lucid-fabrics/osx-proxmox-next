@@ -48,6 +48,29 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 - Mandatory dry-run before live install previews every command
 - Real-time form validation with inline error feedback
 
+### How It Compares
+
+| | Manual setup | osx-proxmox-next |
+|---|---|---|
+| Time to first boot | 3–6 hours | < 5 minutes |
+| OpenCore setup | Edit plist files by hand | Automatic |
+| SMBIOS generation | External tool (GenSMBIOS) | Built-in, zero config |
+| Apple Services | Manual identity chain | One flag: `--apple-services` |
+| Tahoe 26 | Community trial & error | Supported |
+| Dry-run preview | Never | Always — see every `qm` command first |
+| Scripting / CI | Never | Full CLI + JSON export |
+| Post-install health check | Never | `osx-next-cli doctor --vmid <id>` |
+
+### Demo
+
+**Wizard (6 steps: Preflight → OS → Storage → Config → Dry Run → Install):**
+
+![osx-proxmox-next TUI wizard demo](docs/static/img/demo-tui.gif)
+
+**CLI tools (preflight, plan, doctor):**
+
+![osx-proxmox-next CLI demo](docs/static/img/demo-cli.gif)
+
 ### TUI Preview
 
 <table>
@@ -130,6 +153,18 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | GPU | Integrated | Discrete (for passthrough) |
 
 > **AMD CPUs** are fully supported. The tool auto-detects your CPU vendor and applies the correct configuration (Cascadelake-Server emulation for AMD, native host passthrough for Intel). **Xeon and pre-Skylake Intel CPUs** are also handled automatically — Xeon stays on `-cpu host`, older consumer Intel gets Penryn mode, and both get `e1000` instead of `vmxnet3` for reliable network during installation.
+
+### CPU Compatibility
+
+| CPU Type | Support | QEMU Mode | NIC |
+|----------|---------|-----------|-----|
+| Modern Intel (Skylake+) | Full | `-cpu host` (native passthrough) | vmxnet3 |
+| Intel Xeon | Full | `-cpu host` (native passthrough) | e1000 |
+| Pre-Skylake Intel (Broadwell, Haswell, …) | Full | Penryn mode | e1000 |
+| AMD (any) | Full | Cascadelake-Server emulation | vmxnet3 |
+| Apple Silicon (ARM Proxmox) | Not supported | — | — |
+
+All modes are auto-detected. Zero configuration needed.
 
 ### Host
 
@@ -260,11 +295,24 @@ osx-next-cli clone --source-vmid 910 --new-vmid 911 --macos sonoma --execute
 
 # Clone without Apple services identity reset
 osx-next-cli clone --source-vmid 910 --new-vmid 911 --no-apple-services --execute
+
+# Diagnose a VM for common config issues (balloon, machine type, cores, NIC, SMBIOS, boot order…)
+osx-next-cli doctor --vmid 910
 ```
 
 ---
 
 ## 🔧 Troubleshooting
+
+Not sure what's wrong? Run the VM health check first:
+
+```bash
+osx-next-cli doctor --vmid <your-vmid>
+```
+
+It checks balloon driver, machine type, CPU config, NIC model, SMBIOS, boot order, disk layout, and more — and prints a fix command for every failure it finds.
+
+---
 
 <details>
 <summary><strong>macOS installer doesn't show my disk</strong></summary>
