@@ -117,6 +117,22 @@ def test_cli_bundle(monkeypatch, tmp_path):
     assert rc == 0
 
 
+def test_cli_preflight_reruns_after_install(monkeypatch):
+    from osx_proxmox_next.preflight import PreflightCheck
+    calls = []
+
+    def fake_run_preflight():
+        calls.append(1)
+        return [PreflightCheck("dmg2img", len(calls) > 1, "/usr/bin/dmg2img")]
+
+    monkeypatch.setattr(cli_module, "run_preflight", fake_run_preflight)
+    monkeypatch.setattr(cli_module, "has_missing_build_deps", lambda checks: len(calls) == 1)
+    monkeypatch.setattr(cli_module, "install_missing_packages", lambda on_output=None: (True, ["dmg2img"]))
+    rc = run_cli(["preflight"])
+    assert rc == 0
+    assert len(calls) == 2
+
+
 def test_cli_guide():
     rc = run_cli(["guide", "boot issue"])
     assert rc == 0
@@ -1017,3 +1033,102 @@ def test_cli_clone_preserves_bridge_from_source(monkeypatch, tmp_path, capsys) -
     mac_step = next((s for s in captured_steps if "--net0" in s.argv), None)
     assert mac_step is not None
     assert "vmbr5" in mac_step.argv[-1]
+
+
+# ---------------------------------------------------------------------------
+# doctor command
+# ---------------------------------------------------------------------------
+
+def _make_doctor_checks(failures=0, warnings=0):
+    from osx_proxmox_next.doctor import DoctorCheck, Severity
+    checks = []
+    for _ in range(failures):
+        checks.append(DoctorCheck("balloon", Severity.FAIL, "balloon=1", fix="qm set 100 --balloon 0"))
+    for _ in range(warnings):
+        checks.append(DoctorCheck("agent", Severity.WARN, "agent not enabled"))
+    if not checks:
+        checks.append(DoctorCheck("balloon", Severity.OK, "balloon=0"))
+    return checks
+
+
+def test_cli_doctor_invalid_vmid_low(capsys) -> None:
+    rc = run_cli(["doctor", "--vmid", "0"])
+    assert rc == 2
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_cli_doctor_invalid_vmid_high(capsys) -> None:
+    rc = run_cli(["doctor", "--vmid", "999999999"])
+    assert rc == 2
+
+
+def test_cli_doctor_all_ok(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli_module, "run_doctor", lambda vmid: _make_doctor_checks())
+    rc = run_cli(["doctor", "--vmid", "100"])
+    assert rc == 0
+    assert "All checks passed" in capsys.readouterr().out
+
+
+def test_cli_doctor_with_failures(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli_module, "run_doctor", lambda vmid: _make_doctor_checks(failures=1))
+    rc = run_cli(["doctor", "--vmid", "100"])
+    assert rc == 4
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "Fix:" in out
+
+
+def test_cli_doctor_warnings_only(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli_module, "run_doctor", lambda vmid: _make_doctor_checks(warnings=2))
+    rc = run_cli(["doctor", "--vmid", "100"])
+    assert rc == 1
+    assert "warning" in capsys.readouterr().out
+
+
+def test_cli_doctor_mixed_failures_and_warnings(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli_module, "run_doctor", lambda vmid: _make_doctor_checks(failures=2, warnings=1))
+    rc = run_cli(["doctor", "--vmid", "100"])
+    assert rc == 4
+    out = capsys.readouterr().out
+    assert "failure" in out
+    assert "warning" in out
+
+
+# ---------------------------------------------------------------------------
+# clone — apple_services message branch
+# ---------------------------------------------------------------------------
+
+def test_cli_clone_execute_success_prints_apple_services(monkeypatch, tmp_path, capsys) -> None:
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="src", status="stopped", config_raw=""),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--execute"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Apple services" in out
+
+
+def test_cli_clone_execute_no_apple_services_no_message(monkeypatch, tmp_path, capsys) -> None:
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.planner import VmInfo
+
+    monkeypatch.setattr(
+        cli_module, "fetch_vm_info",
+        lambda vmid, adapter=None: VmInfo(vmid=vmid, name="src", status="stopped", config_raw=""),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--execute", "--no-apple-services"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Apple services" not in out
