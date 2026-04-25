@@ -25,6 +25,7 @@ osx-next-cli --version
 | `clone` | Clone a VM with a fresh SMBIOS identity |
 | `bundle` | Export diagnostic log bundle |
 | `guide` | Show recovery guide for a given issue |
+| `doctor` | Diagnose a running or stopped macOS VM for common config issues |
 
 ## Common Flags
 
@@ -286,14 +287,78 @@ osx-next-cli guide "boot issue"
 
 Prints recovery steps for the given issue description.
 
+Prints recovery steps for the given issue description.
+
+### doctor -- Diagnose VM Configuration
+
+```bash
+osx-next-cli doctor --vmid 910
+```
+
+Runs checks against a VM's configuration to detect issues that prevent macOS from booting or functioning properly.
+
+| Check | Severity | Description |
+|-------|----------|-------------|
+| `balloon` | FAIL | Must be `0` — macOS has no balloon driver |
+| `machine` | FAIL | Must include `q35` — UEFI chipset required |
+| `cores` | FAIL/WARN | Non-power-of-2 values cause hangs at Apple logo |
+| `memory` | WARN | Should be ≥4096 MB for installer |
+| `cpu` | WARN | Should be `host` or `Cascadelake-Server` |
+| `net0` | FAIL | Must use `vmxnet3`, `e1000`, or `e1000-82545em` |
+| `agent` | WARN | Should be `enabled=1` for graceful shutdown |
+| `smbios1` | WARN | Must contain `uuid=` for Apple services |
+| `boot` | FAIL | Must not reference `ide3` (non-existent device) |
+| `virtio0` | WARN | Main macOS disk should be present |
+| `ide0` | WARN | OpenCore bootloader disk should be present |
+| `ide2` | WARN | Recovery/installer image should be present |
+
+Each issue labeled `OK`, `WARN`, or `FAIL` with a fix command where applicable.
+
+**Exit codes:** `0` all passed, `1` warnings only, `2` invalid VMID, `4` failures detected.
+
+**Example:**
+```bash
+osx-next-cli doctor --vmid 100
+```
+
+Sample output (all passing):
+```
+  [ OK  ] balloon=0 — macOS has no balloon driver
+  [ OK  ] machine=pc-q35-8.1+pve0
+  [ OK  ] cores=4 — power-of-2, safe for macOS
+  [ OK  ] memory=4096 MB
+  [ OK  ] cpu=host
+  [ OK  ] net0 model=vmxnet3 — native macOS driver
+  [ OK  ] agent=enabled — graceful shutdown works
+  [ OK  ] smbios1 set — identity chain configured
+  [ OK  ] boot=order=ide2;virtio0;ide0
+  [ OK  ] virtio0 present — main macOS disk
+  [ OK  ] ide0 present — OpenCore bootloader
+  [ OK  ] ide2 present — recovery/installer image
+
+  All checks passed.
+```
+
+Sample output (with failures):
+```
+  [FAIL] balloon=1 — macOS will crash with balloon driver enabled
+          Fix: qm set 100 --balloon 0
+  [ WARN] cores=3 — non-power-of-2 value hangs macOS at Apple logo
+          Fix: qm set 100 --cores 2
+  ...
+
+  1 failure, 1 warning
+```
+
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
+| 1 | Warnings (doctor with warnings but no failures) |
 | 2 | Validation error (bad VMID, invalid config, VM not found) |
 | 3 | Missing assets (OpenCore or recovery image not found) |
-| 4 | Apply failed |
+| 4 | Execution failure (apply, edit, clone, or doctor with failures) |
 | 5 | Download failed |
 | 6 | Destroy failed |
 | 7 | Edit failed |
