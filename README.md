@@ -5,8 +5,9 @@
 </h1>
 
 <p align="center">
-  <strong>One-command macOS VM setup for Proxmox 9.</strong><br>
-  No manual <code>qm</code> commands. No config file editing. Just a guided wizard.
+  <strong>You're losing 3–6 hours every time you set up a macOS VM on Proxmox.</strong><br>
+  OpenCore plist editing. GenSMBIOS. Manual <code>qm</code> commands. One wrong flag and you start over.<br>
+  <strong>osx-proxmox-next does it in under 5 minutes. One command. Guided wizard. Done.</strong>
 </p>
 
 <p align="center">
@@ -33,9 +34,11 @@
 
 ---
 
-## 🧰 What It Does
+## 🧰 Stop Wasting Afternoons on macOS VMs
 
-This tool automates macOS virtual machine creation on Proxmox VE 9. It handles VMID selection, CPU/RAM detection, OpenCore bootloader setup, and the full `qm` command sequence — so you don't have to.
+The manual route eats your time: find the right OpenCore build, edit plist files, run GenSMBIOS, copy ISOs, type out `qm` commands, debug boot failures, repeat. Most people give up or spend a full day getting it right once — then forget the steps by the next time.
+
+osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxmox host.
 
 **You get:**
 - A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
@@ -60,6 +63,17 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 | Dry-run preview | Never | Always — see every `qm` command first |
 | Scripting / CI | Never | Full CLI + JSON export |
 | Post-install health check | Never | `osx-next-cli doctor --vmid <id>` |
+
+<p align="center">
+  <strong>If this already looks better than what you've been doing — ⭐ star the repo and help others find it.</strong><br><br>
+  <a href="https://ko-fi.com/lucidfabrics">
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi">
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://github.com/sponsors/lucid-fabrics">
+    <img src="https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=github&logoColor=white" alt="Sponsor on GitHub">
+  </a>
+</p>
 
 ### Demo
 
@@ -99,6 +113,17 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 ![macOS Desktop via VNC](docs/static/img/macos-vnc-desktop.png)
 
 > **Note:** Dynamic wallpapers are known to not display correctly without GPU passthrough on VNC. Use a static wallpaper instead.
+
+<p align="center">
+  Built solo, maintained in free time. If it saved you an afternoon:<br><br>
+  <a href="https://ko-fi.com/lucidfabrics">
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi">
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://buymeacoffee.com/lucidfabrics">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee">
+  </a>
+</p>
 
 ---
 
