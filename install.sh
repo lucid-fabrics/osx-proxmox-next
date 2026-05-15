@@ -52,6 +52,8 @@ setup_runtime() {
   pip install --upgrade pip >>"$LOG_FILE" 2>&1 || die "pip upgrade failed"
   pip install --force-reinstall --no-deps -e "$REPO_DIR" >>"$LOG_FILE" 2>&1 || die "editable install failed"
   pip install -e "$REPO_DIR" >>"$LOG_FILE" 2>&1 || die "dependency install failed"
+  ln -sf "$VENV_DIR/bin/osx-next" /usr/local/bin/osx-next
+  ln -sf "$VENV_DIR/bin/osx-next-cli" /usr/local/bin/osx-next-cli
 }
 
 launch() {
