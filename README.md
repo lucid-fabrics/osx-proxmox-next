@@ -30,6 +30,9 @@
   <a href="https://buymeacoffee.com/lucidfabrics">
     <img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black">
   </a>
+  <a href="https://ko-fi.com/lucidfabrics">
+    <img alt="GPU passthrough fund" src="https://img.shields.io/endpoint?url=https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next&style=for-the-badge">
+  </a>
 </p>
 
 ---
@@ -637,7 +640,7 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 
 - 🧩 **Multi-VM templates** — save and reuse configurations across VMs
 - 🔄 **Auto-update OpenCore** — detect and pull latest OpenCore releases
-- 🎮 **GPU passthrough wizard** — guided IOMMU + VFIO setup *(unlocks at 20 sponsors)*
+- 🎮 **GPU passthrough wizard** — guided IOMMU + VFIO setup *(unlocks at $200 raised — see badge above)*
 
 ---
 
