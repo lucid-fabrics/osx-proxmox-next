@@ -52,6 +52,16 @@ setup_runtime() {
   pip install --upgrade pip >>"$LOG_FILE" 2>&1 || die "pip upgrade failed"
   pip install --force-reinstall --no-deps -e "$REPO_DIR" >>"$LOG_FILE" 2>&1 || die "editable install failed"
   pip install -e "$REPO_DIR" >>"$LOG_FILE" 2>&1 || die "dependency install failed"
+  _safe_venv_dir="$(realpath "$VENV_DIR" 2>/dev/null)" || die "Cannot resolve VENV_DIR path"
+  case "$_safe_venv_dir" in
+    /root/*|/opt/*) ;;
+    *) die "VENV_DIR '$_safe_venv_dir' is outside allowed paths (/root, /opt)" ;;
+  esac
+  [[ -x "$_safe_venv_dir/bin/osx-next" ]] || die "osx-next binary missing after install"
+  [[ -x "$_safe_venv_dir/bin/osx-next-cli" ]] || die "osx-next-cli binary missing after install"
+  ln -sf "$_safe_venv_dir/bin/osx-next" /usr/local/bin/osx-next || die "Failed to install osx-next to /usr/local/bin"
+  ln -sf "$_safe_venv_dir/bin/osx-next-cli" /usr/local/bin/osx-next-cli || die "Failed to install osx-next-cli to /usr/local/bin"
+  log "Installed osx-next and osx-next-cli to /usr/local/bin"
 }
 
 launch() {
