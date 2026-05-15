@@ -91,10 +91,12 @@ def test_cli_plan_net_model_e1000(monkeypatch, capsys):
 def test_cli_plan_net_model_default_vmxnet3(monkeypatch, capsys):
     """Omitting --net-model defaults to vmxnet3 in plan output."""
     from osx_proxmox_next.assets import AssetCheck
+    import osx_proxmox_next.defaults as defaults_module
     monkeypatch.setattr(
         cli_module, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
+    monkeypatch.setattr(defaults_module, "detect_net_model", lambda cpu: "vmxnet3")
     rc = run_cli(_plan_args())
     assert rc == 0
     captured = capsys.readouterr()
