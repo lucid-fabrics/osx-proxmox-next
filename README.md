@@ -32,6 +32,12 @@
   </a>
 </p>
 
+<p align="center">
+  <a href="https://ko-fi.com/lucidfabrics">
+    <img alt="GPU Passthrough Fund progress" src="https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next/svg" width="600">
+  </a>
+</p>
+
 ---
 
 ## 🧰 Stop Wasting Afternoons on macOS VMs
@@ -637,7 +643,7 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 
 - 🧩 **Multi-VM templates** — save and reuse configurations across VMs
 - 🔄 **Auto-update OpenCore** — detect and pull latest OpenCore releases
-- 🎮 **GPU passthrough wizard** — guided IOMMU + VFIO setup *(unlocks at 20 sponsors)*
+- 🎮 **GPU passthrough wizard** — guided IOMMU + VFIO setup *(unlocks at $1000 raised — see badge above)*
 
 ---
 
