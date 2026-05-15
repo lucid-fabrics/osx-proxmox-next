@@ -640,7 +640,7 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 
 - 🧩 **Multi-VM templates** — save and reuse configurations across VMs
 - 🔄 **Auto-update OpenCore** — detect and pull latest OpenCore releases
-- 🎮 **GPU passthrough wizard** — guided IOMMU + VFIO setup *(unlocks at $200 raised — see badge above)*
+- 🎮 **GPU passthrough wizard** — guided IOMMU + VFIO setup *(unlocks at $1000 raised — see badge above)*
 
 ---
 
