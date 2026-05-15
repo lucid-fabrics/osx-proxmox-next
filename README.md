@@ -30,8 +30,11 @@
   <a href="https://buymeacoffee.com/lucidfabrics">
     <img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black">
   </a>
+</p>
+
+<p align="center">
   <a href="https://ko-fi.com/lucidfabrics">
-    <img alt="GPU passthrough fund" src="https://img.shields.io/endpoint?url=https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next&style=for-the-badge">
+    <img alt="GPU Passthrough Fund progress" src="https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next/svg" width="600">
   </a>
 </p>
 
