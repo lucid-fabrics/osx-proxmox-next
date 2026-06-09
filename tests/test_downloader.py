@@ -145,6 +145,31 @@ class TestDownloadOpencore:
         result = download_opencore("sequoia", tmp_path)
         assert result == existing
 
+    def test_force_ignores_cache_and_redownloads(self, tmp_path, monkeypatch):
+        """force=True bypasses the cached ISO and fetches a fresh copy."""
+        existing = tmp_path / "opencore-sequoia.iso"
+        existing.write_text("stale cached iso")
+
+        release = {
+            "tag_name": "v0.3.0",
+            "assets": [
+                {
+                    "name": "opencore-sequoia.iso",
+                    "browser_download_url": "https://example.com/opencore-sequoia.iso",
+                }
+            ],
+        }
+        monkeypatch.setattr(dl_module, "_fetch_github_releases", lambda v: [release])
+        fresh = b"fresh-iso-content"
+        file_resp = _make_chunked_response([fresh], len(fresh))
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: file_resp)
+        monkeypatch.setattr(dl_module, "__version__", "0.3.0")
+        monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
+
+        result = download_opencore("sequoia", tmp_path, force=True)
+        assert result == existing
+        assert result.read_bytes() == fresh
+
 
 class TestDownloadRecovery:
     def test_tahoe_uses_osrecovery_with_latest(self, tmp_path, monkeypatch):

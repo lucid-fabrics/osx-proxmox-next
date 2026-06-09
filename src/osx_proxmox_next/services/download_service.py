@@ -18,11 +18,14 @@ def run_download_worker(
     config: VmConfig,
     missing: list[AssetCheck],
     on_progress: Callable[[str, int], None],
+    force_opencore: bool = False,
 ) -> list[str]:
     """Download missing assets and return a list of error strings.
 
     *on_progress(phase, pct)* is called on the background thread — callers
     that need to update UI must dispatch to the main thread themselves.
+
+    *force_opencore* bypasses the cached OpenCore ISO and re-downloads it.
     """
     dest_dir = Path(config.iso_dir or DEFAULT_ISO_DIR)
     errors: list[str] = []
@@ -37,7 +40,8 @@ def run_download_worker(
             continue
         if "OpenCore" in asset.name:
             try:
-                download_opencore(config.macos, dest_dir, on_progress=_progress_cb)
+                download_opencore(config.macos, dest_dir, on_progress=_progress_cb,
+                                  force=force_opencore)
             except DownloadError as exc:
                 errors.append(f"OpenCore: {exc}")
         elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():  # pragma: no branch

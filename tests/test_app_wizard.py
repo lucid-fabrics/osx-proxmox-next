@@ -867,7 +867,7 @@ def test_download_worker_success(monkeypatch) -> None:
 
     download_calls = {"opencore": 0, "recovery": 0}
 
-    def fake_download_opencore(macos, dest, on_progress=None):
+    def fake_download_opencore(macos, dest, on_progress=None, force=False):
         download_calls["opencore"] += 1
         if on_progress:
             on_progress(DownloadProgress(downloaded=500, total=1000, phase="opencore"))
@@ -1783,7 +1783,7 @@ def test_download_worker_skips_non_downloadable(monkeypatch) -> None:
 
     download_calls = {"opencore": 0}
 
-    def fake_download_opencore(macos, dest, on_progress=None):
+    def fake_download_opencore(macos, dest, on_progress=None, force=False):
         download_calls["opencore"] += 1
         return dest / f"opencore-{macos}.iso"
 

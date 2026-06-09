@@ -190,6 +190,11 @@ def compose_step5() -> ComposeResult:
         yield Static("Review & Dry Run")
         yield Static("", id="config_summary")
         yield Static("", id="download_status")
+        yield Checkbox("Force fresh download (ignore cached ISO)", value=False, id="force_download_cb")
+        yield Static(
+            "Re-fetches the OpenCore image. Does not modify any existing VM.",
+            id="force_download_hint", classes="hint",
+        )
         yield ProgressBar(total=100, show_eta=False, id="download_progress", classes="hidden")
         with Horizontal(classes="action_row"):
             yield Button("Run Dry Apply", id="dry_run_btn", disabled=True)
