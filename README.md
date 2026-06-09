@@ -239,6 +239,9 @@ osx-next-cli --version
 # Download OpenCore + recovery images
 osx-next-cli download --macos ventura
 
+# Re-download the OpenCore ISO, ignoring any cached copy
+osx-next-cli download --macos ventura --force
+
 # Check host readiness
 osx-next-cli preflight
 
@@ -636,6 +639,51 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 - **Commit message validation** — enforces [conventional commits](https://www.conventionalcommits.org/) format
 - **Secret detection** — blocks hardcoded passwords, API keys, tokens
 - **Code quality warnings** — flags TODO/FIXME and debug `print()` statements
+
+---
+
+## ❓ FAQ
+
+### Can I pass through an NVIDIA GeForce GPU?
+
+No, not on any modern macOS. Apple dropped NVIDIA support years ago, and it never came back.
+
+| Architecture | Cards | Last macOS that worked |
+|---|---|---|
+| Kepler | GTX 600 / 700 | Big Sur 11 (native drivers) |
+| Maxwell | GTX 900 | High Sierra 10.13.6 (Web Drivers) |
+| Pascal | GTX 10-series, Titan Xp | High Sierra 10.13.6 (Web Drivers) |
+| Turing and newer | RTX 20 / 30 / 40 | Never supported |
+
+The newest GeForce card that ever ran on macOS was a **Pascal GTX 10-series**, and only up to **High Sierra**. NVIDIA's Web Drivers were never approved for Mojave or later, so anything Maxwell or newer is capped there. Kepler lasted longer only because real Macs shipped with it.
+
+For GPU passthrough on a current macOS guest (Ventura, Sonoma, Sequoia, Tahoe), use an **AMD** card instead. Polaris (RX 470/480/580), Vega, and Navi (RX 5000/6000) have native macOS drivers and work with WhateverGreen, which ships in the OpenCore image.
+
+### Why does macOS show "Memory Modules Misconfigured"?
+
+This is cosmetic and specific to the `MacPro7,1` SMBIOS. macOS knows the real Mac Pro has 12 RAM slots and expects them filled in groups, so a VM's flat memory layout trips the warning. Nothing is actually wrong with the VM.
+
+To silence it, add `RestrictEvents.kext` to `EFI/OC/Kexts/` and set the boot-arg `revpatch=memtab`. If you change the boot-arg and it has no effect, set it directly from macOS, because OpenCore only writes a value when one is not already present:
+
+```bash
+sudo nvram boot-args="revpatch=memtab"
+```
+
+Reboot afterward. Avoid changing the SMBIOS model to dodge the warning if you already have iCloud/iMessage working, since those are bound to the `MacPro7,1` identity.
+
+### My desktop wallpaper is white or blank
+
+This usually means macOS is running without GPU acceleration (the default `vga: std` framebuffer). Dynamic wallpapers in particular do not render in software mode. Pass through a supported AMD GPU for full acceleration, or pick a static wallpaper.
+
+### The CLI keeps using an old OpenCore image
+
+The OpenCore ISO is cached on disk and reused on every run. To pull a fresh copy, force it:
+
+```bash
+osx-next-cli download --macos <version> --force
+```
+
+In the TUI, tick **Force fresh download (ignore cached ISO)** on the Review step. Note this only refreshes the image for new installs; it does not modify the EFI of a VM you already created.
 
 ---
 
