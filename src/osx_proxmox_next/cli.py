@@ -125,6 +125,8 @@ def _add_download_subparser(sub: argparse._SubParsersAction) -> None:
     dl.add_argument("--dest", type=str, default=DEFAULT_ISO_DIR, help="Destination directory")
     dl.add_argument("--opencore-only", action="store_true", help="Only download OpenCore ISO")
     dl.add_argument("--recovery-only", action="store_true", help="Only download recovery image")
+    dl.add_argument("--force", action="store_true",
+                    help="Ignore cached OpenCore ISO and re-download the newest one")
 
 
 def _add_vm_subparsers(sub: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:
@@ -430,7 +432,8 @@ def _run_download(args: argparse.Namespace) -> int:
     if not args.recovery_only:
         print(f"Downloading OpenCore image for {macos}...")
         try:
-            path = download_opencore(macos, dest_dir, on_progress=_cli_progress)
+            path = download_opencore(macos, dest_dir, on_progress=_cli_progress,
+                                     force=getattr(args, "force", False))
             print(f"\nDownloaded: {path}")
         except DownloadError as exc:
             print(f"\nOpenCore download failed: {exc}")

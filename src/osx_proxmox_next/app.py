@@ -245,7 +245,8 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
             self.query_one("#download_progress").remove_class("hidden")
             self.query_one("#download_progress", ProgressBar).update(total=100, progress=0)
             self.state.download_running = True
-            Thread(target=self._download_worker, args=(config, missing), daemon=True).start()
+            force = self.query_one("#force_download_cb", Checkbox).value
+            Thread(target=self._download_worker, args=(config, missing, force), daemon=True).start()
         else:
             self.query_one("#download_status", Static).update(
                 f"Missing assets: {', '.join(a.name for a in missing)}. Provide path manually."

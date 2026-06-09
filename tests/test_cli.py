@@ -89,14 +89,21 @@ def test_cli_plan_net_model_e1000(monkeypatch, capsys):
 
 
 def test_cli_plan_net_model_default_vmxnet3(monkeypatch, capsys):
-    """Omitting --net-model defaults to vmxnet3 in plan output."""
+    """Omitting --net-model defaults to vmxnet3 on a modern non-Xeon CPU."""
     from osx_proxmox_next.assets import AssetCheck
-    import osx_proxmox_next.defaults as defaults_module
+    from osx_proxmox_next.defaults import CpuInfo
     monkeypatch.setattr(
         cli_module, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
-    monkeypatch.setattr(defaults_module, "detect_net_model", lambda cpu: "vmxnet3")
+    # Simulate a modern non-Xeon Intel CPU so the real detect_net_model logic
+    # runs and selects vmxnet3 (Xeon/pre-Skylake would pick e1000-82545em).
+    modern_cpu = CpuInfo(
+        vendor="Intel", model_name="Intel(R) Core(TM) i7-10700K",
+        family=6, model=165, needs_emulated_cpu=False,
+        needs_penryn=False, is_xeon=False,
+    )
+    monkeypatch.setattr(cli_module, "detect_cpu_info", lambda: modern_cpu)
     rc = run_cli(_plan_args())
     assert rc == 0
     captured = capsys.readouterr()
@@ -384,6 +391,36 @@ def test_auto_download_missing_opencore(monkeypatch, tmp_path):
     assert "oc" in downloaded
 
 
+def test_download_force_passes_through(monkeypatch, tmp_path):
+    """`download --force` forwards force=True into download_opencore."""
+    captured = {}
+
+    def fake_download_opencore(macos, dest_dir, on_progress=None, force=False):
+        captured["force"] = force
+        return tmp_path / "opencore-sequoia.iso"
+
+    monkeypatch.setattr(cli_module, "download_opencore", fake_download_opencore)
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path),
+                  "--opencore-only", "--force"])
+    assert rc == 0
+    assert captured["force"] is True
+
+
+def test_download_without_force_defaults_false(monkeypatch, tmp_path):
+    """Omitting --force keeps the cache-respecting default."""
+    captured = {}
+
+    def fake_download_opencore(macos, dest_dir, on_progress=None, force=False):
+        captured["force"] = force
+        return tmp_path / "opencore-sequoia.iso"
+
+    monkeypatch.setattr(cli_module, "download_opencore", fake_download_opencore)
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path),
+                  "--opencore-only"])
+    assert rc == 0
+    assert captured["force"] is False
+
+
 def test_auto_download_missing_recovery(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
@@ -487,7 +524,7 @@ def test_auto_download_missing_nothing_downloadable(monkeypatch, tmp_path):
 def test_cli_download_success(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli_module, "download_opencore",
-        lambda macos, dest, on_progress=None: tmp_path / f"opencore-{macos}.iso",
+        lambda macos, dest, on_progress=None, force=False: tmp_path / f"opencore-{macos}.iso",
     )
     monkeypatch.setattr(
         cli_module, "download_recovery",
@@ -500,7 +537,7 @@ def test_cli_download_success(monkeypatch, tmp_path):
 def test_cli_download_opencore_only(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli_module, "download_opencore",
-        lambda macos, dest, on_progress=None: tmp_path / f"opencore-{macos}.iso",
+        lambda macos, dest, on_progress=None, force=False: tmp_path / f"opencore-{macos}.iso",
     )
     rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path), "--opencore-only"])
     assert rc == 0
@@ -519,7 +556,7 @@ def test_cli_download_failure(monkeypatch, tmp_path):
     from osx_proxmox_next.downloader import DownloadError
     monkeypatch.setattr(
         cli_module, "download_opencore",
-        lambda macos, dest, on_progress=None: (_ for _ in ()).throw(DownloadError("fail")),
+        lambda macos, dest, on_progress=None, force=False: (_ for _ in ()).throw(DownloadError("fail")),
     )
     monkeypatch.setattr(
         cli_module, "download_recovery",

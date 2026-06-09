@@ -62,15 +62,17 @@ def download_opencore(
     macos: str,
     dest_dir: Path,
     on_progress: ProgressCallback = None,
+    force: bool = False,
 ) -> Path:
     version = __version__
     # Try version-specific first, fall back to universal OC image
     candidates = [f"opencore-{macos}.iso", _OPENCORE_UNIVERSAL]
-    for name in candidates:
-        dest = dest_dir / name
-        if dest.exists():
-            log.debug("OpenCore cache hit: %s", dest)
-            return dest
+    if not force:
+        for name in candidates:
+            dest = dest_dir / name
+            if dest.exists():
+                log.debug("OpenCore cache hit: %s", dest)
+                return dest
 
     # Check version-tagged release, latest release, then permanent 'assets' tag
     releases = _fetch_github_releases(version)

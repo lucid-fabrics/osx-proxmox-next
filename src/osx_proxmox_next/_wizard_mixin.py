@@ -146,10 +146,12 @@ class WizardStepsMixin:
                 log.debug("Failed to rebuild plan after download", exc_info=True)
             self._render_config_summary()  # type: ignore[attr-defined]
 
-    def _download_worker(self, config: VmConfig, missing: list[AssetCheck]) -> None:
+    def _download_worker(self, config: VmConfig, missing: list[AssetCheck],
+                         force_opencore: bool = False) -> None:
         def on_progress(phase: str, pct: int) -> None:
             self.call_from_thread(self._update_download_progress, phase, pct)  # type: ignore[attr-defined]
-        errors = run_download_worker(config, missing, on_progress=on_progress)
+        errors = run_download_worker(config, missing, on_progress=on_progress,
+                                     force_opencore=force_opencore)
         self.call_from_thread(self._finish_download, errors)  # type: ignore[attr-defined]
 
     def _update_download_progress(self, phase: str, pct: int) -> None:
