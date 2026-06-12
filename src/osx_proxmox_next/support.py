@@ -2,9 +2,14 @@
 
 KOFI_URL = "https://ko-fi.com/lucidfabrics"
 
-SUPPORT_LINE = f"If this saved you time: {KOFI_URL}"
+SUPPORT_LINE = f"c[_] If this saved you time: {KOFI_URL}"
 
 SUPPORT_LINES_POST_INSTALL = (
-    "Manual OpenCore setup takes hours. This took minutes.",
-    f"If that is worth a coffee: {KOFI_URL}",
+    r"     ) )",
+    r"    ( (",
+    r"  ._______.",
+    r"  |       |)   Manual OpenCore setup takes hours.",
+    r"  |       |    This took minutes.",
+    r"   \_____/     Worth a coffee?",
+    f"               {KOFI_URL}",
 )
