@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from ..defaults import CpuInfo
 from ..domain import SUPPORTED_MACOS, PlanStep, VmConfig
+from ..planner import POST_INSTALL_BOOT_ORDER
 from ..preflight import PreflightCheck
 from ..rollback import RollbackSnapshot, rollback_hints
+from ..support import SUPPORT_LINE
 
 __all__ = [
     "build_config_summary_text",
@@ -23,7 +25,7 @@ def build_config_summary_text(
     lines = [
         f"Target: {meta.get('label', config.macos)} ({meta.get('channel', '?')})",
         f"VM: {config.vmid} / {config.name}",
-        f"CPU: {cpu_label} — {config.cores} cores | Memory: {config.memory_mb} MB | Disk: {config.disk_gb} GB",
+        f"CPU: {cpu_label} - {config.cores} cores | Memory: {config.memory_mb} MB | Disk: {config.disk_gb} GB",
         f"Storage: {config.storage} | Bridge: {config.bridge}",
     ]
     if config.installer_path:
@@ -59,11 +61,11 @@ def format_install_result(
             "Install completed successfully!",
             f"Log: {log_path}",
             "",
-            "POST-INSTALL: After macOS finishes installing, fix the boot order",
-            "so the main disk boots first (instead of recovery):",
-            f"  qm set {vmid} --boot order=virtio0;ide0",
+            "POST-INSTALL: After macOS finishes installing, run:",
+            f"  osx-next-cli post-install --vmid {vmid} --execute",
+            f"This switches boot order to {POST_INSTALL_BOOT_ORDER} (OpenCore first).",
             "",
-            "If this saved you time: https://ko-fi.com/lucidfabrics",
+            SUPPORT_LINE,
         ]
     else:
         lines = ["Install FAILED.", f"Log: {log_path}"]

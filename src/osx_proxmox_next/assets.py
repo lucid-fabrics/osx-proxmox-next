@@ -48,7 +48,7 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
 def suggested_fetch_commands(config: VmConfig) -> list[str]:
     iso_root = config.iso_dir or DEFAULT_ISO_DIR
     return [
-        f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
+        f"# Auto-download available - run: osx-next-cli download --macos {config.macos}",
         f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
         f"# Or place recovery image at {iso_root}/{config.macos}-recovery.iso",
     ]

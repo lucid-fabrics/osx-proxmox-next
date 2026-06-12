@@ -139,14 +139,14 @@ def _compose_step4_cpu_network(cpu_info: CpuInfo) -> ComposeResult:
             value=cpu_info.needs_penryn,
         )
     yield Static(
-        "Older Intel CPU detected (pre-Skylake). Penryn mode improves macOS install stability on this hardware. (Xeon CPUs are automatically excluded — they use -cpu host.)",
+        "Older Intel CPU detected (pre-Skylake). Penryn mode improves macOS install stability on this hardware. (Xeon CPUs are automatically excluded - they use -cpu host.)",
         id="penryn_hint",
         classes="penryn_hint" + ("" if cpu_info.needs_penryn else " step_hidden"),
     )
     _e1000_default = cpu_info.is_xeon or cpu_info.needs_penryn
     with Horizontal(classes="action_row"):
         yield Checkbox(
-            "Use e1000 network adapter (recommended for Xeon / older Intel — no kext needed)",
+            "Use e1000 network adapter (recommended for Xeon / older Intel - no kext needed)",
             id="e1000_cb",
             value=_e1000_default,
         )

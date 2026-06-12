@@ -52,7 +52,7 @@ _BUILD_BINARIES: dict[str, str] = {
 
 
 def _check_ignore_msrs(kvm_conf: Path | None = None) -> PreflightCheck:
-    """Check if KVM ignore_msrs=Y is set — critical for macOS (prevents MSR kernel panics)."""
+    """Check if KVM ignore_msrs=Y is set - critical for macOS (prevents MSR kernel panics)."""
     if kvm_conf is None:
         kvm_conf = Path("/etc/modprobe.d/kvm.conf")
     if kvm_conf.exists():
@@ -66,13 +66,13 @@ def _check_ignore_msrs(kvm_conf: Path | None = None) -> PreflightCheck:
     return PreflightCheck(
         name="KVM ignore_msrs",
         ok=False,
-        details="Missing ignore_msrs=Y — macOS will kernel panic on unsupported MSR access. "
+        details="Missing ignore_msrs=Y - macOS will kernel panic on unsupported MSR access. "
                 "Fix: echo 'options kvm ignore_msrs=Y' >> /etc/modprobe.d/kvm.conf && update-initramfs -k all -u",
     )
 
 
 def _check_iommu(cmdline_path: Path | None = None) -> PreflightCheck:
-    """Check if IOMMU is enabled in kernel cmdline — informational (GPU passthrough)."""
+    """Check if IOMMU is enabled in kernel cmdline - informational (GPU passthrough)."""
     cmdline = cmdline_path or Path("/proc/cmdline")
     if cmdline.exists():
         content = cmdline.read_text()
@@ -85,12 +85,12 @@ def _check_iommu(cmdline_path: Path | None = None) -> PreflightCheck:
     return PreflightCheck(
         name="IOMMU enabled",
         ok=True,
-        details="IOMMU not detected in kernel cmdline — only needed for GPU passthrough",
+        details="IOMMU not detected in kernel cmdline - only needed for GPU passthrough",
     )
 
 
 def _check_initcall_blacklist(cmdline_path: Path | None = None) -> PreflightCheck:
-    """Check for initcall_blacklist=sysfb_init — informational (PVE 8+ GPU passthrough)."""
+    """Check for initcall_blacklist=sysfb_init - informational (PVE 8+ GPU passthrough)."""
     cmdline = cmdline_path or Path("/proc/cmdline")
     if cmdline.exists():
         content = cmdline.read_text()
@@ -103,7 +103,7 @@ def _check_initcall_blacklist(cmdline_path: Path | None = None) -> PreflightChec
     return PreflightCheck(
         name="initcall_blacklist",
         ok=True,
-        details="initcall_blacklist not set — only needed for PVE 8+ GPU passthrough",
+        details="initcall_blacklist not set - only needed for PVE 8+ GPU passthrough",
     )
 
 
@@ -131,7 +131,7 @@ def run_preflight() -> list[PreflightCheck]:
 
     for check in checks:
         if not check.ok:
-            log.debug("Preflight fail: %s — %s", check.name, check.details)
+            log.debug("Preflight fail: %s - %s", check.name, check.details)
 
     checks.append(_check_ignore_msrs())
     checks.append(_check_iommu())
@@ -142,7 +142,7 @@ def run_preflight() -> list[PreflightCheck]:
         PreflightCheck(
             name="CPU vendor",
             ok=True,
-            details=f"{vendor} — {'Cascadelake-Server emulation' if vendor == 'AMD' else 'native host passthrough'}",
+            details=f"{vendor} - {'Cascadelake-Server emulation' if vendor == 'AMD' else 'native host passthrough'}",
         )
     )
     checks.append(

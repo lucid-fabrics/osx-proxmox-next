@@ -255,7 +255,7 @@ def test_cli_apply_success(monkeypatch, tmp_path):
     assert rc == 0
 
 
-def test_cli_apply_failure(monkeypatch, tmp_path):
+def test_cli_apply_failure(monkeypatch, tmp_path, capsys):
     from osx_proxmox_next.assets import AssetCheck
     from osx_proxmox_next.executor import ApplyResult
     from osx_proxmox_next.rollback import RollbackSnapshot
@@ -284,6 +284,7 @@ def test_cli_apply_failure(monkeypatch, tmp_path):
         "--storage", "local-lvm",
     ])
     assert rc == 4
+    assert "ko-fi" not in capsys.readouterr().out
 
 
 def test_config_from_args_smbios():
@@ -739,7 +740,7 @@ def test_cli_uninstall_vm_not_found(monkeypatch):
     assert rc == 2
 
 
-def test_cli_uninstall_execute_success(monkeypatch, tmp_path):
+def test_cli_uninstall_execute_success(monkeypatch, tmp_path, capsys):
     from osx_proxmox_next.executor import ApplyResult
     from osx_proxmox_next.planner import VmInfo
     from osx_proxmox_next.rollback import RollbackSnapshot
@@ -758,6 +759,7 @@ def test_cli_uninstall_execute_success(monkeypatch, tmp_path):
     )
     rc = run_cli(["uninstall", "--vmid", "106", "--execute"])
     assert rc == 0
+    assert "ko-fi" not in capsys.readouterr().out
 
 
 def test_cli_uninstall_execute_failure(monkeypatch, tmp_path):
@@ -1037,7 +1039,7 @@ def test_cli_clone_execute_success(monkeypatch, tmp_path, capsys) -> None:
     assert "901" in out
 
 
-def test_cli_clone_execute_failure(monkeypatch, tmp_path) -> None:
+def test_cli_clone_execute_failure(monkeypatch, tmp_path, capsys) -> None:
     from osx_proxmox_next.executor import ApplyResult
     from osx_proxmox_next.planner import VmInfo
 
@@ -1051,6 +1053,7 @@ def test_cli_clone_execute_failure(monkeypatch, tmp_path) -> None:
     )
     rc = run_cli(["clone", "--source-vmid", "900", "--new-vmid", "901", "--execute"])
     assert rc == 8
+    assert "ko-fi" not in capsys.readouterr().out
 
 
 def test_cli_clone_preserves_bridge_from_source(monkeypatch, tmp_path, capsys) -> None:
@@ -1106,7 +1109,9 @@ def test_cli_doctor_all_ok(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli_module, "run_doctor", lambda vmid: _make_doctor_checks())
     rc = run_cli(["doctor", "--vmid", "100"])
     assert rc == 0
-    assert "All checks passed" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "All checks passed" in out
+    assert "ko-fi" not in out
 
 
 def test_cli_doctor_with_failures(monkeypatch, capsys) -> None:
@@ -1154,6 +1159,7 @@ def test_cli_clone_execute_success_prints_apple_services(monkeypatch, tmp_path, 
     assert rc == 0
     out = capsys.readouterr().out
     assert "Apple services" in out
+    assert "ko-fi.com/lucidfabrics" in out
 
 
 def test_cli_clone_execute_no_apple_services_no_message(monkeypatch, tmp_path, capsys) -> None:
@@ -1210,6 +1216,7 @@ def test_cli_post_install_execute_success(monkeypatch, tmp_path, capsys) -> None
     out = capsys.readouterr().out
     assert "Post-install OK" in out
     assert POST_INSTALL_BOOT_ORDER in out
+    assert "ko-fi.com/lucidfabrics" in out
 
 
 def test_cli_post_install_execute_failure(monkeypatch, tmp_path, capsys) -> None:
@@ -1220,7 +1227,9 @@ def test_cli_post_install_execute_failure(monkeypatch, tmp_path, capsys) -> None
     )
     rc = run_cli(["post-install", "--vmid", "102", "--execute"])
     assert rc == 9
-    assert "FAILED" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "FAILED" in out
+    assert "ko-fi" not in out
 
 
 def test_cli_apply_post_install_hint_correct(monkeypatch, tmp_path, capsys) -> None:
@@ -1249,3 +1258,5 @@ def test_cli_apply_post_install_hint_correct(monkeypatch, tmp_path, capsys) -> N
     assert "post-install" in out
     assert POST_INSTALL_BOOT_ORDER in out
     assert "virtio0;ide0" not in out
+    assert "ko-fi.com/lucidfabrics" in out
+    assert "buymeacoffee" not in out
