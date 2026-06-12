@@ -797,3 +797,64 @@ class TestRecoveryOsType:
 
         download_recovery("tahoe", tmp_path)
         assert captured[0] == "latest"
+
+
+class TestDownloadRestrictEvents:
+    def test_cache_hit_skips_download(self, tmp_path, monkeypatch):
+        from osx_proxmox_next.downloader import RESTRICTEVENTS_ZIP, download_restrictevents
+
+        cached = tmp_path / RESTRICTEVENTS_ZIP
+        cached.write_bytes(b"zip")
+        called = []
+        monkeypatch.setattr(dl_module, "_download_file",
+                            lambda *a, **k: called.append(a))
+
+        result = download_restrictevents(tmp_path)
+        assert result == cached
+        assert called == []
+
+    def test_downloads_when_missing(self, tmp_path, monkeypatch):
+        from osx_proxmox_next.downloader import (
+            RESTRICTEVENTS_URL, RESTRICTEVENTS_ZIP, download_restrictevents,
+        )
+
+        calls = []
+
+        def fake_download(url, dest, on_progress, phase):
+            calls.append((url, dest, phase))
+            dest.write_bytes(b"zip")
+
+        monkeypatch.setattr(dl_module, "_download_file", fake_download)
+        result = download_restrictevents(tmp_path)
+        assert result == tmp_path / RESTRICTEVENTS_ZIP
+        assert calls == [(RESTRICTEVENTS_URL, tmp_path / RESTRICTEVENTS_ZIP, "restrictevents")]
+
+    def test_force_redownloads_cached_zip(self, tmp_path, monkeypatch):
+        from osx_proxmox_next.downloader import RESTRICTEVENTS_ZIP, download_restrictevents
+
+        cached = tmp_path / RESTRICTEVENTS_ZIP
+        cached.write_bytes(b"old")
+        calls = []
+        monkeypatch.setattr(dl_module, "_download_file",
+                            lambda url, dest, on_progress, phase: calls.append(url))
+
+        download_restrictevents(tmp_path, force=True)
+        assert len(calls) == 1
+
+
+class TestEnsureRestrictEvents:
+    def test_returns_path_on_success(self, tmp_path, monkeypatch):
+        from osx_proxmox_next.downloader import RESTRICTEVENTS_ZIP, ensure_restrictevents
+
+        cached = tmp_path / RESTRICTEVENTS_ZIP
+        cached.write_bytes(b"zip")
+        assert ensure_restrictevents(tmp_path) == cached
+
+    def test_swallows_download_error(self, tmp_path, monkeypatch):
+        from osx_proxmox_next.downloader import ensure_restrictevents
+
+        def boom(url, dest, on_progress, phase):
+            raise DownloadError("offline")
+
+        monkeypatch.setattr(dl_module, "_download_file", boom)
+        assert ensure_restrictevents(tmp_path) is None

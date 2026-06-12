@@ -39,6 +39,17 @@ def _noop_progress(phase: str, pct: int) -> None:
     pass
 
 
+@pytest.fixture(autouse=True)
+def _stub_restrictevents(monkeypatch):
+    """Keep the best-effort RestrictEvents fetch off the network in tests."""
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        "osx_proxmox_next.services.download_service.ensure_restrictevents",
+        lambda dest_dir: calls.append(dest_dir) or None,
+    )
+    return calls
+
+
 # ---------------------------------------------------------------------------
 # Happy path — downloads succeed
 # ---------------------------------------------------------------------------
@@ -47,6 +58,11 @@ def _noop_progress(phase: str, pct: int) -> None:
 def test_run_download_worker_empty_missing_returns_no_errors(monkeypatch) -> None:
     errors = run_download_worker(_make_config(), [], _noop_progress)
     assert errors == []
+
+
+def test_run_download_worker_always_fetches_restrictevents(_stub_restrictevents) -> None:
+    run_download_worker(_make_config(), [], _noop_progress)
+    assert _stub_restrictevents == [Path("/tmp/iso")]
 
 
 def test_run_download_worker_opencore_calls_download_opencore(monkeypatch) -> None:

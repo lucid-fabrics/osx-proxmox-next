@@ -18,6 +18,14 @@ from osx_proxmox_next.services import install_service
 from osx_proxmox_next.services import destroy_service
 from osx_proxmox_next.services import preflight_service
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stub_restrictevents(monkeypatch):
+    """Keep the best-effort RestrictEvents fetch off the network in tests."""
+    monkeypatch.setattr(download_service, "ensure_restrictevents", lambda dest_dir: None)
+
 
 class FakePve:
     """Test helper that mimics ProxmoxAdapter with canned responses."""

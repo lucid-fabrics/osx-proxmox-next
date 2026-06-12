@@ -254,3 +254,56 @@ def test_build_oc_disk_script_contains_dest_path() -> None:
         macos="sequoia",
     )
     assert str(dest) in result
+
+
+# ---------------------------------------------------------------------------
+# RestrictEvents injection (silences MacPro7,1 "Memory Modules Misconfigured")
+# ---------------------------------------------------------------------------
+
+
+def _oc_script() -> str:
+    return _build_oc_disk_script(
+        opencore_path=Path("/iso/opencore.iso"),
+        recovery_path=Path("/iso/sequoia-recovery.iso"),
+        dest=Path("/tmp/oc.img"),
+        macos="sequoia",
+    )
+
+
+def test_build_oc_disk_script_injects_restrictevents() -> None:
+    result = _oc_script()
+    assert "RestrictEvents.kext" in result
+    assert "RestrictEvents-1.1.6-RELEASE.zip" in result
+
+
+def test_build_oc_disk_script_restrictevents_zip_next_to_iso() -> None:
+    result = _oc_script()
+    assert "/iso/RestrictEvents-1.1.6-RELEASE.zip" in result
+
+
+def test_build_oc_disk_script_restrictevents_curl_fallback() -> None:
+    result = _oc_script()
+    assert "curl -fsSL" in result
+    assert "github.com/acidanthera/RestrictEvents/releases/download" in result
+
+
+def test_build_oc_disk_script_restrictevents_failure_is_non_fatal() -> None:
+    result = _oc_script()
+    assert "memory warning fix skipped" in result
+
+
+def test_build_oc_disk_script_injection_runs_before_plist_patch() -> None:
+    result = _oc_script()
+    assert result.index("RE_ZIP") < result.index("plistlib")
+
+
+def test_plist_patch_script_registers_restrictevents_kext() -> None:
+    script = _plist_patch_script()
+    assert "RestrictEvents.kext" in script
+    assert "Contents/MacOS/RestrictEvents" in script
+    assert "Contents/Info.plist" in script
+
+
+def test_plist_patch_script_restrictevents_entry_guarded_by_kext_dir() -> None:
+    script = _plist_patch_script()
+    assert 'os.path.isdir(oc_dest+"/EFI/OC/Kexts/RestrictEvents.kext")' in script

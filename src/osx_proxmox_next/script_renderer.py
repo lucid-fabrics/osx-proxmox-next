@@ -6,6 +6,7 @@ from pathlib import Path
 from shlex import quote as shquote
 
 from .domain import SUPPORTED_MACOS, VmConfig
+from .downloader import RESTRICTEVENTS_URL, RESTRICTEVENTS_ZIP
 from .smbios_planner import _sanitize_smbios
 
 log = logging.getLogger(__name__)
@@ -160,11 +161,43 @@ def _plist_patch_script(
         "p[\"NVRAM\"][\"WriteFlash\"]=True; "
         "p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{})[\"RequestBootVarRouting\"]=True; "
         "[k.update(Enabled=True) for k in p.get(\"Kernel\",{}).get(\"Add\",[]) if \"VirtualSMC\" in k.get(\"BundlePath\",\"\")]; "
+        "ka=p.setdefault(\"Kernel\",{}).setdefault(\"Add\",[]); "
+        "os.path.isdir(oc_dest+\"/EFI/OC/Kexts/RestrictEvents.kext\") "
+        "and (\"RestrictEvents.kext\" not in [k.get(\"BundlePath\") for k in ka]) "
+        "and ka.append({\"Arch\":\"Any\",\"BundlePath\":\"RestrictEvents.kext\","
+        "\"Comment\":\"Silence MacPro7,1 memory warning\",\"Enabled\":True,"
+        "\"ExecutablePath\":\"Contents/MacOS/RestrictEvents\",\"MaxKernel\":\"\","
+        "\"MinKernel\":\"\",\"PlistPath\":\"Contents/Info.plist\"}); "
+        "[k.update(Enabled=True) for k in ka if \"RestrictEvents\" in k.get(\"BundlePath\",\"\")]; "
         + amd_patch
         + platforminfo
         + apple_id_bypass
         + "f=open(oc_dest+\"/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "import sys; sys.stderr.write(\"config.plist patched\\n\")'"
+    )
+
+
+def _inject_restrictevents_script(opencore_path: Path) -> str:
+    """Return bash snippet that adds RestrictEvents.kext to the EFI being built.
+
+    The kext zip is normally pre-downloaded next to the OpenCore ISO. If it is
+    missing (cached ISO, download phase skipped), curl it directly; if that
+    also fails the build continues, since the fix is purely cosmetic.
+    """
+    zip_path = opencore_path.parent / RESTRICTEVENTS_ZIP
+    return (
+        f"export RE_ZIP={shquote(str(zip_path))}; "
+        f"[ -f \"$RE_ZIP\" ] || curl -fsSL -o \"$RE_ZIP\" {shquote(RESTRICTEVENTS_URL)} "
+        "|| echo 'WARN: RestrictEvents download failed'; "
+        "if [ -f \"$RE_ZIP\" ]; then "
+        "python3 -c '"
+        "import os, zipfile; "
+        "z=zipfile.ZipFile(os.environ[\"RE_ZIP\"]); "
+        "names=[n for n in z.namelist() if n.startswith(\"RestrictEvents.kext/\")]; "
+        "z.extractall(os.environ[\"OC_DEST\"]+\"/EFI/OC/Kexts\", members=names); "
+        "import sys; sys.stderr.write(\"RestrictEvents.kext injected\\n\")' "
+        "|| echo 'WARN: RestrictEvents.kext extraction failed, memory warning fix skipped'; "
+        "else echo 'WARN: RestrictEvents.kext unavailable, memory warning fix skipped'; fi && "
     )
 
 
@@ -238,6 +271,8 @@ def _build_oc_disk_script(
         + "cp -a $OC_SRC/. $OC_DEST/ && "
         # Validate EFI structure was copied
         "{ [ -d $OC_DEST/EFI/OC ] || { echo 'ERROR: OpenCore ISO does not contain expected EFI/OC directory. ISO may be corrupt.'; false; }; } && "
+        # Add RestrictEvents.kext (silences MacPro7,1 memory warning)
+        + _inject_restrictevents_script(opencore_path)
         # Patch config.plist
         + plist_script + " && "
         # Fix plistlib self-closing tags that OpenCore's OcXmlLib rejects
