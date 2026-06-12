@@ -122,3 +122,24 @@ class TestStepScreensImport:
         cpu = _cpu()
         result = compose_step4(cpu)
         assert isinstance(result, types.GeneratorType)
+
+
+class TestFormatInstallResult:
+    def test_success_references_post_install_subcommand(self):
+        from osx_proxmox_next.planner import POST_INSTALL_BOOT_ORDER
+        from osx_proxmox_next.screens.summary_screen import format_install_result
+        text = format_install_result(ok=True, vmid=900, log_path="/tmp/log.txt", snapshot=None)
+        assert "Install completed successfully!" in text
+        assert "osx-next-cli post-install --vmid 900" in text
+        assert POST_INSTALL_BOOT_ORDER in text
+        assert "virtio0;ide0" not in text
+        assert "ko-fi.com/lucidfabrics" in text
+
+    def test_failure_shows_rollback_hints_and_no_donation_ask(self):
+        from osx_proxmox_next.rollback import RollbackSnapshot
+        from osx_proxmox_next.screens.summary_screen import format_install_result
+        from pathlib import Path
+        snap = RollbackSnapshot(vmid=900, path=Path("/tmp/snap.conf"))
+        text = format_install_result(ok=False, vmid=900, log_path="/tmp/log.txt", snapshot=snap)
+        assert "Install FAILED." in text
+        assert "ko-fi" not in text

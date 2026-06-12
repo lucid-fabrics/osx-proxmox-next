@@ -19,6 +19,7 @@ from .services import fetch_vm_info, get_proxmox_adapter, run_download_worker
 from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints
+from .support import SUPPORT_LINE, SUPPORT_LINES_POST_INSTALL
 
 _MB = 1024 * 1024
 
@@ -179,7 +180,7 @@ def _add_vm_subparsers(sub: argparse._SubParsersAction, common: argparse.Argumen
                        help="macOS version hint for SMBIOS model selection (default: sequoia)")
     clone.add_argument("--no-apple-services", action="store_true", default=False,
                        dest="no_apple_services",
-                       help="Skip vmgenid and MAC regeneration (not recommended — breaks Apple services isolation)")
+                       help="Skip vmgenid and MAC regeneration (not recommended - breaks Apple services isolation)")
     clone.add_argument("--execute", action="store_true",
                        help="Actually run (default is dry run)")
 
@@ -230,7 +231,7 @@ def _handle_apply_command(args: argparse.Namespace, config: VmConfig, steps: lis
         print(f"  osx-next-cli post-install --vmid {config.vmid} --execute")
         print(f"This switches boot order to {POST_INSTALL_BOOT_ORDER} (OpenCore first).")
         print()
-        print("If this saved you time: https://ko-fi.com/lucidfabrics | https://buymeacoffee.com/lucidfabrics")
+        print(SUPPORT_LINE)
         return 0
 
     print(f"Apply FAILED. Log: {result.log_path}")
@@ -328,7 +329,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
     failures = 0
     warnings = 0
 
-    print(f"\nDoctor report — VM {vmid}\n")
+    print(f"\nDoctor report - VM {vmid}\n")
     for check in checks:
         icon = _ICONS[check.severity]
         print(f"  [{icon}] {check.message}")
@@ -495,7 +496,7 @@ def _run_edit(args: argparse.Namespace) -> int:
     steps = build_edit_plan(vmid, changes, start_after=args.start, current_net0=current_net0)
 
     if not args.execute:
-        print("DRY RUN — pass --execute to apply:\n")
+        print("DRY RUN - pass --execute to apply:\n")
 
     for idx, step in enumerate(steps, start=1):
         print(f"{idx:02d}. {step.title}")
@@ -561,7 +562,7 @@ def _run_clone(args: argparse.Namespace) -> int:
     )
 
     if not args.execute:
-        print("DRY RUN — pass --execute to apply:\n")
+        print("DRY RUN - pass --execute to apply:\n")
 
     for idx, step in enumerate(steps, start=1):
         print(f"{idx:02d}. {step.title}")
@@ -576,6 +577,8 @@ def _run_clone(args: argparse.Namespace) -> int:
         print(f"VM {dst_vmid} is ready with a fresh SMBIOS identity.")
         if apple_services:
             print("Apple services (iMessage, FaceTime, iCloud) are isolated from the source VM.")
+        print()
+        print(SUPPORT_LINE)
         return 0
 
     print(f"\nClone FAILED. Log: {result.log_path}")
@@ -591,7 +594,7 @@ def _run_post_install(args: argparse.Namespace) -> int:
     steps = build_post_install_plan(vmid)
 
     if not args.execute:
-        print("DRY RUN — pass --execute to apply:\n")
+        print("DRY RUN - pass --execute to apply:\n")
         for idx, step in enumerate(steps, start=1):
             print(f"{idx:02d}. {step.title}")
             print(f"    {step.command}")
@@ -601,6 +604,9 @@ def _run_post_install(args: argparse.Namespace) -> int:
     if result.ok:
         print(f"Post-install OK. Boot order set to {POST_INSTALL_BOOT_ORDER}. Log: {result.log_path}")
         print("Start the VM to boot into installed macOS via OpenCore.")
+        print()
+        for line in SUPPORT_LINES_POST_INSTALL:
+            print(line)
         return 0
 
     print(f"Post-install FAILED. Log: {result.log_path}")
