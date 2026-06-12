@@ -3,6 +3,7 @@ from osx_proxmox_next.domain import VmConfig
 from osx_proxmox_next.planner import (
     build_plan, _cpu_args,
     VmInfo, fetch_vm_info, build_destroy_plan,
+    POST_INSTALL_BOOT_ORDER,
 )
 from osx_proxmox_next.script_renderer import (
     render_script, _plist_patch_script,
@@ -829,3 +830,26 @@ def test_build_plan_intel_host_no_kvm_pv_flags(monkeypatch) -> None:
     assert "kvm_pv_unhalt" not in profile.command
     assert "kvm_pv_eoi" not in profile.command
     assert "-cpu host" in profile.command
+
+
+# ---------------------------------------------------------------------------
+# build_post_install_plan
+# ---------------------------------------------------------------------------
+
+def test_build_post_install_plan_single_step() -> None:
+    from osx_proxmox_next.planner import build_post_install_plan
+    steps = build_post_install_plan(102)
+    assert len(steps) == 1
+    assert steps[0].title == "Set post-install boot order"
+
+
+def test_build_post_install_plan_correct_boot_order() -> None:
+    from osx_proxmox_next.planner import build_post_install_plan
+    steps = build_post_install_plan(102)
+    assert f"--boot '{POST_INSTALL_BOOT_ORDER}'" in steps[0].command
+
+
+def test_build_post_install_plan_targets_correct_vmid() -> None:
+    from osx_proxmox_next.planner import build_post_install_plan
+    steps = build_post_install_plan(999)
+    assert "qm set 999" in steps[0].command

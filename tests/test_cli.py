@@ -3,6 +3,7 @@ from pathlib import Path
 
 from osx_proxmox_next import cli as cli_module
 from osx_proxmox_next.cli import run_cli
+from osx_proxmox_next.planner import POST_INSTALL_BOOT_ORDER
 
 
 def test_cli_parser_has_expected_commands() -> None:
@@ -1171,3 +1172,80 @@ def test_cli_clone_execute_no_apple_services_no_message(monkeypatch, tmp_path, c
     assert rc == 0
     out = capsys.readouterr().out
     assert "Apple services" not in out
+
+
+# ---------------------------------------------------------------------------
+# post-install subcommand
+# ---------------------------------------------------------------------------
+
+def test_cli_parser_has_post_install_command() -> None:
+    from osx_proxmox_next.cli import build_parser
+    parser = build_parser()
+    cmds = parser._subparsers._group_actions[0].choices  # type: ignore[attr-defined]
+    assert "post-install" in cmds
+
+
+def test_cli_post_install_dry_run(capsys) -> None:
+    rc = run_cli(["post-install", "--vmid", "102"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert POST_INSTALL_BOOT_ORDER in out
+
+
+def test_cli_post_install_invalid_vmid(capsys) -> None:
+    rc = run_cli(["post-install", "--vmid", "1"])
+    assert rc == 2
+    assert "VMID" in capsys.readouterr().out
+
+
+def test_cli_post_install_execute_success(monkeypatch, tmp_path, capsys) -> None:
+    from osx_proxmox_next.executor import ApplyResult
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["post-install", "--vmid", "102", "--execute"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Post-install OK" in out
+    assert POST_INSTALL_BOOT_ORDER in out
+
+
+def test_cli_post_install_execute_failure(monkeypatch, tmp_path, capsys) -> None:
+    from osx_proxmox_next.executor import ApplyResult
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=False, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["post-install", "--vmid", "102", "--execute"])
+    assert rc == 9
+    assert "FAILED" in capsys.readouterr().out
+
+
+def test_cli_apply_post_install_hint_correct(monkeypatch, tmp_path, capsys) -> None:
+    """Apply success message must reference post-install subcommand, not raw qm set."""
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
+    )
+    monkeypatch.setattr(cli_module, "create_snapshot",
+                        lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.json"))
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli([
+        "apply", "--vmid", "102", "--name", "macos-tahoe",
+        "--macos", "sequoia", "--cores", "8", "--memory", "16384",
+        "--disk", "128", "--bridge", "vmbr0", "--storage", "local-lvm",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "post-install" in out
+    assert POST_INSTALL_BOOT_ORDER in out
+    assert "virtio0;ide0" not in out

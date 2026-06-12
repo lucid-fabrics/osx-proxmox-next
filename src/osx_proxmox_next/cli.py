@@ -14,7 +14,7 @@ from .doctor import run_doctor, Severity
 from .domain import MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, EditChanges, validate_config, validate_edit_changes
 from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
 from .executor import apply_plan
-from .planner import build_plan, build_destroy_plan, build_edit_plan, build_clone_plan
+from .planner import build_plan, build_destroy_plan, build_edit_plan, build_clone_plan, build_post_install_plan, POST_INSTALL_BOOT_ORDER
 from .services import fetch_vm_info, get_proxmox_adapter, run_download_worker
 from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
@@ -117,6 +117,12 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
     guide.add_argument("reason", nargs="?", default="boot issue")
     doctor = sub.add_parser("doctor", help="Diagnose a running or stopped macOS VM for common config issues")
     doctor.add_argument("--vmid", type=int, required=True, help="VM ID to inspect")
+    post_install = sub.add_parser(
+        "post-install",
+        help="Fix boot order after macOS installation (switches to OpenCore-first: ide0;virtio0)",
+    )
+    post_install.add_argument("--vmid", type=int, required=True, help="VM ID to update")
+    post_install.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
 
 
 def _add_download_subparser(sub: argparse._SubParsersAction) -> None:
@@ -220,9 +226,9 @@ def _handle_apply_command(args: argparse.Namespace, config: VmConfig, steps: lis
     if result.ok:
         print(f"Apply OK. Log: {result.log_path}")
         print()
-        print("POST-INSTALL: After macOS finishes installing, fix the boot order")
-        print("so the main disk boots first (instead of recovery):")
-        print(f"  qm set {config.vmid} --boot order=virtio0;ide0")
+        print("POST-INSTALL: After macOS finishes installing, run:")
+        print(f"  osx-next-cli post-install --vmid {config.vmid} --execute")
+        print(f"This switches boot order to {POST_INSTALL_BOOT_ORDER} (OpenCore first).")
         print()
         print("If this saved you time: https://ko-fi.com/lucidfabrics | https://buymeacoffee.com/lucidfabrics")
         return 0
@@ -263,6 +269,8 @@ def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
         return _run_edit(args)
     if args.cmd == "clone":
         return _run_clone(args)
+    if args.cmd == "post-install":
+        return _run_post_install(args)
     return None
 
 
@@ -572,6 +580,31 @@ def _run_clone(args: argparse.Namespace) -> int:
 
     print(f"\nClone FAILED. Log: {result.log_path}")
     return 8
+
+
+def _run_post_install(args: argparse.Namespace) -> int:
+    vmid = args.vmid
+    if vmid < MIN_VMID or vmid > MAX_VMID:
+        print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
+        return 2
+
+    steps = build_post_install_plan(vmid)
+
+    if not args.execute:
+        print("DRY RUN — pass --execute to apply:\n")
+        for idx, step in enumerate(steps, start=1):
+            print(f"{idx:02d}. {step.title}")
+            print(f"    {step.command}")
+        return 0
+
+    result = apply_plan(steps, execute=True)
+    if result.ok:
+        print(f"Post-install OK. Boot order set to {POST_INSTALL_BOOT_ORDER}. Log: {result.log_path}")
+        print("Start the VM to boot into installed macOS via OpenCore.")
+        return 0
+
+    print(f"Post-install FAILED. Log: {result.log_path}")
+    return 9
 
 
 if __name__ == "__main__":

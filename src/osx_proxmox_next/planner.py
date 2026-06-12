@@ -19,6 +19,7 @@ from .smbios_planner import (
     _populate_smbios,
 )
 
+POST_INSTALL_BOOT_ORDER = "order=ide0;virtio0"
 
 def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
     """Return QEMU -cpu flag tailored to host CPU.
@@ -296,6 +297,21 @@ def _boot_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
             title="Start VM",
             argv=["qm", "start", vmid],
             risk="action",
+        ),
+    ]
+
+
+def build_post_install_plan(vmid: int) -> list[PlanStep]:
+    """Fix boot order after macOS installation completes.
+
+    Switches from recovery-first (ide2;virtio0;ide0) to OpenCore-first
+    (ide0;virtio0) so the VM boots into the installed macOS via OpenCore.
+    """
+    vid = str(vmid)
+    return [
+        PlanStep(
+            title="Set post-install boot order",
+            argv=["qm", "set", vid, "--boot", POST_INSTALL_BOOT_ORDER],
         ),
     ]
 
