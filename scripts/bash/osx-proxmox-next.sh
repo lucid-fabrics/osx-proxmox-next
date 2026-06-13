@@ -660,6 +660,22 @@ function build_opencore_disk() {
     exit 1
   fi
 
+  # Add RestrictEvents.kext (silences MacPro7,1 "Memory Modules Misconfigured")
+  local re_zip
+  re_zip="$(dirname "$source_iso")/RestrictEvents-1.1.6-RELEASE.zip"
+  if [ ! -f "$re_zip" ]; then
+    curl -fsSL -o "$re_zip" "https://github.com/acidanthera/RestrictEvents/releases/download/1.1.6/RestrictEvents-1.1.6-RELEASE.zip" \
+      || echo -e "  ${YW}WARN: RestrictEvents download failed, memory warning fix skipped${CL}"
+  fi
+  if [ -f "$re_zip" ]; then
+    RE_ZIP="$re_zip" OC_KEXTS="$dest_mnt/EFI/OC/Kexts" python3 -c '
+import os, zipfile
+z = zipfile.ZipFile(os.environ["RE_ZIP"])
+names = [n for n in z.namelist() if n.startswith("RestrictEvents.kext/")]
+z.extractall(os.environ["OC_KEXTS"], members=names)
+' || echo -e "  ${YW}WARN: RestrictEvents extraction failed, memory warning fix skipped${CL}"
+  fi
+
   # Patch config.plist for VM compatibility
   if [ -f "$dest_mnt/EFI/OC/config.plist" ]; then
     python3 -c "
@@ -695,6 +711,17 @@ nv_del['7C436110-AB2A-4BBB-A880-FE41995C9F82'] = ['csr-active-config', 'boot-arg
 pl['NVRAM']['WriteFlash'] = True
 # Enable VirtualSMC
 [k.update(Enabled=True) for k in pl.get('Kernel', {}).get('Add', []) if 'VirtualSMC' in k.get('BundlePath', '')]
+# Register RestrictEvents.kext if present (default revblock=auto blocks the
+# MacPro7,1 memory misconfiguration notifier; no boot-arg needed)
+import os
+ka = pl.setdefault('Kernel', {}).setdefault('Add', [])
+kx = os.path.join(os.path.dirname(path), 'Kexts', 'RestrictEvents.kext')
+if os.path.isdir(kx) and 'RestrictEvents.kext' not in [k.get('BundlePath') for k in ka]:
+    ka.append({'Arch': 'Any', 'BundlePath': 'RestrictEvents.kext',
+               'Comment': 'Silence MacPro7,1 memory warning', 'Enabled': True,
+               'ExecutablePath': 'Contents/MacOS/RestrictEvents',
+               'MaxKernel': '', 'MinKernel': '', 'PlistPath': 'Contents/Info.plist'})
+[k.update(Enabled=True) for k in ka if 'RestrictEvents' in k.get('BundlePath', '')]
 # AMD-specific patches
 if cpu_vendor == 'AMD':
     kq = pl['Kernel']['Quirks']
