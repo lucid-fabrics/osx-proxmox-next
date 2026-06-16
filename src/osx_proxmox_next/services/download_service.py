@@ -7,7 +7,13 @@ from pathlib import Path
 from ..assets import AssetCheck, required_assets
 from ..defaults import DEFAULT_ISO_DIR
 from ..domain import VmConfig
-from ..downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
+from ..downloader import (
+    DownloadError,
+    DownloadProgress,
+    download_opencore,
+    download_recovery,
+    ensure_restrictevents,
+)
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +35,11 @@ def run_download_worker(
     """
     dest_dir = Path(config.iso_dir or DEFAULT_ISO_DIR)
     errors: list[str] = []
+
+    # Always cache the RestrictEvents kext zip alongside the ISO so the
+    # OpenCore disk build can inject it (silences the MacPro7,1 memory
+    # warning). Best-effort: the build script falls back to curl if absent.
+    ensure_restrictevents(dest_dir)
 
     def _progress_cb(p: DownloadProgress) -> None:
         if p.total > 0:

@@ -57,6 +57,40 @@ _BACKOFF_SECONDS = [1, 2, 4]
 _OPENCORE_UNIVERSAL = "opencore-osx-proxmox-vm.iso"
 _ASSETS_TAG = "assets"
 
+# RestrictEvents silences the cosmetic "Memory Modules Misconfigured"
+# notification that macOS shows on every boot with the MacPro7,1 SMBIOS
+# (the real Mac Pro has 12 RAM slots; a VM's flat layout trips the check).
+# Its default revblock=auto blocks the MemorySlotNotification and
+# ExpansionSlotNotification processes, so no boot-arg is needed.
+RESTRICTEVENTS_VERSION = "1.1.6"
+RESTRICTEVENTS_ZIP = f"RestrictEvents-{RESTRICTEVENTS_VERSION}-RELEASE.zip"
+RESTRICTEVENTS_URL = (
+    "https://github.com/acidanthera/RestrictEvents/releases/download/"
+    f"{RESTRICTEVENTS_VERSION}/{RESTRICTEVENTS_ZIP}"
+)
+
+
+def download_restrictevents(
+    dest_dir: Path,
+    on_progress: ProgressCallback = None,
+    force: bool = False,
+) -> Path:
+    dest = dest_dir / RESTRICTEVENTS_ZIP
+    if dest.exists() and not force:
+        log.debug("RestrictEvents cache hit: %s", dest)
+        return dest
+    _download_file(RESTRICTEVENTS_URL, dest, on_progress, "restrictevents")
+    return dest
+
+
+def ensure_restrictevents(dest_dir: Path) -> Optional[Path]:
+    """Best-effort RestrictEvents fetch; the fix is cosmetic so failure is non-fatal."""
+    try:
+        return download_restrictevents(dest_dir)
+    except DownloadError as exc:
+        log.warning("RestrictEvents download failed, memory warning fix skipped: %s", exc)
+        return None
+
 
 def download_opencore(
     macos: str,

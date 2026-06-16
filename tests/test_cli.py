@@ -1,9 +1,30 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from osx_proxmox_next import cli as cli_module
 from osx_proxmox_next.cli import run_cli
 from osx_proxmox_next.planner import POST_INSTALL_BOOT_ORDER
+
+
+@pytest.fixture(autouse=True)
+def _stub_restrictevents(monkeypatch, tmp_path):
+    """Keep the best-effort RestrictEvents fetch off the network in tests."""
+    ensured: list[Path] = []
+    downloaded: list[bool] = []
+
+    monkeypatch.setattr(
+        cli_module, "ensure_restrictevents",
+        lambda dest_dir: ensured.append(dest_dir) or None,
+    )
+
+    def fake_download(dest_dir, on_progress=None, force=False):
+        downloaded.append(force)
+        return tmp_path / "RestrictEvents-1.1.6-RELEASE.zip"
+
+    monkeypatch.setattr(cli_module, "download_restrictevents", fake_download)
+    return {"ensured": ensured, "downloaded": downloaded}
 
 
 def test_cli_parser_has_expected_commands() -> None:
@@ -406,6 +427,70 @@ def test_download_force_passes_through(monkeypatch, tmp_path):
                   "--opencore-only", "--force"])
     assert rc == 0
     assert captured["force"] is True
+
+
+def test_auto_download_missing_cached_assets_still_ensures_restrictevents(
+    monkeypatch, tmp_path, _stub_restrictevents
+):
+    """A fully cached asset set must still pull the RestrictEvents kext zip."""
+    from osx_proxmox_next.cli import _auto_download_missing
+    from osx_proxmox_next.assets import AssetCheck
+
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), True, "")],
+    )
+
+    from osx_proxmox_next.domain import VmConfig
+    cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
+                   memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    _auto_download_missing(cfg, tmp_path)
+    assert _stub_restrictevents["ensured"] == [tmp_path]
+
+
+def test_download_fetches_restrictevents(monkeypatch, tmp_path, _stub_restrictevents):
+    """`download` pulls the RestrictEvents kext zip alongside OpenCore."""
+    monkeypatch.setattr(
+        cli_module, "download_opencore",
+        lambda macos, dest_dir, on_progress=None, force=False: tmp_path / "oc.iso",
+    )
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path),
+                  "--opencore-only"])
+    assert rc == 0
+    assert _stub_restrictevents["downloaded"] == [False]
+
+
+def test_download_force_passes_through_to_restrictevents(
+    monkeypatch, tmp_path, _stub_restrictevents
+):
+    monkeypatch.setattr(
+        cli_module, "download_opencore",
+        lambda macos, dest_dir, on_progress=None, force=False: tmp_path / "oc.iso",
+    )
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path),
+                  "--opencore-only", "--force"])
+    assert rc == 0
+    assert _stub_restrictevents["downloaded"] == [True]
+
+
+def test_download_restrictevents_failure_is_non_fatal(monkeypatch, tmp_path, capsys):
+    """A RestrictEvents download error must not fail the download command."""
+    from osx_proxmox_next.downloader import DownloadError
+
+    monkeypatch.setattr(
+        cli_module, "download_opencore",
+        lambda macos, dest_dir, on_progress=None, force=False: tmp_path / "oc.iso",
+    )
+
+    def boom(dest_dir, on_progress=None, force=False):
+        raise DownloadError("offline")
+
+    monkeypatch.setattr(cli_module, "download_restrictevents", boom)
+    rc = run_cli(["download", "--macos", "sequoia", "--dest", str(tmp_path),
+                  "--opencore-only"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "memory warning fix skipped" in out
 
 
 def test_download_without_force_defaults_false(monkeypatch, tmp_path):

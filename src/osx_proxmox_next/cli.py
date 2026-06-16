@@ -12,7 +12,14 @@ from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage, dete
 from .diagnostics import export_log_bundle, recovery_guide
 from .doctor import run_doctor, Severity
 from .domain import MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, EditChanges, validate_config, validate_edit_changes
-from .downloader import DownloadError, DownloadProgress, download_opencore, download_recovery
+from .downloader import (
+    DownloadError,
+    DownloadProgress,
+    download_opencore,
+    download_recovery,
+    download_restrictevents,
+    ensure_restrictevents,
+)
 from .executor import apply_plan
 from .planner import build_plan, build_destroy_plan, build_edit_plan, build_clone_plan, build_post_install_plan, POST_INSTALL_BOOT_ORDER
 from .services import fetch_vm_info, get_proxmox_adapter, run_download_worker
@@ -64,6 +71,9 @@ def _auto_download_missing(config: VmConfig, dest_dir: Path) -> None:
     assets = required_assets(config)
     missing = [a for a in assets if not a.ok and a.downloadable]
     if not missing:
+        # ISO may be cached from an older version; still make sure the
+        # RestrictEvents kext zip is available for the OpenCore disk build.
+        ensure_restrictevents(dest_dir)
         return
 
     config_with_dir = config if config.iso_dir else \
@@ -447,6 +457,12 @@ def _run_download(args: argparse.Namespace) -> int:
         except DownloadError as exc:
             print(f"\nOpenCore download failed: {exc}")
             ok = False
+        try:
+            path = download_restrictevents(dest_dir, on_progress=_cli_progress,
+                                           force=getattr(args, "force", False))
+            print(f"\nDownloaded: {path}")
+        except DownloadError as exc:
+            print(f"\nRestrictEvents download failed (memory warning fix skipped): {exc}")
 
     if not args.opencore_only:
         print(f"Downloading recovery image for {macos}...")

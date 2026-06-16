@@ -663,13 +663,19 @@ For GPU passthrough on a current macOS guest (Ventura, Sonoma, Sequoia, Tahoe), 
 
 This is cosmetic and specific to the `MacPro7,1` SMBIOS. macOS knows the real Mac Pro has 12 RAM slots and expects them filled in groups, so a VM's flat memory layout trips the warning. Nothing is actually wrong with the VM.
 
-To silence it, add `RestrictEvents.kext` to `EFI/OC/Kexts/` and set the boot-arg `revpatch=memtab`. If you change the boot-arg and it has no effect, set it directly from macOS, because OpenCore only writes a value when one is not already present:
+**VMs created from v0.26 onward are fixed automatically.** The OpenCore disk build now injects [RestrictEvents.kext](https://github.com/acidanthera/RestrictEvents), whose default `revblock=auto` setting blocks the `MemorySlotNotification` and `ExpansionSlotNotification` processes that produce the warning. No boot-arg is required.
 
-```bash
-sudo nvram boot-args="revpatch=memtab"
-```
+> Earlier versions of this FAQ suggested `revpatch=memtab`. That value only enables the Memory tab on MacBookAir SMBIOS models and does nothing on `MacPro7,1`, so skip it. The process blocking that removes the warning is on by default once the kext is present.
 
-Reboot afterward. Avoid changing the SMBIOS model to dodge the warning if you already have iCloud/iMessage working, since those are bound to the `MacPro7,1` identity.
+For a VM created before v0.26, fix it in place:
+
+1. Shut down the VM and back it up.
+2. Mount partition 1 of the OpenCore disk (the small `ide0` disk) on the Proxmox host.
+3. Download the [RestrictEvents release zip](https://github.com/acidanthera/RestrictEvents/releases) and copy `RestrictEvents.kext` into `EFI/OC/Kexts/`.
+4. Add a `Kernel > Add` entry in `config.plist` with `BundlePath` `RestrictEvents.kext`, `ExecutablePath` `Contents/MacOS/RestrictEvents`, `PlistPath` `Contents/Info.plist`, `Enabled` `True`. Keep `Lilu.kext` above it in the list.
+5. Unmount, boot, then dismiss any old copy of the warning still sitting in Notification Center. Blocking stops new notifications but does not clear ones already delivered.
+
+Avoid changing the SMBIOS model to dodge the warning if you already have iCloud/iMessage working, since those are bound to the `MacPro7,1` identity.
 
 ### My desktop wallpaper is white or blank
 
