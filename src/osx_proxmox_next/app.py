@@ -295,8 +295,10 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
         if not self.state.config:
             return
         label = SUPPORTED_MACOS.get(self.state.config.macos, {}).get("label", self.state.config.macos)
-        self.query_one("#install_btn", Button).label = f"Install {label}"
-        self.query_one("#install_btn").remove_class("hidden")
+        btn = self.query_one("#install_btn", Button)
+        btn.label = f"Install {label}"
+        btn.remove_class("hidden")
+        btn.focus()
 
     def _run_live_install(self) -> None:
         if self.state.apply_running:
