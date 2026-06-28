@@ -860,20 +860,30 @@ def test_build_plan_intel_host_no_kvm_pv_flags(monkeypatch) -> None:
 # build_post_install_plan
 # ---------------------------------------------------------------------------
 
-def test_build_post_install_plan_single_step() -> None:
+def test_build_post_install_plan_two_steps() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(102)
-    assert len(steps) == 1
-    assert steps[0].title == "Set post-install boot order"
+    assert len(steps) == 2
+    assert steps[0].title == "Detach recovery disk"
+    assert steps[1].title == "Set post-install boot order"
+
+
+def test_build_post_install_plan_detaches_ide2() -> None:
+    from osx_proxmox_next.planner import build_post_install_plan
+    steps = build_post_install_plan(102)
+    cmd = steps[0].command
+    assert "--delete" in cmd
+    assert "ide2" in cmd
 
 
 def test_build_post_install_plan_correct_boot_order() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(102)
-    assert f"--boot '{POST_INSTALL_BOOT_ORDER}'" in steps[0].command
+    assert f"--boot '{POST_INSTALL_BOOT_ORDER}'" in steps[1].command
 
 
 def test_build_post_install_plan_targets_correct_vmid() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(999)
     assert "qm set 999" in steps[0].command
+    assert "qm set 999" in steps[1].command

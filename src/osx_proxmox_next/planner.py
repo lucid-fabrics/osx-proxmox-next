@@ -315,9 +315,15 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
 
     Switches from recovery-first (ide2;virtio0;ide0) to OpenCore-first
     (ide0;virtio0) so the VM boots into the installed macOS via OpenCore.
+    Detaches the recovery disk so OpenCore does not show a boot picker.
     """
     vid = str(vmid)
     return [
+        PlanStep(
+            title="Detach recovery disk",
+            argv=["qm", "set", vid, "--delete", "ide2"],
+            risk="action",
+        ),
         PlanStep(
             title="Set post-install boot order",
             argv=["qm", "set", vid, "--boot", POST_INSTALL_BOOT_ORDER],
