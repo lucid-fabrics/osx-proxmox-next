@@ -217,6 +217,8 @@ def _recovery_steps(
                 # Trap to clean up loop device and temp dir on failure
                 "RLOOP=''; OC_REC=$(mktemp -d) && "
                 "trap '[ -n \"$RLOOP\" ] && { umount $OC_REC 2>/dev/null; losetup -d $RLOOP 2>/dev/null; }; rm -rf $OC_REC' EXIT; "
+                # Cleanup stale loops from previous failed runs (always runs, before python3)
+                f'for lo in $(losetup -j {shquote(str(recovery_raw))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
                 # Fix HFS+ dirty/lock flags so Linux mounts read-write,
                 # then write OpenCore .contentFlavour + .contentDetails
                 "python3 -c '"
@@ -230,8 +232,6 @@ def _recovery_steps(
                 "a=(a|0x100)&~0x800; "
                 "f.seek(off); f.write(struct.pack(\">I\",a)); "
                 "f.close(); print(\"HFS+ flags fixed\")' && "
-                # Cleanup stale loops from previous failed runs
-                f'for lo in $(losetup -j {shquote(str(recovery_raw))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
                 f'RLOOP=$(losetup -fP --show {shquote(str(recovery_raw))}) && '
                 "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
                 # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
@@ -270,6 +270,15 @@ def _disk_steps(ctx: _DiskBuildContext, macos_label: str) -> list[PlanStep]:
     """EFI/TPM disk, main disk, OpenCore build/import, and recovery import."""
     return [
         PlanStep(
+            title="Validate storage target",
+            argv=[
+                "bash", "-c",
+                f"pvesm list {shquote(ctx.config.storage)} > /dev/null 2>&1 || "
+                f'{{ echo "ERROR: Storage {ctx.config.storage} not found.'
+                ' Run pvesm status to list available storages."; false; }}',
+            ],
+        ),
+        PlanStep(
             title="Attach EFI + TPM",
             argv=[
                 "qm", "set", ctx.vmid,
@@ -306,9 +315,19 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
 
     Switches from recovery-first (ide2;virtio0;ide0) to OpenCore-first
     (ide0;virtio0) so the VM boots into the installed macOS via OpenCore.
+    Detaches the recovery disk so OpenCore does not show a boot picker.
     """
     vid = str(vmid)
     return [
+        PlanStep(
+            title="Detach recovery disk",
+            argv=[
+                "bash", "-c",
+                f"qm config {shquote(vid)} | grep -q '^ide2:' && "
+                f"qm set {shquote(vid)} --delete ide2 || true",
+            ],
+            risk="action",
+        ),
         PlanStep(
             title="Set post-install boot order",
             argv=["qm", "set", vid, "--boot", POST_INSTALL_BOOT_ORDER],

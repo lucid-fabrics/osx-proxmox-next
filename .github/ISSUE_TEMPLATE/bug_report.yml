@@ -10,9 +10,9 @@ body:
   - type: input
     id: version
     attributes:
-      label: osx-proxmox version
-      description: Run `osx-proxmox --version`
-      placeholder: "0.6.0"
+      label: osx-proxmox-next version
+      description: Run `osx-proxmox-next --version`
+      placeholder: "0.25.0"
     validations:
       required: true
   - type: input
@@ -28,6 +28,7 @@ body:
     attributes:
       label: macOS version
       options:
+        - Ventura 13
         - Sonoma 14
         - Sequoia 15
         - Tahoe 26

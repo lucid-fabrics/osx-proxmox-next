@@ -44,6 +44,7 @@ def test_build_plan_rejects_invalid_config() -> None:
 def test_build_plan_includes_core_steps() -> None:
     steps = build_plan(_cfg("sequoia"))
     titles = [step.title for step in steps]
+    assert "Validate storage target" in titles
     assert "Create VM shell" in titles
     assert "Apply macOS hardware profile" in titles
     assert "Build OpenCore boot disk" in titles
@@ -52,6 +53,29 @@ def test_build_plan_includes_core_steps() -> None:
     assert "Import and attach macOS recovery" in titles
     assert "Set boot order" in titles
     assert any(step.command.startswith("qm start") for step in steps)
+
+
+def test_build_plan_storage_validation_is_first_disk_step() -> None:
+    steps = build_plan(_cfg("sequoia"))
+    titles = [step.title for step in steps]
+    validate_idx = titles.index("Validate storage target")
+    efi_idx = titles.index("Attach EFI + TPM")
+    assert validate_idx < efi_idx
+    validate_step = steps[validate_idx]
+    assert "pvesm list" in validate_step.command
+    assert "local-lvm" in validate_step.command
+
+
+def test_recovery_stamp_stale_cleanup_before_python3() -> None:
+    steps = build_plan(_cfg("sonoma"))
+    stamp = next(s for s in steps if s.title == "Stamp recovery with Apple icon flavour")
+    cmd = stamp.command
+    losetup_pos = cmd.index("losetup -j")
+    python3_pos = cmd.index("python3 -c")
+    assert losetup_pos < python3_pos, "stale loop cleanup must run before python3 HFS+ fix"
+    # Ensure RLOOP=$(losetup...) is after python3 (conditional on python3 success)
+    rloop_assign_pos = cmd.index("RLOOP=$(losetup")
+    assert python3_pos < rloop_assign_pos, "RLOOP must be set after python3 succeeds"
 
 
 def test_build_plan_tahoe_no_preview_warning() -> None:
@@ -836,20 +860,30 @@ def test_build_plan_intel_host_no_kvm_pv_flags(monkeypatch) -> None:
 # build_post_install_plan
 # ---------------------------------------------------------------------------
 
-def test_build_post_install_plan_single_step() -> None:
+def test_build_post_install_plan_two_steps() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(102)
-    assert len(steps) == 1
-    assert steps[0].title == "Set post-install boot order"
+    assert len(steps) == 2
+    assert steps[0].title == "Detach recovery disk"
+    assert steps[1].title == "Set post-install boot order"
+
+
+def test_build_post_install_plan_detaches_ide2() -> None:
+    from osx_proxmox_next.planner import build_post_install_plan
+    steps = build_post_install_plan(102)
+    cmd = steps[0].command
+    assert "--delete ide2" in cmd
+    assert "ide2:" in cmd  # idempotency guard checks ^ide2:
 
 
 def test_build_post_install_plan_correct_boot_order() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(102)
-    assert f"--boot '{POST_INSTALL_BOOT_ORDER}'" in steps[0].command
+    assert f"--boot '{POST_INSTALL_BOOT_ORDER}'" in steps[1].command
 
 
 def test_build_post_install_plan_targets_correct_vmid() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(999)
     assert "qm set 999" in steps[0].command
+    assert "qm set 999" in steps[1].command
