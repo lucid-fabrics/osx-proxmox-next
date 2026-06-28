@@ -273,9 +273,9 @@ def _disk_steps(ctx: _DiskBuildContext, macos_label: str) -> list[PlanStep]:
             title="Validate storage target",
             argv=[
                 "bash", "-c",
-                f"pvesm status {shquote(ctx.config.storage)} > /dev/null 2>&1 || "
-                f"{{ echo 'ERROR: Storage {shquote(ctx.config.storage)} not found."
-                " Run pvesm status to list available storages.'; false; }}",
+                f"pvesm list {shquote(ctx.config.storage)} > /dev/null 2>&1 || "
+                f'{{ echo "ERROR: Storage {ctx.config.storage} not found.'
+                ' Run pvesm status to list available storages."; false; }}',
             ],
         ),
         PlanStep(
@@ -321,7 +321,11 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
     return [
         PlanStep(
             title="Detach recovery disk",
-            argv=["qm", "set", vid, "--delete", "ide2"],
+            argv=[
+                "bash", "-c",
+                f"qm config {shquote(vid)} | grep -q '^ide2:' && "
+                f"qm set {shquote(vid)} --delete ide2 || true",
+            ],
             risk="action",
         ),
         PlanStep(

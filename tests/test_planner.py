@@ -62,7 +62,7 @@ def test_build_plan_storage_validation_is_first_disk_step() -> None:
     efi_idx = titles.index("Attach EFI + TPM")
     assert validate_idx < efi_idx
     validate_step = steps[validate_idx]
-    assert "pvesm status" in validate_step.command
+    assert "pvesm list" in validate_step.command
     assert "local-lvm" in validate_step.command
 
 
@@ -872,8 +872,8 @@ def test_build_post_install_plan_detaches_ide2() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(102)
     cmd = steps[0].command
-    assert "--delete" in cmd
-    assert "ide2" in cmd
+    assert "--delete ide2" in cmd
+    assert "ide2:" in cmd  # idempotency guard checks ^ide2:
 
 
 def test_build_post_install_plan_correct_boot_order() -> None:
