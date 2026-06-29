@@ -873,7 +873,8 @@ def test_build_post_install_plan_detaches_ide2() -> None:
     steps = build_post_install_plan(102)
     cmd = steps[0].command
     assert "--delete ide2" in cmd
-    assert "ide2:" in cmd  # idempotency guard checks ^ide2:
+    assert "'^ide2:'" in cmd  # idempotency guard
+    assert "if " in cmd  # propagates qm set failures (not masked by || true)
 
 
 def test_build_post_install_plan_correct_boot_order() -> None:
