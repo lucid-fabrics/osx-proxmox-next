@@ -24,7 +24,7 @@
   <a href="https://lucid-fabrics.github.io/osx-proxmox-next/">
     <img alt="Documentation" src="https://img.shields.io/badge/Docs-Read%20the%20Docs-blue?logo=readthedocs&logoColor=white">
   </a>
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img alt="Support on Ko-fi" src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white">
   </a>
   <a href="https://buymeacoffee.com/lucidfabrics">
@@ -33,7 +33,7 @@
 </p>
 
 <p align="center">
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img alt="GPU Passthrough Fund progress" src="https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next/svg?v=2" width="600">
   </a>
 </p>
@@ -72,7 +72,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 <p align="center">
   <strong>If this already looks better than what you've been doing — ⭐ star the repo and help others find it.</strong><br><br>
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi">
   </a>
   &nbsp;&nbsp;
@@ -122,7 +122,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 <p align="center">
   Built solo, maintained in free time. If it saved you an afternoon:<br><br>
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi">
   </a>
   &nbsp;&nbsp;
@@ -143,7 +143,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmo
 
 This clones the repo, sets up a Python venv, and launches the TUI wizard.
 
-> Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/lucidfabrics) or a [coffee on BMC](https://buymeacoffee.com/lucidfabrics). ☕
+> Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/s/84fe857595) or a [coffee on BMC](https://buymeacoffee.com/lucidfabrics). ☕
 
 ### 🐚 Bash Alternative
 
@@ -714,7 +714,7 @@ This project is free and open source. Sponsors keep it alive and shape what gets
     <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee">
   </a>
   &nbsp;
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
   </a>
   &nbsp;
@@ -737,7 +737,7 @@ This project is for **testing, lab use, and learning**. Respect Apple licensing 
 <p align="center">
   This project is built and maintained solo. No company, no team — just one dev who got tired of manual <code>qm</code> configs.<br>
   If it saved you time, a coffee keeps it going:<br><br>
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">
   </a>
   &nbsp;&nbsp;
