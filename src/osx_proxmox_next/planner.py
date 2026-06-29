@@ -223,7 +223,7 @@ def _recovery_steps(
                 # then write OpenCore .contentFlavour + .contentDetails
                 "python3 -c '"
                 "import struct,subprocess; "
-                f'img="{recovery_raw}"; '
+                f"img={shquote(str(recovery_raw))}; "
                 "out=subprocess.check_output([\"sgdisk\",\"-i\",\"1\",img],text=True); "
                 "start=int([l for l in out.splitlines() if \"First sector\" in l][0].split(\":\")[1].split(\"(\")[0].strip()); "
                 "off=start*512+1024+4; "
@@ -324,8 +324,8 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
             title="Detach recovery disk",
             argv=[
                 "bash", "-c",
-                f"qm config {shquote(vid)} | grep -q '^ide2:' && "
-                f"qm set {shquote(vid)} --delete ide2 || true",
+                f"if qm config {shquote(vid)} | grep -q '^ide2:'; then "
+                f"qm set {shquote(vid)} --delete ide2; fi",
             ],
             risk="action",
         ),
