@@ -34,7 +34,7 @@
 
 <p align="center">
   <a href="https://ko-fi.com/lucidfabrics">
-    <img alt="GPU Passthrough Fund progress" src="https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next/svg" width="600">
+    <img alt="GPU Passthrough Fund progress" src="https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next/svg?v=2" width="600">
   </a>
 </p>
 
