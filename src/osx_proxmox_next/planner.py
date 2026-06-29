@@ -221,9 +221,9 @@ def _recovery_steps(
                 f'for lo in $(losetup -j {shquote(str(recovery_raw))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
                 # Fix HFS+ dirty/lock flags so Linux mounts read-write,
                 # then write OpenCore .contentFlavour + .contentDetails
-                "python3 -c '"
-                "import struct,subprocess; "
-                f"img={shquote(str(recovery_raw))}; "
+                f"RECOVERY_IMG={shquote(str(recovery_raw))} python3 -c '"
+                "import struct,subprocess,os; "
+                "img=os.environ[\"RECOVERY_IMG\"]; "
                 "out=subprocess.check_output([\"sgdisk\",\"-i\",\"1\",img],text=True); "
                 "start=int([l for l in out.splitlines() if \"First sector\" in l][0].split(\":\")[1].split(\"(\")[0].strip()); "
                 "off=start*512+1024+4; "
