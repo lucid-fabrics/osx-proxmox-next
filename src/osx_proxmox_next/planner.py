@@ -273,9 +273,10 @@ def _disk_steps(ctx: _DiskBuildContext, macos_label: str) -> list[PlanStep]:
             title="Validate storage target",
             argv=[
                 "bash", "-c",
-                f"pvesm list {shquote(ctx.config.storage)} > /dev/null 2>&1 || "
-                f'{{ echo "ERROR: Storage {ctx.config.storage} not found.'
-                ' Run pvesm status to list available storages."; false; }}',
+                f"STORAGE={shquote(ctx.config.storage)}; "
+                'pvesm list "$STORAGE" > /dev/null 2>&1 || '
+                '{ echo "ERROR: Storage $STORAGE not found.'
+                ' Run pvesm status to list available storages."; false; }',
             ],
         ),
         PlanStep(
