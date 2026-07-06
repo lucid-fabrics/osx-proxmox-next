@@ -24,7 +24,7 @@
   <a href="https://lucid-fabrics.github.io/osx-proxmox-next/">
     <img alt="Documentation" src="https://img.shields.io/badge/Docs-Read%20the%20Docs-blue?logo=readthedocs&logoColor=white">
   </a>
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img alt="Support on Ko-fi" src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white">
   </a>
   <a href="https://buymeacoffee.com/lucidfabrics">
@@ -33,7 +33,7 @@
 </p>
 
 <p align="center">
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img alt="GPU Passthrough Fund progress" src="https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next/svg?v=2" width="600">
   </a>
 </p>
@@ -72,7 +72,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 <p align="center">
   <strong>If this already looks better than what you've been doing — ⭐ star the repo and help others find it.</strong><br><br>
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi">
   </a>
   &nbsp;&nbsp;
@@ -122,7 +122,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 <p align="center">
   Built solo, maintained in free time. If it saved you an afternoon:<br><br>
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi">
   </a>
   &nbsp;&nbsp;
@@ -143,7 +143,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmo
 
 This clones the repo, sets up a Python venv, and launches the TUI wizard.
 
-> Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/lucidfabrics) or a [coffee on BMC](https://buymeacoffee.com/lucidfabrics). ☕
+> Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/s/84fe857595) or a [coffee on BMC](https://buymeacoffee.com/lucidfabrics). ☕
 
 ### 🐚 Bash Alternative
 
@@ -373,6 +373,21 @@ Use `osx-next-cli download --macos <version>` to auto-fetch missing assets. The 
 <summary><strong>I see UEFI Shell instead of macOS boot</strong></summary>
 
 Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on `ide2`, with boot order set to `ide2;virtio0;ide0`.
+</details>
+
+<details>
+<summary><strong>Loops back to Recovery after the install finishes</strong></summary>
+
+The install succeeded but OpenCore is still booting the on-disk Recovery volume. macOS only sets the startup disk once it boots the new system for real, and it never got there, so the bootloader keeps falling back to Recovery. `post-install` only reorders the Proxmox boot devices, it cannot change the bootloader's saved choice inside the VM.
+
+Fix it from the VM console:
+
+1. Reboot and wait for the OpenCore picker (the screen with the disk icons).
+2. Press **spacebar** to reveal all entries, select **macOS** (not "Install macOS" or "Recovery"), and boot it.
+3. Optionally press **Ctrl+Enter** on that entry to make it the default so the choice sticks.
+4. If it still returns to Recovery, pick **Reset NVRAM** in the picker first, reboot, then select **macOS** again.
+
+Once macOS reaches the Setup Assistant and you finish setup, later boots go straight to macOS.
 </details>
 
 <details>
@@ -714,7 +729,7 @@ This project is free and open source. Sponsors keep it alive and shape what gets
     <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee">
   </a>
   &nbsp;
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
   </a>
   &nbsp;
@@ -737,7 +752,7 @@ This project is for **testing, lab use, and learning**. Respect Apple licensing 
 <p align="center">
   This project is built and maintained solo. No company, no team — just one dev who got tired of manual <code>qm</code> configs.<br>
   If it saved you time, a coffee keeps it going:<br><br>
-  <a href="https://ko-fi.com/lucidfabrics">
+  <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">
   </a>
   &nbsp;&nbsp;

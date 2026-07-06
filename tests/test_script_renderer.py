@@ -122,6 +122,13 @@ def test_plist_patch_script_sets_scan_policy() -> None:
     assert "ScanPolicy" in result
 
 
+def test_plist_patch_script_allows_set_default() -> None:
+    # Lets the user persist "macOS" as the boot entry (Ctrl+Enter in the picker)
+    # so a fresh install stops falling back to Recovery on reboot.
+    result = _plist_patch_script()
+    assert "AllowSetDefault" in result
+
+
 def test_plist_patch_script_verbose_boot_adds_flag() -> None:
     result_verbose = _plist_patch_script(verbose_boot=True)
     result_normal = _plist_patch_script(verbose_boot=False)
