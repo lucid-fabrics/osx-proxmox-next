@@ -151,6 +151,7 @@ def _plist_patch_script(
         "p[\"Misc\"][\"Boot\"][\"Timeout\"]=15; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
         "p[\"Misc\"][\"Boot\"][\"HideAuxiliary\"]=True; "
+        "p[\"Misc\"][\"Security\"][\"AllowSetDefault\"]=True; "
         "p[\"Misc\"][\"Boot\"][\"PickerMode\"]=\"External\"; "
         "p[\"Misc\"][\"Boot\"][\"PickerVariant\"]=\"Acidanthera\\\\Syrah\"; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x67\\x0f\\x00\\x00\"; "

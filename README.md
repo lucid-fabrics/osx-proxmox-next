@@ -376,6 +376,21 @@ Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on 
 </details>
 
 <details>
+<summary><strong>Loops back to Recovery after the install finishes</strong></summary>
+
+The install succeeded but OpenCore is still booting the on-disk Recovery volume. macOS only sets the startup disk once it boots the new system for real, and it never got there, so the bootloader keeps falling back to Recovery. `post-install` only reorders the Proxmox boot devices, it cannot change the bootloader's saved choice inside the VM.
+
+Fix it from the VM console:
+
+1. Reboot and wait for the OpenCore picker (the screen with the disk icons).
+2. Press **spacebar** to reveal all entries, select **macOS** (not "Install macOS" or "Recovery"), and boot it.
+3. Optionally press **Ctrl+Enter** on that entry to make it the default so the choice sticks.
+4. If it still returns to Recovery, pick **Reset NVRAM** in the picker first, reboot, then select **macOS** again.
+
+Once macOS reaches the Setup Assistant and you finish setup, later boots go straight to macOS.
+</details>
+
+<details>
 <summary><strong>"Guest has not initialized the display"</strong></summary>
 
 Boot/display profile mismatch during early boot. Use `vga: std` for stable noVNC during installation.
