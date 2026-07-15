@@ -769,6 +769,8 @@ This project is for **testing, lab use, and learning**. Respect Apple licensing 
 
 ---
 
-## ⭐ Star History
+## ⭐ Stars
 
-[![Star History Chart](https://api.star-history.com/svg?repos=lucid-fabrics/osx-proxmox-next&type=date&legend=top-left)](https://www.star-history.com/#lucid-fabrics/osx-proxmox-next&type=date&legend=top-left)
+[![Stars](https://img.shields.io/github/stars/lucid-fabrics/osx-proxmox-next?style=social)](https://github.com/lucid-fabrics/osx-proxmox-next/stargazers)
+
+Track the chart on [star-history.com](https://www.star-history.com/#lucid-fabrics/osx-proxmox-next&type=date).
