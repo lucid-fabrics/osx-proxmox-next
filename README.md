@@ -779,6 +779,6 @@ This project is for **testing, lab use, and learning**. Respect Apple licensing 
 
 ## ⭐ Star History
 
-[![Star History Chart](https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/star-history/star-history.svg)](https://github.com/lucid-fabrics/osx-proxmox-next/stargazers)
+[![Star History Chart](https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/docs/static/star-history.svg)](https://github.com/lucid-fabrics/osx-proxmox-next/stargazers)
 
 Chart auto-regenerated from the GitHub stargazers API.
