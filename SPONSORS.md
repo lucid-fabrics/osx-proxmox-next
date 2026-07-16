@@ -8,3 +8,5 @@ Edit this file to add/remove supporters from non-GitHub-Sponsors sources
 fetched automatically by `scripts/sync_sponsors.py`.
 
 - [SuperDooper](https://github.com/superdooper86)
+- 💖 PipelineTest $7 Ko-fi
+- 💖 PipelineTest2 $7 Ko-fi
