@@ -740,10 +740,9 @@ This project is free and open source. Sponsors keep it alive and shape what gets
 
 **Sponsors:**
 
-- _No GitHub Sponsors yet. [Be the first!](https://github.com/sponsors/lucid-fabrics)_
-
-**Past supporters (Ko-fi, BMC, one-time):**
 - ❤️ [SuperDooper](https://github.com/superdooper86)
+
+_Want to join them? [Sponsor on GitHub](https://github.com/sponsors/lucid-fabrics)_
 ---
 
 ## ⚖️ Disclaimer

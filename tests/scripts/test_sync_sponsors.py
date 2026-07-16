@@ -55,9 +55,12 @@ def test_render_block_empty_github_shows_placeholder(sync_module):
 def test_render_block_with_manual_entries(sync_module):
     manual = ["Charlie", "[Dora](https://example.com/dora)"]
     block = sync_module.render_block([], manual)
-    assert "**Past supporters (Ko-fi, BMC, one-time):**" in block
+    # Manual entries render directly under the main Sponsors header.
+    assert "**Past supporters" not in block
     assert "❤️ Charlie" in block
     assert "❤️ [Dora](https://example.com/dora)" in block
+    # Manual-only path shows the recurring-sponsor CTA.
+    assert "Sponsor on GitHub" in block
 
 
 def test_render_block_combined(sync_module):
@@ -65,8 +68,20 @@ def test_render_block_combined(sync_module):
     manual = ["Bob"]
     block = sync_module.render_block(github, manual)
     assert "[alice]" in block
-    assert "**Past supporters" in block
+    # When GitHub sponsors exist, the CTA is suppressed.
+    assert "Sponsor on GitHub" not in block
     assert "❤️ Bob" in block
+
+
+def test_render_block_no_split_subsection(sync_module):
+    """No 'Past supporters' subsection - all entries share the main header."""
+    block = sync_module.render_block(
+        [{"login": "alice", "amount": 5, "tier": "T"}],
+        ["Bob"],
+    )
+    assert "**Sponsors:**" in block
+    assert "**Past supporters" not in block
+    assert block.count("❤️") == 2
 
 
 def test_update_readme_replaces_block(tmp_path, sync_module):
