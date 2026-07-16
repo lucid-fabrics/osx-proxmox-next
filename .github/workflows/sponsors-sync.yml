@@ -31,7 +31,7 @@ jobs:
         run: python3 scripts/sync_sponsors.py
 
       - name: Open PR if changed
-        uses: peter-evans/create-pull-request@5e5296811133e5b171df9ec3f8e22c11c1815c43 # v6
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         with:
           commit-message: 'chore(readme): refresh sponsors list'
           branch: chore/sponsors-sync
