@@ -20,3 +20,7 @@ htmlcov/
 # generated runtime artifacts
 generated/
 pytest-of-*/
+
+# tool caches
+.playwright-mcp/
+.wrangler/
