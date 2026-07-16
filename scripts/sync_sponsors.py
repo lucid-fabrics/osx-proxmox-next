@@ -133,21 +133,33 @@ def load_manual() -> list[str]:
 
 
 def render_block(github: list[dict], manual: list[str]) -> str:
-    """Build the markdown block that replaces the Sponsors section."""
+    """Build the markdown block that replaces the Sponsors section.
+
+    Layout:
+      **Sponsors:**
+      - github sponsors (with tier + monthly amount)
+      - manual supporters (from SPONSORS.md, no tier info)
+      If no sponsors at all, show a CTA placeholder.
+    """
     github = sorted(github, key=lambda s: (-s["amount"], s["login"].lower()))
     out = ["**Sponsors:**", ""]
-    if github:
-        for s in github:
-            out.append(
-                f"- ❤️ [{s['login']}](https://github.com/{s['login']}) "
-                f"| {s['tier']} (${s['amount']}/mo)"
-            )
-    else:
-        out.append("- _No GitHub Sponsors yet. [Be the first!](https://github.com/sponsors/lucid-fabrics)_")
 
-    if manual:
-        out += ["", "**Past supporters (Ko-fi, BMC, one-time):**"]
-        out += [f"- ❤️ {name}" for name in manual]
+    if not github and not manual:
+        out.append("- _No GitHub Sponsors yet. [Be the first!](https://github.com/sponsors/lucid-fabrics)_")
+        return "\n".join(out)
+
+    for s in github:
+        out.append(
+            f"- ❤️ [{s['login']}](https://github.com/{s['login']}) "
+            f"| {s['tier']} (${s['amount']}/mo)"
+        )
+
+    for name in manual:
+        out.append(f"- ❤️ {name}")
+
+    if not github and manual:
+        # Manual-only: hint that GitHub Sponsors is the recurring option.
+        out += ["", "_Want to join them? [Sponsor on GitHub](https://github.com/sponsors/lucid-fabrics)_"]
 
     return "\n".join(out)
 
