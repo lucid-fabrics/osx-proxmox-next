@@ -740,7 +740,13 @@ This project is free and open source. Sponsors keep it alive and shape what gets
 
 **Sponsors:**
 
-- ❤️ [SuperDooper](https://github.com/superdooper86)
+- ❤️ [SuperDooper](https://github.com/superdooper86) ($34 GH Sponsors Apr 18)
+- ❤️ Tim ($5 Ko-fi Jul 8)
+- ❤️ Wotao Yin ($10 Ko-fi Jun 27)
+- ❤️ Arketsu ($10 BMC Mar 14)
+- ❤️ RNDThoughts ($5 Ko-fi Feb 19)
+- ❤️ Anonymous ($20 Ko-fi Jun 29)
+- ❤️ 1 donor $10 BMC Jul 15
 
 _Want to join them? [Sponsor on GitHub](https://github.com/sponsors/lucid-fabrics)_
 ---
