@@ -1205,10 +1205,14 @@ OC_IMPORT_OUT="$("${IMPORT_CMD[@]}" "$VMID" "$OC_DISK" "$STORAGE" --format raw 2
 }
 OC_DISK_REF="$(get_disk_ref "$OC_IMPORT_OUT" "$STORAGE" "$VMID" "OpenCore")"
 qm set "$VMID" --ide0 "${OC_DISK_REF},media=disk" >/dev/null
-# Fix GPT header corruption on thin-provisioned LVM after importdisk
+# Fix GPT header corruption on thin-provisioned LVM after importdisk.
+# 4Kn drives / zvols / some LVM-thin backends report a 4096-byte logical
+# sector size; a hardcoded bs=512 write fails with "Invalid argument" on
+# those (silently, since stderr is discarded), leaving the GPT corrupt.
 OC_DEV=$(pvesm path "$OC_DISK_REF" 2>/dev/null) || true
 if [ -n "$OC_DEV" ] && [ -b "$OC_DEV" ]; then
-  dd if="$OC_DISK" of="$OC_DEV" bs=512 count=2048 conv=notrunc 2>/dev/null || true
+  OC_SS=$(blockdev --getss "$OC_DEV" 2>/dev/null); OC_SS=${OC_SS:-512}
+  dd if="$OC_DISK" of="$OC_DEV" bs="$OC_SS" count=$((1048576 / OC_SS)) conv=notrunc 2>/dev/null || true
 fi
 msg_ok "Attached OpenCore disk (ide0)"
 

@@ -195,7 +195,12 @@ def _opencore_steps(ctx: _DiskBuildContext) -> list[PlanStep]:
                 # with "File exists" because qm importdisk already created it.)
                 'DEV=$(pvesm path "$REF") && '
                 f'if [[ "$DEV" != rbd:* ]]; then '
-                f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null; '
+                # 4Kn drives / zvols / some LVM-thin backends report a
+                # 4096-byte logical sector size; a hardcoded bs=512 write
+                # fails with "Invalid argument" on those (silently, since
+                # stderr is discarded), leaving the GPT header corrupt.
+                'SS=$(blockdev --getss "$DEV" 2>/dev/null); SS=${SS:-512}; '
+                f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs="$SS" count=$((1048576 / SS)) conv=notrunc 2>/dev/null; '
                 f'fi',
             ],
         ),

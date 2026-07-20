@@ -162,6 +162,13 @@ def test_build_plan_uses_importdisk_for_opencore(monkeypatch) -> None:
     # an already-imported RBD volume); only non-RBD paths run dd.
     assert "qemu-img dd" not in oc.command
     assert '[[ "$DEV" != rbd:* ]]' in oc.command
+    # dd must use the destination device's actual logical sector size, not a
+    # hardcoded bs=512 - 4Kn drives/zvols/some LVM-thin backends reject
+    # 512-byte writes with "Invalid argument", corrupting the GPT header.
+    assert "blockdev --getss" in oc.command
+    assert "bs=512" not in oc.command
+    assert 'bs="$SS"' in oc.command
+    assert "count=$((1048576 / SS))" in oc.command
 
 
 def test_build_plan_uses_importdisk_for_recovery(monkeypatch) -> None:
