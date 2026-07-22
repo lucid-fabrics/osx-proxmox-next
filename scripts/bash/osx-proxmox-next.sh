@@ -351,8 +351,44 @@ function detect_cpu_needs_emulation() {
   echo "no"
 }
 
+# Server/workstation chips (e.g. Xeon E5 v4, model 79) are old enough to be
+# below the Skylake threshold but work fine with -cpu host; they just need
+# e1000 instead of vmxnet3 (see detect_net_model).
+function detect_cpu_is_xeon() {
+  if grep -q "model name.*Xeon" /proc/cpuinfo 2>/dev/null; then
+    echo "yes"
+  else
+    echo "no"
+  fi
+}
+
+# Matches Python defaults.py _INTEL_LEGACY_THRESHOLD: Family 6 models below
+# Skylake (94), excluding hybrid and Xeon, work more reliably with e1000.
+function detect_net_model() {
+  local vendor family model is_xeon
+  vendor=$(detect_cpu_vendor)
+  is_xeon=$(detect_cpu_is_xeon)
+  if [ "$vendor" != "AMD" ] && [ "$is_xeon" = "no" ]; then
+    family=$(awk -F: '/^cpu family/{print int($2); exit}' /proc/cpuinfo 2>/dev/null)
+    model=$(awk -F: '/^model\t/{print int($2); exit}' /proc/cpuinfo 2>/dev/null)
+    family=${family:-0}
+    model=${model:-0}
+    if [ "$family" -eq 6 ] && [ "$model" -gt 0 ] && [ "$model" -lt 94 ] \
+      && [ "$(detect_cpu_needs_emulation)" = "no" ]; then
+      echo "e1000-82545em"
+      return
+    fi
+  fi
+  if [ "$is_xeon" = "yes" ]; then
+    echo "e1000-82545em"
+    return
+  fi
+  echo "vmxnet3"
+}
+
 CPU_VENDOR=$(detect_cpu_vendor)
 CPU_NEEDS_EMULATION=$(detect_cpu_needs_emulation)
+NET_MODEL=$(detect_net_model)
 
 # ── Per-version default disk sizes (matches Python defaults.py) ──
 function default_disk_gb() {
@@ -1117,7 +1153,7 @@ qm create "$VMID" \
   --cpu host \
   --balloon 0 \
   --agent enabled=1 \
-  --net0 "vmxnet3,bridge=$BRG,macaddr=$VM_MAC,firewall=0$VLAN$MTU" \
+  --net0 "$NET_MODEL,bridge=$BRG,macaddr=$VM_MAC,firewall=0$VLAN$MTU" \
   >/dev/null
 msg_ok "Created VM shell"
 
