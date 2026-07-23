@@ -351,44 +351,28 @@ function detect_cpu_needs_emulation() {
   echo "no"
 }
 
-# Server/workstation chips (e.g. Xeon E5 v4, model 79) are old enough to be
-# below the Skylake threshold but work fine with -cpu host; they just need
-# e1000 instead of vmxnet3 (see detect_net_model).
-function detect_cpu_is_xeon() {
-  if grep -q "model name.*Xeon" /proc/cpuinfo 2>/dev/null; then
-    echo "yes"
+# Real Xeon E5/E7 v2-v4 HEDT chips (dual-socket/multi-die parts) leak their
+# genuine multi-package topology through -cpu host. Combined with a
+# multi-socket-capable SMBIOS (MacPro7,1), XNU's scheduler can livelock
+# during heavy multithreaded I/O (the installer copy phase spins at 100%
+# CPU with zero disk/network progress). A fixed emulated model avoids this;
+# these exact overrides match the known-working profile from
+# github.com/mchiappinam/proxmox-macos.
+function detect_cpu_xeon_hedt_model() {
+  local model_name
+  model_name=$(awk -F: '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)
+  if echo "$model_name" | grep -qE "Xeon.*E[57][ -]*[0-9]+ *v2"; then
+    echo "Haswell-noTSX,model=158,stepping=3"
+  elif echo "$model_name" | grep -qE "Xeon.*E[57][ -]*[0-9]+ *v[34]"; then
+    echo "Broadwell-noTSX,model=158"
   else
-    echo "no"
+    echo ""
   fi
-}
-
-# Matches Python defaults.py _INTEL_LEGACY_THRESHOLD: Family 6 models below
-# Skylake (94), excluding hybrid and Xeon, work more reliably with e1000.
-function detect_net_model() {
-  local vendor family model is_xeon
-  vendor=$(detect_cpu_vendor)
-  is_xeon=$(detect_cpu_is_xeon)
-  if [ "$vendor" != "AMD" ] && [ "$is_xeon" = "no" ]; then
-    family=$(awk -F: '/^cpu family/{print int($2); exit}' /proc/cpuinfo 2>/dev/null)
-    model=$(awk -F: '/^model\t/{print int($2); exit}' /proc/cpuinfo 2>/dev/null)
-    family=${family:-0}
-    model=${model:-0}
-    if [ "$family" -eq 6 ] && [ "$model" -gt 0 ] && [ "$model" -lt 94 ] \
-      && [ "$(detect_cpu_needs_emulation)" = "no" ]; then
-      echo "e1000-82545em"
-      return
-    fi
-  fi
-  if [ "$is_xeon" = "yes" ]; then
-    echo "e1000-82545em"
-    return
-  fi
-  echo "vmxnet3"
 }
 
 CPU_VENDOR=$(detect_cpu_vendor)
 CPU_NEEDS_EMULATION=$(detect_cpu_needs_emulation)
-NET_MODEL=$(detect_net_model)
+XEON_HEDT_MODEL=$(detect_cpu_xeon_hedt_model)
 
 # ── Per-version default disk sizes (matches Python defaults.py) ──
 function default_disk_gb() {
@@ -1153,14 +1137,16 @@ qm create "$VMID" \
   --cpu host \
   --balloon 0 \
   --agent enabled=1 \
-  --net0 "$NET_MODEL,bridge=$BRG,macaddr=$VM_MAC,firewall=0$VLAN$MTU" \
+  --net0 "vmxnet3,bridge=$BRG,macaddr=$VM_MAC,firewall=0$VLAN$MTU" \
   >/dev/null
 msg_ok "Created VM shell"
 
 # ── Apply macOS hardware profile ──
-msg_info "Applying macOS hardware profile (CPU: $CPU_VENDOR, emulation: $CPU_NEEDS_EMULATION)"
+msg_info "Applying macOS hardware profile (CPU: $CPU_VENDOR, emulation: $CPU_NEEDS_EMULATION, HEDT: ${XEON_HEDT_MODEL:-no})"
 if [ "$CPU_NEEDS_EMULATION" = "yes" ]; then
   CPU_FLAG="-cpu Cascadelake-Server,vendor=GenuineIntel,+invtsc,-pcid,-hle,-rtm,-avx512f,-avx512dq,-avx512cd,-avx512bw,-avx512vl,-avx512vnni,kvm=on,vmware-cpuid-freq=on"
+elif [ -n "$XEON_HEDT_MODEL" ]; then
+  CPU_FLAG="-cpu ${XEON_HEDT_MODEL},kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on"
 else
   CPU_FLAG="-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc,vmware-cpuid-freq=on"
 fi
