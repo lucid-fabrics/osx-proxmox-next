@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from enum import Enum
 
+from .defaults import detect_cpu_info
 from .infrastructure import ProxmoxAdapter
 
 
@@ -168,6 +169,36 @@ def _check_boot_order(cfg: dict[str, str], vmid: int) -> DoctorCheck:
     return DoctorCheck("boot", Severity.WARN, "boot order not set - Proxmox using firmware default")
 
 
+def _check_cpu_hedt(cfg: dict[str, str], vmid: int) -> DoctorCheck | None:
+    """Flag real Xeon E5/E7 v2-v4 HEDT hosts still using -cpu host in args.
+
+    Only meaningful when doctor runs on the same host the VM lives on
+    (it reads the local CPU, not the VM's). Returns None when the host
+    isn't a detected HEDT Xeon, since the check doesn't apply.
+    """
+    cpu_info = detect_cpu_info()
+    if not cpu_info.xeon_hedt_model:
+        return None
+    args_val = cfg.get("args", "")
+    expected = cpu_info.xeon_hedt_model.split(",")[0]
+    if expected in args_val:
+        return DoctorCheck(
+            "cpu_hedt",
+            Severity.OK,
+            f"HEDT Xeon detected, args uses -cpu {expected} (avoids XNU scheduler livelock)",
+        )
+    if "-cpu host" in args_val:
+        return DoctorCheck(
+            "cpu_hedt",
+            Severity.FAIL,
+            "Host is a Xeon E5/E7 HEDT chip but this VM's args use -cpu host - "
+            "real multi-socket topology leaking through can livelock XNU's scheduler "
+            "during install (CPU pegged at 100%, disk/network progress both flat zero)",
+            fix=f"Recreate the VM so it picks up -cpu {expected} automatically, or manually replace -cpu host,... in the args line",
+        )
+    return None
+
+
 def run_doctor(vmid: int, adapter: ProxmoxAdapter | None = None) -> list[DoctorCheck]:
     if adapter is None:
         from .services import get_proxmox_adapter
@@ -179,7 +210,7 @@ def run_doctor(vmid: int, adapter: ProxmoxAdapter | None = None) -> list[DoctorC
 
     cfg = _parse_qm_config(result.output)
 
-    return [
+    checks = [
         _check_balloon(cfg, vmid),
         _check_machine(cfg, vmid),
         _check_cores(cfg, vmid),
@@ -193,3 +224,7 @@ def run_doctor(vmid: int, adapter: ProxmoxAdapter | None = None) -> list[DoctorC
         _check_disk(cfg, "ide0", "OpenCore bootloader"),
         _check_disk(cfg, "ide2", "recovery/installer image"),
     ]
+    hedt_check = _check_cpu_hedt(cfg, vmid)
+    if hedt_check is not None:
+        checks.append(hedt_check)
+    return checks

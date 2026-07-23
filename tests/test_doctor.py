@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from osx_proxmox_next.defaults import CpuInfo
 from osx_proxmox_next.doctor import (
     DoctorCheck,
     Severity,
@@ -10,6 +11,7 @@ from osx_proxmox_next.doctor import (
     _check_boot_order,
     _check_cores,
     _check_cpu,
+    _check_cpu_hedt,
     _check_disk,
     _check_machine,
     _check_memory,
@@ -21,6 +23,20 @@ from osx_proxmox_next.doctor import (
     run_doctor,
 )
 from osx_proxmox_next.infrastructure import CommandResult, ProxmoxAdapter
+
+
+@pytest.fixture(autouse=True)
+def _non_hedt_cpu(monkeypatch):
+    """Keep run_doctor tests deterministic regardless of the real test-runner's CPU.
+
+    Without this, _check_cpu_hedt reads the actual machine's /proc/cpuinfo via
+    detect_cpu_info(), so "all checks OK" / "12 checks" would only hold by luck
+    of whatever CPU happens to run the test suite.
+    """
+    monkeypatch.setattr(
+        "osx_proxmox_next.doctor.detect_cpu_info",
+        lambda: CpuInfo(vendor="Intel", model_name="", family=6, model=85, needs_emulated_cpu=False),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -380,3 +396,57 @@ def test_run_doctor_detects_odd_cores():
     checks = run_doctor(100, adapter=adapter)
     cores_check = next(c for c in checks if c.name == "cores")
     assert cores_check.severity == Severity.FAIL
+
+
+# ---------------------------------------------------------------------------
+# _check_cpu_hedt
+# ---------------------------------------------------------------------------
+
+_HEDT_CPU = CpuInfo(vendor="Intel", model_name="Intel(R) Xeon(R) CPU E5-2696 v4 @ 2.20GHz",
+                     family=6, model=79, needs_emulated_cpu=False, xeon_hedt_model="Broadwell-noTSX,model=158")
+
+
+def test_check_cpu_hedt_skips_non_hedt_host():
+    """Non-HEDT host: check doesn't apply, returns None."""
+    assert _check_cpu_hedt({}, 100) is None
+
+
+def test_check_cpu_hedt_ok_when_args_use_correct_model(monkeypatch):
+    monkeypatch.setattr("osx_proxmox_next.doctor.detect_cpu_info", lambda: _HEDT_CPU)
+    cfg = {"args": "-device isa-applesmc -cpu Broadwell-noTSX,model=158,kvm=on,vendor=GenuineIntel"}
+    check = _check_cpu_hedt(cfg, 100)
+    assert check.severity == Severity.OK
+
+
+def test_check_cpu_hedt_fails_when_args_use_host(monkeypatch):
+    monkeypatch.setattr("osx_proxmox_next.doctor.detect_cpu_info", lambda: _HEDT_CPU)
+    cfg = {"args": "-device isa-applesmc -cpu host,kvm=on,vendor=GenuineIntel"}
+    check = _check_cpu_hedt(cfg, 100)
+    assert check.severity == Severity.FAIL
+    assert "Broadwell-noTSX" in check.fix
+
+
+def test_check_cpu_hedt_no_match_when_args_missing(monkeypatch):
+    """HEDT host but args has neither the expected model nor -cpu host: no verdict."""
+    monkeypatch.setattr("osx_proxmox_next.doctor.detect_cpu_info", lambda: _HEDT_CPU)
+    assert _check_cpu_hedt({"args": "-cpu Penryn,kvm=on"}, 100) is None
+
+
+def test_run_doctor_thirteen_checks_on_hedt_host(monkeypatch):
+    """HEDT host adds the extra cpu_hedt check on top of the usual twelve."""
+    monkeypatch.setattr("osx_proxmox_next.doctor.detect_cpu_info", lambda: _HEDT_CPU)
+    config = _GOOD_CONFIG + "\nargs: -cpu Broadwell-noTSX,model=158,kvm=on,vendor=GenuineIntel"
+    adapter = _FakeAdapter(config)
+    checks = run_doctor(100, adapter=adapter)
+    assert len(checks) == 13
+    hedt_check = next(c for c in checks if c.name == "cpu_hedt")
+    assert hedt_check.severity == Severity.OK
+
+
+def test_run_doctor_detects_hedt_using_cpu_host(monkeypatch):
+    monkeypatch.setattr("osx_proxmox_next.doctor.detect_cpu_info", lambda: _HEDT_CPU)
+    config = _GOOD_CONFIG + "\nargs: -cpu host,kvm=on,vendor=GenuineIntel"
+    adapter = _FakeAdapter(config)
+    checks = run_doctor(100, adapter=adapter)
+    hedt_check = next(c for c in checks if c.name == "cpu_hedt")
+    assert hedt_check.severity == Severity.FAIL

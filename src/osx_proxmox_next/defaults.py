@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,6 +50,7 @@ class CpuInfo:
     needs_emulated_cpu: bool  # True for AMD and Intel hybrid (12th gen+)
     needs_penryn: bool = False  # True for pre-Skylake Intel (Broadwell and older), excluding Xeon
     is_xeon: bool = False   # True when "Xeon" appears in model name (server chips, always use -cpu host)
+    xeon_hedt_model: str = ""  # Fixed QEMU -cpu model for Xeon E5/E7 v2-v4 HEDT chips (empty if not applicable)
 
 
 def _classify_intel_cpu(family: int, model: int, model_name: str) -> tuple[bool, bool, bool]:
@@ -62,8 +64,10 @@ def _classify_intel_cpu(family: int, model: int, model_name: str) -> tuple[bool,
         family == 6
         and (model in _INTEL_HYBRID_MODELS or model >= _INTEL_HYBRID_THRESHOLD)
     )
-    # Xeon CPUs are server/workstation chips that work fine with -cpu host even
-    # when below the Skylake model threshold (e.g. Xeon E5 v4 is model 79).
+    # Xeon CPUs are server/workstation chips that generally work fine with
+    # -cpu host even below the Skylake model threshold (e.g. Xeon E5 v4 is
+    # model 79). Real HEDT parts (E5/E7 v2-v4) are the exception, see
+    # _xeon_hedt_cpu_model.
     is_xeon = "Xeon" in model_name
     # Pre-Skylake Intel (Broadwell, Haswell, Ivy Bridge, etc.) work more reliably
     # with -cpu Penryn during macOS installation than with -cpu host.
@@ -76,6 +80,27 @@ def _classify_intel_cpu(family: int, model: int, model_name: str) -> tuple[bool,
         and model < _INTEL_LEGACY_THRESHOLD
     )
     return is_hybrid, is_xeon, is_legacy
+
+
+_XEON_HEDT_PATTERN = re.compile(r"Xeon.*E[57][ -]*\d+ *v([234])", re.IGNORECASE)
+
+
+def _xeon_hedt_cpu_model(model_name: str) -> str:
+    """Return a fixed QEMU -cpu model for Xeon E5/E7 v2-v4 HEDT chips, or "".
+
+    Real HEDT parts (dual-socket/multi-die) leak their genuine multi-package
+    topology through -cpu host. Combined with a multi-socket-capable SMBIOS
+    (MacPro7,1), XNU's scheduler can livelock under heavy multithreaded I/O,
+    e.g. the macOS installer copy phase (CPU pegged at 100% while disk and
+    network progress both flatline). These exact overrides match the
+    known-working profile from github.com/mchiappinam/proxmox-macos.
+    """
+    match = _XEON_HEDT_PATTERN.search(model_name)
+    if not match:
+        return ""
+    if match.group(1) == "2":
+        return "Haswell-noTSX,model=158,stepping=3"
+    return "Broadwell-noTSX,model=158"
 
 
 def detect_cpu_info() -> CpuInfo:
@@ -120,7 +145,7 @@ def detect_cpu_info() -> CpuInfo:
     is_hybrid, is_xeon, is_legacy = _classify_intel_cpu(family, model, model_name)
     return CpuInfo(vendor=vendor, model_name=model_name, family=family,
                    model=model, needs_emulated_cpu=is_hybrid, needs_penryn=is_legacy,
-                   is_xeon=is_xeon)
+                   is_xeon=is_xeon, xeon_hedt_model=_xeon_hedt_cpu_model(model_name))
 
 
 def detect_cpu_vendor() -> str:
