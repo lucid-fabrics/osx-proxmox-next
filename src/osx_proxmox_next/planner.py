@@ -31,7 +31,10 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
     Intel hybrid CPUs (12th gen+) also need Cascadelake-Server because macOS
     hardware validation fails on P+E core topology with correct SMBIOS.
 
-    Non-hybrid Intel uses ``-cpu host`` for native passthrough.
+    Non-hybrid Intel uses ``-cpu host`` for native passthrough, except real
+    Xeon E5/E7 v2-v4 HEDT chips, which get a fixed emulated model instead
+    (see ``defaults._xeon_hedt_cpu_model``) to avoid an XNU scheduler
+    livelock under heavy multithreaded I/O.
 
     Ref: luchina-gabriel/OSX-PROXMOX (battle-tested on ~5k installs).
     """
@@ -52,6 +55,14 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
             "-hle,-rtm,"
             "-avx512f,-avx512dq,-avx512cd,-avx512bw,-avx512vl,-avx512vnni,"
             "kvm=on,"
+            "vmware-cpuid-freq=on"
+        )
+    if cpu.xeon_hedt_model:
+        return (
+            f"-cpu {cpu.xeon_hedt_model},"
+            "kvm=on,"
+            "vendor=GenuineIntel,"
+            "+invtsc,"
             "vmware-cpuid-freq=on"
         )
     # +kvm_pv_unhalt and +kvm_pv_eoi are KVM paravirtualization hints that macOS
