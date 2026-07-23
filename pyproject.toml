@@ -54,5 +54,8 @@ osx-next-cli = "osx_proxmox_next.cli:run_cli"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+osx_proxmox_next = ["*.tcss", "py.typed"]
+
 [tool.pytest.ini_options]
 addopts = "--cov=osx_proxmox_next --cov-branch --cov-report=term-missing --cov-fail-under=95"
