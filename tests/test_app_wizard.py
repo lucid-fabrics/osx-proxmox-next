@@ -81,7 +81,7 @@ async def _advance_to_step(pilot, app, target_step, monkeypatch=None):
         if monkeypatch:
             monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
             monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
-        # Scroll button into view — step 4 form can exceed viewport height
+        # Scroll button into view - step 4 form can exceed viewport height
         app.query_one("#next_btn_4").scroll_visible()
         for _ in range(3):
             await pilot.pause()
@@ -1536,7 +1536,7 @@ def test_detect_vmid_boundary_high(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        # max VMID is 999999, so next would be 1000000 which overflows — returns DEFAULT_VMID
+        # max VMID is 999999, so next would be 1000000 which overflows - returns DEFAULT_VMID
         assert app._detect_next_vmid() == DEFAULT_VMID
 
     asyncio.run(_run())
@@ -2384,6 +2384,29 @@ def test_penryn_unchecked_on_modern_cpu(monkeypatch) -> None:
             cb = app.query_one("#penryn_cb", Checkbox)
             assert cb.value is False
             assert app.state.use_penryn is False
+
+    asyncio.run(_run())
+
+
+def test_hints_stay_hidden_when_boxes_checked_on_modern_cpu(monkeypatch) -> None:
+    """Checking penryn/e1000 on a modern CPU must not reveal the 'detected' hints (#107)."""
+    from osx_proxmox_next.defaults import CpuInfo
+    modern_cpu = CpuInfo(vendor="Intel", model_name="12th Gen Intel Core i7-12700K",
+                         family=6, model=151, needs_emulated_cpu=True, needs_penryn=False)
+    monkeypatch.setattr("osx_proxmox_next.app.detect_cpu_info", lambda: modern_cpu)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            await pilot.click("#penryn_cb")
+            await pilot.click("#e1000_cb")
+            await pilot.pause()
+            assert app.state.use_penryn is True
+            assert app.state.net_model == "e1000-82545em"
+            assert app.query_one("#penryn_hint").has_class("step_hidden")
+            assert app.query_one("#e1000_hint").has_class("step_hidden")
 
     asyncio.run(_run())
 
