@@ -156,18 +156,15 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
             self._toggle_apple_services_fields()
         if event.checkbox.id == "penryn_cb":
             self.state.use_penryn = event.checkbox.value
+            # Hint visibility is set at compose time from CPU detection and must
+            # not follow the checkbox: showing "Older Intel CPU detected" because
+            # the user ticked the box reads as a false detection claim (#107).
             if event.checkbox.value:
                 self.query_one("#cores", Input).value = "4"
-                self.query_one("#penryn_hint", Static).remove_class("step_hidden")
             else:
                 self.query_one("#cores", Input).value = str(detect_cpu_cores())
-                self.query_one("#penryn_hint", Static).add_class("step_hidden")
         if event.checkbox.id == "e1000_cb":
             self.state.net_model = "e1000-82545em" if event.checkbox.value else "vmxnet3"
-            if event.checkbox.value:
-                self.query_one("#e1000_hint", Static).remove_class("step_hidden")
-            else:
-                self.query_one("#e1000_hint", Static).add_class("step_hidden")
 
     def _toggle_apple_services_fields(self) -> None:
         c = self.query_one("#apple_services_fields")
