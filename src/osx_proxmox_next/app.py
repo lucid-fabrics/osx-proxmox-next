@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from threading import Thread
 
@@ -11,6 +12,7 @@ from textual.containers import Container
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
 
+from . import __version__
 from ._edit_mixin import EditModeMixin
 from ._manage_mixin import ManageModeMixin
 from ._wizard_mixin import WizardStepsMixin
@@ -402,4 +404,7 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
 
 
 def run() -> None:
+    if "--version" in sys.argv[1:]:
+        print(f"osx-next {__version__}")
+        return
     NextApp().run()
