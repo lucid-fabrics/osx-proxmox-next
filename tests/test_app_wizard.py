@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -81,7 +82,7 @@ async def _advance_to_step(pilot, app, target_step, monkeypatch=None):
         if monkeypatch:
             monkeypatch.setattr(app_module, "required_assets", lambda cfg: [])
             monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
-        # Scroll button into view — step 4 form can exceed viewport height
+        # Scroll button into view - step 4 form can exceed viewport height
         app.query_one("#next_btn_4").scroll_visible()
         for _ in range(3):
             await pilot.pause()
@@ -1536,7 +1537,7 @@ def test_detect_vmid_boundary_high(monkeypatch) -> None:
 
     async def _run() -> None:
         app = NextApp()
-        # max VMID is 999999, so next would be 1000000 which overflows — returns DEFAULT_VMID
+        # max VMID is 999999, so next would be 1000000 which overflows - returns DEFAULT_VMID
         assert app._detect_next_vmid() == DEFAULT_VMID
 
     asyncio.run(_run())
@@ -1681,6 +1682,19 @@ def test_run_function(monkeypatch) -> None:
     monkeypatch.setattr(NextApp, "run", fake_run)
     app_mod.run()
     assert called[0] is True
+
+
+def test_run_version_flag(monkeypatch, capsys) -> None:
+    """osx-next --version prints the version and exits without launching the TUI (#106)."""
+    from osx_proxmox_next import __version__, app as app_mod
+
+    def fail_run(self):
+        raise AssertionError("TUI must not launch with --version")
+
+    monkeypatch.setattr(NextApp, "run", fail_run)
+    monkeypatch.setattr(sys, "argv", ["osx-next", "--version"])
+    app_mod.run()
+    assert capsys.readouterr().out.strip() == f"osx-next {__version__}"
 
 
 def test_wizard_state_defaults() -> None:
