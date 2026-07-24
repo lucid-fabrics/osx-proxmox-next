@@ -12,10 +12,10 @@ from osx_proxmox_next.script_renderer import (
 from osx_proxmox_next.infrastructure import CommandResult
 
 
-def _cpu(vendor="Intel", model_name="", family=6, model=85, needs_emulated=False):
+def _cpu(vendor="Intel", model_name="", family=6, model=85, needs_emulated=False, xeon_hedt_model=""):
     """Helper to build CpuInfo for tests."""
     return CpuInfo(vendor=vendor, model_name=model_name, family=family,
-                   model=model, needs_emulated_cpu=needs_emulated)
+                   model=model, needs_emulated_cpu=needs_emulated, xeon_hedt_model=xeon_hedt_model)
 
 
 def _cfg(macos: str) -> VmConfig:
@@ -289,6 +289,16 @@ def test_cpu_args_intel_hybrid() -> None:
     assert "-avx512f" in args
     assert "-pcid" in args
     assert "host" not in args
+
+
+def test_cpu_args_xeon_hedt() -> None:
+    """Real HEDT Xeon (E5/E7 v2-v4) gets the fixed emulated model, not -cpu host."""
+    cpu = _cpu(vendor="Intel", needs_emulated=False, xeon_hedt_model="Broadwell-noTSX,model=158")
+    args = _cpu_args(cpu)
+    assert "-cpu Broadwell-noTSX,model=158," in args
+    assert "vendor=GenuineIntel" in args
+    assert "vmware-cpuid-freq=on" in args
+    assert "-cpu host" not in args
 
 
 def test_cpu_args_override() -> None:

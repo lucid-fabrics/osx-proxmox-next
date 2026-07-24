@@ -4,6 +4,7 @@ from osx_proxmox_next.defaults import (
     DEFAULT_ISO_DIR,
     CpuInfo,
     _resolve_iso_path,
+    _xeon_hedt_cpu_model,
     default_disk_gb,
     detect_cpu_cores,
     detect_cpu_info,
@@ -208,6 +209,48 @@ def test_detect_cpu_info_intel_future_model(monkeypatch, tmp_path):
     monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
     info = detect_cpu_info()
     assert info.needs_emulated_cpu is True
+
+
+def test_xeon_hedt_cpu_model_v4():
+    """Xeon E5 v4 (Broadwell-EP HEDT) gets a fixed emulated model."""
+    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) CPU E5-2696 v4 @ 2.20GHz") == "Broadwell-noTSX,model=158"
+
+
+def test_xeon_hedt_cpu_model_v3():
+    """Xeon E5 v3 (Haswell-EP HEDT) also maps to the Broadwell-noTSX override."""
+    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) CPU E5-2640 v3 @ 2.60GHz") == "Broadwell-noTSX,model=158"
+
+
+def test_xeon_hedt_cpu_model_v2():
+    """Xeon E5 v2 (Ivy Bridge-EP HEDT) gets the Haswell-noTSX override."""
+    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) CPU E5-2670 v2 @ 2.50GHz") == "Haswell-noTSX,model=158,stepping=3"
+
+
+def test_xeon_hedt_cpu_model_non_hedt_xeon():
+    """Single-socket workstation Xeons (E3) and Scalable (Gold) are unaffected."""
+    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) CPU E3-1230 v5 @ 3.40GHz") == ""
+    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) Gold 6248 @ 2.50GHz") == ""
+
+
+def test_xeon_hedt_cpu_model_non_xeon():
+    """Consumer chips never match, regardless of model number."""
+    assert _xeon_hedt_cpu_model("12th Gen Intel(R) Core(TM) i7-12700K") == ""
+
+
+def test_detect_cpu_info_intel_xeon_hedt(monkeypatch, tmp_path):
+    """detect_cpu_info wires xeon_hedt_model through for a real HEDT Xeon."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text(
+        "vendor_id\t: GenuineIntel\n"
+        "cpu family\t: 6\n"
+        "model\t\t: 79\n"
+        "model name\t: Intel(R) Xeon(R) CPU E5-2696 v4 @ 2.20GHz\n"
+    )
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    info = detect_cpu_info()
+    assert info.is_xeon is True
+    assert info.xeon_hedt_model == "Broadwell-noTSX,model=158"
+    assert info.needs_emulated_cpu is False
 
 
 def test_detect_cpu_info_intel_comet_lake(monkeypatch, tmp_path):
