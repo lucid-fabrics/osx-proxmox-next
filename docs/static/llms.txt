@@ -1,0 +1,30 @@
+# OSX Proxmox Next
+
+> Open-source tool that creates macOS virtual machines on Proxmox VE 9 with one command. It runs a 6-step TUI wizard (or a scriptable CLI) on the Proxmox host, auto-detects Intel/AMD/Xeon CPUs, downloads OpenCore and the official Apple recovery image, generates a SMBIOS identity, and boots the macOS installer. Supports macOS Ventura 13, Sonoma 14, Sequoia 15, and Tahoe 26.
+
+Install (run as root on a Proxmox 9 host):
+`bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"`
+
+Key facts:
+- Commands installed: `osx-next` (TUI wizard), `osx-next-cli` (headless CLI, dry-run by default, `--execute` to apply)
+- Works on Intel (including hybrid 12th gen+ and Xeon) and AMD host CPUs; CPU mode is auto-selected
+- Recovery images come from Apple's osrecovery API; OpenCore EFI is built automatically (no plist editing)
+- A mandatory dry run previews every `qm` command before anything is created
+- Post-install: `osx-next-cli doctor --vmid <id>` health-checks the VM
+- License: open source, repository at https://github.com/lucid-fabrics/osx-proxmox-next
+- Intended for testing, lab use, and learning; users are responsible for complying with Apple licensing
+
+## Docs
+
+- [Quick Start](https://lucid-fabrics.github.io/osx-proxmox-next/docs/getting-started/quick-start): one-command install and first VM
+- [TUI Wizard](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/tui-wizard): the 6-step wizard explained
+- [CLI Reference](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/cli-reference): all `osx-next-cli` commands and flags
+- [Supported macOS Versions](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/macos-versions): Ventura, Sonoma, Sequoia, Tahoe details
+- [Apple Services](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/apple-services): iCloud, iMessage, FaceTime setup
+- [Troubleshooting](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/troubleshooting): boot loops, EXITBS hangs, network issues
+- [FAQ](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/faq): common questions
+
+## Optional
+
+- [Architecture](https://lucid-fabrics.github.io/osx-proxmox-next/docs/architecture/overview): how the planner/executor pipeline works
+- [GitHub repository](https://github.com/lucid-fabrics/osx-proxmox-next): source, issues, releases
