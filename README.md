@@ -42,18 +42,18 @@
 
 ## 🧰 Stop Wasting Afternoons on macOS VMs
 
-The manual route eats your time: find the right OpenCore build, edit plist files, run GenSMBIOS, copy ISOs, type out `qm` commands, debug boot failures, repeat. Most people give up or spend a full day getting it right once — then forget the steps by the next time.
+The manual route eats your time: find the right OpenCore build, edit plist files, run GenSMBIOS, copy ISOs, type out `qm` commands, debug boot failures, repeat. Most people give up or spend a full day getting it right once - then forget the steps by the next time.
 
 osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxmox host.
 
 **You get:**
 - A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
 - Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
-- Intel, Xeon, and AMD CPU support — auto-detected, zero configuration needed
-- Automatic OpenCore and recovery/installer download — no manual file placement
-- Shared storage support — download ISOs to NAS or any Proxmox storage pool (`--iso-dir`)
-- Auto-generated SMBIOS identity (serial, UUID, model) — no OpenCore editing needed
-- Graphical boot picker with Apple icons — auto-boots the installer
+- Intel, Xeon, and AMD CPU support - auto-detected, zero configuration needed
+- Automatic OpenCore and recovery/installer download - no manual file placement
+- Shared storage support - download ISOs to NAS or any Proxmox storage pool (`--iso-dir`)
+- Auto-generated SMBIOS identity (serial, UUID, model) - no OpenCore editing needed
+- Graphical boot picker with Apple icons - auto-boots the installer
 - Mandatory dry-run before live install previews every command
 - Real-time form validation with inline error feedback
 
@@ -66,12 +66,12 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 | SMBIOS generation | External tool (GenSMBIOS) | Built-in, zero config |
 | Apple Services | Manual identity chain | One flag: `--apple-services` |
 | Tahoe 26 | Community trial & error | Supported |
-| Dry-run preview | Never | Always — see every `qm` command first |
+| Dry-run preview | Never | Always - see every `qm` command first |
 | Scripting / CI | Never | Full CLI + JSON export |
 | Post-install health check | Never | `osx-next-cli doctor --vmid <id>` |
 
 <p align="center">
-  <strong>If this already looks better than what you've been doing — ⭐ star the repo and help others find it.</strong><br><br>
+  <strong>If this already looks better than what you've been doing - ⭐ star the repo and help others find it.</strong><br><br>
   <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi">
   </a>
@@ -160,7 +160,7 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | Step | What Happens |
 |------|-------------|
 | **1️⃣ Preflight** | Auto-detects CPU vendor (Intel/AMD), checks host readiness |
-| **2️⃣ Choose OS** | Pick macOS version (Ventura, Sonoma, Sequoia, Tahoe) — SMBIOS auto-generated |
+| **2️⃣ Choose OS** | Pick macOS version (Ventura, Sonoma, Sequoia, Tahoe) - SMBIOS auto-generated |
 | **3️⃣ Storage** | Select storage target from auto-detected Proxmox storage pools |
 | **4️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk) with auto-filled defaults |
 | **5️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
@@ -183,7 +183,7 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | Storage | 64 GB free | 128+ GB SSD/NVMe |
 | GPU | Integrated | Discrete (for passthrough) |
 
-> **AMD CPUs** are fully supported. The tool auto-detects your CPU vendor and applies the correct configuration (Cascadelake-Server emulation for AMD, native host passthrough for Intel). **Xeon and pre-Skylake Intel CPUs** are also handled automatically — Xeon stays on `-cpu host`, older consumer Intel gets Penryn mode, and both get `e1000` instead of `vmxnet3` for reliable network during installation.
+> **AMD CPUs** are fully supported. The tool auto-detects your CPU vendor and applies the correct configuration (Cascadelake-Server emulation for AMD, native host passthrough for Intel). **Xeon and pre-Skylake Intel CPUs** are also handled automatically - Xeon stays on `-cpu host`, older consumer Intel gets Penryn mode, and both get `e1000` instead of `vmxnet3` for reliable network during installation.
 
 ### CPU Compatibility
 
@@ -193,7 +193,7 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | Intel Xeon | Full | `-cpu host` (native passthrough) | e1000 |
 | Pre-Skylake Intel (Broadwell, Haswell, …) | Full | Penryn mode | e1000 |
 | AMD (any) | Full | Cascadelake-Server emulation | vmxnet3 |
-| Apple Silicon (ARM Proxmox) | Not supported | — | — |
+| Apple Silicon (ARM Proxmox) | Not supported | - | - |
 
 All modes are auto-detected. Zero configuration needed.
 
@@ -245,7 +245,7 @@ osx-next-cli download --macos ventura --force
 # Check host readiness
 osx-next-cli preflight
 
-# Preview commands (dry run) — SMBIOS identity auto-generated
+# Preview commands (dry run) - SMBIOS identity auto-generated
 osx-next-cli apply \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
@@ -297,13 +297,13 @@ osx-next-cli plan --json \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm
 
-# Destroy a VM (dry run — preview commands)
+# Destroy a VM (dry run - preview commands)
 osx-next-cli uninstall --vmid 910
 
 # Destroy a VM (execute for real, including disk images)
 osx-next-cli uninstall --vmid 910 --purge --execute
 
-# Edit an existing VM (dry run — preview commands)
+# Edit an existing VM (dry run - preview commands)
 osx-next-cli edit --vmid 910 --cores 4 --memory 8192
 
 # Edit an existing VM (rename + extend disk, execute for real)
@@ -318,10 +318,10 @@ osx-next-cli edit --vmid 910 --bridge vmbr1 --nic-model e1000 --execute
 # Edit and restart VM automatically after changes
 osx-next-cli edit --vmid 910 --cores 8 --memory 16384 --start --execute
 
-# Clone a VM with a fresh SMBIOS identity (dry run — preview commands)
+# Clone a VM with a fresh SMBIOS identity (dry run - preview commands)
 osx-next-cli clone --source-vmid 910 --new-vmid 911 --name macos-sequoia-clone
 
-# Clone and execute (regenerates serial, UUID, MLB, ROM, vmgenid — both VMs stay independent on Apple services)
+# Clone and execute (regenerates serial, UUID, MLB, ROM, vmgenid - both VMs stay independent on Apple services)
 osx-next-cli clone --source-vmid 910 --new-vmid 911 --name macos-sequoia-clone --execute
 
 # Clone with explicit macOS version hint
@@ -344,7 +344,7 @@ Not sure what's wrong? Run the VM health check first:
 osx-next-cli doctor --vmid <your-vmid>
 ```
 
-It checks balloon driver, machine type, CPU config, NIC model, SMBIOS, boot order, disk layout, and more — and prints a fix command for every failure it finds.
+It checks balloon driver, machine type, CPU config, NIC model, SMBIOS, boot order, disk layout, and more - and prints a fix command for every failure it finds.
 
 ---
 
@@ -360,7 +360,7 @@ In the macOS installer:
 </details>
 
 <details>
-<summary><strong>Live apply is blocked — missing assets</strong></summary>
+<summary><strong>Live apply is blocked - missing assets</strong></summary>
 
 The tool requires OpenCore and recovery/installer images. It scans `/var/lib/vz/template/iso` and `/mnt/pve/*/template/iso` for:
 - `opencore-osx-proxmox-vm.iso` or `opencore-{version}.iso`
@@ -439,16 +439,16 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 - Keep the main macOS disk on `virtio0`, OpenCore on `ide0`, recovery on `ide2`
 - Use `vga: std` during installation (switch after)
 - Change one setting at a time and measure the impact
-- **Intel CPUs** get native host passthrough — best performance
-- **Xeon CPUs** get native host passthrough — same as modern Intel, Penryn is skipped
+- **Intel CPUs** get native host passthrough - best performance
+- **Xeon CPUs** get native host passthrough - same as modern Intel, Penryn is skipped
 - **Pre-Skylake Intel** (Broadwell, Haswell, etc.) use Penryn mode with `e1000` NIC for install stability
-- **AMD CPUs** use Cascadelake-Server emulation — functional but slower due to CPU translation overhead
+- **AMD CPUs** use Cascadelake-Server emulation - functional but slower due to CPU translation overhead
 
 ---
 
 ## 🎛️ Guest Performance Profiles (Optional)
 
-These are **optional shell scripts that run inside the macOS guest** to tune responsiveness. They are not part of this project and are not required — use them only if you understand what they change.
+These are **optional shell scripts that run inside the macOS guest** to tune responsiveness. They are not part of this project and are not required - use them only if you understand what they change.
 
 ### Blazing Profile
 
@@ -458,7 +458,7 @@ Optimized for **maximum UI speed** in the VM. Best for general use where you wan
 |----------------|---------|
 | UI animations | Disabled (window resize, Mission Control, Dock) |
 | Transparency effects | Disabled (reduces compositing overhead) |
-| Spotlight indexing | **Disabled** (`mdutil -a -i off`) — frees CPU/IO |
+| Spotlight indexing | **Disabled** (`mdutil -a -i off`) - frees CPU/IO |
 | Sleep on AC power | Disabled (sleep, display sleep, disk sleep, Power Nap all off) |
 | Dock/Finder/SystemUIServer | Restarted to apply changes |
 
@@ -472,7 +472,7 @@ Optimized for **development workflows** (Xcode, SourceKit, code search). Similar
 |----------------|---------|
 | UI animations | Disabled (same as Blazing) |
 | Transparency effects | Disabled (same as Blazing) |
-| Spotlight indexing | **Kept ON** — required for Xcode code completion and search |
+| Spotlight indexing | **Kept ON** - required for Xcode code completion and search |
 | System sleep | Disabled, but display sleep is allowed (longer coding sessions) |
 | Dock/Finder/SystemUIServer | Restarted to apply changes |
 
@@ -484,7 +484,7 @@ Optimized for **development workflows** (Xcode, SourceKit, code search). Similar
 |----------|---------|
 | General browsing, testing apps | **Blazing** |
 | Xcode / SwiftUI / iOS development | **Xcode** |
-| Don't know / want defaults | **Neither** — skip this section |
+| Don't know / want defaults | **Neither** - skip this section |
 
 ### Usage
 
@@ -507,13 +507,13 @@ bash scripts/profiles/revert_xcode_profile.sh
 - **Snapshot your VM before applying** any profile
 - Apply only one profile at a time
 - Always keep the matching `revert_*` script ready
-- These scripts accept an optional sudo password argument — avoid storing passwords in plain text
+- These scripts accept an optional sudo password argument - avoid storing passwords in plain text
 
 ---
 
 ## ☁️ Enable Apple Services (iCloud, iMessage, FaceTime)
 
-Apple services require a complete, consistent identity chain spanning both QEMU SMBIOS and OpenCore's EFI PlatformInfo — plus stable network/time configuration.
+Apple services require a complete, consistent identity chain spanning both QEMU SMBIOS and OpenCore's EFI PlatformInfo - plus stable network/time configuration.
 
 ### How It Works
 
@@ -524,10 +524,10 @@ macOS validates Apple ID through two identity sources:
 | **QEMU SMBIOS** | Serial, UUID, model visible to firmware | Proxmox `--smbios1` flag |
 | **OpenCore PlatformInfo** | Serial, UUID, MLB, ROM visible to macOS | Patched into `config.plist` via `plistlib` |
 
-Both must carry **identical values**. The ROM field must be derived from the NIC MAC address — macOS cross-checks ROM against the hardware NIC during Apple ID validation.
+Both must carry **identical values**. The ROM field must be derived from the NIC MAC address - macOS cross-checks ROM against the hardware NIC during Apple ID validation.
 
 When `--apple-services` is enabled, this tool automatically:
-1. Generates Apple-format SMBIOS identity (serial, UUID, MLB, ROM, model) — GenSMBIOS-compatible base-34 serials with valid manufacturing codes and checksummed MLB, no external binary needed
+1. Generates Apple-format SMBIOS identity (serial, UUID, MLB, ROM, model) - GenSMBIOS-compatible base-34 serials with valid manufacturing codes and checksummed MLB, no external binary needed
 2. Generates a stable static MAC address for the NIC
 3. Derives ROM from the MAC address (first 6 bytes, no colons)
 4. Applies SMBIOS via Proxmox's `--smbios1` flag
@@ -588,26 +588,26 @@ In the **TUI**, check "Enable Apple Services (iMessage, FaceTime, iCloud)" in st
 | "iMessage activation failed" | Verify ROM matches NIC MAC and MAC is static. Check date/time sync. |
 | Works once then breaks | VM config is regenerating SMBIOS or NIC MAC between boots. |
 | PlatformInfo not applied | Ensure `--apple-services` flag is set. Check OpenCore config.plist for PlatformInfo section. |
-| "Verification Failed" on Sequoia/Tahoe | Ensure `--apple-services` is set — the kernel patch is applied automatically. If still failing, reboot once after first sign-in attempt. |
+| "Verification Failed" on Sequoia/Tahoe | Ensure `--apple-services` is set - the kernel patch is applied automatically. If still failing, reboot once after first sign-in attempt. |
 
 > **Note:** This tool configures all identity fields automatically, but Apple controls service activation server-side. Even with a correct setup, activation may require multiple attempts or a call to Apple Support. Never share SMBIOS values publicly or reuse them across VMs.
 
-### Sequoia/Tahoe Apple ID — Kernel Patch Fix
+### Sequoia/Tahoe Apple ID - Kernel Patch Fix
 
 Starting with macOS Sequoia 15, Apple's DeviceCheck reads `hv_vmm_present` from the kernel sysctl table to detect VMs and block Apple ID sign-in. The error appears as:
 
 ```
-Verification Failed — An unknown error occurred.
+Verification Failed - An unknown error occurred.
 ```
 
 **This tool fixes it automatically.** When `--apple-services` is enabled, a kernel-level OpenCore patch is injected into `config.plist` that redirects the `hv_vmm_present` sysctl lookup to read from `hibernatecount` instead (always 0 = not a VM). Apple's DeviceCheck sees a physical machine and allows sign-in.
 
-**Community-attested:** Multiple testers have reported Apple ID, iCloud, iMessage, and FaceTime working on Sequoia 15 and Tahoe 26 with this patch. Results may vary — if it works for you, consider sharing your experience on [Discord](https://discord.gg/Ub6TunHYre).
+**Community-attested:** Multiple testers have reported Apple ID, iCloud, iMessage, and FaceTime working on Sequoia 15 and Tahoe 26 with this patch. Results may vary - if it works for you, consider sharing your experience on [Discord](https://discord.gg/Ub6TunHYre).
 
-> `RestrictEvents.kext` with `revpatch=sbvmm` alone does **not** fix this — that only hides `kern.hv_vmm_present` from userspace. The kernel patch operates at the sysctl string table level, which is what Apple's attestation stack reads directly.
+> `RestrictEvents.kext` with `revpatch=sbvmm` alone does **not** fix this - that only hides `kern.hv_vmm_present` from userspace. The kernel patch operates at the sysctl string table level, which is what Apple's attestation stack reads directly.
 
 **If sign-in still fails after applying the patch:**
-1. Reboot the VM once — the patch requires a clean boot to take effect
+1. Reboot the VM once - the patch requires a clean boot to take effect
 2. Verify `--apple-services` was set during VM creation
 3. As a last resort: create a **Sonoma 14** VM, sign in, then upgrade in-place to Sequoia/Tahoe
 
@@ -617,7 +617,7 @@ Verification Failed — An unknown error occurred.
 
 ```
 src/osx_proxmox_next/
-  app.py              # TUI wizard (Textual) — 6-step reactive state machine
+  app.py              # TUI wizard (Textual) - 6-step reactive state machine
   cli.py              # Non-interactive CLI
   domain.py           # VM config model + validation (VmConfig, EditChanges, PlanStep)
   planner.py          # qm command generation (build_plan, build_edit_plan)
@@ -651,9 +651,9 @@ bash scripts/setup-hooks.sh
 ```
 
 Enables pre-commit, commit-msg, and pre-push hooks for:
-- **Commit message validation** — enforces [conventional commits](https://www.conventionalcommits.org/) format
-- **Secret detection** — blocks hardcoded passwords, API keys, tokens
-- **Code quality warnings** — flags TODO/FIXME and debug `print()` statements
+- **Commit message validation** - enforces [conventional commits](https://www.conventionalcommits.org/) format
+- **Secret detection** - blocks hardcoded passwords, API keys, tokens
+- **Code quality warnings** - flags TODO/FIXME and debug `print()` statements
 
 ---
 
@@ -710,9 +710,9 @@ In the TUI, tick **Force fresh download (ignore cached ISO)** on the Review step
 
 ## 🔮 Roadmap
 
-- 🧩 **Multi-VM templates** — save and reuse configurations across VMs
-- 🔄 **Auto-update OpenCore** — detect and pull latest OpenCore releases
-- 🎮 **GPU passthrough wizard** — guided IOMMU + VFIO setup *(unlocks at $1000 raised — see badge above)*
+- 🧩 **Multi-VM templates** - save and reuse configurations across VMs
+- 🔄 **Auto-update OpenCore** - detect and pull latest OpenCore releases
+- 🎮 **GPU passthrough wizard** - guided IOMMU + VFIO setup *(unlocks at $1000 raised - see badge above)*
 
 ---
 
@@ -751,6 +751,27 @@ This project is free and open source. Sponsors keep it alive and shape what gets
 _Want to join them? [Sponsor on GitHub](https://github.com/sponsors/lucid-fabrics)_
 ---
 
+## ❓ FAQ
+
+**Can you run macOS in a virtual machine on Proxmox?**
+Yes. osx-proxmox-next creates a macOS VM on Proxmox VE 9 in one command: it builds the OpenCore bootloader, downloads the official Apple recovery image, generates a SMBIOS identity, and boots the installer. macOS Ventura 13, Sonoma 14, Sequoia 15, and Tahoe 26 are supported.
+
+**Does macOS work on AMD CPUs under Proxmox?**
+Yes. AMD hosts are auto-detected and run with Cascadelake-Server CPU emulation. Intel hosts (including 12th gen+ hybrid and Xeon) get the correct CPU mode automatically. No configuration needed.
+
+**How long does it take to install macOS on Proxmox?**
+About 5 minutes of setup with the wizard, then the macOS installer runs unattended. Download time depends on your connection (recovery image is ~0.9 GB, downloaded once and cached).
+
+**Is GPU passthrough supported?**
+Yes, with manual host-side IOMMU setup. See [GPU Passthrough](#-gpu-passthrough).
+
+**Is running macOS in a VM legal?**
+This project is for testing, lab use, and learning. Apple's license terms govern where macOS may run; you are responsible for compliance in your region.
+
+More: [full FAQ in the docs](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/faq).
+
+---
+
 ## ⚖️ Disclaimer
 
 This project is for **testing, lab use, and learning**. Respect Apple licensing and intellectual property. You are responsible for legal and compliance use in your region.
@@ -758,7 +779,7 @@ This project is for **testing, lab use, and learning**. Respect Apple licensing 
 ---
 
 <p align="center">
-  This project is built and maintained solo. No company, no team — just one dev who got tired of manual <code>qm</code> configs.<br>
+  This project is built and maintained solo. No company, no team - just one dev who got tired of manual <code>qm</code> configs.<br>
   If it saved you time, a coffee keeps it going:<br><br>
   <a href="https://ko-fi.com/s/84fe857595">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">

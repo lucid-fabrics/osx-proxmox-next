@@ -368,8 +368,8 @@ function CTA() {
 export default function Home(): ReactNode {
   return (
     <Layout
-      title="macOS VMs on Proxmox"
-      description="Deploy macOS VMs on Proxmox VE — automated, repeatable, painless">
+      title="macOS VMs on Proxmox VE 9: One-Command Install"
+      description="Create macOS virtual machines on Proxmox VE 9 with one command. Ventura, Sonoma, Sequoia, and Tahoe on Intel and AMD hosts. TUI wizard, automatic OpenCore and recovery download, SMBIOS generation.">
       <HomepageHeader />
       <main>
         <BeforeAfter />
