@@ -183,17 +183,18 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | Storage | 64 GB free | 128+ GB SSD/NVMe |
 | GPU | Integrated | Discrete (for passthrough) |
 
-> **AMD CPUs** are fully supported. The tool auto-detects your CPU vendor and applies the correct configuration (Cascadelake-Server emulation for AMD, native host passthrough for Intel). **Xeon and pre-Skylake Intel CPUs** are also handled automatically - Xeon stays on `-cpu host`, older consumer Intel gets Penryn mode, and both get `e1000` instead of `vmxnet3` for reliable network during installation.
+> **AMD CPUs** are fully supported. The tool auto-detects your CPU vendor and applies the correct configuration (Cascadelake-Server emulation for AMD, native host passthrough for Intel). **Xeon and pre-Skylake Intel CPUs** are also handled automatically: most Xeons stay on `-cpu host`, real HEDT chips (Xeon E5/E7 v2-v4, dual-socket/multi-die parts) get a fixed emulated CPU model instead, since `-cpu host` leaks their genuine multi-package topology and can livelock macOS's scheduler during install. Older consumer Intel gets Penryn mode, and non-HEDT Xeon/legacy Intel get `e1000` instead of `vmxnet3` for reliable network during installation.
 
 ### CPU Compatibility
 
 | CPU Type | Support | QEMU Mode | NIC |
 |----------|---------|-----------|-----|
 | Modern Intel (Skylake+) | Full | `-cpu host` (native passthrough) | vmxnet3 |
-| Intel Xeon | Full | `-cpu host` (native passthrough) | e1000 |
-| Pre-Skylake Intel (Broadwell, Haswell, …) | Full | Penryn mode | e1000 |
+| Intel Xeon (non-HEDT) | Full | `-cpu host` (native passthrough) | e1000 |
+| Intel Xeon E5/E7 v2-v4 (HEDT, dual-socket) | Full | Fixed emulated model (Broadwell-noTSX / Haswell-noTSX) | e1000 |
+| Pre-Skylake Intel (Broadwell, Haswell, etc.) | Full | Penryn mode | e1000 |
 | AMD (any) | Full | Cascadelake-Server emulation | vmxnet3 |
-| Apple Silicon (ARM Proxmox) | Not supported | - | - |
+| Apple Silicon (ARM Proxmox) | Not supported | n/a | n/a |
 
 All modes are auto-detected. Zero configuration needed.
 
@@ -439,8 +440,8 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 - Keep the main macOS disk on `virtio0`, OpenCore on `ide0`, recovery on `ide2`
 - Use `vga: std` during installation (switch after)
 - Change one setting at a time and measure the impact
-- **Intel CPUs** get native host passthrough - best performance
-- **Xeon CPUs** get native host passthrough - same as modern Intel, Penryn is skipped
+- **Intel CPUs** get native host passthrough, best performance
+- **Xeon CPUs** get native host passthrough (same as modern Intel, Penryn is skipped), except real HEDT chips (E5/E7 v2-v4), which use a fixed emulated model to avoid a scheduler livelock
 - **Pre-Skylake Intel** (Broadwell, Haswell, etc.) use Penryn mode with `e1000` NIC for install stability
 - **AMD CPUs** use Cascadelake-Server emulation - functional but slower due to CPU translation overhead
 
