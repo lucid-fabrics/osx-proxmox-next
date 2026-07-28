@@ -72,10 +72,15 @@ launch() {
 }
 
 nuke_stale() {
-  # Remove previous install to prevent stale code/venv from persisting
+  # Clear previous install to prevent stale code/venv from persisting.
+  # Empty the directory rather than rm -rf'ing it: if the invoking shell's
+  # cwd is $REPO_DIR (e.g. user cloned it manually and cd'd in), removing
+  # the directory itself leaves that shell's getcwd() unresolvable, which
+  # breaks any later command needing it (pushd, pwd -P, etc.) even after
+  # this script exits.
   if [[ -d "$REPO_DIR" ]]; then
     log "Removing previous install..."
-    rm -rf "$REPO_DIR"
+    find "$REPO_DIR" -mindepth 1 -delete
   fi
 }
 
