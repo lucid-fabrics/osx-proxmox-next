@@ -788,6 +788,12 @@ with open(path, 'wb') as f:
   msg_ok "Built OpenCore boot disk"
 }
 
+# pushd needs a resolvable cwd to save onto the dir stack; if the caller's
+# shell is sitting in a directory that got removed from under it (e.g. by a
+# prior install script deleting its own repo checkout), getcwd() fails and
+# pushd aborts. Land somewhere known-good first so that can't happen here.
+cd "${HOME:-/root}" 2>/dev/null || cd /
+
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
 
