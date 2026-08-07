@@ -225,7 +225,7 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 | **Sequoia 15** | ✅ Stable | 🧪 Community-tested | Kernel patch applied automatically with `--apple-services` |
 | **Tahoe 26** | ✅ Stable | 🧪 Community-tested | Kernel patch applied automatically with `--apple-services` |
 
-> **Apple Services on Sequoia/Tahoe VMs:** This tool automatically applies a kernel-level patch when `--apple-services` is enabled. The patch redirects Apple's VM detection sysctl (`hv_vmm_present`) to read from the hibernate counter (always 0), so Apple's DeviceCheck sees a physical machine and allows Apple ID sign-in. Verified working on Sequoia 15 and Tahoe 26. See the [Apple Services section](#-enable-apple-services-icloud-imessage-facetime) for details.
+> **Apple Services on Sequoia/Tahoe VMs:** This tool automatically applies two kernel-level patches when `--apple-services` is enabled. Together they hide the real VM detection sysctl (`hv_vmm_present`) and reroute the name to the hibernate counter, which reads 0 on a default VM, so Apple's DeviceCheck sees what appears to be a physical machine. Confirm inside the VM with `sysctl -n kern.hv_vmm_present`, which must print `0`. See the [Apple Services section](#-enable-apple-services-icloud-imessage-facetime) for details.
 
 ---
 
@@ -601,16 +601,25 @@ Starting with macOS Sequoia 15, Apple's DeviceCheck reads `hv_vmm_present` from 
 Verification Failed - An unknown error occurred.
 ```
 
-**This tool fixes it automatically.** When `--apple-services` is enabled, a kernel-level OpenCore patch is injected into `config.plist` that redirects the `hv_vmm_present` sysctl lookup to read from `hibernatecount` instead (always 0 = not a VM). Apple's DeviceCheck sees a physical machine and allows sign-in.
+**This tool fixes it automatically.** When `--apple-services` is enabled, two kernel-level OpenCore patches are injected into `config.plist`. The first renames the real `hv_vmm_present` sysctl so nothing can resolve it; the second renames `hibernatecount` into its place. That counter reads 0 on a default VM, so DeviceCheck sees what appears to be a physical machine.
 
-**Community-attested:** Multiple testers have reported Apple ID, iCloud, iMessage, and FaceTime working on Sequoia 15 and Tahoe 26 with this patch. Results may vary - if it works for you, consider sharing your experience on [Discord](https://discord.gg/Ub6TunHYre).
+Check it worked, inside the VM:
+
+```bash
+sysctl -n kern.hv_vmm_present    # must print 0
+```
+
+If it prints `1` the patch is not in effect and sign-in will fail. Releases that predate the fix for [#114](https://github.com/lucid-fabrics/osx-proxmox-next/issues/114) shipped only the second patch, so both OIDs ended up named `hv_vmm_present` and the real one still won. Rebuild the VM on the latest release.
+
+**Not officially verified.** Attestation is server-side and Apple can change it at any time, so results may vary. The `sysctl` check above tells you whether the patch itself is working; everything past that is up to Apple. If it works for you, consider sharing your experience on [Discord](https://discord.gg/Ub6TunHYre).
 
 > `RestrictEvents.kext` with `revpatch=sbvmm` alone does **not** fix this - that only hides `kern.hv_vmm_present` from userspace. The kernel patch operates at the sysctl string table level, which is what Apple's attestation stack reads directly.
 
 **If sign-in still fails after applying the patch:**
 1. Reboot the VM once - the patch requires a clean boot to take effect
-2. Verify `--apple-services` was set during VM creation
-3. As a last resort: create a **Sonoma 14** VM, sign in, then upgrade in-place to Sequoia/Tahoe
+2. Confirm `sysctl -n kern.hv_vmm_present` prints `0`
+3. Verify `--apple-services` was set during VM creation
+4. As a last resort: create a **Sonoma 14** VM, sign in, then upgrade in-place to Sequoia/Tahoe
 
 ---
 
