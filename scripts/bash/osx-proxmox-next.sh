@@ -714,6 +714,8 @@ with open(path, 'rb') as f:
 pl.setdefault('Misc', {}).setdefault('Security', {})['ScanPolicy'] = 0
 pl['Misc']['Security']['DmgLoading'] = 'Any'
 pl['Misc']['Security']['SecureBootModel'] = 'Disabled'
+# Lets the user persist 'macOS' as the boot entry (Ctrl+Enter in the picker)
+pl['Misc']['Security']['AllowSetDefault'] = True
 # Boot - graphical picker with Apple icons, auto-boot after 15s
 pl['Misc'].setdefault('Boot', {})['Timeout'] = 15
 pl['Misc']['Boot']['HideAuxiliary'] = True
@@ -729,6 +731,9 @@ nvram['prev-lang:kbd'] = 'en-US:0'.encode()
 nv_del = pl.setdefault('NVRAM', {}).setdefault('Delete', {})
 nv_del['7C436110-AB2A-4BBB-A880-FE41995C9F82'] = ['csr-active-config', 'boot-args', 'prev-lang:kbd']
 pl['NVRAM']['WriteFlash'] = True
+# Routes Boot* variables to OpenCore's own storage, so the default entry set
+# via AllowSetDefault survives firmware that deletes entries it dislikes
+pl.setdefault('UEFI', {}).setdefault('Quirks', {})['RequestBootVarRouting'] = True
 # Enable VirtualSMC
 [k.update(Enabled=True) for k in pl.get('Kernel', {}).get('Add', []) if 'VirtualSMC' in k.get('BundlePath', '')]
 # Register RestrictEvents.kext if present (default revblock=auto blocks the

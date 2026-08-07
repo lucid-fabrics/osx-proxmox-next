@@ -259,6 +259,7 @@ def test_apple_id_bypass_patches_swap_rather_than_invent() -> None:
     assert names == {b"boot session UUID", b"hibernatecount",
                      b"hibernatehidready", b"hv_vmm_present"}
 
+
 _BASH_INSTALLER = Path(__file__).resolve().parents[1] / "scripts/bash/osx-proxmox-next.sh"
 
 
@@ -331,3 +332,161 @@ def test_bash_and_python_emit_identical_kernel_patches(tmp_path: Path, apple: bo
 
     assert py["Kernel"].get("Patch", []) == ba["Kernel"].get("Patch", [])
     assert len(py["Kernel"].get("Patch", [])) == (len(_APPLE_ID_BYPASS_PATCHES) if apple else 0)
+
+
+def test_bash_installer_sets_the_same_opencore_quirks(tmp_path: Path) -> None:
+    """AllowSetDefault and RequestBootVarRouting reached bash long after Python."""
+    py_cfg = tmp_path / "py/EFI/OC/config.plist"
+    ba_cfg = tmp_path / "ba/EFI/OC/config.plist"
+    _skeleton_config(py_cfg)
+    _skeleton_config(ba_cfg)
+
+    py = _run_python_patcher(py_cfg)
+    ba = _run_bash_patcher(ba_cfg, tmp_path)
+
+    assert py["Misc"]["Security"]["AllowSetDefault"] == ba["Misc"]["Security"]["AllowSetDefault"]
+    assert py["UEFI"]["Quirks"]["RequestBootVarRouting"] == ba["UEFI"]["Quirks"]["RequestBootVarRouting"]
+
+
+def test_apple_id_bypass_patches_are_armed() -> None:
+    """Byte-perfect but Enabled=False lands an inert patch and nothing complains.
+
+    Same for Count=0 (matches nothing) and Identifier != kernel (would byte-patch
+    every binary OpenCore loads). All three fail silently at runtime.
+    """
+    for patch in _exec_bypass_fragment():
+        assert patch["Enabled"] is True
+        assert patch["Count"] == 1
+        assert patch["Identifier"] == "kernel"
+        assert patch["Arch"] == "x86_64"
+        assert patch["Base"] == ""
+
+
+def test_apple_id_bypass_patch_comments_have_no_quotes() -> None:
+    """Comments are interpolated raw into the fragment, so quotes break it.
+
+    The fragment is wrapped in `python3 -c '...'`, where an apostrophe ends the
+    shell string, and its dict literals use double quotes, where a double quote
+    ends the Python string. Neither is escaped on the way in.
+    """
+    frag = _apple_id_bypass_patch_keys()
+    for comment, _find, _replace in _APPLE_ID_BYPASS_PATCHES:
+        assert "'" not in comment and '"' not in comment, comment
+    assert "'" not in frag
+
+
+def test_apple_id_bypass_patch_keys_is_idempotent() -> None:
+    p: dict = {}
+    frag = _apple_id_bypass_patch_keys()
+    exec(frag, {"p": p})  # noqa: S102
+    exec(frag, {"p": p})  # noqa: S102
+    assert len(p["Kernel"]["Patch"]) == len(_APPLE_ID_BYPASS_PATCHES)
+
+
+# ---------------------------------------------------------------------------
+# _build_oc_disk_script
+# ---------------------------------------------------------------------------
+
+
+def test_build_oc_disk_script_returns_string() -> None:
+    result = _build_oc_disk_script(
+        opencore_path=Path("/iso/opencore.iso"),
+        recovery_path=Path("/iso/sequoia-recovery.iso"),
+        dest=Path("/tmp/oc.img"),
+        macos="sequoia",
+    )
+    assert isinstance(result, str)
+
+
+def test_build_oc_disk_script_non_empty() -> None:
+    result = _build_oc_disk_script(
+        opencore_path=Path("/iso/opencore.iso"),
+        recovery_path=Path("/iso/sequoia-recovery.iso"),
+        dest=Path("/tmp/oc.img"),
+        macos="sequoia",
+    )
+    assert len(result) > 0
+
+
+def test_build_oc_disk_script_contains_efi_check() -> None:
+    result = _build_oc_disk_script(
+        opencore_path=Path("/iso/opencore.iso"),
+        recovery_path=Path("/iso/sequoia-recovery.iso"),
+        dest=Path("/tmp/oc.img"),
+        macos="sequoia",
+    )
+    assert "EFI/OC" in result
+
+
+def test_build_oc_disk_script_contains_plistlib() -> None:
+    result = _build_oc_disk_script(
+        opencore_path=Path("/iso/opencore.iso"),
+        recovery_path=Path("/iso/sequoia-recovery.iso"),
+        dest=Path("/tmp/oc.img"),
+        macos="sequoia",
+    )
+    assert "plistlib" in result
+
+
+def test_build_oc_disk_script_contains_dest_path() -> None:
+    dest = Path("/tmp/custom_oc.img")
+    result = _build_oc_disk_script(
+        opencore_path=Path("/iso/opencore.iso"),
+        recovery_path=Path("/iso/sequoia-recovery.iso"),
+        dest=dest,
+        macos="sequoia",
+    )
+    assert str(dest) in result
+
+
+# ---------------------------------------------------------------------------
+# RestrictEvents injection (silences MacPro7,1 "Memory Modules Misconfigured")
+# ---------------------------------------------------------------------------
+
+
+def _oc_script() -> str:
+    return _build_oc_disk_script(
+        opencore_path=Path("/iso/opencore.iso"),
+        recovery_path=Path("/iso/sequoia-recovery.iso"),
+        dest=Path("/tmp/oc.img"),
+        macos="sequoia",
+    )
+
+
+def test_build_oc_disk_script_injects_restrictevents() -> None:
+    result = _oc_script()
+    assert "RestrictEvents.kext" in result
+    assert "RestrictEvents-1.1.6-RELEASE.zip" in result
+
+
+def test_build_oc_disk_script_restrictevents_zip_next_to_iso() -> None:
+    result = _oc_script()
+    assert "/iso/RestrictEvents-1.1.6-RELEASE.zip" in result
+
+
+def test_build_oc_disk_script_restrictevents_curl_fallback() -> None:
+    result = _oc_script()
+    assert "curl -fsSL" in result
+    assert "github.com/acidanthera/RestrictEvents/releases/download" in result
+
+
+def test_build_oc_disk_script_restrictevents_failure_is_non_fatal() -> None:
+    result = _oc_script()
+    assert "memory warning fix skipped" in result
+
+
+def test_build_oc_disk_script_injection_runs_before_plist_patch() -> None:
+    result = _oc_script()
+    assert result.index("RE_ZIP") < result.index("plistlib")
+
+
+def test_plist_patch_script_registers_restrictevents_kext() -> None:
+    script = _plist_patch_script()
+    assert "RestrictEvents.kext" in script
+    assert "Contents/MacOS/RestrictEvents" in script
+    assert "Contents/Info.plist" in script
+
+
+def test_plist_patch_script_restrictevents_entry_guarded_by_kext_dir() -> None:
+    script = _plist_patch_script()
+    assert 'os.path.isdir(oc_dest+"/EFI/OC/Kexts/RestrictEvents.kext")' in script
