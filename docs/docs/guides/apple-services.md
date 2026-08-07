@@ -79,6 +79,19 @@ Verify inside the VM:
 sysctl -n kern.hv_vmm_present    # must print 0
 ```
 
+Because it is a swap, `kern.hibernatecount` now carries what `hv_vmm_present` used to, so it reads `1` on a VM. That is the patch working, not a fault. Verified on a macOS Sequoia guest:
+
+```console
+$ sysctl kern.hv_vmm_present kern.hibernatecount
+kern.hv_vmm_present: 0
+kern.hibernatecount: 1
+
+$ sysctl -d kern.hibernatecount
+kern.hibernatecount: running on a vmm
+```
+
+The description travels with the name, which is why `hibernatecount` describes itself oddly. Harmless, and the same residue OpenCore Legacy Patcher leaves on `direct_handoff`.
+
 :::warning
 Releases that predate the fix for [#114](https://github.com/lucid-fabrics/osx-proxmox-next/issues/114) injected only the second patch. Both OIDs then carried the name `hv_vmm_present` and `sysctlbyname()` still resolved the real one, so the sysctl kept returning `1` and sign-in failed. Rebuild the VM on the latest release.
 :::
