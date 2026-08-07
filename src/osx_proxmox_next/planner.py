@@ -87,7 +87,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     cpu = detect_cpu_info()
     cpu_flag = _cpu_args(cpu, override=config.cpu_model)
     # AMD needs kernel patches (AppleCpuPmCfgLock / AppleXcpmCfgLock).
-    # Hybrid Intel does NOT — it only needs Cascadelake-Server emulation.
+    # Hybrid Intel does NOT, it only needs Cascadelake-Server emulation.
     is_amd = cpu.vendor == "AMD"
 
     # Pre-generate SMBIOS identity so downstream steps just read config fields.
@@ -323,7 +323,11 @@ def _boot_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
 
 
 def build_post_install_plan(vmid: int) -> list[PlanStep]:
-    """Fix boot order after macOS installation completes.
+    """Detach recovery and point boot at OpenCore.
+
+    Run this as soon as the installer has rebooted once, not only when macOS is
+    fully installed. While recovery stays attached the OpenCore picker lists it
+    ahead of the installer and auto-boots it, so the install never resumes.
 
     Switches from recovery-first (ide2;virtio0;ide0) to OpenCore-first
     (ide0;virtio0) so the VM boots into the installed macOS via OpenCore.
@@ -440,7 +444,7 @@ def _updated_net0(current_net0: str | None, new_bridge: str, nic_model: str | No
             other.append(f"bridge={new_bridge}")
         return ",".join([new_model_part] + other)
 
-    # net0 line not found — fall back to clean config
+    # net0 line not found, fall back to clean config
     return f"{fallback_model},bridge={new_bridge},firewall=0"
 
 

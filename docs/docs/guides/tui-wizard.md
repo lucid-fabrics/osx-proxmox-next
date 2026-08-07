@@ -111,11 +111,13 @@ After completion, open the VM console via Proxmox web UI (noVNC) to continue mac
 
 ### Post-Install
 
-After macOS finishes installing, fix the boot order so the main disk boots first:
+Run this as soon as the installer reboots the VM for the first time, not only once macOS is fully installed:
 
 ```bash
-qm set <vmid> --boot order=virtio0;ide0
+osx-next-cli post-install --vmid <id> --execute
 ```
+
+It detaches recovery and sets boot order `ide0;virtio0`. Until you do, the OpenCore picker auto-boots recovery on every reboot and the install never finishes.
 
 ---
 
