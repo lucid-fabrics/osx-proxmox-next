@@ -336,6 +336,20 @@ def test_bash_and_python_emit_identical_kernel_patches(tmp_path: Path, apple: bo
     assert len(py["Kernel"].get("Patch", [])) == (len(_APPLE_ID_BYPASS_PATCHES) if apple else 0)
 
 
+def test_bash_inline_python_has_no_double_quotes() -> None:
+    """The block is a double-quoted python3 -c argument in the shell.
+
+    A single double-quote anywhere inside, even in a comment, ends the shell
+    string early and shifts every positional argument. That shipped once: a
+    comment mentioning the memory banner in quotes made the patcher receive
+    'Modules' as its config path and the installer died with FileNotFoundError.
+    shellcheck -S error does not catch it and bash -n parses it fine.
+    """
+    block = _bash_inline_python()
+    bad = [(i, ln) for i, ln in enumerate(block.splitlines(), 1) if '"' in ln]
+    assert not bad, f"double-quote inside python3 -c block: {bad[:3]}"
+
+
 def test_bash_installer_sets_the_same_opencore_quirks(tmp_path: Path) -> None:
     """AllowSetDefault and RequestBootVarRouting reached bash long after Python."""
     py_cfg = tmp_path / "py/EFI/OC/config.plist"
