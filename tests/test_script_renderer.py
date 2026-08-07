@@ -1,7 +1,13 @@
 """Unit tests for script_renderer module."""
 from __future__ import annotations
 
+import os
+import plistlib
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from osx_proxmox_next.domain import PlanStep, VmConfig
 from osx_proxmox_next.script_renderer import (
@@ -252,3 +258,76 @@ def test_apple_id_bypass_patches_swap_rather_than_invent() -> None:
              for n in bytes(x["Replace"]).split(b"\x00") if n}
     assert names == {b"boot session UUID", b"hibernatecount",
                      b"hibernatehidready", b"hv_vmm_present"}
+
+_BASH_INSTALLER = Path(__file__).resolve().parents[1] / "scripts/bash/osx-proxmox-next.sh"
+
+
+def _skeleton_config(path: Path) -> None:
+    """Minimal config.plist with the containers both patchers assume exist."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(plistlib.dumps({
+        "Misc": {"Security": {}, "Boot": {}},
+        "NVRAM": {"Add": {"7C436110-AB2A-4BBB-A880-FE41995C9F82": {}}},
+        "Kernel": {"Add": [{"BundlePath": "Lilu.kext", "Enabled": True}], "Quirks": {}},
+        "UEFI": {"Quirks": {}},
+        "PlatformInfo": {},
+    }))
+
+
+def _bash_inline_python() -> str:
+    """Extract the config.plist patcher out of the bash installer.
+
+    Sliced by marker rather than line number so it survives edits above it.
+    """
+    lines = _BASH_INSTALLER.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == 'python3 -c "')
+    end = next(i for i, ln in enumerate(lines[start:], start)
+               if ln.startswith('" "$dest_mnt'))
+    return "\n".join(lines[start + 1:end])
+
+
+def _run_bash_patcher(cfg: Path, tmp: Path, apple: str = "true") -> dict:
+    script = tmp / "bash_patcher.py"
+    script.write_text(_bash_inline_python())
+    subprocess.run(
+        [sys.executable, str(script), str(cfg), "Intel", apple, "C02XX0XXXXXX",
+         "11111111-2222-3333-4444-555555555555", "C02XX000XXXXXXXXX",
+         "001122334455", "MacPro7,1"],
+        check=True, capture_output=True,
+    )
+    with cfg.open("rb") as fh:
+        return plistlib.load(fh)
+
+
+def _run_python_patcher(cfg: Path, apple: bool = True) -> dict:
+    cmd = _plist_patch_script(
+        apple_services=apple, smbios_serial="C02XX0XXXXXX",
+        smbios_uuid="11111111-2222-3333-4444-555555555555",
+        smbios_mlb="C02XX000XXXXXXXXX", smbios_rom="001122334455",
+        smbios_model="MacPro7,1",
+    )
+    env = {**os.environ, "OC_DEST": str(cfg.parent.parent.parent)}
+    subprocess.run(["bash", "-c", cmd], check=True, capture_output=True, env=env)
+    with cfg.open("rb") as fh:
+        return plistlib.load(fh)
+
+
+@pytest.mark.parametrize("apple", [True, False])
+def test_bash_and_python_emit_identical_kernel_patches(tmp_path: Path, apple: bool) -> None:
+    """Execute both patchers and compare, rather than grepping for constants.
+
+    A substring check only catches a typo'd hex literal. It sails past a
+    swapped Find/Replace, Enabled=False, a bumped MinKernel, or the whole
+    block being gated off, all of which ship a silently inert patch to bash
+    users. This is the guard for the Python/bash parity rule.
+    """
+    py_cfg = tmp_path / "py/EFI/OC/config.plist"
+    ba_cfg = tmp_path / "ba/EFI/OC/config.plist"
+    _skeleton_config(py_cfg)
+    _skeleton_config(ba_cfg)
+
+    py = _run_python_patcher(py_cfg, apple=apple)
+    ba = _run_bash_patcher(ba_cfg, tmp_path, apple="true" if apple else "false")
+
+    assert py["Kernel"].get("Patch", []) == ba["Kernel"].get("Patch", [])
+    assert len(py["Kernel"].get("Patch", [])) == (len(_APPLE_ID_BYPASS_PATCHES) if apple else 0)
