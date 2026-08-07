@@ -716,8 +716,12 @@ pl['Misc']['Security']['DmgLoading'] = 'Any'
 pl['Misc']['Security']['SecureBootModel'] = 'Disabled'
 # Lets the user persist 'macOS' as the boot entry (Ctrl+Enter in the picker)
 pl['Misc']['Security']['AllowSetDefault'] = True
-# Boot - graphical picker with Apple icons, auto-boot after 15s
-pl['Misc'].setdefault('Boot', {})['Timeout'] = 15
+# Boot - graphical picker with Apple icons. Timeout 0 disables auto-boot: the
+# picker lists recovery ahead of the installer, so any non-zero value auto-boots
+# recovery on each install reboot and the install silently never finishes.
+# post-install restores 15s once recovery is detached. Keep in sync with
+# script_renderer.py PICKER_TIMEOUT_INSTALL.
+pl['Misc'].setdefault('Boot', {})['Timeout'] = 0
 pl['Misc']['Boot']['HideAuxiliary'] = True
 pl['Misc']['Boot']['PickerAttributes'] = 17
 pl['Misc']['Boot']['PickerMode'] = 'External'

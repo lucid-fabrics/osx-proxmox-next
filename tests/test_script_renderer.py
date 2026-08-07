@@ -11,6 +11,8 @@ import pytest
 
 from osx_proxmox_next.domain import PlanStep, VmConfig
 from osx_proxmox_next.script_renderer import (
+    PICKER_TIMEOUT_INSTALL,
+    PICKER_TIMEOUT_INSTALLED,
     _APPLE_ID_BYPASS_PATCHES,
     _apple_id_bypass_patch_keys,
     _build_oc_disk_script,
@@ -346,6 +348,21 @@ def test_bash_installer_sets_the_same_opencore_quirks(tmp_path: Path) -> None:
 
     assert py["Misc"]["Security"]["AllowSetDefault"] == ba["Misc"]["Security"]["AllowSetDefault"]
     assert py["UEFI"]["Quirks"]["RequestBootVarRouting"] == ba["UEFI"]["Quirks"]["RequestBootVarRouting"]
+    assert py["Misc"]["Boot"]["Timeout"] == ba["Misc"]["Boot"]["Timeout"]
+
+
+def test_build_disables_picker_auto_boot(tmp_path: Path) -> None:
+    """Any non-zero timeout auto-boots recovery and the install never finishes.
+
+    The picker lists the attached recovery disk ahead of the installer, so
+    auto-boot always picks the wrong entry until post-install detaches recovery.
+    Timeout=0 makes the picker wait instead of choosing wrongly.
+    """
+    cfg = tmp_path / "py/EFI/OC/config.plist"
+    _skeleton_config(cfg)
+    assert _run_python_patcher(cfg)["Misc"]["Boot"]["Timeout"] == PICKER_TIMEOUT_INSTALL
+    assert PICKER_TIMEOUT_INSTALL == 0
+    assert PICKER_TIMEOUT_INSTALLED > 0
 
 
 def test_apple_id_bypass_patches_are_armed() -> None:

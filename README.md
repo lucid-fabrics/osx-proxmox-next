@@ -53,7 +53,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 - Automatic OpenCore and recovery/installer download - no manual file placement
 - Shared storage support - download ISOs to NAS or any Proxmox storage pool (`--iso-dir`)
 - Auto-generated SMBIOS identity (serial, UUID, model) - no OpenCore editing needed
-- Graphical boot picker with Apple icons - auto-boots the installer
+- Graphical boot picker with Apple icons - waits for your choice during install, auto-boots once `post-install` runs
 - Mandatory dry-run before live install previews every command
 - Real-time form validation with inline error feedback
 
@@ -379,7 +379,9 @@ Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on 
 <details>
 <summary><strong>Install never finishes, it keeps restarting in Recovery</strong></summary>
 
-Different from the one below: here the install never completes at all. A macOS install reboots itself two or three times, and each reboot returns to the OpenCore picker. The picker lists **macOS Base System** (the recovery disk on `ide2`) before **macOS Installer**, and `Timeout=15` auto-boots the first entry, so every reboot restarts Recovery instead of resuming the install.
+Different from the one below: here the install never completes at all. A macOS install reboots itself two or three times, and each reboot returns to the OpenCore picker. The picker lists **macOS Base System** (the recovery disk on `ide2`) before **macOS Installer**, so any auto-boot picks the wrong one and every reboot restarts Recovery instead of resuming.
+
+Current releases ship the picker with `Timeout=0`, so it waits for you rather than choosing wrongly. If you are on an older build where it auto-boots after 15s, this is the loop you are hitting.
 
 **The fix:** detach recovery once the installer has rebooted for the first time.
 

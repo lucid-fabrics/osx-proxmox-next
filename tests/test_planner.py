@@ -870,31 +870,58 @@ def test_build_plan_intel_host_no_kvm_pv_flags(monkeypatch) -> None:
 # build_post_install_plan
 # ---------------------------------------------------------------------------
 
-def test_build_post_install_plan_two_steps() -> None:
+def test_build_post_install_plan_step_order() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(102)
-    assert len(steps) == 2
-    assert steps[0].title == "Detach recovery disk"
-    assert steps[1].title == "Set post-install boot order"
+    assert [s.title for s in steps] == [
+        "Verify VM is stopped",
+        "Detach recovery disk",
+        "Restore boot picker timeout",
+        "Set post-install boot order",
+    ]
+
+
+def test_build_post_install_plan_refuses_running_vm() -> None:
+    """Mounting the OpenCore disk of a running VM risks corrupting it."""
+    from osx_proxmox_next.planner import build_post_install_plan
+    cmd = build_post_install_plan(102)[0].command
+    assert "qm status" in cmd
+    assert "status: stopped" in cmd
+    assert "false" in cmd  # must fail the plan, not warn and continue
 
 
 def test_build_post_install_plan_detaches_ide2() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(102)
-    cmd = steps[0].command
+    cmd = steps[1].command
     assert "--delete ide2" in cmd
     assert "'^ide2:'" in cmd  # idempotency guard
     assert "if " in cmd  # propagates qm set failures (not masked by || true)
 
 
+def test_build_post_install_plan_restores_picker_timeout() -> None:
+    """Built with Timeout=0 so a half-done install cannot auto-boot recovery.
+
+    Once recovery is detached auto-boot is safe again, otherwise every future
+    boot would sit at the picker waiting for a keypress.
+    """
+    from osx_proxmox_next.planner import build_post_install_plan
+    from osx_proxmox_next.script_renderer import PICKER_TIMEOUT_INSTALLED
+    cmd = build_post_install_plan(102)[2].command
+    assert f'"Timeout"]={PICKER_TIMEOUT_INSTALLED}' in cmd
+    assert "losetup" in cmd and "mount" in cmd
+    assert "losetup -d" in cmd  # loop device released on exit
+    assert "<array/>" in cmd  # OcXmlLib self-closing-tag fixup
+
+
 def test_build_post_install_plan_correct_boot_order() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(102)
-    assert f"--boot '{POST_INSTALL_BOOT_ORDER}'" in steps[1].command
+    assert f"--boot '{POST_INSTALL_BOOT_ORDER}'" in steps[3].command
 
 
 def test_build_post_install_plan_targets_correct_vmid() -> None:
     from osx_proxmox_next.planner import build_post_install_plan
     steps = build_post_install_plan(999)
-    assert "qm set 999" in steps[0].command
     assert "qm set 999" in steps[1].command
+    assert "qm set 999" in steps[3].command

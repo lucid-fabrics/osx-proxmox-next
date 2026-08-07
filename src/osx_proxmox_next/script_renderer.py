@@ -23,6 +23,15 @@ _APPLE_OSK = "ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc"
 
 _OC_DISK_SIZE_MB = 1024
 
+# A macOS install reboots two or three times, and the picker lists the attached
+# recovery disk ahead of the installer. Any non-zero timeout therefore auto-boots
+# recovery on every reboot and the install silently never finishes. 0 disables
+# auto-boot entirely (OpenCore: "Set to 0 to disable"), so the picker waits for a
+# choice instead of making the wrong one. post-install restores INSTALLED once
+# recovery is detached and there is only one sane entry left to boot.
+PICKER_TIMEOUT_INSTALL = 0
+PICKER_TIMEOUT_INSTALLED = 15
+
 
 def _partprobe_retry_snippet(loop_var: str) -> str:
     """Return bash snippet that retries partprobe up to 10 times for slow storage."""
@@ -196,7 +205,7 @@ def _plist_patch_script(
         "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
         "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
         "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
-        "p[\"Misc\"][\"Boot\"][\"Timeout\"]=15; "
+        f"p[\"Misc\"][\"Boot\"][\"Timeout\"]={PICKER_TIMEOUT_INSTALL}; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
         "p[\"Misc\"][\"Boot\"][\"HideAuxiliary\"]=True; "
         "p[\"Misc\"][\"Security\"][\"AllowSetDefault\"]=True; "
