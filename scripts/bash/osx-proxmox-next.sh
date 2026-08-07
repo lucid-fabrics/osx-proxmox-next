@@ -729,7 +729,12 @@ pl['Misc']['Boot']['PickerVariant'] = 'Acidanthera\\\Syrah'
 # NVRAM: SIP partially disabled for kext loading
 nvram = pl.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault('7C436110-AB2A-4BBB-A880-FE41995C9F82', {})
 nvram['csr-active-config'] = b'\x67\x0f\x00\x00'
-nvram['boot-args'] = 'keepsyms=1 debug=0x100'
+# revblock=pci makes RestrictEvents block the MemorySlotNotification and
+# ExpansionSlotNotification processes behind the "Memory Modules Misconfigured"
+# banner. Its documented revblock=auto default does NOT engage the block, this
+# was verified on a clean Sequoia guest. Keep in sync with script_renderer.py
+# BOOT_ARGS_BASE.
+nvram['boot-args'] = 'keepsyms=1 debug=0x100 revblock=pci'
 nvram['prev-lang:kbd'] = 'en-US:0'.encode()
 # NVRAM Delete: purge stale values so Add entries take effect
 nv_del = pl.setdefault('NVRAM', {}).setdefault('Delete', {})

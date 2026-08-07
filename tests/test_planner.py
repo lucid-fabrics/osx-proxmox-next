@@ -363,8 +363,8 @@ def test_build_plan_default_no_verbose(monkeypatch) -> None:
     cfg = _cfg("sequoia")
     steps = build_plan(cfg)
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
-    assert "debug=0x100 -v" not in build.command
-    assert 'debug=0x100"' in build.command or "debug=0x100'" in build.command
+    assert "revblock=pci -v" not in build.command  # -v only with --verbose-boot
+    assert "keepsyms=1 debug=0x100 revblock=pci" in build.command
 
 
 def test_build_plan_verbose_boot(monkeypatch) -> None:
@@ -374,7 +374,7 @@ def test_build_plan_verbose_boot(monkeypatch) -> None:
     cfg.verbose_boot = True
     steps = build_plan(cfg)
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
-    assert "debug=0x100 -v" in build.command
+    assert "keepsyms=1 debug=0x100 revblock=pci -v" in build.command
 
 
 def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
@@ -771,7 +771,7 @@ def test_plist_patch_script_verbose_boot() -> None:
     script = _plist_patch_script(verbose_boot=True)
     assert "-v" in script
     no_verbose = _plist_patch_script(verbose_boot=False)
-    assert "debug=0x100 -v" not in no_verbose
+    assert "revblock=pci -v" not in no_verbose
 
 
 def test_plist_patch_script_platforminfo() -> None:
