@@ -380,6 +380,12 @@ def _restore_picker_timeout_script(vid: str) -> str:
         "OC_LOOP=$(losetup -fP --show \"$OC_PATH\") && "
         "trap 'umount $OC_MNT 2>/dev/null; losetup -d $OC_LOOP 2>/dev/null; "
         "rmdir $OC_MNT 2>/dev/null' EXIT && "
+        # losetup -fP does not guarantee the partition node exists yet, the
+        # kernel creates it asynchronously and mount fails with
+        # "Can't lookup blockdev" on slower storage
+        + _partprobe_retry_snippet("OC_LOOP") + " && "
+        "{ [ -b \"${OC_LOOP}p1\" ] || { echo \"ERROR: ${OC_LOOP}p1 never appeared\"; "
+        "false; }; } && "
         "mount \"${OC_LOOP}p1\" $OC_MNT && "
         "python3 -c '"
         "import plistlib, os, sys; "

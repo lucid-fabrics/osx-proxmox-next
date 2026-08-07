@@ -632,7 +632,17 @@ def _run_post_install(args: argparse.Namespace) -> int:
             print(line)
         return 0
 
-    print(f"Post-install FAILED. Log: {result.log_path}")
+    # Surface the failing step and its output. "FAILED, see log" makes the user
+    # go digging for a reason that is usually a single actionable line, such as
+    # the VM still being running.
+    failed = next((r for r in result.results if not r.ok), None)
+    if failed is not None:
+        print(f"Post-install FAILED at step: {failed.title}")
+        for line in (failed.output or "").strip().splitlines()[-5:]:
+            print(f"  {line}")
+    else:
+        print("Post-install FAILED.")
+    print(f"Log: {result.log_path}")
     return 9
 
 
