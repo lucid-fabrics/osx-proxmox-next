@@ -349,6 +349,31 @@ def test_bash_installer_sets_the_same_opencore_quirks(tmp_path: Path) -> None:
     assert py["Misc"]["Security"]["AllowSetDefault"] == ba["Misc"]["Security"]["AllowSetDefault"]
     assert py["UEFI"]["Quirks"]["RequestBootVarRouting"] == ba["UEFI"]["Quirks"]["RequestBootVarRouting"]
     assert py["Misc"]["Boot"]["Timeout"] == ba["Misc"]["Boot"]["Timeout"]
+    guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
+    assert py["NVRAM"]["Add"][guid]["boot-args"] == ba["NVRAM"]["Add"][guid]["boot-args"]
+
+
+def test_boot_args_configure_restrictevents(tmp_path: Path) -> None:
+    """revblock=pci is the documented config for the memory-warning block.
+
+    This asserts the boot-arg is emitted, nothing more. It does NOT assert the
+    banner is suppressed: measured on Sequoia 15.7.9 with Lilu, RestrictEvents
+    1.1.6 and VirtualSMC all loaded, SIP off, hw.model MacPro7,1 and this exact
+    boot-arg live, MemorySlotNotification still ran and still posted. Upstream
+    limitation, see BOOT_ARGS_BASE.
+    """
+    cfg = tmp_path / "py/EFI/OC/config.plist"
+    _skeleton_config(cfg)
+    nvram = _run_python_patcher(cfg)["NVRAM"]["Add"]["7C436110-AB2A-4BBB-A880-FE41995C9F82"]
+    assert "revblock=pci" in nvram["boot-args"]
+
+
+def test_boot_args_keep_verbose_flag_separate(tmp_path: Path) -> None:
+    """--verbose-boot must add -v without dropping the RestrictEvents config."""
+    verbose = _plist_patch_script(verbose_boot=True)
+    normal = _plist_patch_script(verbose_boot=False)
+    assert "revblock=pci" in verbose and "revblock=pci" in normal
+    assert " -v" in verbose and " -v" not in normal
 
 
 def test_build_disables_picker_auto_boot(tmp_path: Path) -> None:

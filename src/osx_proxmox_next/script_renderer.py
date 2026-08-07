@@ -32,6 +32,21 @@ _OC_DISK_SIZE_MB = 1024
 PICKER_TIMEOUT_INSTALL = 0
 PICKER_TIMEOUT_INSTALLED = 15
 
+# revblock=pci is the documented way to ask RestrictEvents to block
+# MemorySlotNotification and ExpansionSlotNotification, the processes behind the
+# "Memory Modules Misconfigured" banner MacPro7,1 shows because a VM has no DIMM
+# slots. It is set because it is the correct configuration, but be clear that on
+# Sequoia it does NOT currently suppress the banner.
+#
+# Measured on a clean Sequoia 15.7.9 guest with every documented precondition
+# satisfied: Lilu 1.6.8, RestrictEvents 1.1.6 and VirtualSMC all loaded,
+# hw.model MacPro7,1, SIP fully disabled, and revblock=pci live in boot-args.
+# MemorySlotNotification still ran (pid 540 from boot) and still posted the
+# notification. RestrictEvents' process blocking appears broken on this macOS,
+# and 1.1.6 is the newest release. Treat the banner as cosmetic and unfixed;
+# PlatformInfo -> CustomMemory is the kext-free alternative, untested here.
+BOOT_ARGS_BASE = "keepsyms=1 debug=0x100 revblock=pci"
+
 
 def _partprobe_retry_snippet(loop_var: str) -> str:
     """Return bash snippet that retries partprobe up to 10 times for slow storage."""
@@ -195,7 +210,7 @@ def _plist_patch_script(
         else ""
     )
     apple_id_bypass = _apple_id_bypass_patch_keys() if apple_services else ""
-    boot_args = f"keepsyms=1 debug=0x100{' -v' if verbose_boot else ''}"
+    boot_args = f"{BOOT_ARGS_BASE}{' -v' if verbose_boot else ''}"
 
     return (
         "python3 -c '"
