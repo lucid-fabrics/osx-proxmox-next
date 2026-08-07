@@ -377,6 +377,22 @@ Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on 
 </details>
 
 <details>
+<summary><strong>Install never finishes, it keeps restarting in Recovery</strong></summary>
+
+Different from the one below: here the install never completes at all. A macOS install reboots itself two or three times, and each reboot returns to the OpenCore picker. The picker lists **macOS Base System** (the recovery disk on `ide2`) before **macOS Installer**, and `Timeout=15` auto-boots the first entry, so every reboot restarts Recovery instead of resuming the install.
+
+**The fix:** detach recovery once the installer has rebooted for the first time.
+
+```bash
+osx-next-cli post-install --vmid <id> --execute
+```
+
+With `ide2` gone the picker only lists the installer, so auto-boot picks the right entry and the install resumes to completion. Run this after the *first* reboot, not only at the very end.
+
+Selecting **macOS Installer** manually at the picker also works for that one boot, but pressing **Ctrl+Enter** to make it the default is not reliable here: the installer re-blesses the boot target on every reboot, so the next one returns to Recovery anyway. Detaching recovery is the fix that holds.
+</details>
+
+<details>
 <summary><strong>Loops back to Recovery after the install finishes</strong></summary>
 
 The install succeeded but OpenCore is still booting the on-disk Recovery volume. macOS only sets the startup disk once it boots the new system for real, and it never got there, so the bootloader keeps falling back to Recovery. `post-install` only reorders the Proxmox boot devices, it cannot change the bootloader's saved choice inside the VM.

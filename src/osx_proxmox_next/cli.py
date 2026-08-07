@@ -130,7 +130,12 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
     doctor.add_argument("--vmid", type=int, required=True, help="VM ID to inspect")
     post_install = sub.add_parser(
         "post-install",
-        help="Fix boot order after macOS installation (switches to OpenCore-first: ide0;virtio0)",
+        help=(
+            "Detach recovery and switch to OpenCore-first boot (ide0;virtio0). "
+            "Run it after the installer's FIRST reboot, not only at the very end: "
+            "while recovery stays attached the picker lists it first and auto-boots "
+            "it, so the install restarts instead of resuming."
+        ),
     )
     post_install.add_argument("--vmid", type=int, required=True, help="VM ID to update")
     post_install.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
