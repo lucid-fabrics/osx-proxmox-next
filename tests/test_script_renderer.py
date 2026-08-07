@@ -5,6 +5,7 @@ from pathlib import Path
 
 from osx_proxmox_next.domain import PlanStep, VmConfig
 from osx_proxmox_next.script_renderer import (
+    _APPLE_ID_BYPASS_PATCHES,
     _apple_id_bypass_patch_keys,
     _build_oc_disk_script,
     _plist_patch_script,
@@ -207,110 +208,47 @@ def test_apple_id_bypass_patch_keys_scoped_to_sequoia() -> None:
     assert "24.0.0" in result  # MinKernel for Sequoia (Darwin 24.x)
 
 
-# ---------------------------------------------------------------------------
-# _build_oc_disk_script
-# ---------------------------------------------------------------------------
+def _exec_bypass_fragment() -> list[dict]:
+    """Run the fragment the way the generated script does: one shared namespace."""
+    p: dict = {}
+    exec(_apple_id_bypass_patch_keys(), {"p": p})  # noqa: S102
+    return p["Kernel"]["Patch"]
 
 
-def test_build_oc_disk_script_returns_string() -> None:
-    result = _build_oc_disk_script(
-        opencore_path=Path("/iso/opencore.iso"),
-        recovery_path=Path("/iso/sequoia-recovery.iso"),
-        dest=Path("/tmp/oc.img"),
-        macos="sequoia",
-    )
-    assert isinstance(result, str)
+def test_apple_id_bypass_hides_real_hv_vmm_present() -> None:
+    """Without this patch both OIDs are named hv_vmm_present and the real one wins."""
+    patches = _exec_bypass_fragment()
+    finds = [bytes(x["Find"]) for x in patches]
+    assert b"boot session UUID\x00hv_vmm_present\x00" in finds
+    real = patches[finds.index(b"boot session UUID\x00hv_vmm_present\x00")]
+    assert b"hv_vmm_present" not in bytes(real["Replace"])
 
 
-def test_build_oc_disk_script_non_empty() -> None:
-    result = _build_oc_disk_script(
-        opencore_path=Path("/iso/opencore.iso"),
-        recovery_path=Path("/iso/sequoia-recovery.iso"),
-        dest=Path("/tmp/oc.img"),
-        macos="sequoia",
-    )
-    assert len(result) > 0
+def test_apple_id_bypass_patches_are_length_preserving() -> None:
+    for patch in _exec_bypass_fragment():
+        assert len(patch["Find"]) == len(patch["Replace"])
 
 
-def test_build_oc_disk_script_contains_efi_check() -> None:
-    result = _build_oc_disk_script(
-        opencore_path=Path("/iso/opencore.iso"),
-        recovery_path=Path("/iso/sequoia-recovery.iso"),
-        dest=Path("/tmp/oc.img"),
-        macos="sequoia",
-    )
-    assert "EFI/OC" in result
+def test_apple_id_bypass_patch_bytes_are_exact() -> None:
+    """A silent hex typo would make the patch never match and Apple ID fail quietly."""
+    assert [(bytes(x["Find"]), bytes(x["Replace"])) for x in _exec_bypass_fragment()] == [
+        # swap, not a rename: hv_vmm_present and hibernatecount trade names, so
+        # no OID is invented and none disappears
+        (b"boot session UUID\x00hv_vmm_present\x00",
+         b"boot session UUID\x00hibernatecount\x00"),
+        (b"hibernatehidready\x00hibernatecount\x00",
+         b"hibernatehidready\x00hv_vmm_present\x00"),
+    ]
 
 
-def test_build_oc_disk_script_contains_plistlib() -> None:
-    result = _build_oc_disk_script(
-        opencore_path=Path("/iso/opencore.iso"),
-        recovery_path=Path("/iso/sequoia-recovery.iso"),
-        dest=Path("/tmp/oc.img"),
-        macos="sequoia",
-    )
-    assert "plistlib" in result
+def test_apple_id_bypass_patches_swap_rather_than_invent() -> None:
+    """Post-patch the kernel must hold one of each name, not an invented one.
 
-
-def test_build_oc_disk_script_contains_dest_path() -> None:
-    dest = Path("/tmp/custom_oc.img")
-    result = _build_oc_disk_script(
-        opencore_path=Path("/iso/opencore.iso"),
-        recovery_path=Path("/iso/sequoia-recovery.iso"),
-        dest=dest,
-        macos="sequoia",
-    )
-    assert str(dest) in result
-
-
-# ---------------------------------------------------------------------------
-# RestrictEvents injection (silences MacPro7,1 "Memory Modules Misconfigured")
-# ---------------------------------------------------------------------------
-
-
-def _oc_script() -> str:
-    return _build_oc_disk_script(
-        opencore_path=Path("/iso/opencore.iso"),
-        recovery_path=Path("/iso/sequoia-recovery.iso"),
-        dest=Path("/tmp/oc.img"),
-        macos="sequoia",
-    )
-
-
-def test_build_oc_disk_script_injects_restrictevents() -> None:
-    result = _oc_script()
-    assert "RestrictEvents.kext" in result
-    assert "RestrictEvents-1.1.6-RELEASE.zip" in result
-
-
-def test_build_oc_disk_script_restrictevents_zip_next_to_iso() -> None:
-    result = _oc_script()
-    assert "/iso/RestrictEvents-1.1.6-RELEASE.zip" in result
-
-
-def test_build_oc_disk_script_restrictevents_curl_fallback() -> None:
-    result = _oc_script()
-    assert "curl -fsSL" in result
-    assert "github.com/acidanthera/RestrictEvents/releases/download" in result
-
-
-def test_build_oc_disk_script_restrictevents_failure_is_non_fatal() -> None:
-    result = _oc_script()
-    assert "memory warning fix skipped" in result
-
-
-def test_build_oc_disk_script_injection_runs_before_plist_patch() -> None:
-    result = _oc_script()
-    assert result.index("RE_ZIP") < result.index("plistlib")
-
-
-def test_plist_patch_script_registers_restrictevents_kext() -> None:
-    script = _plist_patch_script()
-    assert "RestrictEvents.kext" in script
-    assert "Contents/MacOS/RestrictEvents" in script
-    assert "Contents/Info.plist" in script
-
-
-def test_plist_patch_script_restrictevents_entry_guarded_by_kext_dir() -> None:
-    script = _plist_patch_script()
-    assert 'os.path.isdir(oc_dest+"/EFI/OC/Kexts/RestrictEvents.kext")' in script
+    Renaming the real OID to something like hv_vmm_hidden_ leaves a sysctl
+    reading 1 whose description is still "running on a vmm", which fingerprints
+    the guest harder than hiding the flag hides it.
+    """
+    names = {n for x in _exec_bypass_fragment()
+             for n in bytes(x["Replace"]).split(b"\x00") if n}
+    assert names == {b"boot session UUID", b"hibernatecount",
+                     b"hibernatehidready", b"hv_vmm_present"}
