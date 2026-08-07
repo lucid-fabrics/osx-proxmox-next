@@ -62,37 +62,85 @@ def _amd_plist_keys() -> str:
     )
 
 
+# Swap two sysctl names in the kernel's cstring table (same technique
+# OpenCore-Legacy-Patcher uses, run in reverse so the flag reads 0):
+#
+#   1. rename the real kern.hv_vmm_present OID to hibernatecount
+#   2. rename the real kern.hibernatecount OID to hv_vmm_present
+#
+# It is a true swap, not a rename-to-junk: no name is invented, no name
+# disappears, and the count of each stays 1. Renaming the real OID to
+# something like hv_vmm_hidden_ would leave a sysctl advertising itself as
+# "running on a vmm" with value 1, which fingerprints the guest harder than
+# the flag being hidden hides it.
+#
+# The value now behind kern.hv_vmm_present is gIOHibernateCount, which is 0 at
+# boot and increments only in IOHibernateDone, i.e. on waking from a sleep that
+# actually opened a hibernate file. It is NOT a constant. It stays 0 here
+# because we ship the MacPro7,1 SMBIOS (see smbios.py) and desktop Macs default
+# to hibernatemode=0, which never opens that file. A guest switched to
+# hibernatemode=3 would report a non-zero VM flag after its first hibernate
+# cycle, until the next cold boot.
+#
+# Step 1 is not optional. Without it both OIDs are registered under the name
+# hv_vmm_present and sysctlbyname() still returns the real one (1), so Apple's
+# attestation keeps seeing a VM and Apple ID sign-in fails with
+# "Verification Failed".
+#
+# Each pair below is a NUL-separated run of adjacent strings in the kernel's
+# cstring section, so the neighbour anchors the match and keeps it unique.
+# Replacements are the same byte length, which OpenCore requires. Sources:
+# bsd/kern/hvg_sysctl.c and iokit/Kernel/IOHibernateIO.cpp; both runs occur
+# exactly once in Darwin 24.x (Sequoia) and 25.x (Tahoe) kernels.
+_APPLE_ID_BYPASS_PATCHES = (
+    (
+        "Apple ID VM bypass - hide real hv_vmm_present",
+        # b"boot session UUID\0hv_vmm_present\0"
+        "626f6f742073657373696f6e20555549440068765f766d6d5f70726573656e7400",
+        # b"boot session UUID\0hibernatecount\0"
+        "626f6f742073657373696f6e20555549440068696265726e617465636f756e7400",
+    ),
+    (
+        "Apple ID VM bypass - hv_vmm_present",
+        # b"hibernatehidready\0hibernatecount\0"
+        "68696265726e61746568696472656164790068696265726e617465636f756e7400",
+        # b"hibernatehidready\0hv_vmm_present\0"
+        "68696265726e61746568696472656164790068765f766d6d5f70726573656e7400",
+    ),
+)
+
+
 def _apple_id_bypass_patch_keys() -> str:
     """Return inline python fragment to add kernel patches that bypass Apple's VM detection.
 
-    These patches replace the hibernatecount sysctl name with hv_vmm_present in the
-    kernel's string table. macOS reads hv_vmm_present=0 (the hibernate counter value)
-    instead of 1 (the actual VM flag), so Apple's DeviceCheck sees a physical machine
-    and allows Apple ID sign-in on Sequoia/Tahoe VMs.
+    macOS ends up reading hv_vmm_present=0 (the hibernate counter value) instead
+    of 1 (the actual VM flag), so Apple's DeviceCheck sees a physical machine and
+    allows Apple ID sign-in on Sequoia/Tahoe VMs.
     """
-    find_hex = "68696265726e61746568696472656164790068696265726e617465636f756e7400"
-    replace_hex = "68696265726e61746568696472656164790068765f766d6d5f70726573656e7400"
-    return (
-        "kp=p.setdefault(\"Kernel\",{}).setdefault(\"Patch\",[]); "
-        f"_f=bytes.fromhex(\"{find_hex}\"); "
-        "(_f not in [x.get(\"Find\") for x in kp]) and kp.append("
-        "{"
-        "\"Arch\":\"x86_64\","
-        "\"Base\":\"\","
-        "\"Comment\":\"Apple ID VM bypass - hv_vmm_present\","
-        "\"Count\":1,"
-        "\"Enabled\":True,"
-        f"\"Find\":bytes.fromhex(\"{find_hex}\"),"
-        "\"Identifier\":\"kernel\","
-        "\"Limit\":0,"
-        "\"Mask\":b\"\","
-        "\"MaxKernel\":\"\","
-        "\"MinKernel\":\"24.0.0\","
-        f"\"Replace\":bytes.fromhex(\"{replace_hex}\"),"
-        "\"ReplaceMask\":b\"\","
-        "\"Skip\":0"
-        "}); "
-    )
+    frag = "kp=p.setdefault(\"Kernel\",{}).setdefault(\"Patch\",[]); "
+    for comment, find_hex, replace_hex in _APPLE_ID_BYPASS_PATCHES:
+        frag += (
+            f"_f=bytes.fromhex(\"{find_hex}\"); "
+            "kp[:]=[x for x in kp if x.get(\"Find\")!=_f]; "
+            "kp.append("
+            "{"
+            "\"Arch\":\"x86_64\","
+            "\"Base\":\"\","
+            f"\"Comment\":\"{comment}\","
+            "\"Count\":1,"
+            "\"Enabled\":True,"
+            "\"Find\":_f,"
+            "\"Identifier\":\"kernel\","
+            "\"Limit\":0,"
+            "\"Mask\":b\"\","
+            "\"MaxKernel\":\"\","
+            "\"MinKernel\":\"24.0.0\","
+            f"\"Replace\":bytes.fromhex(\"{replace_hex}\"),"
+            "\"ReplaceMask\":b\"\","
+            "\"Skip\":0"
+            "}); "
+        )
+    return frag
 
 
 def _platforminfo_plist_keys(
