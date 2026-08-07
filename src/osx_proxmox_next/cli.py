@@ -242,9 +242,11 @@ def _handle_apply_command(args: argparse.Namespace, config: VmConfig, steps: lis
     if result.ok:
         print(f"Apply OK. Log: {result.log_path}")
         print()
-        print("POST-INSTALL: After macOS finishes installing, run:")
+        print("IMPORTANT: as soon as the installer reboots the VM the first time, run:")
         print(f"  osx-next-cli post-install --vmid {config.vmid} --execute")
-        print(f"This switches boot order to {POST_INSTALL_BOOT_ORDER} (OpenCore first).")
+        print(f"This detaches the recovery disk and sets boot order {POST_INSTALL_BOOT_ORDER}.")
+        print("Until you do, the boot picker lists recovery first and auto-boots it, so")
+        print("each reboot restarts the installer instead of resuming it.")
         print()
         print(SUPPORT_LINE)
         return 0

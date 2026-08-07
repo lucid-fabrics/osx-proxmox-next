@@ -389,7 +389,7 @@ osx-next-cli post-install --vmid <id> --execute
 
 With `ide2` gone the picker only lists the installer, so auto-boot picks the right entry and the install resumes to completion. Run this after the *first* reboot, not only at the very end.
 
-Selecting **macOS Installer** manually at the picker also works for that one boot, but pressing **Ctrl+Enter** to make it the default is not reliable here: the installer re-blesses the boot target on every reboot, so the next one returns to Recovery anyway. Detaching recovery is the fix that holds.
+Selecting **macOS Installer** manually at the picker works for that boot. Pressing **Ctrl+Enter** on it is supposed to make it the default (the config enables `AllowSetDefault` and `RequestBootVarRouting` for this), but results have been inconsistent in testing, so treat it as a convenience rather than the fix. Detaching recovery is the one that reliably holds.
 </details>
 
 <details>
