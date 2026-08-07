@@ -335,3 +335,62 @@ def test_resolve_recovery_finds_dmg(tmp_path, monkeypatch):
     cfg = _cfg("sequoia")
     result = resolve_recovery_or_installer_path(cfg)
     assert result == Path("/var/lib/vz/template/iso/sequoia-recovery.dmg")
+
+
+# ---------------------------------------------------------------------------
+# unresponsive mount handling
+# ---------------------------------------------------------------------------
+
+
+def test_listdir_or_none_returns_entries(tmp_path) -> None:
+    from osx_proxmox_next.assets import _listdir_or_none
+    (tmp_path / "b.iso").write_text("")
+    (tmp_path / "a.iso").write_text("")
+    assert [p.name for p in _listdir_or_none(tmp_path)] == ["a.iso", "b.iso"]
+
+
+def test_listdir_or_none_missing_dir_is_empty(tmp_path) -> None:
+    from osx_proxmox_next.assets import _listdir_or_none
+    assert _listdir_or_none(tmp_path / "nope") == []
+
+
+def test_listdir_or_none_times_out_instead_of_hanging(monkeypatch, tmp_path) -> None:
+    """A dead NFS mount blocks readdir in uninterruptible sleep.
+
+    Without a timeout the whole CLI hangs unkillably, so one offline storage
+    makes plan and apply impossible on that host.
+    """
+    import time
+    from osx_proxmox_next import assets
+
+    def _hang(_self):
+        time.sleep(30)
+        return []
+
+    monkeypatch.setattr(Path, "iterdir", _hang)
+    started = time.monotonic()
+    assert assets._listdir_or_none(tmp_path, timeout=0.2) is None
+    assert time.monotonic() - started < 5  # returned promptly, did not wait 30s
+
+
+def test_find_iso_skips_unresponsive_root(monkeypatch, tmp_path) -> None:
+    """A hung /mnt/pve entry must not stop a good ISO being found elsewhere."""
+    import time
+    from osx_proxmox_next import assets
+
+    good = tmp_path / "good"
+    good.mkdir()
+    (good / "opencore-osx-proxmox-vm.iso").write_text("")
+    dead = tmp_path / "dead"
+
+    real_iterdir = Path.iterdir
+
+    def _maybe_hang(self):
+        if str(self).startswith(str(dead)):
+            time.sleep(30)
+        return real_iterdir(self)
+
+    monkeypatch.setattr(assets, "_LISTDIR_TIMEOUT", 0.2)
+    monkeypatch.setattr(Path, "iterdir", _maybe_hang)
+    found = assets._find_iso(["opencore-osx-proxmox-vm.iso"], extra_dirs=[dead, good])
+    assert found is not None and found.name == "opencore-osx-proxmox-vm.iso"
