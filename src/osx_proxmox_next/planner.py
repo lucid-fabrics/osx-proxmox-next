@@ -9,6 +9,7 @@ from .defaults import CpuInfo, detect_cpu_info
 from .domain import SUPPORTED_MACOS, VmConfig, PlanStep, EditChanges, validate_config
 from .infrastructure import ProxmoxAdapter
 from .script_renderer import (
+    PICKER_TIMEOUT_INSTALLED,
     _APPLE_OSK,
     _build_oc_disk_script,
     _partprobe_retry_snippet,
@@ -87,7 +88,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     cpu = detect_cpu_info()
     cpu_flag = _cpu_args(cpu, override=config.cpu_model)
     # AMD needs kernel patches (AppleCpuPmCfgLock / AppleXcpmCfgLock).
-    # Hybrid Intel does NOT — it only needs Cascadelake-Server emulation.
+    # Hybrid Intel does NOT, it only needs Cascadelake-Server emulation.
     is_amd = cpu.vendor == "AMD"
 
     # Pre-generate SMBIOS identity so downstream steps just read config fields.
@@ -323,7 +324,11 @@ def _boot_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
 
 
 def build_post_install_plan(vmid: int) -> list[PlanStep]:
-    """Fix boot order after macOS installation completes.
+    """Detach recovery and point boot at OpenCore.
+
+    Run this as soon as the installer has rebooted once, not only when macOS is
+    fully installed. While recovery stays attached the OpenCore picker lists it
+    ahead of the installer and auto-boots it, so the install never resumes.
 
     Switches from recovery-first (ide2;virtio0;ide0) to OpenCore-first
     (ide0;virtio0) so the VM boots into the installed macOS via OpenCore.
@@ -331,6 +336,14 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
     """
     vid = str(vmid)
     return [
+        PlanStep(
+            title="Verify VM is stopped",
+            argv=[
+                "bash", "-c",
+                f"qm status {shquote(vid)} | grep -q 'status: stopped' || "
+                f"{{ echo 'ERROR: VM {vid} is running. Stop it first: qm stop {vid}'; false; }}",
+            ],
+        ),
         PlanStep(
             title="Detach recovery disk",
             argv=[
@@ -341,10 +354,51 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
             risk="action",
         ),
         PlanStep(
+            title="Restore boot picker timeout",
+            argv=["bash", "-c", _restore_picker_timeout_script(vid)],
+        ),
+        PlanStep(
             title="Set post-install boot order",
             argv=["qm", "set", vid, "--boot", POST_INSTALL_BOOT_ORDER],
         ),
     ]
+
+
+def _restore_picker_timeout_script(vid: str) -> str:
+    """Return bash that puts the OpenCore picker back to auto-boot.
+
+    The disk is built with Timeout=0 so a half-finished install can never
+    auto-boot recovery. Once recovery is detached there is only one sane entry
+    left, so auto-boot is safe again and the VM can start unattended.
+    """
+    q = shquote(vid)
+    return (
+        f"OC_VOL=$(qm config {q} | sed -n 's/^ide0: \\([^,]*\\).*/\\1/p') && "
+        "{ [ -n \"$OC_VOL\" ] || { echo 'ERROR: no ide0 (OpenCore) disk found'; false; }; } && "
+        "OC_PATH=$(pvesm path \"$OC_VOL\") && "
+        "OC_MNT=$(mktemp -d) && export OC_MNT && "
+        "OC_LOOP=$(losetup -fP --show \"$OC_PATH\") && "
+        "trap 'umount $OC_MNT 2>/dev/null; losetup -d $OC_LOOP 2>/dev/null; "
+        "rmdir $OC_MNT 2>/dev/null' EXIT && "
+        # losetup -fP does not guarantee the partition node exists yet, the
+        # kernel creates it asynchronously and mount fails with
+        # "Can't lookup blockdev" on slower storage
+        + _partprobe_retry_snippet("OC_LOOP") + " && "
+        "{ [ -b \"${OC_LOOP}p1\" ] || { echo \"ERROR: ${OC_LOOP}p1 never appeared\"; "
+        "false; }; } && "
+        "mount \"${OC_LOOP}p1\" $OC_MNT && "
+        "python3 -c '"
+        "import plistlib, os, sys; "
+        "p=os.environ[\"OC_MNT\"]+\"/EFI/OC/config.plist\"; "
+        "f=open(p,\"rb\"); c=plistlib.load(f); f.close(); "
+        f"c[\"Misc\"][\"Boot\"][\"Timeout\"]={PICKER_TIMEOUT_INSTALLED}; "
+        "f=open(p,\"wb\"); plistlib.dump(c,f); f.close(); "
+        f"sys.stderr.write(\"picker timeout restored to {PICKER_TIMEOUT_INSTALLED}s\\n\")' && "
+        # plistlib emits self-closing tags that OpenCore's OcXmlLib rejects
+        "sed -i 's|<array/>|<array></array>|g; s|<dict/>|<dict></dict>|g; "
+        "s|<data/>|<data></data>|g' $OC_MNT/EFI/OC/config.plist && "
+        "sync"
+    )
 
 
 
@@ -440,7 +494,7 @@ def _updated_net0(current_net0: str | None, new_bridge: str, nic_model: str | No
             other.append(f"bridge={new_bridge}")
         return ",".join([new_model_part] + other)
 
-    # net0 line not found — fall back to clean config
+    # net0 line not found, fall back to clean config
     return f"{fallback_model},bridge={new_bridge},firewall=0"
 
 

@@ -67,14 +67,37 @@ To skip SMBIOS generation entirely, use `--no-smbios`.
 
 ## Sequoia/Tahoe Apple Services
 
-Starting with macOS Sequoia 15, Apple performs **hardware device attestation** (DeviceCheck/App Attest) during Apple ID sign-in. Standard VM detection — where `hv_vmm_present` sysctl returns `1` — causes Apple's servers to reject authentication.
+Starting with macOS Sequoia 15, Apple performs **hardware device attestation** (DeviceCheck/App Attest) during Apple ID sign-in. Standard VM detection, where the `hv_vmm_present` sysctl returns `1`, causes Apple's servers to reject authentication.
 
 ### Kernel Patch (Applied Automatically)
 
-When `--apple-services` is enabled, the tool now injects an OpenCore `Kernel/Patch` that redirects the `hv_vmm_present` sysctl to `hibernatecount` (always `0`). This makes DeviceCheck see what appears to be a physical machine.
+When `--apple-services` is enabled, the tool injects two OpenCore `Kernel/Patch` entries. The first renames the real `hv_vmm_present` sysctl so nothing can resolve it; the second renames `hibernatecount` into its place. That counter reads `0` on a default VM, so DeviceCheck sees what appears to be a physical machine.
+
+Verify inside the VM:
+
+```bash
+sysctl -n kern.hv_vmm_present    # must print 0
+```
+
+Because it is a swap, `kern.hibernatecount` now carries what `hv_vmm_present` used to, so it reads `1` on a VM. That is the patch working, not a fault. Verified on a macOS Sequoia guest:
+
+```console
+$ sysctl kern.hv_vmm_present kern.hibernatecount
+kern.hv_vmm_present: 0
+kern.hibernatecount: 1
+
+$ sysctl -d kern.hibernatecount
+kern.hibernatecount: running on a vmm
+```
+
+The description travels with the name, which is why `hibernatecount` describes itself oddly. Harmless, and the same residue OpenCore Legacy Patcher leaves on `direct_handoff`.
+
+:::warning
+Releases that predate the fix for [#114](https://github.com/lucid-fabrics/osx-proxmox-next/issues/114) injected only the second patch. Both OIDs then carried the name `hv_vmm_present` and `sysctlbyname()` still resolved the real one, so the sysctl kept returning `1` and sign-in failed. Rebuild the VM on the latest release.
+:::
 
 :::note
-This fix is community-attested on Sequoia 15 and Tahoe 26. It has not been officially verified by Apple or this project. Results may vary — report your experience on Discord or GitHub Issues.
+The `sysctl` check above confirms the patches themselves are working. Whether Apple then accepts the sign-in is server-side and can change at any time, so results may vary. Report your experience on Discord or GitHub Issues.
 :::
 
 The error without this patch appears as:
@@ -89,13 +112,18 @@ Verification Failed -- An unknown error occurred.
 
 ### Fallback: Install Sonoma First
 
-If the kernel patch does not work in your setup, the Sonoma upgrade path remains a reliable fallback:
+If the kernel patches do not work in your setup, you can establish the Apple ID session on Sonoma first:
 
 1. Create a **Sonoma 14** VM with `--apple-services`
 2. Complete macOS setup, sign into Apple ID in System Settings
 3. Verify iCloud, iMessage, FaceTime all work
 4. Upgrade in-place to Sequoia or Tahoe via **System Settings > Software Update**
-5. Apple Services stay connected because the device identity was established on Sonoma
+
+:::warning
+Build the Sonoma VM on a release that includes the [#114](https://github.com/lucid-fabrics/osx-proxmox-next/issues/114) fix. The patches carry `MinKernel 24.0.0`, so they sit dormant on Sonoma (Darwin 23) and activate on the first Sequoia or Tahoe boot. A VM built on an older release carries the *broken* patch across the upgrade, and an in-place macOS upgrade never rebuilds the OpenCore disk, so the fix cannot arrive that way. This is the likely cause of the upgrade failure reported in #114.
+
+After upgrading, check `sysctl -n kern.hv_vmm_present` prints `0`.
+:::
 
 ## Common Issues
 

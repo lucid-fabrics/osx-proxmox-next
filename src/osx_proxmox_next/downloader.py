@@ -60,8 +60,10 @@ _ASSETS_TAG = "assets"
 # RestrictEvents silences the cosmetic "Memory Modules Misconfigured"
 # notification that macOS shows on every boot with the MacPro7,1 SMBIOS
 # (the real Mac Pro has 12 RAM slots; a VM's flat layout trips the check).
-# Its default revblock=auto blocks the MemorySlotNotification and
-# ExpansionSlotNotification processes, so no boot-arg is needed.
+# It is shipped and configured (revblock=pci via script_renderer.BOOT_ARGS_BASE)
+# but does NOT actually suppress the banner on Sequoia: measured with every
+# precondition met and the notifier still running. See the note there. The kext
+# is kept because it is correct configuration and costs nothing.
 RESTRICTEVENTS_VERSION = "1.1.6"
 RESTRICTEVENTS_ZIP = f"RestrictEvents-{RESTRICTEVENTS_VERSION}-RELEASE.zip"
 RESTRICTEVENTS_URL = (

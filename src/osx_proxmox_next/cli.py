@@ -130,7 +130,12 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
     doctor.add_argument("--vmid", type=int, required=True, help="VM ID to inspect")
     post_install = sub.add_parser(
         "post-install",
-        help="Fix boot order after macOS installation (switches to OpenCore-first: ide0;virtio0)",
+        help=(
+            "Detach recovery and switch to OpenCore-first boot (ide0;virtio0). "
+            "Run it after the installer's FIRST reboot, not only at the very end: "
+            "while recovery stays attached the picker lists it first and auto-boots "
+            "it, so the install restarts instead of resuming."
+        ),
     )
     post_install.add_argument("--vmid", type=int, required=True, help="VM ID to update")
     post_install.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
@@ -237,9 +242,11 @@ def _handle_apply_command(args: argparse.Namespace, config: VmConfig, steps: lis
     if result.ok:
         print(f"Apply OK. Log: {result.log_path}")
         print()
-        print("POST-INSTALL: After macOS finishes installing, run:")
+        print("IMPORTANT: as soon as the installer reboots the VM the first time, run:")
         print(f"  osx-next-cli post-install --vmid {config.vmid} --execute")
-        print(f"This switches boot order to {POST_INSTALL_BOOT_ORDER} (OpenCore first).")
+        print(f"This detaches the recovery disk and sets boot order {POST_INSTALL_BOOT_ORDER}.")
+        print("Until you do, the boot picker lists recovery first and auto-boots it, so")
+        print("each reboot restarts the installer instead of resuming it.")
         print()
         print(SUPPORT_LINE)
         return 0
@@ -625,7 +632,17 @@ def _run_post_install(args: argparse.Namespace) -> int:
             print(line)
         return 0
 
-    print(f"Post-install FAILED. Log: {result.log_path}")
+    # Surface the failing step and its output. "FAILED, see log" makes the user
+    # go digging for a reason that is usually a single actionable line, such as
+    # the VM still being running.
+    failed = next((r for r in result.results if not r.ok), None)
+    if failed is not None:
+        print(f"Post-install FAILED at step: {failed.title}")
+        for line in (failed.output or "").strip().splitlines()[-5:]:
+            print(f"  {line}")
+    else:
+        print("Post-install FAILED.")
+    print(f"Log: {result.log_path}")
     return 9
 
 

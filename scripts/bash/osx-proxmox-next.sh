@@ -434,7 +434,7 @@ function generate_smbios() {
 
   if [ "$APPLE_SERVICES" = "true" ]; then
     # Apple-format serial+MLB via inline Python (same algorithm as smbios.py).
-    # Constants are duplicated here — keep in sync with smbios.py APPLE_PLATFORM_DATA.
+    # Constants are duplicated here, keep in sync with smbios.py APPLE_PLATFORM_DATA.
     # Model passed via env var to avoid shell injection into Python source.
     local smbios_out
     smbios_out=$(SMBIOS_MODEL_ENV="$SMBIOS_MODEL" python3 -c "
@@ -574,7 +574,7 @@ fg=${fg}"
   fi
 
   # Step 4: Download BaseSystem.dmg (URL from AU: is already complete)
-  # Apple's CDN can reset connections on large downloads — retry with resume
+  # Apple's CDN can reset connections on large downloads, retry with resume
   local base_dmg="${output_img%.img}.dmg"
   local max_retries=5
   local attempt=0
@@ -714,21 +714,37 @@ with open(path, 'rb') as f:
 pl.setdefault('Misc', {}).setdefault('Security', {})['ScanPolicy'] = 0
 pl['Misc']['Security']['DmgLoading'] = 'Any'
 pl['Misc']['Security']['SecureBootModel'] = 'Disabled'
-# Boot — graphical picker with Apple icons, auto-boot after 15s
-pl['Misc'].setdefault('Boot', {})['Timeout'] = 15
+# Lets the user persist 'macOS' as the boot entry (Ctrl+Enter in the picker)
+pl['Misc']['Security']['AllowSetDefault'] = True
+# Boot - graphical picker with Apple icons. Timeout 0 disables auto-boot: the
+# picker lists recovery ahead of the installer, so any non-zero value auto-boots
+# recovery on each install reboot and the install silently never finishes.
+# post-install restores 15s once recovery is detached. Keep in sync with
+# script_renderer.py PICKER_TIMEOUT_INSTALL.
+pl['Misc'].setdefault('Boot', {})['Timeout'] = 0
 pl['Misc']['Boot']['HideAuxiliary'] = True
 pl['Misc']['Boot']['PickerAttributes'] = 17
 pl['Misc']['Boot']['PickerMode'] = 'External'
 pl['Misc']['Boot']['PickerVariant'] = 'Acidanthera\\\Syrah'
-# NVRAM — SIP partially disabled for kext loading
+# NVRAM: SIP partially disabled for kext loading
 nvram = pl.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault('7C436110-AB2A-4BBB-A880-FE41995C9F82', {})
 nvram['csr-active-config'] = b'\x67\x0f\x00\x00'
-nvram['boot-args'] = 'keepsyms=1 debug=0x100'
+# revblock=pci is the documented config asking RestrictEvents to block the
+# MemorySlotNotification and ExpansionSlotNotification processes behind the
+# memory-misconfigured banner. It does NOT actually suppress it on Sequoia,
+# see script_renderer.py BOOT_ARGS_BASE. Keep the two in sync.
+# NOTE: this block lives inside a double-quoted python3 -c argument, so it must
+# never contain a double-quote character. One would end the shell string early
+# and shift every positional argument, which broke the installer outright.
+nvram['boot-args'] = 'keepsyms=1 debug=0x100 revblock=pci'
 nvram['prev-lang:kbd'] = 'en-US:0'.encode()
-# NVRAM Delete — purge stale values so Add entries take effect
+# NVRAM Delete: purge stale values so Add entries take effect
 nv_del = pl.setdefault('NVRAM', {}).setdefault('Delete', {})
 nv_del['7C436110-AB2A-4BBB-A880-FE41995C9F82'] = ['csr-active-config', 'boot-args', 'prev-lang:kbd']
 pl['NVRAM']['WriteFlash'] = True
+# Routes Boot* variables to OpenCore's own storage, so the default entry set
+# via AllowSetDefault survives firmware that deletes entries it dislikes
+pl.setdefault('UEFI', {}).setdefault('Quirks', {})['RequestBootVarRouting'] = True
 # Enable VirtualSMC
 [k.update(Enabled=True) for k in pl.get('Kernel', {}).get('Add', []) if 'VirtualSMC' in k.get('BundlePath', '')]
 # Register RestrictEvents.kext if present (default revblock=auto blocks the
@@ -747,7 +763,7 @@ if cpu_vendor == 'AMD':
     kq = pl['Kernel']['Quirks']
     kq['AppleCpuPmCfgLock'] = True
     kq['AppleXcpmCfgLock'] = True
-# PlatformInfo — required for Apple Services (iMessage, FaceTime, iCloud)
+# PlatformInfo: required for Apple Services (iMessage, FaceTime, iCloud)
 # macOS reads identity from OpenCore's EFI PlatformInfo, not QEMU SMBIOS
 if apple_svc == 'true' and serial:
     pi = pl.setdefault('PlatformInfo', {}).setdefault('Generic', {})
@@ -758,6 +774,36 @@ if apple_svc == 'true' and serial:
     pi['ROM'] = bytes.fromhex(rom)
     pl['PlatformInfo']['UpdateSMBIOS'] = True
     pl['PlatformInfo']['UpdateDataHub'] = True
+# Apple ID VM detection bypass (Sequoia 15+ / Tahoe 26). Swaps two sysctl
+# names in the kernel cstring table; keep in sync with script_renderer.py
+# _APPLE_ID_BYPASS_PATCHES. test_bash_and_python_emit_identical_kernel_patches
+# runs both patchers and diffs the result, so drift here fails the suite:
+#   1. rename the real kern.hv_vmm_present OID to hibernatecount
+#   2. rename the real kern.hibernatecount OID to hv_vmm_present
+# A true swap, so no name is invented and none disappears. The value now
+# behind hv_vmm_present is the hibernate counter: 0 at boot, incremented only
+# on waking from a sleep that opened a hibernate file. Not a constant; it
+# stays 0 because MacPro7,1 defaults to hibernatemode=0.
+# Step 1 is not optional: without it both OIDs answer to hv_vmm_present and
+# sysctlbyname() still returns the real one (1), so sign-in keeps failing.
+if apple_svc == 'true':
+    kp = pl.setdefault('Kernel', {}).setdefault('Patch', [])
+    for cmt, find_hex, repl_hex in (
+        ('Apple ID VM bypass - hide real hv_vmm_present',
+         '626f6f742073657373696f6e20555549440068765f766d6d5f70726573656e7400',
+         '626f6f742073657373696f6e20555549440068696265726e617465636f756e7400'),
+        ('Apple ID VM bypass - hv_vmm_present',
+         '68696265726e61746568696472656164790068696265726e617465636f756e7400',
+         '68696265726e61746568696472656164790068765f766d6d5f70726573656e7400'),
+    ):
+        find_b = bytes.fromhex(find_hex)
+        kp[:] = [x for x in kp if x.get('Find') != find_b]
+        kp.append({'Arch': 'x86_64', 'Base': '', 'Comment': cmt,
+                   'Count': 1, 'Enabled': True, 'Find': find_b,
+                   'Identifier': 'kernel', 'Limit': 0, 'Mask': b'',
+                   'MaxKernel': '', 'MinKernel': '24.0.0',
+                   'Replace': bytes.fromhex(repl_hex),
+                   'ReplaceMask': b'', 'Skip': 0})
 with open(path, 'wb') as f:
     plistlib.dump(pl, f)
 " "$dest_mnt/EFI/OC/config.plist" "$CPU_VENDOR" \
@@ -1071,8 +1117,8 @@ msg_ok "Virtual Machine ID is ${CL}${BL}$VMID${CL}."
 
 # ── Apple Services toggle ──
 if whiptail --backtitle "OSX Proxmox Next" --title "Apple Services" --yesno \
-  "Enable Apple Services (iMessage, FaceTime, iCloud)?\n\nThis generates a unique SMBIOS identity, static MAC, and patches OpenCore PlatformInfo.\n\nNOTE: Apple Services only work on macOS Sonoma 14 and earlier.\nSequoia 15+ requires signing in on Sonoma first, then upgrading." \
-  14 70 --defaultno 3>&1 1>&2 2>&3; then
+  "Enable Apple Services (iMessage, FaceTime, iCloud)?\n\nGenerates a unique SMBIOS identity and static MAC, and patches\nOpenCore PlatformInfo plus the Apple ID kernel patches.\n\nThe kernel patches take effect on Sequoia 15 and Tahoe 26 only.\nAfter install, check:  sysctl -n kern.hv_vmm_present\nIt must print 0. If sign-in still fails, the Apple Services\nguide covers the Sonoma fallback." \
+  17 70 --defaultno 3>&1 1>&2 2>&3; then
   APPLE_SERVICES="true"
   msg_ok "Apple Services enabled"
 else
@@ -1101,7 +1147,7 @@ fi
 RECOVERY_RAW="$TEMP_DIR/recovery.img"
 download_recovery "$MACOS_VER" "$RECOVERY_RAW"
 
-# ── Generate SMBIOS identity (before OC build — PlatformInfo needs these) ──
+# ── Generate SMBIOS identity (before OC build, PlatformInfo needs these) ──
 generate_smbios "$MACOS_VER"
 
 # ── Apple Services: derive ROM from static MAC ──

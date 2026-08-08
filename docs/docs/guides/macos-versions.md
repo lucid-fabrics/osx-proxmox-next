@@ -56,7 +56,7 @@ For users who want the latest stable release.
 - Good VM performance
 
 **Cons:**
-- Apple Services require the kernel patch applied by `--apple-services` (community-attested, not officially verified)
+- Apple Services require the kernel patches applied by `--apple-services` (not officially verified)
 - Requires CryptexFixup kext
 
 ### Tahoe 26
@@ -69,7 +69,7 @@ The bleeding-edge option, currently in beta.
 
 **Cons:**
 - Beta software with potential bugs and instability
-- Apple Services require the kernel patch applied by `--apple-services` (community-attested, not officially verified)
+- Apple Services require the kernel patches applied by `--apple-services` (not officially verified)
 - Not recommended for production or daily-driver use
 - May require updates to OpenCore configuration as betas progress
 
@@ -78,7 +78,7 @@ The bleeding-edge option, currently in beta.
 Follow this decision path:
 
 1. **Do you need Apple Services (iCloud, iMessage, FaceTime)?**
-   - Yes, on Sequoia or Tahoe: Use `--apple-services` — a kernel patch is applied automatically and is community-attested to work. Sonoma 14 remains the safest choice with full verified support.
+   - Yes, on Sequoia or Tahoe: Use `--apple-services`: the kernel patches are applied automatically. Verify with `sysctl -n kern.hv_vmm_present` (must print `0`). Sonoma 14 remains the safest choice with full verified support.
    - Yes, on Sonoma: **Sonoma 14** with `--apple-services` gives fully verified Apple Services support.
    - No: Continue to step 2.
 
@@ -95,11 +95,11 @@ Follow this decision path:
 
 ## Hardware Attestation (Sequoia and Tahoe)
 
-Starting with Sequoia 15, Apple performs hardware attestation checks during Apple ID sign-in. These checks use the `hv_vmm_present` sysctl — which normally returns `1` in a VM — to detect virtualized environments.
+Starting with Sequoia 15, Apple performs hardware attestation checks during Apple ID sign-in. These checks use the `hv_vmm_present` sysctl, which normally returns `1` in a VM, to detect virtualized environments.
 
-When `--apple-services` is enabled, an OpenCore `Kernel/Patch` is automatically injected that redirects `hv_vmm_present` to `hibernatecount` (always `0`), making DeviceCheck see what appears to be a physical machine.
+When `--apple-services` is enabled, two OpenCore `Kernel/Patch` entries are automatically injected: one renames the real `hv_vmm_present` sysctl out of the way, the other renames `hibernatecount` into its place. That counter reads `0` on a default VM, so DeviceCheck sees what appears to be a physical machine. Verify with `sysctl -n kern.hv_vmm_present` in the VM, which must print `0`.
 
-Community reports indicate this resolves Apple ID, iCloud, iMessage, and FaceTime sign-in on Sequoia 15 and Tahoe 26. This is **not officially verified** — use Sonoma 14 if you need a guaranteed-working baseline.
+This is **not officially verified**. Attestation is server-side and Apple can change it at any time, so use Sonoma 14 if you need a guaranteed-working baseline.
 
 Notes:
 - `RestrictEvents.kext` with `revpatch=sbvmm` alone does **not** fix this
@@ -115,7 +115,7 @@ If you want Sequoia or Tahoe but prefer to establish your Apple Services session
 3. Once signed in, upgrade in-place to **Sequoia 15** or **Tahoe 26** via System Settings > Software Update
 4. Your Apple Services session carries over from the Sonoma sign-in
 
-This is an alternative to using `--apple-services` directly on Sequoia or Tahoe. Both approaches work — use this path if you prefer the Sonoma-verified baseline before upgrading.
+This is an alternative to using `--apple-services` directly on Sequoia or Tahoe. Both approaches work, use this path if you prefer the Sonoma-verified baseline before upgrading.
 
 :::note
 In-place upgrades preserve your data but take longer than a fresh install. Back up your VM (snapshot) before upgrading.

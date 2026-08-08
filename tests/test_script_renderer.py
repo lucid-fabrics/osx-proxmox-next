@@ -1,10 +1,19 @@
 """Unit tests for script_renderer module."""
 from __future__ import annotations
 
+import os
+import plistlib
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from osx_proxmox_next.domain import PlanStep, VmConfig
 from osx_proxmox_next.script_renderer import (
+    PICKER_TIMEOUT_INSTALL,
+    PICKER_TIMEOUT_INSTALLED,
+    _APPLE_ID_BYPASS_PATCHES,
     _apple_id_bypass_patch_keys,
     _build_oc_disk_script,
     _plist_patch_script,
@@ -205,6 +214,229 @@ def test_apple_id_bypass_patch_keys_contains_replace_hex() -> None:
 def test_apple_id_bypass_patch_keys_scoped_to_sequoia() -> None:
     result = _apple_id_bypass_patch_keys()
     assert "24.0.0" in result  # MinKernel for Sequoia (Darwin 24.x)
+
+
+def _exec_bypass_fragment() -> list[dict]:
+    """Run the fragment the way the generated script does: one shared namespace."""
+    p: dict = {}
+    exec(_apple_id_bypass_patch_keys(), {"p": p})  # noqa: S102
+    return p["Kernel"]["Patch"]
+
+
+def test_apple_id_bypass_hides_real_hv_vmm_present() -> None:
+    """Without this patch both OIDs are named hv_vmm_present and the real one wins."""
+    patches = _exec_bypass_fragment()
+    finds = [bytes(x["Find"]) for x in patches]
+    assert b"boot session UUID\x00hv_vmm_present\x00" in finds
+    real = patches[finds.index(b"boot session UUID\x00hv_vmm_present\x00")]
+    assert b"hv_vmm_present" not in bytes(real["Replace"])
+
+
+def test_apple_id_bypass_patches_are_length_preserving() -> None:
+    for patch in _exec_bypass_fragment():
+        assert len(patch["Find"]) == len(patch["Replace"])
+
+
+def test_apple_id_bypass_patch_bytes_are_exact() -> None:
+    """A silent hex typo would make the patch never match and Apple ID fail quietly."""
+    assert [(bytes(x["Find"]), bytes(x["Replace"])) for x in _exec_bypass_fragment()] == [
+        # swap, not a rename: hv_vmm_present and hibernatecount trade names, so
+        # no OID is invented and none disappears
+        (b"boot session UUID\x00hv_vmm_present\x00",
+         b"boot session UUID\x00hibernatecount\x00"),
+        (b"hibernatehidready\x00hibernatecount\x00",
+         b"hibernatehidready\x00hv_vmm_present\x00"),
+    ]
+
+
+def test_apple_id_bypass_patches_swap_rather_than_invent() -> None:
+    """Post-patch the kernel must hold one of each name, not an invented one.
+
+    Renaming the real OID to something like hv_vmm_hidden_ leaves a sysctl
+    reading 1 whose description is still "running on a vmm", which fingerprints
+    the guest harder than hiding the flag hides it.
+    """
+    names = {n for x in _exec_bypass_fragment()
+             for n in bytes(x["Replace"]).split(b"\x00") if n}
+    assert names == {b"boot session UUID", b"hibernatecount",
+                     b"hibernatehidready", b"hv_vmm_present"}
+
+
+_BASH_INSTALLER = Path(__file__).resolve().parents[1] / "scripts/bash/osx-proxmox-next.sh"
+
+
+def _skeleton_config(path: Path) -> None:
+    """Minimal config.plist with the containers both patchers assume exist."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(plistlib.dumps({
+        "Misc": {"Security": {}, "Boot": {}},
+        "NVRAM": {"Add": {"7C436110-AB2A-4BBB-A880-FE41995C9F82": {}}},
+        "Kernel": {"Add": [{"BundlePath": "Lilu.kext", "Enabled": True}], "Quirks": {}},
+        "UEFI": {"Quirks": {}},
+        "PlatformInfo": {},
+    }))
+
+
+def _bash_inline_python() -> str:
+    """Extract the config.plist patcher out of the bash installer.
+
+    Sliced by marker rather than line number so it survives edits above it.
+    """
+    lines = _BASH_INSTALLER.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == 'python3 -c "')
+    end = next(i for i, ln in enumerate(lines[start:], start)
+               if ln.startswith('" "$dest_mnt'))
+    return "\n".join(lines[start + 1:end])
+
+
+def _run_bash_patcher(cfg: Path, tmp: Path, apple: str = "true") -> dict:
+    script = tmp / "bash_patcher.py"
+    script.write_text(_bash_inline_python())
+    subprocess.run(
+        [sys.executable, str(script), str(cfg), "Intel", apple, "C02XX0XXXXXX",
+         "11111111-2222-3333-4444-555555555555", "C02XX000XXXXXXXXX",
+         "001122334455", "MacPro7,1"],
+        check=True, capture_output=True,
+    )
+    with cfg.open("rb") as fh:
+        return plistlib.load(fh)
+
+
+def _run_python_patcher(cfg: Path, apple: bool = True) -> dict:
+    cmd = _plist_patch_script(
+        apple_services=apple, smbios_serial="C02XX0XXXXXX",
+        smbios_uuid="11111111-2222-3333-4444-555555555555",
+        smbios_mlb="C02XX000XXXXXXXXX", smbios_rom="001122334455",
+        smbios_model="MacPro7,1",
+    )
+    env = {**os.environ, "OC_DEST": str(cfg.parent.parent.parent)}
+    subprocess.run(["bash", "-c", cmd], check=True, capture_output=True, env=env)
+    with cfg.open("rb") as fh:
+        return plistlib.load(fh)
+
+
+@pytest.mark.parametrize("apple", [True, False])
+def test_bash_and_python_emit_identical_kernel_patches(tmp_path: Path, apple: bool) -> None:
+    """Execute both patchers and compare, rather than grepping for constants.
+
+    A substring check only catches a typo'd hex literal. It sails past a
+    swapped Find/Replace, Enabled=False, a bumped MinKernel, or the whole
+    block being gated off, all of which ship a silently inert patch to bash
+    users. This is the guard for the Python/bash parity rule.
+    """
+    py_cfg = tmp_path / "py/EFI/OC/config.plist"
+    ba_cfg = tmp_path / "ba/EFI/OC/config.plist"
+    _skeleton_config(py_cfg)
+    _skeleton_config(ba_cfg)
+
+    py = _run_python_patcher(py_cfg, apple=apple)
+    ba = _run_bash_patcher(ba_cfg, tmp_path, apple="true" if apple else "false")
+
+    assert py["Kernel"].get("Patch", []) == ba["Kernel"].get("Patch", [])
+    assert len(py["Kernel"].get("Patch", [])) == (len(_APPLE_ID_BYPASS_PATCHES) if apple else 0)
+
+
+def test_bash_inline_python_has_no_double_quotes() -> None:
+    """The block is a double-quoted python3 -c argument in the shell.
+
+    A single double-quote anywhere inside, even in a comment, ends the shell
+    string early and shifts every positional argument. That shipped once: a
+    comment mentioning the memory banner in quotes made the patcher receive
+    'Modules' as its config path and the installer died with FileNotFoundError.
+    shellcheck -S error does not catch it and bash -n parses it fine.
+    """
+    block = _bash_inline_python()
+    bad = [(i, ln) for i, ln in enumerate(block.splitlines(), 1) if '"' in ln]
+    assert not bad, f"double-quote inside python3 -c block: {bad[:3]}"
+
+
+def test_bash_installer_sets_the_same_opencore_quirks(tmp_path: Path) -> None:
+    """AllowSetDefault and RequestBootVarRouting reached bash long after Python."""
+    py_cfg = tmp_path / "py/EFI/OC/config.plist"
+    ba_cfg = tmp_path / "ba/EFI/OC/config.plist"
+    _skeleton_config(py_cfg)
+    _skeleton_config(ba_cfg)
+
+    py = _run_python_patcher(py_cfg)
+    ba = _run_bash_patcher(ba_cfg, tmp_path)
+
+    assert py["Misc"]["Security"]["AllowSetDefault"] == ba["Misc"]["Security"]["AllowSetDefault"]
+    assert py["UEFI"]["Quirks"]["RequestBootVarRouting"] == ba["UEFI"]["Quirks"]["RequestBootVarRouting"]
+    assert py["Misc"]["Boot"]["Timeout"] == ba["Misc"]["Boot"]["Timeout"]
+    guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
+    assert py["NVRAM"]["Add"][guid]["boot-args"] == ba["NVRAM"]["Add"][guid]["boot-args"]
+
+
+def test_boot_args_configure_restrictevents(tmp_path: Path) -> None:
+    """revblock=pci is the documented config for the memory-warning block.
+
+    This asserts the boot-arg is emitted, nothing more. It does NOT assert the
+    banner is suppressed: measured on Sequoia 15.7.9 with Lilu, RestrictEvents
+    1.1.6 and VirtualSMC all loaded, SIP off, hw.model MacPro7,1 and this exact
+    boot-arg live, MemorySlotNotification still ran and still posted. Upstream
+    limitation, see BOOT_ARGS_BASE.
+    """
+    cfg = tmp_path / "py/EFI/OC/config.plist"
+    _skeleton_config(cfg)
+    nvram = _run_python_patcher(cfg)["NVRAM"]["Add"]["7C436110-AB2A-4BBB-A880-FE41995C9F82"]
+    assert "revblock=pci" in nvram["boot-args"]
+
+
+def test_boot_args_keep_verbose_flag_separate(tmp_path: Path) -> None:
+    """--verbose-boot must add -v without dropping the RestrictEvents config."""
+    verbose = _plist_patch_script(verbose_boot=True)
+    normal = _plist_patch_script(verbose_boot=False)
+    assert "revblock=pci" in verbose and "revblock=pci" in normal
+    assert " -v" in verbose and " -v" not in normal
+
+
+def test_build_disables_picker_auto_boot(tmp_path: Path) -> None:
+    """Any non-zero timeout auto-boots recovery and the install never finishes.
+
+    The picker lists the attached recovery disk ahead of the installer, so
+    auto-boot always picks the wrong entry until post-install detaches recovery.
+    Timeout=0 makes the picker wait instead of choosing wrongly.
+    """
+    cfg = tmp_path / "py/EFI/OC/config.plist"
+    _skeleton_config(cfg)
+    assert _run_python_patcher(cfg)["Misc"]["Boot"]["Timeout"] == PICKER_TIMEOUT_INSTALL
+    assert PICKER_TIMEOUT_INSTALL == 0
+    assert PICKER_TIMEOUT_INSTALLED > 0
+
+
+def test_apple_id_bypass_patches_are_armed() -> None:
+    """Byte-perfect but Enabled=False lands an inert patch and nothing complains.
+
+    Same for Count=0 (matches nothing) and Identifier != kernel (would byte-patch
+    every binary OpenCore loads). All three fail silently at runtime.
+    """
+    for patch in _exec_bypass_fragment():
+        assert patch["Enabled"] is True
+        assert patch["Count"] == 1
+        assert patch["Identifier"] == "kernel"
+        assert patch["Arch"] == "x86_64"
+        assert patch["Base"] == ""
+
+
+def test_apple_id_bypass_patch_comments_have_no_quotes() -> None:
+    """Comments are interpolated raw into the fragment, so quotes break it.
+
+    The fragment is wrapped in `python3 -c '...'`, where an apostrophe ends the
+    shell string, and its dict literals use double quotes, where a double quote
+    ends the Python string. Neither is escaped on the way in.
+    """
+    frag = _apple_id_bypass_patch_keys()
+    for comment, _find, _replace in _APPLE_ID_BYPASS_PATCHES:
+        assert "'" not in comment and '"' not in comment, comment
+    assert "'" not in frag
+
+
+def test_apple_id_bypass_patch_keys_is_idempotent() -> None:
+    p: dict = {}
+    frag = _apple_id_bypass_patch_keys()
+    exec(frag, {"p": p})  # noqa: S102
+    exec(frag, {"p": p})  # noqa: S102
+    assert len(p["Kernel"]["Patch"]) == len(_APPLE_ID_BYPASS_PATCHES)
 
 
 # ---------------------------------------------------------------------------

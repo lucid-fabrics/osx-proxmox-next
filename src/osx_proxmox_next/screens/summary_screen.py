@@ -61,9 +61,11 @@ def format_install_result(
             "Install completed successfully!",
             f"Log: {log_path}",
             "",
-            "POST-INSTALL: After macOS finishes installing, run:",
+            "IMPORTANT: as soon as the installer reboots the VM the first time, run:",
             f"  osx-next-cli post-install --vmid {vmid} --execute",
-            f"This switches boot order to {POST_INSTALL_BOOT_ORDER} (OpenCore first).",
+            f"Detaches recovery and sets boot order {POST_INSTALL_BOOT_ORDER}. Until you",
+            "do, the picker lists recovery first and auto-boots it, so each reboot",
+            "restarts the installer instead of resuming it.",
             "",
             SUPPORT_LINE,
         ]

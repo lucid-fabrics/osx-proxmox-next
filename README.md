@@ -53,7 +53,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 - Automatic OpenCore and recovery/installer download - no manual file placement
 - Shared storage support - download ISOs to NAS or any Proxmox storage pool (`--iso-dir`)
 - Auto-generated SMBIOS identity (serial, UUID, model) - no OpenCore editing needed
-- Graphical boot picker with Apple icons - auto-boots the installer
+- Graphical boot picker with Apple icons - waits for your choice during install, auto-boots once `post-install` runs
 - Mandatory dry-run before live install previews every command
 - Real-time form validation with inline error feedback
 
@@ -225,7 +225,7 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 | **Sequoia 15** | ✅ Stable | 🧪 Community-tested | Kernel patch applied automatically with `--apple-services` |
 | **Tahoe 26** | ✅ Stable | 🧪 Community-tested | Kernel patch applied automatically with `--apple-services` |
 
-> **Apple Services on Sequoia/Tahoe VMs:** This tool automatically applies a kernel-level patch when `--apple-services` is enabled. The patch redirects Apple's VM detection sysctl (`hv_vmm_present`) to read from the hibernate counter (always 0), so Apple's DeviceCheck sees a physical machine and allows Apple ID sign-in. Verified working on Sequoia 15 and Tahoe 26. See the [Apple Services section](#-enable-apple-services-icloud-imessage-facetime) for details.
+> **Apple Services on Sequoia/Tahoe VMs:** This tool automatically applies two kernel-level patches when `--apple-services` is enabled. Together they hide the real VM detection sysctl (`hv_vmm_present`) and reroute the name to the hibernate counter, which reads 0 on a default VM, so Apple's DeviceCheck sees what appears to be a physical machine. Confirm inside the VM with `sysctl -n kern.hv_vmm_present`, which must print `0`. See the [Apple Services section](#-enable-apple-services-icloud-imessage-facetime) for details.
 
 ---
 
@@ -374,6 +374,24 @@ Use `osx-next-cli download --macos <version>` to auto-fetch missing assets. The 
 <summary><strong>I see UEFI Shell instead of macOS boot</strong></summary>
 
 Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on `ide2`, with boot order set to `ide2;virtio0;ide0`.
+</details>
+
+<details>
+<summary><strong>Install never finishes, it keeps restarting in Recovery</strong></summary>
+
+Different from the one below: here the install never completes at all. A macOS install reboots itself two or three times, and each reboot returns to the OpenCore picker. The picker lists **macOS Base System** (the recovery disk on `ide2`) before **macOS Installer**, so any auto-boot picks the wrong one and every reboot restarts Recovery instead of resuming.
+
+Current releases ship the picker with `Timeout=0`, so it waits for you rather than choosing wrongly. If you are on an older build where it auto-boots after 15s, this is the loop you are hitting.
+
+**The fix:** detach recovery once the installer has rebooted for the first time.
+
+```bash
+osx-next-cli post-install --vmid <id> --execute
+```
+
+With `ide2` gone the picker only lists the installer, so auto-boot picks the right entry and the install resumes to completion. Run this after the *first* reboot, not only at the very end.
+
+Selecting **macOS Installer** manually at the picker works for that boot. Pressing **Ctrl+Enter** on it is supposed to make it the default (the config enables `AllowSetDefault` and `RequestBootVarRouting` for this), but results have been inconsistent in testing, so treat it as a convenience rather than the fix. Detaching recovery is the one that reliably holds.
 </details>
 
 <details>
@@ -601,16 +619,25 @@ Starting with macOS Sequoia 15, Apple's DeviceCheck reads `hv_vmm_present` from 
 Verification Failed - An unknown error occurred.
 ```
 
-**This tool fixes it automatically.** When `--apple-services` is enabled, a kernel-level OpenCore patch is injected into `config.plist` that redirects the `hv_vmm_present` sysctl lookup to read from `hibernatecount` instead (always 0 = not a VM). Apple's DeviceCheck sees a physical machine and allows sign-in.
+**This tool fixes it automatically.** When `--apple-services` is enabled, two kernel-level OpenCore patches are injected into `config.plist` that **swap the two sysctl names**: the OID that really reports VM presence is renamed to `hibernatecount`, and the harmless hibernate counter is renamed to `hv_vmm_present`. So `sysctl -n kern.hv_vmm_present` now reads the counter (0 on a default VM) and DeviceCheck sees what appears to be a physical machine.
 
-**Community-attested:** Multiple testers have reported Apple ID, iCloud, iMessage, and FaceTime working on Sequoia 15 and Tahoe 26 with this patch. Results may vary - if it works for you, consider sharing your experience on [Discord](https://discord.gg/Ub6TunHYre).
+Check it worked, inside the VM:
+
+```bash
+sysctl -n kern.hv_vmm_present    # must print 0
+```
+
+If it prints `1` the patch is not in effect and sign-in will fail. Releases that predate the fix for [#114](https://github.com/lucid-fabrics/osx-proxmox-next/issues/114) shipped only the second patch, so both OIDs ended up named `hv_vmm_present` and the real one still won. Rebuild the VM on the latest release.
+
+**Not officially verified.** Attestation is server-side and Apple can change it at any time, so results may vary. The `sysctl` check above tells you whether the patch itself is working; everything past that is up to Apple. If it works for you, consider sharing your experience on [Discord](https://discord.gg/Ub6TunHYre).
 
 > `RestrictEvents.kext` with `revpatch=sbvmm` alone does **not** fix this - that only hides `kern.hv_vmm_present` from userspace. The kernel patch operates at the sysctl string table level, which is what Apple's attestation stack reads directly.
 
 **If sign-in still fails after applying the patch:**
 1. Reboot the VM once - the patch requires a clean boot to take effect
-2. Verify `--apple-services` was set during VM creation
-3. As a last resort: create a **Sonoma 14** VM, sign in, then upgrade in-place to Sequoia/Tahoe
+2. Confirm `sysctl -n kern.hv_vmm_present` prints `0`
+3. Verify `--apple-services` was set during VM creation
+4. As a last resort: create a **Sonoma 14** VM, sign in, then upgrade in-place to Sequoia/Tahoe
 
 ---
 

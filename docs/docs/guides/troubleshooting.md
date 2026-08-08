@@ -17,7 +17,8 @@ title: Troubleshooting
 | "Guest has not initialized the display" | Display profile mismatch during early boot | Use `vga: std` for stable noVNC during installation. |
 | Stuck on Apple logo (flat CPU) | Non-power-of-2 CPU core count | Use 2, 4, 8, or 16 cores. Values like 6 or 12 cause kernel hangs. |
 | Freeze at "X minutes remaining" during install, CPU 100%, network/disk IO both flat zero, mouse/keyboard unresponsive | Real Xeon E5/E7 v2-v4 (HEDT/dual-socket) CPUs leak their genuine multi-package topology through `-cpu host`. Combined with the `MacPro7,1` SMBIOS, XNU's scheduler can livelock during heavy multithreaded I/O like the installer copy phase | The bash installer auto-detects these CPUs and uses a fixed emulated model (`Broadwell-noTSX,model=158` or `Haswell-noTSX,model=158,stepping=3`) instead of `-cpu host`. Confirm on the Proxmox host with `qm config <vmid>`: the args line should show `Broadwell-noTSX` or `Haswell-noTSX`, not `host`. |
-| "Verification Failed" — Apple ID on Sequoia/Tahoe | `hv_vmm_present` sysctl returning `1` causes DeviceCheck to reject sign-in | Ensure `--apple-services` was used — it injects a kernel patch redirecting `hv_vmm_present` to `hibernatecount`. Note: `RestrictEvents.kext revpatch=sbvmm` alone does **not** fix this. If the patch doesn't work, use the Sonoma upgrade path (see [Apple Services guide](./apple-services.md)). |
+| Install never finishes, VM keeps landing back in Recovery | The OpenCore picker lists `macOS Base System` (the attached recovery disk) before `macOS Installer`, and `Timeout=15` auto-boots the first entry. Every installer reboot therefore restarts Recovery instead of resuming | Detach recovery once the installer has rebooted once: `osx-next-cli post-install --vmid <id> --execute`. The picker then only lists the installer and auto-boot resumes the install. Picking **macOS Installer** by hand works for that boot; **Ctrl+Enter** to pin it as default is inconsistent in testing, so do not rely on it. |
+| "Verification Failed", Apple ID on Sequoia/Tahoe | `hv_vmm_present` sysctl returning `1` causes DeviceCheck to reject sign-in | Run `sysctl -n kern.hv_vmm_present` in the VM: it must print `0`. If it prints `1`, first check `pmset -g \| grep hibernatemode`. If that is not `0`, run `sudo pmset -a hibernatemode 0` and cold-boot the VM, the patch reroutes the flag to the hibernate counter, which a hibernate cycle increments. If hibernatemode was already `0`, the patch is not in effect: releases that predate the fix for [#114](https://github.com/lucid-fabrics/osx-proxmox-next/issues/114) injected an incomplete patch that left the real sysctl registered, so rebuild the VM on the latest release with `--apple-services`. Note: `RestrictEvents.kext revpatch=sbvmm` alone does **not** fix this. |
 | macOS is slow on AMD | Expected -- AMD uses CPU emulation | AMD hosts use `Cascadelake-Server` emulation instead of native passthrough. Intel hosts get native performance. |
 | Installer doesn't show disk | Disk not formatted | Open Disk Utility > View > Show All Devices > Select QEMU VirtIO > Erase as APFS + GUID Partition Map. |
 
@@ -95,13 +96,13 @@ The TUI wizard (step 5) auto-downloads missing assets before the dry-run preview
 
 ## Post-Install Boot Order
 
-After macOS finishes installing, fix the boot order so the main disk boots first:
+Run this as soon as the installer reboots the VM for the first time, not only once macOS is fully installed:
 
 ```bash
-qm set <vmid> --boot order=virtio0;ide0
+osx-next-cli post-install --vmid <id> --execute
 ```
 
-Without this, the VM boots into the recovery installer on every start.
+It detaches the recovery disk and sets boot order `ide0;virtio0`. Until you do, the OpenCore picker lists recovery ahead of the installer and auto-boots it after 15s, so each reboot restarts the installer instead of resuming it, and the install never finishes.
 
 ## MSR Kernel Panics
 
