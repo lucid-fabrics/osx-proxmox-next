@@ -619,7 +619,7 @@ Starting with macOS Sequoia 15, Apple's DeviceCheck reads `hv_vmm_present` from 
 Verification Failed - An unknown error occurred.
 ```
 
-**This tool fixes it automatically.** When `--apple-services` is enabled, two kernel-level OpenCore patches are injected into `config.plist`. The first renames the real `hv_vmm_present` sysctl so nothing can resolve it; the second renames `hibernatecount` into its place. That counter reads 0 on a default VM, so DeviceCheck sees what appears to be a physical machine.
+**This tool fixes it automatically.** When `--apple-services` is enabled, two kernel-level OpenCore patches are injected into `config.plist` that **swap the two sysctl names**: the OID that really reports VM presence is renamed to `hibernatecount`, and the harmless hibernate counter is renamed to `hv_vmm_present`. So `sysctl -n kern.hv_vmm_present` now reads the counter (0 on a default VM) and DeviceCheck sees what appears to be a physical machine.
 
 Check it worked, inside the VM:
 
