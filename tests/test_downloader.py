@@ -228,6 +228,9 @@ class TestDownloadRecovery:
 
         result = download_recovery("sequoia", tmp_path)
         assert result == existing
+        # A cached image from an older version may be unaligned; the cache
+        # hit must fix it in place instead of re-serving the broken file.
+        assert result.stat().st_size == 1024 * 1024
 
     def test_success(self, tmp_path, monkeypatch):
         session_resp = _make_response(b"")

@@ -304,7 +304,13 @@ def _validate_and_fetch_assets(args: argparse.Namespace, config: VmConfig) -> in
     missing = [a for a in assets if not a.ok]
 
     if missing and not getattr(args, "no_download", False):
-        dest_dir = Path(config.iso_dir) if config.iso_dir else Path(detect_iso_storage()[0])
+        # Record the resolved download dir on the config so the post-download
+        # re-check and build_plan search the same directory the files landed
+        # in. detect_iso_storage() can return a custom pool that is neither
+        # the default template dir nor under /mnt/pve.
+        if not config.iso_dir:
+            config.iso_dir = detect_iso_storage()[0]
+        dest_dir = Path(config.iso_dir)
         _auto_download_missing(config, dest_dir)
         # Re-check after download
         assets = required_assets(config)
