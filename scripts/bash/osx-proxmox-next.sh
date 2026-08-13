@@ -612,7 +612,9 @@ fg=${fg}"
   local img_size aligned_size
   img_size=$(stat -c%s "$output_img" 2>/dev/null || stat -f%z "$output_img")
   aligned_size=$(( (img_size + 1048575) / 1048576 * 1048576 ))
-  [ "$aligned_size" -ne "$img_size" ] && truncate -s "$aligned_size" "$output_img"
+  if [ "$aligned_size" -ne "$img_size" ]; then
+    truncate -s "$aligned_size" "$output_img"
+  fi
 
   msg_ok "Downloaded and converted recovery image"
 }
