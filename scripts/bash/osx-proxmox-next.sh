@@ -603,6 +603,17 @@ fg=${fg}"
     exit 1
   }
   rm -f "$base_dmg"
+
+  # Some storage backends (ZFS, Ceph, certain NFS mounts) require attached
+  # raw images to be a multiple of the request alignment, typically 512B or
+  # 4096B. dmg2img output isn't guaranteed to land on that boundary, and
+  # QEMU refuses to start with "Image size is not a multiple of request
+  # alignment" if it doesn't. Pad to a 1MiB boundary to cover both.
+  local img_size aligned_size
+  img_size=$(stat -c%s "$output_img" 2>/dev/null || stat -f%z "$output_img")
+  aligned_size=$(( (img_size + 1048575) / 1048576 * 1048576 ))
+  [ "$aligned_size" -ne "$img_size" ] && truncate -s "$aligned_size" "$output_img"
+
   msg_ok "Downloaded and converted recovery image"
 }
 
