@@ -28,6 +28,36 @@ def test_preflight_has_expected_checks() -> None:
     assert len(checks) >= 15
 
 
+def _cpu_info(needs_emulated=False, hedt_model=""):
+    from osx_proxmox_next.defaults import CpuInfo
+    return CpuInfo(vendor="Intel", model_name="test", family=6, model=85,
+                   needs_emulated_cpu=needs_emulated, xeon_hedt_model=hedt_model)
+
+
+def _cpu_vendor_detail(checks):
+    return next(c for c in checks if c.name == "CPU vendor").details
+
+
+def test_preflight_cpu_detail_hedt_xeon(monkeypatch) -> None:
+    """Multi-socket-capable Xeon hosts report the pinned profile, not host passthrough."""
+    monkeypatch.setattr(preflight, "detect_cpu_info",
+                        lambda: _cpu_info(hedt_model="Skylake-Client-noTSX-IBRS"))
+    assert "Skylake-Client-noTSX-IBRS (multi-socket Xeon profile)" in \
+        _cpu_vendor_detail(run_preflight())
+
+
+def test_preflight_cpu_detail_emulated(monkeypatch) -> None:
+    """AMD and hybrid Intel hosts report Cascadelake-Server emulation."""
+    monkeypatch.setattr(preflight, "detect_cpu_info",
+                        lambda: _cpu_info(needs_emulated=True))
+    assert "Cascadelake-Server emulation" in _cpu_vendor_detail(run_preflight())
+
+
+def test_preflight_cpu_detail_host_passthrough(monkeypatch) -> None:
+    monkeypatch.setattr(preflight, "detect_cpu_info", lambda: _cpu_info())
+    assert "native host passthrough" in _cpu_vendor_detail(run_preflight())
+
+
 def test_find_binary_checks_common_system_paths(monkeypatch) -> None:
     monkeypatch.setattr(preflight.shutil, "which", lambda _cmd: None)
     monkeypatch.setattr(

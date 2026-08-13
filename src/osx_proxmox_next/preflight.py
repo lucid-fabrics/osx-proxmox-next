@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import shutil
 
-from .defaults import detect_cpu_vendor
+from .defaults import detect_cpu_info, detect_cpu_vendor
 from .infrastructure import ProxmoxAdapter
 
 log = logging.getLogger(__name__)
@@ -138,11 +138,20 @@ def run_preflight() -> list[PreflightCheck]:
     checks.append(_check_initcall_blacklist())
 
     vendor = detect_cpu_vendor()
+    cpu_info = detect_cpu_info()
+    # Mirrors planner._cpu_args selection order so preflight reports the
+    # profile the plan will actually use.
+    if cpu_info.needs_emulated_cpu:
+        cpu_detail = "Cascadelake-Server emulation"
+    elif cpu_info.xeon_hedt_model:
+        cpu_detail = f"{cpu_info.xeon_hedt_model.split(',')[0]} (multi-socket Xeon profile)"
+    else:
+        cpu_detail = "native host passthrough"
     checks.append(
         PreflightCheck(
             name="CPU vendor",
             ok=True,
-            details=f"{vendor} - {'Cascadelake-Server emulation' if vendor == 'AMD' else 'native host passthrough'}",
+            details=f"{vendor} - {cpu_detail}",
         )
     )
     checks.append(
