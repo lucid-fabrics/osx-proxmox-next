@@ -678,6 +678,63 @@ def test_cli_apply_no_download_flag(monkeypatch):
     assert rc == 3
 
 
+def test_validate_and_fetch_assets_records_download_dir(monkeypatch, tmp_path):
+    """The auto-detected download dir must land on config.iso_dir, so the
+    post-download re-check and build_plan search where the files actually
+    went (a custom pool is neither the default dir nor under /mnt/pve)."""
+    import argparse
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.domain import VmConfig
+
+    custom_pool = tmp_path / "pool" / "template" / "iso"
+    custom_pool.mkdir(parents=True)
+
+    calls = {"n": 0}
+
+    def fake_required_assets(cfg):
+        calls["n"] += 1
+        # Missing on first check, found on the re-check after download
+        ok = calls["n"] > 1
+        return [AssetCheck("Recovery image", custom_pool / "sonoma-recovery.img", ok,
+                           "hint", downloadable=True)]
+
+    monkeypatch.setattr(cli_module, "required_assets", fake_required_assets)
+    monkeypatch.setattr(cli_module, "detect_iso_storage", lambda: [str(custom_pool)])
+    monkeypatch.setattr(cli_module, "_auto_download_missing", lambda cfg, dest: None)
+
+    config = VmConfig(vmid=901, name="macos-test", macos="sonoma", cores=8, memory_mb=16384,
+                      disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    rc = cli_module._validate_and_fetch_assets(argparse.Namespace(), config)
+    assert rc is None
+    assert config.iso_dir == str(custom_pool)
+
+
+def test_validate_and_fetch_assets_keeps_explicit_iso_dir(monkeypatch, tmp_path):
+    """An explicitly configured iso_dir is never overwritten by auto-detection."""
+    import argparse
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.domain import VmConfig
+
+    calls = {"n": 0}
+
+    def fake_required_assets(cfg):
+        calls["n"] += 1
+        return [AssetCheck("Recovery image", tmp_path / "sonoma-recovery.img",
+                           calls["n"] > 1, "hint", downloadable=True)]
+
+    monkeypatch.setattr(cli_module, "required_assets", fake_required_assets)
+    monkeypatch.setattr(cli_module, "detect_iso_storage",
+                        lambda: (_ for _ in ()).throw(AssertionError("must not be called")))
+    monkeypatch.setattr(cli_module, "_auto_download_missing", lambda cfg, dest: None)
+
+    config = VmConfig(vmid=901, name="macos-test", macos="sonoma", cores=8, memory_mb=16384,
+                      disk_gb=128, bridge="vmbr0", storage="local-lvm",
+                      iso_dir=str(tmp_path))
+    rc = cli_module._validate_and_fetch_assets(argparse.Namespace(), config)
+    assert rc is None
+    assert config.iso_dir == str(tmp_path)
+
+
 def test_cli_download_both_exclusive_flags(monkeypatch, tmp_path):
     """Passing both --opencore-only and --recovery-only results in no downloads."""
     oc_called = []
@@ -1225,7 +1282,7 @@ def test_cli_doctor_mixed_failures_and_warnings(monkeypatch, capsys) -> None:
 
 
 # ---------------------------------------------------------------------------
-# clone — apple_services message branch
+# clone - apple_services message branch
 # ---------------------------------------------------------------------------
 
 def test_cli_clone_execute_success_prints_apple_services(monkeypatch, tmp_path, capsys) -> None:
