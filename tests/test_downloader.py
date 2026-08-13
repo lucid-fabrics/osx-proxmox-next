@@ -669,6 +669,31 @@ class TestBuildRecoveryImage:
 
         _build_recovery_image(dmg, chunklist, dest)
         assert dest.exists()
+        # 2048 bytes isn't a multiple of the 1MiB alignment; the image must
+        # be padded so storage backends that require aligned raw images
+        # (ZFS, Ceph, some NFS mounts) can attach it.
+        assert dest.stat().st_size == 1024 * 1024
+
+    def test_already_aligned_image_untouched(self, tmp_path, monkeypatch):
+        from osx_proxmox_next.downloader import _build_recovery_image
+        from osx_proxmox_next.infrastructure import CommandResult
+
+        dmg = tmp_path / "BaseSystem.dmg"
+        chunklist = tmp_path / "BaseSystem.chunklist"
+        dmg.write_bytes(b"x" * 1024)
+        chunklist.write_bytes(b"y" * 64)
+        dest = tmp_path / "recovery.img"
+        aligned_size = 2 * 1024 * 1024
+
+        def handler(argv):
+            dest.write_bytes(b"\x00" * aligned_size)
+            return CommandResult(ok=True, returncode=0, output="")
+
+        import osx_proxmox_next.services as _svc
+        monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
+
+        _build_recovery_image(dmg, chunklist, dest)
+        assert dest.stat().st_size == aligned_size
 
     def test_failure_cleans_up(self, tmp_path, monkeypatch):
         from osx_proxmox_next.downloader import _build_recovery_image
