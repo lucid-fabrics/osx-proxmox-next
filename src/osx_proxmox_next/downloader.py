@@ -147,6 +147,14 @@ def download_recovery(
     dest = dest_dir / f"{macos}-recovery.img"
     if dest.exists():
         log.debug("Recovery cache hit: %s", dest)
+        # Images cached by older versions may be unaligned; fix in place so
+        # a stale cache doesn't keep reproducing the QEMU alignment error.
+        # Best-effort: on read-only storage keep the old return-as-is
+        # behavior instead of turning a cache hit into a crash.
+        try:
+            _align_raw_image(dest)
+        except OSError as exc:
+            log.warning("Could not align cached recovery image %s: %s", dest, exc)
         return dest
 
     board_id = RECOVERY_BOARD_IDS[macos]

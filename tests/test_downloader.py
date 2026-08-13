@@ -229,6 +229,19 @@ class TestDownloadRecovery:
         result = download_recovery("sequoia", tmp_path)
         assert result == existing
 
+    def test_existing_unwritable_file_still_served(self, tmp_path, monkeypatch):
+        """Alignment of a cached image is best-effort: read-only storage
+        must not turn a cache hit into a crash."""
+        existing = tmp_path / "sequoia-recovery.img"
+        existing.write_text("already here")
+
+        def deny_align(path, alignment=None):
+            raise PermissionError(13, "Read-only file system", str(path))
+
+        monkeypatch.setattr(dl_module, "_align_raw_image", deny_align)
+        result = download_recovery("sequoia", tmp_path)
+        assert result == existing
+
     def test_success(self, tmp_path, monkeypatch):
         session_resp = _make_response(b"")
         session_resp.headers = {"Set-Cookie": "session=ABC123; path=/; HttpOnly"}
