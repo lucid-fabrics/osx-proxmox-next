@@ -143,11 +143,11 @@ def test_build_plan_uses_importdisk_for_opencore(monkeypatch) -> None:
     from pathlib import Path
     import osx_proxmox_next.planner as planner
 
-    monkeypatch.setattr(planner, "resolve_opencore_path", lambda _macos: Path("/mnt/pve/wd2tb/template/iso/opencore-tahoe.iso"))
+    monkeypatch.setattr(planner, "resolve_opencore_path", lambda _macos, extra_dirs=None: Path("/mnt/pve/wd2tb/template/iso/opencore-tahoe.iso"))
     monkeypatch.setattr(
         planner,
         "resolve_recovery_or_installer_path",
-        lambda _cfg: Path("/mnt/pve/wd2tb/template/iso/macos-tahoe-full.iso"),
+        lambda _cfg, extra_dirs=None: Path("/mnt/pve/wd2tb/template/iso/macos-tahoe-full.iso"),
     )
     cfg = _cfg("tahoe")
     cfg.installer_path = ""
@@ -171,7 +171,7 @@ def test_build_plan_uses_importdisk_for_recovery(monkeypatch) -> None:
     monkeypatch.setattr(
         planner,
         "resolve_recovery_or_installer_path",
-        lambda _cfg: Path("/var/lib/vz/template/iso/sonoma-recovery.img"),
+        lambda _cfg, extra_dirs=None: Path("/var/lib/vz/template/iso/sonoma-recovery.img"),
     )
     cfg = _cfg("sonoma")
     steps = build_plan(cfg)
@@ -179,6 +179,53 @@ def test_build_plan_uses_importdisk_for_recovery(monkeypatch) -> None:
     assert "qm importdisk" in recovery.command
     assert "sonoma-recovery.img" in recovery.command
     assert "media=disk" in recovery.command
+
+
+def test_build_plan_forwards_iso_dir_to_resolvers(monkeypatch, tmp_path) -> None:
+    """A custom iso_dir (e.g. a non-default storage pool) must reach the asset
+    resolvers, or plan generation falls back to the default template dir and
+    never finds a recovery image downloaded to a custom pool."""
+    import osx_proxmox_next.planner as planner
+
+    captured = {}
+
+    def fake_opencore(_macos, extra_dirs=None):
+        captured["opencore"] = extra_dirs
+        return tmp_path / "opencore-sonoma.iso"
+
+    def fake_recovery(_cfg, extra_dirs=None):
+        captured["recovery"] = extra_dirs
+        return tmp_path / "sonoma-recovery.img"
+
+    monkeypatch.setattr(planner, "resolve_opencore_path", fake_opencore)
+    monkeypatch.setattr(planner, "resolve_recovery_or_installer_path", fake_recovery)
+
+    cfg = _cfg("sonoma")
+    cfg.iso_dir = str(tmp_path)
+    build_plan(cfg)
+
+    assert captured["opencore"] == [tmp_path]
+    assert captured["recovery"] == [tmp_path]
+
+
+def test_build_plan_no_iso_dir_passes_empty_extra_dirs(monkeypatch, tmp_path) -> None:
+    """No iso_dir configured means no extra search roots, matching required_assets."""
+    import osx_proxmox_next.planner as planner
+
+    captured = {}
+    monkeypatch.setattr(
+        planner, "resolve_opencore_path",
+        lambda _macos, extra_dirs=None: captured.setdefault("opencore", extra_dirs) or tmp_path / "opencore-sonoma.iso",
+    )
+    monkeypatch.setattr(
+        planner, "resolve_recovery_or_installer_path",
+        lambda _cfg, extra_dirs=None: captured.setdefault("recovery", extra_dirs) or tmp_path / "sonoma-recovery.img",
+    )
+
+    build_plan(_cfg("sonoma"))
+
+    assert captured["opencore"] == []
+    assert captured["recovery"] == []
 
 
 def test_smbios_model_fallback():
@@ -220,7 +267,7 @@ def test_build_plan_recovery_uses_importdisk(monkeypatch) -> None:
         monkeypatch.setattr(
             planner,
             "resolve_recovery_or_installer_path",
-            lambda _cfg, s=suffix: Path(f"/var/lib/vz/template/iso/sonoma-recovery{s}"),
+            lambda _cfg, s=suffix, extra_dirs=None: Path(f"/var/lib/vz/template/iso/sonoma-recovery{s}"),
         )
         cfg = _cfg("sonoma")
         steps = build_plan(cfg)
@@ -553,7 +600,7 @@ def test_build_plan_apple_services_mac_propagated_from_smbios(monkeypatch) -> No
     cfg = _cfg("sequoia")
     cfg.apple_services = True
     steps = build_plan(cfg)
-    # MAC set by _smbios_steps should be reused — verify ROM matches MAC
+    # MAC set by _smbios_steps should be reused: verify ROM matches MAC
     mac_hex = cfg.static_mac.replace(":", "").upper()
     assert cfg.smbios_rom == mac_hex
     # Verify the MAC appears in the net0 step
@@ -562,7 +609,7 @@ def test_build_plan_apple_services_mac_propagated_from_smbios(monkeypatch) -> No
 
 
 def test_build_plan_disables_balloon() -> None:
-    """macOS doesn't support balloon driver — must be disabled."""
+    """macOS doesn't support balloon driver: must be disabled."""
     steps = build_plan(_cfg("sequoia"))
     create = next(step for step in steps if step.title == "Create VM shell")
     assert "--balloon 0" in create.command

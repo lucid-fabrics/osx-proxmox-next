@@ -80,8 +80,9 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     meta = SUPPORTED_MACOS[config.macos]
     vmid = str(config.vmid)
 
-    recovery_raw = resolve_recovery_or_installer_path(config)
-    opencore_path = resolve_opencore_path(config.macos)
+    extra_dirs = [Path(config.iso_dir)] if config.iso_dir else []
+    recovery_raw = resolve_recovery_or_installer_path(config, extra_dirs=extra_dirs)
+    opencore_path = resolve_opencore_path(config.macos, extra_dirs=extra_dirs)
     oc_disk = opencore_path.parent / f"opencore-{config.macos}-vm{vmid}.img"
 
     macos_label = meta["label"]
