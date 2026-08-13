@@ -32,8 +32,9 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
     Intel hybrid CPUs (12th gen+) also need Cascadelake-Server because macOS
     hardware validation fails on P+E core topology with correct SMBIOS.
 
-    Non-hybrid Intel uses ``-cpu host`` for native passthrough, except real
-    Xeon E5/E7 v2-v4 HEDT chips, which get a fixed emulated model instead
+    Non-hybrid Intel uses ``-cpu host`` for native passthrough, except
+    multi-socket-capable Xeons (E5/E7 v2-v4 HEDT and Scalable
+    Platinum/Gold/Silver/Bronze), which get a fixed emulated model instead
     (see ``defaults._xeon_hedt_cpu_model``) to avoid an XNU scheduler
     livelock under heavy multithreaded I/O.
 
