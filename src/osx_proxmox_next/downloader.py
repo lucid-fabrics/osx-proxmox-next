@@ -194,7 +194,12 @@ def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> 
                 "Install it with: apt install dmg2img"
             )
         raise DownloadError(f"Failed to convert recovery DMG: {result.output}")
-    _align_raw_image(dest)
+    # Unlike the cache-hit path, a freshly built image that can't be aligned
+    # WILL fail at VM start, so fail loud through the normal error channel.
+    try:
+        _align_raw_image(dest)
+    except OSError as exc:
+        raise DownloadError(f"Failed to align recovery image: {exc}") from exc
 
 
 def _align_raw_image(path: Path, alignment: int = _RAW_IMAGE_ALIGNMENT) -> None:
