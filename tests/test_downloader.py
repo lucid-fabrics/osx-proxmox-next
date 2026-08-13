@@ -690,6 +690,32 @@ class TestBuildRecoveryImage:
         # (ZFS, Ceph, some NFS mounts) can attach it.
         assert dest.stat().st_size == 1024 * 1024
 
+    def test_align_failure_raises_download_error(self, tmp_path, monkeypatch):
+        """A fresh image that can't be aligned will fail at VM start, so the
+        failure must surface as a DownloadError, not a raw OSError."""
+        from osx_proxmox_next.downloader import _build_recovery_image
+        from osx_proxmox_next.infrastructure import CommandResult
+
+        dmg = tmp_path / "BaseSystem.dmg"
+        chunklist = tmp_path / "BaseSystem.chunklist"
+        dmg.write_bytes(b"x" * 1024)
+        chunklist.write_bytes(b"y" * 64)
+        dest = tmp_path / "recovery.img"
+
+        def handler(argv):
+            dest.write_bytes(b"\x00" * 2048)
+            return CommandResult(ok=True, returncode=0, output="")
+
+        import osx_proxmox_next.services as _svc
+        monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
+
+        def deny_align(path, alignment=None):
+            raise OSError(28, "No space left on device", str(path))
+
+        monkeypatch.setattr(dl_module, "_align_raw_image", deny_align)
+        with pytest.raises(DownloadError, match="Failed to align recovery image"):
+            _build_recovery_image(dmg, chunklist, dest)
+
     def test_already_aligned_image_untouched(self, tmp_path, monkeypatch):
         from osx_proxmox_next.downloader import _build_recovery_image
         from osx_proxmox_next.infrastructure import CommandResult
