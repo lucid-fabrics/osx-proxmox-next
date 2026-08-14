@@ -258,7 +258,11 @@ def _inject_restrictevents_script(opencore_path: Path) -> str:
     also fails the build continues, since the fix is purely cosmetic.
     """
     zip_path = opencore_path.parent / RESTRICTEVENTS_ZIP
+    # The whole fragment is one brace group: the inner ';' separators must not
+    # escape the surrounding '&&' chain, or an earlier failure leaves RE_ZIP
+    # unset and this still runs ("curl: option -o: blank argument").
     return (
+        "{ "
         f"export RE_ZIP={shquote(str(zip_path))}; "
         f"[ -f \"$RE_ZIP\" ] || curl -fsSL -o \"$RE_ZIP\" {shquote(RESTRICTEVENTS_URL)} "
         "|| echo 'WARN: RestrictEvents download failed'; "
@@ -270,7 +274,8 @@ def _inject_restrictevents_script(opencore_path: Path) -> str:
         "z.extractall(os.environ[\"OC_DEST\"]+\"/EFI/OC/Kexts\", members=names); "
         "import sys; sys.stderr.write(\"RestrictEvents.kext injected\\n\")' "
         "|| echo 'WARN: RestrictEvents.kext extraction failed, memory warning fix skipped'; "
-        "else echo 'WARN: RestrictEvents.kext unavailable, memory warning fix skipped'; fi && "
+        "else echo 'WARN: RestrictEvents.kext unavailable, memory warning fix skipped'; fi; "
+        "} && "
     )
 
 
@@ -337,7 +342,9 @@ def _build_oc_disk_script(
     )
 
     return (
-        _loop_cleanup_script(opencore_path, dest)
+        # Fail early with a clear message instead of a losetup cascade
+        f'{{ [ -f {shquote(str(opencore_path))} ] || {{ echo "ERROR: OpenCore ISO not found: {shquote(str(opencore_path))}. Hint: osx-next-cli download --macos {macos}"; false; }}; }} && '
+        + _loop_cleanup_script(opencore_path, dest)
         + _format_dest_oc_script(dest)
         + _mount_source_oc_script(opencore_path)
         # Copy OpenCore files (including hidden files)

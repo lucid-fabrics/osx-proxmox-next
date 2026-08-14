@@ -458,6 +458,34 @@ def test_build_plan_stamps_recovery_flavour(monkeypatch) -> None:
     assert titles.index("Stamp recovery with Apple icon flavour") < titles.index("Import and attach macOS recovery")
 
 
+def test_stamp_step_guards_missing_recovery(monkeypatch) -> None:
+    """A missing recovery image must fail with a clear message, not a losetup cascade."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    stamp = next(step for step in steps if step.title == "Stamp recovery with Apple icon flavour")
+    assert "ERROR: Recovery image not found" in stamp.command
+    assert "osx-next-cli download --macos sequoia" in stamp.command
+
+
+def test_stamp_step_aligns_recovery_before_import(monkeypatch) -> None:
+    """Apply must pad the recovery image to a 1MiB boundary.
+
+    Download-time alignment only covers fresh builds; an image cached by an
+    older version (or built by hand) reaches apply unaligned and QEMU then
+    refuses to start with "Image size is not a multiple of request alignment".
+    """
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    stamp = next(step for step in steps if step.title == "Stamp recovery with Apple icon flavour")
+    assert "stat -c%s" in stamp.command
+    assert "(SZ + 1048575) / 1048576 * 1048576" in stamp.command
+    assert "truncate -s" in stamp.command
+    # Alignment must happen before the HFS+ flag fix touches the image
+    assert stamp.command.index("truncate -s") < stamp.command.index("HFS+ flags fixed")
+
+
 def test_build_plan_cpu_model_override(monkeypatch) -> None:
     """--cpu-model override is used in hardware profile."""
     import osx_proxmox_next.planner as planner

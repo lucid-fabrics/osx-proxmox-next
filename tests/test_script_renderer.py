@@ -546,3 +546,22 @@ def test_plist_patch_script_registers_restrictevents_kext() -> None:
 def test_plist_patch_script_restrictevents_entry_guarded_by_kext_dir() -> None:
     script = _plist_patch_script()
     assert 'os.path.isdir(oc_dest+"/EFI/OC/Kexts/RestrictEvents.kext")' in script
+
+
+def test_build_oc_disk_script_guards_missing_iso() -> None:
+    """A missing OpenCore ISO must fail with a clear message, not a losetup cascade."""
+    result = _oc_script()
+    guard = '{ [ -f /iso/opencore.iso ] || { echo "ERROR: OpenCore ISO not found'
+    assert guard in result
+    assert result.index("ERROR: OpenCore ISO not found") < result.index("losetup")
+    assert "osx-next-cli download --macos sequoia" in result
+
+
+def test_build_oc_disk_script_restrictevents_fragment_is_brace_group() -> None:
+    """The RestrictEvents fragment uses ';' separators internally; without a
+    surrounding brace group those break out of the '&&' chain, so an earlier
+    failure (e.g. missing ISO) still ran curl with RE_ZIP unset and produced
+    the misleading "curl: option -o: blank argument" error."""
+    result = _oc_script()
+    assert "{ export RE_ZIP=" in result
+    assert "fi; } && " in result
