@@ -52,13 +52,24 @@ class CpuInfo:
     is_xeon: bool = False   # True when "Xeon" appears in model name (server chips, always use -cpu host)
     xeon_hedt_model: str = ""  # Fixed QEMU -cpu model for Xeon E5/E7 v2-v4 HEDT chips (empty if not applicable)
 
+    @property
+    def is_amd_pre_zen3(self) -> bool:
+        """Pre-Zen 3 AMD (family < 25): Ryzen 1000/2000/3000, 4000G, TR 1000-3000.
+
+        These lack ERMS/INVPCID/PKU/spec-ctrl that Cascadelake-Server
+        advertises; the Tahoe installer dies there with "error preparing
+        the update" (#117). Haswell-noTSX installs cleanly. Family 0 means
+        /proc/cpuinfo parse failure - keep the Cascadelake default then.
+        """
+        return self.vendor == "AMD" and 0 < self.family < 25
+
 
 def _classify_intel_cpu(family: int, model: int, model_name: str) -> tuple[bool, bool, bool]:
     """Classify an Intel CPU into (is_hybrid, is_xeon, is_legacy).
 
-    is_hybrid: Family 6 with P+E core topology (12th gen+) — needs emulated CPU.
-    is_xeon: Server/workstation chip — always uses -cpu host.
-    is_legacy: Pre-Skylake desktop (Broadwell and older) — needs Penryn mode.
+    is_hybrid: Family 6 with P+E core topology (12th gen+) - needs emulated CPU.
+    is_xeon: Server/workstation chip - always uses -cpu host.
+    is_legacy: Pre-Skylake desktop (Broadwell and older) - needs Penryn mode.
     """
     is_hybrid = (
         family == 6
@@ -129,7 +140,7 @@ def detect_cpu_info() -> CpuInfo:
                 if len(parts) >= 2:
                     model_name = parts[1].strip()
             elif line.startswith("model"):
-                # "model\t\t: 183" — must come after "model name" check
+                # "model\t\t: 183" - must come after "model name" check
                 parts = line.split(":")
                 if len(parts) >= 2 and parts[1].strip().isdigit():
                     model = int(parts[1].strip())

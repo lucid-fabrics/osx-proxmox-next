@@ -28,7 +28,10 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
     If *override* is provided (e.g. ``Skylake-Server-IBRS``), it is used
     directly as the -cpu model with standard KVM flags.
 
-    AMD always uses Cascadelake-Server emulation (no native macOS support).
+    AMD uses Cascadelake-Server emulation (no native macOS support), except
+    pre-Zen 3 parts (Ryzen 1000-3000, family < 25) which get Haswell-noTSX:
+    they lack ERMS/INVPCID/PKU/spec-ctrl that Cascadelake advertises and the
+    Tahoe installer fails there ("error preparing the update", #117).
     Intel hybrid CPUs (12th gen+) also need Cascadelake-Server because macOS
     hardware validation fails on P+E core topology with correct SMBIOS.
 
@@ -48,6 +51,15 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
             "vmware-cpuid-freq=on"
         )
     if cpu.needs_emulated_cpu:
+        if cpu.is_amd_pre_zen3:
+            return (
+                "-cpu Haswell-noTSX,"
+                "vendor=GenuineIntel,"
+                "+invtsc,"
+                "+hypervisor,"
+                "kvm=on,"
+                "vmware-cpuid-freq=on"
+            )
         return (
             "-cpu Cascadelake-Server,"
             "vendor=GenuineIntel,"

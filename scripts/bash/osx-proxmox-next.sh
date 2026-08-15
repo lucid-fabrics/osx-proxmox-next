@@ -370,9 +370,29 @@ function detect_cpu_xeon_hedt_model() {
   fi
 }
 
+# Pre-Zen 3 AMD (family < 25: Ryzen 1000-3000, 4000G, TR 1000-3000) lacks
+# ERMS/INVPCID/PKU/spec-ctrl that Cascadelake-Server advertises; the Tahoe
+# installer fails there with "error preparing the update" (#117).
+# Haswell-noTSX installs cleanly on those parts.
+function detect_amd_pre_zen3() {
+  local family
+  if [ "$(detect_cpu_vendor)" != "AMD" ]; then
+    echo "no"
+    return
+  fi
+  family=$(awk -F: '/^cpu family/{print int($2); exit}' /proc/cpuinfo 2>/dev/null)
+  family=${family:-0}
+  if [ "$family" -gt 0 ] && [ "$family" -lt 25 ]; then
+    echo "yes"
+  else
+    echo "no"
+  fi
+}
+
 CPU_VENDOR=$(detect_cpu_vendor)
 CPU_NEEDS_EMULATION=$(detect_cpu_needs_emulation)
 XEON_HEDT_MODEL=$(detect_cpu_xeon_hedt_model)
+AMD_PRE_ZEN3=$(detect_amd_pre_zen3)
 
 # ── Per-version default disk sizes (matches Python defaults.py) ──
 function default_disk_gb() {
@@ -1209,7 +1229,11 @@ msg_ok "Created VM shell"
 # ── Apply macOS hardware profile ──
 msg_info "Applying macOS hardware profile (CPU: $CPU_VENDOR, emulation: $CPU_NEEDS_EMULATION, HEDT: ${XEON_HEDT_MODEL:-no})"
 if [ "$CPU_NEEDS_EMULATION" = "yes" ]; then
-  CPU_FLAG="-cpu Cascadelake-Server,vendor=GenuineIntel,+invtsc,-pcid,-hle,-rtm,-avx512f,-avx512dq,-avx512cd,-avx512bw,-avx512vl,-avx512vnni,kvm=on,vmware-cpuid-freq=on"
+  if [ "$AMD_PRE_ZEN3" = "yes" ]; then
+    CPU_FLAG="-cpu Haswell-noTSX,vendor=GenuineIntel,+invtsc,+hypervisor,kvm=on,vmware-cpuid-freq=on"
+  else
+    CPU_FLAG="-cpu Cascadelake-Server,vendor=GenuineIntel,+invtsc,-pcid,-hle,-rtm,-avx512f,-avx512dq,-avx512cd,-avx512bw,-avx512vl,-avx512vnni,kvm=on,vmware-cpuid-freq=on"
+  fi
 elif [ -n "$XEON_HEDT_MODEL" ]; then
   CPU_FLAG="-cpu ${XEON_HEDT_MODEL},kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on"
 else

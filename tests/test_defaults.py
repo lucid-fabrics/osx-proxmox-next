@@ -134,6 +134,30 @@ def test_detect_cpu_info_amd(monkeypatch, tmp_path):
     assert info.needs_emulated_cpu is True
 
 
+def test_detect_cpu_info_amd_pre_zen3(monkeypatch, tmp_path):
+    """Zen 2 AMD (family 23, e.g. Ryzen 9 3950X) is flagged pre-Zen 3 (#117)."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text(
+        "vendor_id\t: AuthenticAMD\n"
+        "cpu family\t: 23\n"
+        "model\t\t: 113\n"
+        "model name\t: AMD Ryzen 9 3950X 16-Core Processor\n"
+    )
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    info = detect_cpu_info()
+    assert info.vendor == "AMD"
+    assert info.family == 23
+    assert info.is_amd_pre_zen3 is True
+
+
+def test_is_amd_pre_zen3_boundaries():
+    """Zen 3+ (family >= 25), Intel, and unparsed family are all excluded."""
+    base = dict(model_name="", model=0, needs_emulated_cpu=True)
+    assert CpuInfo(vendor="AMD", family=25, **base).is_amd_pre_zen3 is False
+    assert CpuInfo(vendor="AMD", family=0, **base).is_amd_pre_zen3 is False
+    assert CpuInfo(vendor="Intel", family=23, **base).is_amd_pre_zen3 is False
+
+
 def test_detect_cpu_info_intel_legacy(monkeypatch, tmp_path):
     """Pre-hybrid Intel (e.g. Rocket Lake model 167) → host passthrough."""
     fake_cpuinfo = tmp_path / "cpuinfo"

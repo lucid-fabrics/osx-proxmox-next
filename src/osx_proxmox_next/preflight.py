@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import shutil
 
-from .defaults import detect_cpu_vendor
+from .defaults import detect_cpu_info
 from .infrastructure import ProxmoxAdapter
 
 log = logging.getLogger(__name__)
@@ -137,12 +137,17 @@ def run_preflight() -> list[PreflightCheck]:
     checks.append(_check_iommu())
     checks.append(_check_initcall_blacklist())
 
-    vendor = detect_cpu_vendor()
+    cpu = detect_cpu_info()
+    if cpu.vendor == "AMD":
+        cpu_mode = ("Haswell-noTSX emulation (pre-Zen 3)"
+                    if cpu.is_amd_pre_zen3 else "Cascadelake-Server emulation")
+    else:
+        cpu_mode = "native host passthrough"
     checks.append(
         PreflightCheck(
             name="CPU vendor",
             ok=True,
-            details=f"{vendor} - {'Cascadelake-Server emulation' if vendor == 'AMD' else 'native host passthrough'}",
+            details=f"{cpu.vendor} - {cpu_mode}",
         )
     )
     checks.append(
