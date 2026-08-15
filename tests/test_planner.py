@@ -317,8 +317,8 @@ def test_cpu_args_intel() -> None:
 
 
 def test_cpu_args_amd() -> None:
-    """AMD → Cascadelake-Server emulation."""
-    cpu = _cpu(vendor="AMD", needs_emulated=True)
+    """Zen 3+ AMD (family 25) → Cascadelake-Server emulation."""
+    cpu = _cpu(vendor="AMD", family=25, needs_emulated=True)
     args = _cpu_args(cpu)
     assert "Cascadelake-Server" in args
     assert "vendor=GenuineIntel" in args
@@ -326,6 +326,25 @@ def test_cpu_args_amd() -> None:
     assert "-avx512f" in args
     assert "-pcid" in args
     assert "host" not in args
+
+
+def test_cpu_args_amd_pre_zen3() -> None:
+    """Pre-Zen 3 AMD (family 23, e.g. Ryzen 9 3950X) → Haswell-noTSX (#117)."""
+    cpu = _cpu(vendor="AMD", family=23, needs_emulated=True)
+    args = _cpu_args(cpu)
+    assert "Haswell-noTSX" in args
+    assert "Cascadelake" not in args
+    assert "vendor=GenuineIntel" in args
+    assert "+hypervisor" in args
+    assert "+invtsc" in args
+    assert "vmware-cpuid-freq=on" in args
+
+
+def test_cpu_args_amd_unknown_family_keeps_cascadelake() -> None:
+    """AMD with unparsed family (0) keeps the Cascadelake default."""
+    cpu = _cpu(vendor="AMD", family=0, needs_emulated=True)
+    args = _cpu_args(cpu)
+    assert "Cascadelake-Server" in args
 
 
 def test_cpu_args_intel_hybrid() -> None:
@@ -361,11 +380,20 @@ def test_cpu_args_override() -> None:
 
 def test_build_plan_amd_uses_cascadelake(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="AMD", needs_emulated=True))
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="AMD", family=25, needs_emulated=True))
     steps = build_plan(_cfg("sequoia"))
     profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
     assert "Cascadelake-Server" in profile.command
     assert "vendor=GenuineIntel" in profile.command
+
+
+def test_build_plan_pre_zen3_amd_uses_haswell(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="AMD", family=23, needs_emulated=True))
+    steps = build_plan(_cfg("sequoia"))
+    profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
+    assert "Haswell-noTSX" in profile.command
+    assert "Cascadelake" not in profile.command
 
 
 def test_build_plan_intel_uses_host(monkeypatch) -> None:

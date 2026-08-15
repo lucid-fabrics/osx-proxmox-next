@@ -333,7 +333,8 @@ def _print_cpu_info(args: argparse.Namespace, config: VmConfig) -> None:
         if config.cpu_model:
             cpu_mode = f"override: {config.cpu_model}"
         elif cpu.needs_emulated_cpu:
-            cpu_mode = "Cascadelake-Server emulation"
+            cpu_mode = ("Haswell-noTSX emulation (pre-Zen 3 AMD)"
+                        if cpu.is_amd_pre_zen3 else "Cascadelake-Server emulation")
         else:
             cpu_mode = "native host passthrough"
         cpu_label = cpu.model_name or cpu.vendor
