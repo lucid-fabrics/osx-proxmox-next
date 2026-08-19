@@ -51,23 +51,60 @@ _BUILD_BINARIES: dict[str, str] = {
 }
 
 
-def _check_ignore_msrs(kvm_conf: Path | None = None) -> PreflightCheck:
-    """Check if KVM ignore_msrs=Y is set - critical for macOS (prevents MSR kernel panics)."""
+_IGNORE_MSRS_FIX = (
+    "Fix: echo 'options kvm ignore_msrs=Y' >> /etc/modprobe.d/kvm.conf && "
+    "update-initramfs -k all -u && reboot "
+    "(to apply without rebooting: echo Y > /sys/module/kvm/parameters/ignore_msrs)"
+)
+
+
+def _check_ignore_msrs(
+    kvm_conf: Path | None = None,
+    sysfs_param: Path | None = None,
+) -> PreflightCheck:
+    """Check if KVM ignore_msrs is on - critical for macOS (prevents MSR kernel panics).
+
+    The running kernel is the authority. /etc/modprobe.d/kvm.conf only takes
+    effect after update-initramfs plus a reboot, so a host can carry the right
+    config and still be running with ignore_msrs off. Reading the config file
+    alone reports OK on such a host and the VM then panics anyway.
+    """
+    if sysfs_param is None:
+        sysfs_param = Path("/sys/module/kvm/parameters/ignore_msrs")
     if kvm_conf is None:
         kvm_conf = Path("/etc/modprobe.d/kvm.conf")
-    if kvm_conf.exists():
-        content = kvm_conf.read_text()
-        if "ignore_msrs=Y" in content:
-            return PreflightCheck(
-                name="KVM ignore_msrs",
-                ok=True,
-                details="ignore_msrs=Y set in /etc/modprobe.d/kvm.conf",
-            )
+
+    try:
+        runtime = sysfs_param.read_text().strip()
+    except OSError:
+        runtime = ""
+
+    if runtime:
+        enabled = runtime[:1] in ("Y", "y", "1")
+        return PreflightCheck(
+            name="KVM ignore_msrs",
+            ok=enabled,
+            details=(
+                f"Running kernel has ignore_msrs={runtime}"
+                if enabled
+                else f"Running kernel has ignore_msrs={runtime} - macOS will kernel "
+                     f"panic on unsupported MSR access. {_IGNORE_MSRS_FIX}"
+            ),
+        )
+
+    # kvm module not loaded or sysfs unavailable: fall back to the config file.
+    if kvm_conf.exists() and "ignore_msrs=Y" in kvm_conf.read_text():
+        return PreflightCheck(
+            name="KVM ignore_msrs",
+            ok=True,
+            details="ignore_msrs=Y set in /etc/modprobe.d/kvm.conf (kvm module not loaded, "
+                    "value unverified)",
+        )
     return PreflightCheck(
         name="KVM ignore_msrs",
         ok=False,
         details="Missing ignore_msrs=Y - macOS will kernel panic on unsupported MSR access. "
-                "Fix: echo 'options kvm ignore_msrs=Y' >> /etc/modprobe.d/kvm.conf && update-initramfs -k all -u",
+                f"{_IGNORE_MSRS_FIX}",
     )
 
 
