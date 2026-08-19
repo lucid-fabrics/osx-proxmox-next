@@ -662,6 +662,109 @@ class _FakeAdapter:
         return self._handler(argv)
 
 
+def _make_chunklist(chunks: list[bytes], *, chunk_count: int | None = None,
+                    magic: bytes = b"CNKL") -> bytes:
+    """Build a CNKL chunklist for the given chunks.
+
+    Layout matches what Apple serves: magic(4) header_size(4) version(1)
+    method(1) pad(2) chunk_count(8), then (length, sha256) per chunk.
+    """
+    import hashlib as _h
+    import struct as _s
+    header = magic + _s.pack("<IBBxx", 36, 1, 1) + _s.pack("<Q", chunk_count if chunk_count
+                                                           is not None else len(chunks))
+    header += b"\x00" * (36 - len(header))
+    body = b"".join(_s.pack("<I", len(c)) + _h.sha256(c).digest() for c in chunks)
+    return header + body
+
+
+class TestVerifyChunklist:
+    def test_valid_image_passes(self, tmp_path):
+        chunks = [b"a" * 1000, b"b" * 500, b"c" * 17]
+        dmg = tmp_path / "BaseSystem.dmg"
+        dmg.write_bytes(b"".join(chunks))
+        cl = tmp_path / "BaseSystem.chunklist"
+        cl.write_bytes(_make_chunklist(chunks))
+        dl_module._verify_chunklist(dmg, cl)  # must not raise
+
+    def test_single_flipped_byte_is_caught(self, tmp_path):
+        """The whole point: a silently corrupt download must not proceed."""
+        chunks = [b"a" * 1000, b"b" * 500]
+        cl = tmp_path / "BaseSystem.chunklist"
+        cl.write_bytes(_make_chunklist(chunks))
+        corrupt = bytearray(b"".join(chunks))
+        corrupt[1200] ^= 0x01
+        dmg = tmp_path / "BaseSystem.dmg"
+        dmg.write_bytes(bytes(corrupt))
+        with pytest.raises(DownloadError, match="failed Apple's checksum at chunk 2/2"):
+            dl_module._verify_chunklist(dmg, cl)
+
+    def test_short_image_is_caught(self, tmp_path):
+        chunks = [b"a" * 1000, b"b" * 500]
+        cl = tmp_path / "BaseSystem.chunklist"
+        cl.write_bytes(_make_chunklist(chunks))
+        dmg = tmp_path / "BaseSystem.dmg"
+        dmg.write_bytes(b"a" * 1000 + b"b" * 100)  # truncated final chunk
+        with pytest.raises(DownloadError, match="short"):
+            dl_module._verify_chunklist(dmg, cl)
+
+    def test_unknown_format_is_skipped_not_fatal(self, tmp_path):
+        """Apple has changed this format before; refusing to install would be
+        worse than the corruption the check guards against."""
+        dmg = tmp_path / "BaseSystem.dmg"
+        dmg.write_bytes(b"whatever")
+        cl = tmp_path / "BaseSystem.chunklist"
+        cl.write_bytes(b"NOPE" + b"\x00" * 60)
+        dl_module._verify_chunklist(dmg, cl)  # must not raise
+
+    def test_truncated_chunklist_is_skipped(self, tmp_path):
+        chunks = [b"a" * 1000, b"b" * 500]
+        dmg = tmp_path / "BaseSystem.dmg"
+        dmg.write_bytes(b"".join(chunks))
+        cl = tmp_path / "BaseSystem.chunklist"
+        # claims 99 chunks but carries entries for 2
+        cl.write_bytes(_make_chunklist(chunks, chunk_count=99))
+        dl_module._verify_chunklist(dmg, cl)  # must not raise
+
+    def test_missing_chunklist_is_skipped(self, tmp_path):
+        dmg = tmp_path / "BaseSystem.dmg"
+        dmg.write_bytes(b"data")
+        dl_module._verify_chunklist(dmg, tmp_path / "absent.chunklist")  # must not raise
+
+    def test_trailing_data_tolerated(self, tmp_path):
+        """Real images carry a signature past the chunked region."""
+        chunks = [b"a" * 64]
+        dmg = tmp_path / "BaseSystem.dmg"
+        dmg.write_bytes(b"".join(chunks) + b"trailing-signature")
+        cl = tmp_path / "BaseSystem.chunklist"
+        cl.write_bytes(_make_chunklist(chunks))
+        dl_module._verify_chunklist(dmg, cl)  # must not raise
+
+    def test_build_recovery_image_rejects_corrupt_download(self, tmp_path, monkeypatch):
+        """Verification must run before dmg2img, so a bad image never converts."""
+        from osx_proxmox_next.infrastructure import CommandResult
+
+        chunks = [b"a" * 128]
+        dmg = tmp_path / "BaseSystem.dmg"
+        dmg.write_bytes(b"z" * 128)
+        cl = tmp_path / "BaseSystem.chunklist"
+        cl.write_bytes(_make_chunklist(chunks))
+        dest = tmp_path / "recovery.img"
+
+        called = []
+
+        def handler(argv):
+            called.append(argv)
+            return CommandResult(ok=True, returncode=0, output="")
+
+        import osx_proxmox_next.services as _svc
+        monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
+
+        with pytest.raises(DownloadError, match="failed Apple's checksum"):
+            _build_recovery_image(dmg, cl, dest)
+        assert called == [], "dmg2img must not run on a corrupt download"
+
+
 class TestBuildRecoveryImage:
     def test_success(self, tmp_path, monkeypatch):
         from osx_proxmox_next.downloader import _build_recovery_image

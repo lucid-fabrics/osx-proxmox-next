@@ -582,9 +582,11 @@ fg=${fg}"
   fi
 
   # Step 3: Parse response body (KEY: VALUE format, not HTTP headers)
-  local image_url image_sess
+  local image_url image_sess chunklist_url chunklist_sess
   image_url=$(grep "^AU: " "$resp_body" | sed 's/^AU: //;s/\r//' | head -1)
   image_sess=$(grep "^AT: " "$resp_body" | sed 's/^AT: //;s/\r//' | head -1)
+  chunklist_url=$(grep "^CU: " "$resp_body" | sed 's/^CU: //;s/\r//' | head -1)
+  chunklist_sess=$(grep "^CT: " "$resp_body" | sed 's/^CT: //;s/\r//' | head -1)
   rm -f "$resp_body"
 
   if [ -z "$image_url" ]; then
@@ -614,6 +616,47 @@ fg=${fg}"
     msg_info "Download interrupted, resuming (attempt $((attempt + 1))/$max_retries)..."
     sleep 3
   done
+
+  # Step 4b: Verify the download against Apple's chunklist (CNKL: a sha256 per
+  # ~10MiB chunk). Catches a silently corrupt download here instead of letting
+  # it convert cleanly into a recovery that misbehaves at boot. A chunklist we
+  # cannot fetch or parse is a warning, not a failure: Apple has changed this
+  # format before and blocking the install over it would be worse.
+  if [ -n "$chunklist_url" ]; then
+    local chunklist="${output_img%.img}.chunklist"
+    if curl -fsSL -o "$chunklist" \
+      -H "User-Agent: InternetRecovery/1.0" \
+      ${chunklist_sess:+-H "Cookie: AssetToken=${chunklist_sess}"} \
+      "$chunklist_url"; then
+      msg_info "Verifying BaseSystem.dmg against Apple's chunklist"
+      if ! DMG="$base_dmg" CHUNKLIST="$chunklist" python3 -c '
+import hashlib, os, struct, sys
+blob = open(os.environ["CHUNKLIST"], "rb").read()
+if len(blob) < 36 or blob[:4] != b"CNKL":
+    sys.stderr.write("WARN: unexpected chunklist format, skipping\n"); sys.exit(0)
+header_size = struct.unpack_from("<I", blob, 4)[0]
+count = struct.unpack_from("<Q", blob, 12)[0]
+if header_size < 36 or header_size + count * 36 > len(blob):
+    sys.stderr.write("WARN: truncated chunklist, skipping\n"); sys.exit(0)
+with open(os.environ["DMG"], "rb") as fh:
+    for i in range(count):
+        base = header_size + i * 36
+        length = struct.unpack_from("<I", blob, base)[0]
+        data = fh.read(length)
+        if len(data) != length or hashlib.sha256(data).digest() != blob[base+4:base+36]:
+            sys.stderr.write("chunk %d/%d does not match\n" % (i + 1, count)); sys.exit(1)
+'; then
+        msg_error "BaseSystem.dmg failed Apple's checksum - the bytes on disk are not what Apple served."
+        msg_error "Re-run the installer. If it fails again the host is corrupting data:"
+        msg_error "  check RAM (memtest86+) and storage (zpool scrub / smartctl)."
+        rm -f "$base_dmg" "$chunklist"
+        exit 1
+      fi
+    else
+      msg_info "Could not download chunklist, skipping checksum verification"
+    fi
+    rm -f "$chunklist"
+  fi
 
   # Step 5: Convert DMG to raw image using dmg2img
   msg_info "Converting BaseSystem.dmg to raw disk image"
