@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
+import struct
 import time
 import urllib.error
 import urllib.request
@@ -181,8 +183,71 @@ def download_recovery(
     return dest
 
 
-def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> None:
+_CHUNKLIST_MAGIC = b"CNKL"
+_CHUNKLIST_ENTRY = 36  # 4-byte length + 32-byte sha256
+
+
+def _verify_chunklist(dmg_path: Path, chunklist_path: Path) -> None:
+    """Check BaseSystem.dmg against Apple's chunklist, raising on a mismatch.
+
+    Apple ships a CNKL manifest next to the image: a 36-byte header followed by
+    one (length, sha256) entry per chunk. Verifying it turns a silently corrupt
+    download into an error here, instead of a recovery that converts fine and
+    then misbehaves at boot. Chunks are streamed so a ~1 GB image costs one
+    sequential read and no extra memory.
+
+    A chunklist we cannot parse is not treated as a failed download: Apple has
+    changed this format before, and refusing to install over it would be worse
+    than the corruption it guards against.
+    """
+    try:
+        blob = chunklist_path.read_bytes()
+    except OSError as exc:
+        log.warning("Could not read chunklist %s: %s", chunklist_path, exc)
+        return
+
+    if len(blob) < 36 or blob[:4] != _CHUNKLIST_MAGIC:
+        log.warning("Chunklist %s is not in the expected CNKL format, skipping verification",
+                    chunklist_path)
+        return
+
+    # CNKL header: magic(4) size(4) version(1) method(1) pad(2) chunk_count(8)
+    header_size, _file_ver, _chunk_method = struct.unpack_from("<IBB", blob, 4)
+    chunk_count = struct.unpack_from("<Q", blob, 12)[0]
+    end = header_size + chunk_count * _CHUNKLIST_ENTRY
+    if header_size < 36 or end > len(blob):
+        log.warning("Chunklist %s is truncated, skipping verification", chunklist_path)
+        return
+
+    with dmg_path.open("rb") as fh:
+        for index in range(chunk_count):
+            base = header_size + index * _CHUNKLIST_ENTRY
+            length = struct.unpack_from("<I", blob, base)[0]
+            expected = blob[base + 4:base + _CHUNKLIST_ENTRY]
+            data = fh.read(length)
+            if len(data) != length:
+                raise DownloadError(
+                    f"Recovery download is short: chunk {index + 1}/{chunk_count} wanted "
+                    f"{length} bytes, got {len(data)}. Re-run the download."
+                )
+            if hashlib.sha256(data).digest() != expected:
+                raise DownloadError(
+                    f"Recovery download failed Apple's checksum at chunk "
+                    f"{index + 1}/{chunk_count} (offset {fh.tell() - length}). "
+                    "The bytes on disk are not what Apple served. Re-run the download; "
+                    "if it fails again the host is corrupting data, so check RAM "
+                    "(memtest) and storage (zpool scrub / SMART)."
+                )
+        if fh.read(1):
+            log.warning("Recovery image has trailing data beyond the chunklist, continuing")
+
+    log.debug("Recovery image verified against chunklist: %d chunks", chunk_count)
+
+
+def _build_recovery_image(dmg_path: Path, chunklist_path: Path, dest: Path) -> None:
     from .services import get_proxmox_adapter
+
+    _verify_chunklist(dmg_path, chunklist_path)
     adapter = get_proxmox_adapter()
     result = adapter.run(["dmg2img", str(dmg_path), str(dest)])
     if not result.ok:
