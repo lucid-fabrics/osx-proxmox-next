@@ -1322,7 +1322,9 @@ msg_ok "Attached EFI disk + TPM"
 
 # ── Create main disk ──
 msg_info "Creating main disk (${DISK_SIZE})"
-qm set "$VMID" --virtio0 "${STORAGE}:${DISK_SIZE%G}" >/dev/null
+# cache=writeback avoids the O_DIRECT path, which corrupted stage-2
+# installs on some ZFS hosts (issue #117)
+qm set "$VMID" --virtio0 "${STORAGE}:${DISK_SIZE%G},cache=writeback,iothread=1" >/dev/null
 msg_ok "Created main disk"
 
 # ── Detect import command (PVE 8.x vs 9.x) ──

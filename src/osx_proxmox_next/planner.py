@@ -322,7 +322,12 @@ def _disk_steps(ctx: _DiskBuildContext, macos_label: str) -> list[PlanStep]:
         ),
         PlanStep(
             title="Create main disk",
-            argv=["qm", "set", ctx.vmid, "--virtio0", f"{ctx.config.storage}:{ctx.config.disk_gb}"],
+            argv=[
+                "qm", "set", ctx.vmid, "--virtio0",
+                # cache=writeback avoids the O_DIRECT path, which corrupted
+                # stage-2 installs on some ZFS hosts (issue #117)
+                f"{ctx.config.storage}:{ctx.config.disk_gb},cache=writeback,iothread=1",
+            ],
         ),
         *_opencore_steps(ctx),
         *_recovery_steps(ctx.config, ctx.vmid, ctx.recovery_raw, macos_label),

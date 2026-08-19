@@ -688,10 +688,16 @@ def test_build_plan_uses_vmxnet3_nic() -> None:
 
 
 def test_build_plan_uses_virtio0_disk() -> None:
-    """Main disk must be virtio0 for better I/O performance."""
+    """Main disk must be virtio0 with writeback cache and iothread.
+
+    cache=writeback avoids the O_DIRECT path that corrupted stage-2
+    installs on some ZFS hosts (issue #117).
+    """
     steps = build_plan(_cfg("sequoia"))
     disk = next(step for step in steps if step.title == "Create main disk")
     assert "--virtio0" in disk.command
+    assert "cache=writeback" in disk.command
+    assert "iothread=1" in disk.command
     assert "--sata0" not in disk.command
 
 
