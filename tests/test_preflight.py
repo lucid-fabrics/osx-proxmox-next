@@ -67,10 +67,12 @@ def test_find_binary_which_found(monkeypatch):
 
 
 def test_check_ignore_msrs_present(tmp_path):
-    """When kvm.conf has ignore_msrs=Y, check must pass."""
+    """When kvm.conf has ignore_msrs=Y and kvm isn't loaded, check must pass."""
     kvm_conf = tmp_path / "kvm.conf"
     kvm_conf.write_text("options kvm ignore_msrs=Y\n")
-    check = preflight._check_ignore_msrs(kvm_conf=kvm_conf)
+    check = preflight._check_ignore_msrs(
+        kvm_conf=kvm_conf, sysfs_param=tmp_path / "no-sysfs"
+    )
     assert check.name == "KVM ignore_msrs"
     assert check.ok is True
     assert "ignore_msrs=Y" in check.details
@@ -78,7 +80,9 @@ def test_check_ignore_msrs_present(tmp_path):
 
 def test_check_ignore_msrs_missing(tmp_path):
     """When kvm.conf doesn't exist, check must fail."""
-    check = preflight._check_ignore_msrs(kvm_conf=tmp_path / "nonexistent")
+    check = preflight._check_ignore_msrs(
+        kvm_conf=tmp_path / "nonexistent", sysfs_param=tmp_path / "no-sysfs"
+    )
     assert check.name == "KVM ignore_msrs"
     assert check.ok is False
     assert "ignore_msrs=Y" in check.details
@@ -88,8 +92,46 @@ def test_check_ignore_msrs_present_but_wrong_value(tmp_path):
     """When kvm.conf exists but lacks ignore_msrs=Y, check must fail."""
     kvm_conf = tmp_path / "kvm.conf"
     kvm_conf.write_text("options kvm report_ignored_msrs=N\n")
-    check = preflight._check_ignore_msrs(kvm_conf=kvm_conf)
+    check = preflight._check_ignore_msrs(
+        kvm_conf=kvm_conf, sysfs_param=tmp_path / "no-sysfs"
+    )
     assert check.ok is False
+
+
+def test_check_ignore_msrs_runtime_wins_over_stale_config(tmp_path):
+    """Config says Y but the running kernel says N: must fail, not report OK.
+
+    This is the host that carries the right kvm.conf but never ran
+    update-initramfs or rebooted, so the VM panics despite a green preflight.
+    """
+    kvm_conf = tmp_path / "kvm.conf"
+    kvm_conf.write_text("options kvm ignore_msrs=Y\n")
+    sysfs = tmp_path / "ignore_msrs"
+    sysfs.write_text("N\n")
+    check = preflight._check_ignore_msrs(kvm_conf=kvm_conf, sysfs_param=sysfs)
+    assert check.ok is False
+    assert "Running kernel has ignore_msrs=N" in check.details
+
+
+def test_check_ignore_msrs_runtime_enabled_without_config(tmp_path):
+    """Set at runtime with no config file: the running kernel is what counts."""
+    sysfs = tmp_path / "ignore_msrs"
+    sysfs.write_text("Y\n")
+    check = preflight._check_ignore_msrs(
+        kvm_conf=tmp_path / "nonexistent", sysfs_param=sysfs
+    )
+    assert check.ok is True
+    assert "Running kernel has ignore_msrs=Y" in check.details
+
+
+def test_check_ignore_msrs_runtime_numeric_true(tmp_path):
+    """Some kernels expose the bool as 1/0 rather than Y/N."""
+    sysfs = tmp_path / "ignore_msrs"
+    sysfs.write_text("1\n")
+    check = preflight._check_ignore_msrs(
+        kvm_conf=tmp_path / "nonexistent", sysfs_param=sysfs
+    )
+    assert check.ok is True
 
 
 def test_check_iommu_enabled(tmp_path):
