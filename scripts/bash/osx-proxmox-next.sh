@@ -351,13 +351,15 @@ function detect_cpu_needs_emulation() {
   echo "no"
 }
 
-# Real Xeon E5/E7 v2-v4 HEDT chips (dual-socket/multi-die parts) leak their
+# Real Xeon E5/E7 v2-v4 HEDT chips and Xeon Scalable (Skylake-SP and later:
+# Platinum/Gold/Silver/Bronze) are multi-socket-capable parts that leak their
 # genuine multi-package topology through -cpu host. Combined with a
 # multi-socket-capable SMBIOS (MacPro7,1), XNU's scheduler can livelock
 # during heavy multithreaded I/O (the installer copy phase spins at 100%
-# CPU with zero disk/network progress). A fixed emulated model avoids this;
-# these exact overrides match the known-working profile from
-# github.com/mchiappinam/proxmox-macos.
+# CPU with zero disk/network progress). A fixed emulated model avoids this.
+# E5/E7 overrides match the known-working profile from
+# github.com/mchiappinam/proxmox-macos; the Scalable override is the same
+# idea, confirmed working on a dual-socket Cascade Lake-SP host.
 function detect_cpu_xeon_hedt_model() {
   local model_name
   model_name=$(awk -F: '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)
@@ -365,6 +367,8 @@ function detect_cpu_xeon_hedt_model() {
     echo "Haswell-noTSX,model=158,stepping=3"
   elif echo "$model_name" | grep -qE "Xeon.*E[57][ -]*[0-9]+ *v[34]"; then
     echo "Broadwell-noTSX,model=158"
+  elif echo "$model_name" | grep -qE "Xeon.*(Platinum|Gold|Silver|Bronze)[ -]*[0-9]{4}"; then
+    echo "Skylake-Client-noTSX-IBRS"
   else
     echo ""
   fi

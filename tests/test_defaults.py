@@ -227,9 +227,18 @@ def test_xeon_hedt_cpu_model_v2():
 
 
 def test_xeon_hedt_cpu_model_non_hedt_xeon():
-    """Single-socket workstation Xeons (E3) and Scalable (Gold) are unaffected."""
+    """Single-socket workstation Xeons (E3) are unaffected."""
     assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) CPU E3-1230 v5 @ 3.40GHz") == ""
-    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) Gold 6248 @ 2.50GHz") == ""
+
+
+def test_xeon_hedt_cpu_model_scalable():
+    """Xeon Scalable (Skylake-SP/Cascade Lake-SP: Platinum/Gold/Silver/Bronze)
+    hits the same multi-socket XNU scheduler livelock as E5/E7 HEDT and gets
+    a fixed emulated model instead of -cpu host."""
+    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) Gold 6248 @ 2.50GHz") == "Skylake-Client-noTSX-IBRS"
+    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) Platinum 8280 CPU @ 2.70GHz") == "Skylake-Client-noTSX-IBRS"
+    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) Silver 4214 CPU @ 2.20GHz") == "Skylake-Client-noTSX-IBRS"
+    assert _xeon_hedt_cpu_model("Intel(R) Xeon(R) Bronze 3204 CPU @ 1.90GHz") == "Skylake-Client-noTSX-IBRS"
 
 
 def test_xeon_hedt_cpu_model_non_xeon():

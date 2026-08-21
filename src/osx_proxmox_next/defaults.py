@@ -50,15 +50,15 @@ class CpuInfo:
     needs_emulated_cpu: bool  # True for AMD and Intel hybrid (12th gen+)
     needs_penryn: bool = False  # True for pre-Skylake Intel (Broadwell and older), excluding Xeon
     is_xeon: bool = False   # True when "Xeon" appears in model name (server chips, always use -cpu host)
-    xeon_hedt_model: str = ""  # Fixed QEMU -cpu model for Xeon E5/E7 v2-v4 HEDT chips (empty if not applicable)
+    xeon_hedt_model: str = ""  # Fixed QEMU -cpu model for multi-socket-capable Xeon HEDT/Scalable chips (empty if not applicable)
 
 
 def _classify_intel_cpu(family: int, model: int, model_name: str) -> tuple[bool, bool, bool]:
     """Classify an Intel CPU into (is_hybrid, is_xeon, is_legacy).
 
-    is_hybrid: Family 6 with P+E core topology (12th gen+) — needs emulated CPU.
-    is_xeon: Server/workstation chip — always uses -cpu host.
-    is_legacy: Pre-Skylake desktop (Broadwell and older) — needs Penryn mode.
+    is_hybrid: Family 6 with P+E core topology (12th gen+), needs emulated CPU.
+    is_xeon: Server/workstation chip, always uses -cpu host.
+    is_legacy: Pre-Skylake desktop (Broadwell and older), needs Penryn mode.
     """
     is_hybrid = (
         family == 6
@@ -83,24 +83,32 @@ def _classify_intel_cpu(family: int, model: int, model_name: str) -> tuple[bool,
 
 
 _XEON_HEDT_PATTERN = re.compile(r"Xeon.*E[57][ -]*\d+ *v([234])", re.IGNORECASE)
+_XEON_SCALABLE_PATTERN = re.compile(r"Xeon.*(?:Platinum|Gold|Silver|Bronze)[ -]*\d{4}", re.IGNORECASE)
 
 
 def _xeon_hedt_cpu_model(model_name: str) -> str:
-    """Return a fixed QEMU -cpu model for Xeon E5/E7 v2-v4 HEDT chips, or "".
+    """Return a fixed QEMU -cpu model for multi-socket-capable Xeon chips, or "".
 
-    Real HEDT parts (dual-socket/multi-die) leak their genuine multi-package
-    topology through -cpu host. Combined with a multi-socket-capable SMBIOS
-    (MacPro7,1), XNU's scheduler can livelock under heavy multithreaded I/O,
-    e.g. the macOS installer copy phase (CPU pegged at 100% while disk and
-    network progress both flatline). These exact overrides match the
-    known-working profile from github.com/mchiappinam/proxmox-macos.
+    Real HEDT and Scalable parts (dual-socket/multi-die) leak their genuine
+    multi-package topology through -cpu host. Combined with a multi-socket-
+    capable SMBIOS (MacPro7,1), XNU's scheduler can livelock under heavy
+    multithreaded I/O, e.g. the macOS installer copy phase (CPU pegged at
+    100% while disk and network progress both flatline).
+
+    E5/E7 v2-v4 HEDT overrides match the known-working profile from
+    github.com/mchiappinam/proxmox-macos. Xeon Scalable (Skylake-SP and
+    later: Platinum/Gold/Silver/Bronze) hits the identical livelock on
+    dual-socket boards; confirmed fix on Cascade Lake-SP is the same idea,
+    pin to a fixed non-host model instead of exposing genuine topology.
     """
     match = _XEON_HEDT_PATTERN.search(model_name)
-    if not match:
-        return ""
-    if match.group(1) == "2":
-        return "Haswell-noTSX,model=158,stepping=3"
-    return "Broadwell-noTSX,model=158"
+    if match:
+        if match.group(1) == "2":
+            return "Haswell-noTSX,model=158,stepping=3"
+        return "Broadwell-noTSX,model=158"
+    if _XEON_SCALABLE_PATTERN.search(model_name):
+        return "Skylake-Client-noTSX-IBRS"
+    return ""
 
 
 def detect_cpu_info() -> CpuInfo:
@@ -129,7 +137,7 @@ def detect_cpu_info() -> CpuInfo:
                 if len(parts) >= 2:
                     model_name = parts[1].strip()
             elif line.startswith("model"):
-                # "model\t\t: 183" — must come after "model name" check
+                # "model\t\t: 183" must come after "model name" check
                 parts = line.split(":")
                 if len(parts) >= 2 and parts[1].strip().isdigit():
                     model = int(parts[1].strip())

@@ -170,11 +170,11 @@ def _check_boot_order(cfg: dict[str, str], vmid: int) -> DoctorCheck:
 
 
 def _check_cpu_hedt(cfg: dict[str, str], vmid: int) -> DoctorCheck | None:
-    """Flag real Xeon E5/E7 v2-v4 HEDT hosts still using -cpu host in args.
+    """Flag real multi-socket-capable Xeon hosts (HEDT or Scalable) still using -cpu host in args.
 
     Only meaningful when doctor runs on the same host the VM lives on
     (it reads the local CPU, not the VM's). Returns None when the host
-    isn't a detected HEDT Xeon, since the check doesn't apply.
+    isn't a detected HEDT/Scalable Xeon, since the check doesn't apply.
     """
     cpu_info = detect_cpu_info()
     if not cpu_info.xeon_hedt_model:
@@ -185,13 +185,13 @@ def _check_cpu_hedt(cfg: dict[str, str], vmid: int) -> DoctorCheck | None:
         return DoctorCheck(
             "cpu_hedt",
             Severity.OK,
-            f"HEDT Xeon detected, args uses -cpu {expected} (avoids XNU scheduler livelock)",
+            f"Multi-socket-capable Xeon detected, args uses -cpu {expected} (avoids XNU scheduler livelock)",
         )
     if "-cpu host" in args_val:
         return DoctorCheck(
             "cpu_hedt",
             Severity.FAIL,
-            "Host is a Xeon E5/E7 HEDT chip but this VM's args use -cpu host - "
+            "Host is a multi-socket-capable Xeon (HEDT or Scalable) but this VM's args use -cpu host - "
             "real multi-socket topology leaking through can livelock XNU's scheduler "
             "during install (CPU pegged at 100%, disk/network progress both flat zero)",
             fix=f"Recreate the VM so it picks up -cpu {expected} automatically, or manually replace -cpu host,... in the args line",

@@ -132,6 +132,27 @@ def test_cli_plan_net_model_default_vmxnet3(monkeypatch, capsys):
     assert "vmxnet3" in captured.out
 
 
+def test_cli_plan_hedt_xeon_cpu_display(monkeypatch, capsys):
+    """Multi-socket-capable Xeon hosts show the pinned profile in plan output."""
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.defaults import CpuInfo
+    monkeypatch.setattr(
+        cli_module, "required_assets",
+        lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
+    )
+    scalable_cpu = CpuInfo(
+        vendor="Intel", model_name="Intel(R) Xeon(R) Gold 6248 @ 2.50GHz",
+        family=6, model=85, needs_emulated_cpu=False, is_xeon=True,
+        xeon_hedt_model="Skylake-Client-noTSX-IBRS",
+    )
+    monkeypatch.setattr(cli_module, "detect_cpu_info", lambda: scalable_cpu)
+    rc = run_cli(_plan_args())
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Skylake-Client-noTSX-IBRS (multi-socket Xeon profile)" in captured.out
+    assert "native host passthrough" not in captured.out
+
+
 def test_cli_preflight(monkeypatch):
     from osx_proxmox_next.preflight import PreflightCheck
     monkeypatch.setattr(
@@ -1225,7 +1246,7 @@ def test_cli_doctor_mixed_failures_and_warnings(monkeypatch, capsys) -> None:
 
 
 # ---------------------------------------------------------------------------
-# clone — apple_services message branch
+# clone - apple_services message branch
 # ---------------------------------------------------------------------------
 
 def test_cli_clone_execute_success_prints_apple_services(monkeypatch, tmp_path, capsys) -> None:

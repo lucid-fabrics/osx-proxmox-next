@@ -328,6 +328,8 @@ def _print_cpu_info(args: argparse.Namespace, config: VmConfig) -> None:
             cpu_mode = f"override: {config.cpu_model}"
         elif cpu.needs_emulated_cpu:
             cpu_mode = "Cascadelake-Server emulation"
+        elif cpu.xeon_hedt_model:
+            cpu_mode = f"{cpu.xeon_hedt_model.split(',')[0]} (multi-socket Xeon profile)"
         else:
             cpu_mode = "native host passthrough"
         cpu_label = cpu.model_name or cpu.vendor
