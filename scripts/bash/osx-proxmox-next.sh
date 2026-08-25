@@ -695,11 +695,16 @@ function fetch_oc_component() {
     return 0
   fi
   rm -f "$dest"
-  curl -fsSL -o "$dest" "$url" || { rm -f "$dest"; return 1; }
+  curl -fsSL --retry 3 --max-time 600 -o "$dest" "$url" || { rm -f "$dest"; return 1; }
+  # A mismatch is the tamper signal: hard-stop instead of silently falling
+  # back to the unpinned prebuilt ISO. Keep in sync with oc_builder.py
+  # ChecksumError. A plain download failure above returns 1 (fallback OK).
   echo "$sha  $dest" | sha256sum -c --status || {
-    echo -e "  ${YW}WARN: checksum mismatch for ${name}${CL}"
+    msg_error "Checksum mismatch for ${name} (${url})"
+    echo -e "  Expected: ${sha}"
+    echo -e "  The upstream file changed or the download was tampered with. Aborting."
     rm -f "$dest"
-    return 1
+    exit 1
   }
 }
 
@@ -813,50 +818,75 @@ if count == 0:
   echo "$OC_MCE_INFO_PLIST_B64" | base64 -d > "$tree/EFI/OC/Kexts/MCEReporterDisabler.kext/Contents/Info.plist" || return 1
 }
 
-# Assemble the OpenCore ISO at $1. Returns 1 when the component phase fails
-# (so the caller can fall back to the prebuilt ISO); exits on loop/mount
-# failures, same as build_opencore_disk.
+# Undo a partial image build: unmount, detach, remove temporaries.
+function _oc_assemble_abort() {
+  local mnt="$1" iloop="$2" img="$3" tree="$4"
+  [ -n "$mnt" ] && { umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true; rm -rf "$mnt"; }
+  [ -n "$iloop" ] && losetup -d "$iloop" 2>/dev/null
+  BUILD_DEST_MNT="" BUILD_LOOP=""
+  rm -f "$img"
+  rm -rf "$tree"
+  echo -e "  ${YW}WARN: OpenCore image assembly failed at the disk stage${CL}"
+}
+
+# Assemble the OpenCore ISO at $1. Returns non-zero on ANY failure so the
+# caller can fall back to the prebuilt ISO; it must never exit the script
+# itself (checksum mismatches excepted: fetch_oc_component hard-stops).
+# Deliberately avoids setup_loop/safe_mount, which exit on failure.
 function assemble_opencore_iso() {
   local dest_iso="$1"
   local tree="$TEMP_DIR/oc-tree"
   local img="${dest_iso}.part"
+  local iloop="" mnt=""
 
   rm -rf "$tree"
-  mkdir -p "$tree"
+  mkdir -p "$tree" || return 1
   assemble_opencore_tree "$tree" || { rm -rf "$tree"; return 1; }
 
   cleanup_stale_loops "$img"
   rm -f "$img"
-  truncate -s 128M "$img"
+  truncate -s 128M "$img" || { _oc_assemble_abort "" "" "$img" "$tree"; return 1; }
   sgdisk -Z "$img" &>/dev/null
-  sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE "$img" &>/dev/null
+  sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE "$img" &>/dev/null \
+    || { _oc_assemble_abort "" "" "$img" "$tree"; return 1; }
 
-  local iloop
-  setup_loop iloop "$img" "OpenCore assembly image"
-  BUILD_LOOP="$iloop"
-  if [ ! -b "${iloop}p1" ]; then
-    msg_error "ERROR: ${iloop}p1 not found after partprobe"
-    echo -e "  Hint: Try running the script again (slow storage)"
-    exit 1
+  iloop=$(losetup -fP --show "$img" 2>/dev/null) || iloop=""
+  if [ -z "$iloop" ] || [ ! -b "$iloop" ]; then
+    _oc_assemble_abort "" "" "$img" "$tree"
+    return 1
   fi
-  mkfs.fat -F 32 -n OPENCORE "${iloop}p1" &>/dev/null
+  BUILD_LOOP="$iloop"
 
-  local mnt
-  mnt=$(mktemp -d)
-  safe_mount "${iloop}p1" "$mnt"
+  local _i
+  for _i in 1 2 3 4 5; do
+    partprobe "$iloop" 2>/dev/null || true
+    [ -b "${iloop}p1" ] && break
+    sleep 1
+  done
+  if [ ! -b "${iloop}p1" ] || ! mkfs.fat -F 32 -n OPENCORE "${iloop}p1" &>/dev/null; then
+    _oc_assemble_abort "" "$iloop" "$img" "$tree"
+    return 1
+  fi
+
+  mnt=$(mktemp -d) || { _oc_assemble_abort "" "$iloop" "$img" "$tree"; return 1; }
+  if ! mount "${iloop}p1" "$mnt" 2>/dev/null || ! mountpoint -q "$mnt"; then
+    _oc_assemble_abort "$mnt" "$iloop" "$img" "$tree"
+    return 1
+  fi
   BUILD_DEST_MNT="$mnt"
-  cp -a "$tree"/. "$mnt"/ || {
-    msg_error "Failed to copy assembled OpenCore files"
-    umount "$mnt" 2>/dev/null || true
-    losetup -d "$iloop" 2>/dev/null || true
-    rm -rf "$mnt" "$tree" "$img"
-    exit 1
+  if ! cp -a "$tree"/. "$mnt"/; then
+    _oc_assemble_abort "$mnt" "$iloop" "$img" "$tree"
+    return 1
+  fi
+
+  { umount "$mnt" 2>/dev/null || umount -l "$mnt"; } || {
+    _oc_assemble_abort "$mnt" "$iloop" "$img" "$tree"
+    return 1
   }
-  umount "$mnt" 2>/dev/null || umount -l "$mnt" || true
-  losetup -d "$iloop" 2>/dev/null || true
+  losetup -d "$iloop" 2>/dev/null
   rm -rf "$mnt" "$tree"
   BUILD_DEST_MNT="" BUILD_LOOP=""
-  mv "$img" "$dest_iso"
+  mv "$img" "$dest_iso" || { rm -f "$img"; return 1; }
 }
 
 # ── Build OpenCore GPT+ESP disk from source ISO ──
@@ -1400,9 +1430,9 @@ else
   else
     echo -e "  ${YW}WARN: local assembly failed, falling back to prebuilt ISO${CL}"
     msg_info "Downloading OpenCore ISO"
-    if ! curl -fSL -o "$OC_ISO" "$OC_URL"; then
+    if ! curl -fSL --retry 3 -o "$OC_ISO.part" "$OC_URL" || ! mv "$OC_ISO.part" "$OC_ISO"; then
       msg_error "Failed to download OpenCore ISO from $OC_URL"
-      rm -f "$OC_ISO"
+      rm -f "$OC_ISO" "$OC_ISO.part"
       exit 1
     fi
     msg_ok "Downloaded OpenCore ISO"

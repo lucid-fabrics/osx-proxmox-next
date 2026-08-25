@@ -392,7 +392,7 @@ def test_assemble_efi_tree_layout(fake_components: Path) -> None:
 def test_iso_build_script_contents(tmp_path: Path) -> None:
     script = _iso_build_script(tmp_path / "tree", tmp_path / "oc.iso.part")
     for needle in ("truncate -s 128M", "sgdisk -Z", "-t 1:EF00", "mkfs.fat -F 32",
-                   "losetup -fP", "trap", "cp -a", "umount"):
+                   "losetup -fP", "trap", "cp -a", "umount", "losetup -j"):
         assert needle in script, needle
 
 
@@ -541,3 +541,200 @@ def test_bash_falls_back_to_prebuilt_iso(bash_text: str) -> None:
     assert 'OC_URL="https://github.com/lucid-fabrics/osx-proxmox-next/releases/download/assets/opencore-osx-proxmox-vm.iso"' in bash_text
     fallback = bash_text.index("falling back to prebuilt ISO")
     assert bash_text.index("assemble_opencore_iso \"$OC_ISO\"") < fallback
+
+
+def test_ensure_opencore_iso_checksum_mismatch_never_falls_back(tmp_path: Path,
+                                                                monkeypatch) -> None:
+    """A hash mismatch is the tamper signal: it must abort, not silently
+    downgrade to the unpinned prebuilt ISO."""
+    from osx_proxmox_next.oc_builder import ChecksumError
+
+    def tampered(dest, on_progress=None):
+        raise ChecksumError("Lilu checksum mismatch")
+
+    monkeypatch.setattr(ocb, "build_opencore_iso", tampered)
+    monkeypatch.setattr(ocb, "download_opencore",
+                        lambda *a, **k: pytest.fail("fell back on checksum mismatch"))
+    with pytest.raises(ChecksumError):
+        ensure_opencore_iso("sequoia", tmp_path)
+
+
+def test_assemble_progress_is_monotonic_across_components(fake_components: Path,
+                                                          monkeypatch) -> None:
+    """The phase progress bar must climb once across all components, not
+    reset to 0% for every downloaded archive."""
+    cache = fake_components / "cache"
+    cache.mkdir()
+    work = fake_components / "work"
+    work.mkdir()
+    seen: list[float] = []
+
+    def record(p):
+        seen.append(p.downloaded / p.total)
+
+    assemble_efi_tree(cache, work, on_progress=record)
+    assert seen, "no progress reported"
+    assert seen == sorted(seen), "progress went backwards"
+    assert seen[-1] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Bash execution parity (needs bash >= 4 and sha256sum; runs in CI, skips
+# on stock macOS)
+# ---------------------------------------------------------------------------
+
+import shutil as _shutil
+import subprocess as _sp
+
+
+def _bash_supports_harness() -> bool:
+    bash = _shutil.which("bash")
+    if not bash or not _shutil.which("sha256sum"):
+        return False
+    # bash 3.x accepts string subscripts by collapsing them to index 0, so an
+    # assignment probe passes falsely; check the version number instead.
+    probe = _sp.run([bash, "-c", 'echo "${BASH_VERSINFO[0]}"'],
+                    capture_output=True, text=True)
+    return probe.stdout.strip().isdigit() and int(probe.stdout.strip()) >= 4
+
+
+_bash_harness = pytest.mark.skipif(
+    not _bash_supports_harness(),
+    reason="needs bash >= 4 (associative arrays) and sha256sum",
+)
+
+
+def _extract_bash_sections(text: str) -> str:
+    """The pins block plus the embedded-data/assembly-function block."""
+    pins_start = text.index("# ── OpenCore component pins")
+    pins_end = text.index("set -euo pipefail")
+    funcs_start = text.index("# ── Embedded OpenCore data files")
+    funcs_end = text.index("# ── Build OpenCore GPT+ESP disk from source ISO")
+    return text[pins_start:pins_end] + "\n" + text[funcs_start:funcs_end]
+
+
+def _write_harness(tmp_path: Path, bash_text: str, body: str,
+                   fixtures: dict[str, Path]) -> Path:
+    extracted = tmp_path / "extracted.sh"
+    extracted.write_text(_extract_bash_sections(bash_text))
+    overrides = "\n".join(
+        f'OC_COMPONENT_URLS[{name}]="{path.as_uri()}"\n'
+        f'OC_COMPONENT_SHA256[{name}]="{_sha256(path)}"'
+        for name, path in fixtures.items()
+    )
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -uo pipefail\n"
+        'YW=""; CL=""; RD=""; GN=""\n'
+        "msg_info() { :; }\n"
+        "msg_ok() { :; }\n"
+        'msg_error() { echo "ERR: $1" >&2; }\n'
+        "cleanup_stale_loops() { :; }\n"
+        'BUILD_LOOP=""; BUILD_DEST_MNT=""\n'
+        f'source "{extracted}"\n'
+        + overrides + "\n"
+        + body
+    )
+    return harness
+
+
+def _fixture_archives(tmp_path: Path) -> dict[str, Path]:
+    """Same shapes as the fake_components fixture, for the bash side."""
+    up = tmp_path / "bash-upstream"
+    up.mkdir()
+    oc_members = {name: b"efi-" + name.encode() for name in _OC_PKG_FILES}
+    return {
+        "OpenCorePkg": _make_zip(up / "OpenCore-RELEASE.zip", oc_members),
+        "Lilu": _make_zip(up / "Lilu.zip", {"Lilu.kext/Contents/Info.plist": b"l"}),
+        "VirtualSMC": _make_zip(up / "VirtualSMC.zip", {
+            "Kexts/VirtualSMC.kext/Contents/Info.plist": b"v",
+            "Kexts/SMCProcessor.kext/Contents/Info.plist": b"skip",
+        }),
+        "WhateverGreen": _make_zip(up / "WhateverGreen.zip",
+                                   {"WhateverGreen.kext/Contents/Info.plist": b"w"}),
+        "AppleALC": _make_zip(up / "AppleALC.zip", {
+            "AppleALC.kext/Contents/Info.plist": b"a",
+            "AppleALCU.kext/Contents/Info.plist": b"skip",
+        }),
+        "CryptexFixup": _make_zip(up / "CryptexFixup.zip",
+                                  {"CryptexFixup.kext/Contents/Info.plist": b"c"}),
+        "RestrictEvents": _make_zip(up / "RestrictEvents.zip",
+                                    {"RestrictEvents.kext/Contents/Info.plist": b"r"}),
+        "OcBinaryData": _make_targz(up / "OcBinaryData.tar.gz", {
+            "OcBinaryData-abc/Resources/Font/Font_1x.bin": b"font",
+        }),
+    }
+
+
+@_bash_harness
+def test_bash_assemble_tree_executes_identically_to_python(tmp_path: Path,
+                                                           bash_text: str,
+                                                           monkeypatch) -> None:
+    """Run the real bash assembly (fixture archives over file://) and diff
+    the resulting tree byte-for-byte against the Python assembly."""
+    fixtures = _fixture_archives(tmp_path)
+    cache = tmp_path / "bash-cache"
+    cache.mkdir()
+    bash_tree = tmp_path / "bash-tree"
+    harness = _write_harness(
+        tmp_path, bash_text,
+        f'CACHE_DIR="{cache}"\n'
+        f'assemble_opencore_tree "{bash_tree}" || {{ echo TREE_FAILED; exit 1; }}\n',
+        fixtures,
+    )
+    result = _sp.run(["bash", str(harness)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    monkeypatch.setattr(ocb, "OC_COMPONENTS",
+                        {n: _component_for(p) for n, p in fixtures.items()})
+    py_cache = tmp_path / "py-cache"
+    py_cache.mkdir()
+    py_work = tmp_path / "py-work"
+    py_work.mkdir()
+    py_tree = assemble_efi_tree(py_cache, py_work)
+
+    bash_files = {f.relative_to(bash_tree).as_posix(): f.read_bytes()
+                  for f in bash_tree.rglob("*") if f.is_file()}
+    py_files = {f.relative_to(py_tree).as_posix(): f.read_bytes()
+                for f in py_tree.rglob("*") if f.is_file()}
+    assert bash_files == py_files
+
+
+@_bash_harness
+def test_bash_disk_stage_failure_reaches_fallback_branch(tmp_path: Path,
+                                                         bash_text: str) -> None:
+    """A loop-device failure inside assemble_opencore_iso must RETURN to the
+    caller's else-branch (prebuilt fallback), never exit the installer."""
+    fixtures = _fixture_archives(tmp_path)
+    cache = tmp_path / "bash-cache"
+    cache.mkdir()
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    for name, script in {
+        "truncate": "#!/bin/sh\n: > \"$3\"\nexit 0\n",
+        "sgdisk": "#!/bin/sh\nexit 0\n",
+        "losetup": "#!/bin/sh\nexit 1\n",
+    }.items():
+        shim = shims / name
+        shim.write_text(script)
+        shim.chmod(0o755)
+    dest_iso = tmp_path / "out" / "opencore-osx-proxmox-vm.iso"
+    dest_iso.parent.mkdir()
+    tmpd = tmp_path / "tempdir"
+    tmpd.mkdir()
+    harness = _write_harness(
+        tmp_path, bash_text,
+        f'CACHE_DIR="{cache}"\n'
+        f'TEMP_DIR="{tmpd}"\n'
+        f'PATH="{shims}:$PATH"\n'
+        f'if assemble_opencore_iso "{dest_iso}"; then echo BUILT; else echo FELL_BACK; fi\n'
+        "echo SURVIVED\n",
+        fixtures,
+    )
+    result = _sp.run(["bash", str(harness)], capture_output=True, text=True)
+    out = result.stdout
+    assert "FELL_BACK" in out, result.stdout + result.stderr
+    assert "SURVIVED" in out, "assemble_opencore_iso exited the shell instead of returning"
+    assert "BUILT" not in out
+    assert not dest_iso.exists()

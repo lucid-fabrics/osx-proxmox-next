@@ -16,6 +16,7 @@ import hashlib
 import logging
 import shutil
 import tarfile
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from importlib import resources
@@ -24,6 +25,7 @@ from pathlib import Path
 from .downloader import (
     _OPENCORE_UNIVERSAL,
     DownloadError,
+    DownloadProgress,
     ProgressCallback,
     _download_file,
     download_opencore,
@@ -31,7 +33,21 @@ from .downloader import (
 
 log = logging.getLogger(__name__)
 
-__all__ = ["OC_COMPONENTS", "Component", "build_opencore_iso", "ensure_opencore_iso"]
+__all__ = [
+    "OC_COMPONENTS",
+    "ChecksumError",
+    "Component",
+    "build_opencore_iso",
+    "ensure_opencore_iso",
+]
+
+
+class ChecksumError(DownloadError):
+    """A pinned component failed SHA-256 verification.
+
+    Deliberately NOT recovered by the prebuilt-ISO fallback: a mismatch is
+    the tamper signal, and silently downgrading to the unpinned prebuilt
+    image would defeat the verification entirely."""
 
 
 @dataclass(frozen=True)
@@ -140,7 +156,7 @@ def _fetch_component(name: str, comp: Component, dest_dir: Path,
     actual = _sha256(dest)
     if actual != comp.sha256:
         dest.unlink(missing_ok=True)
-        raise DownloadError(
+        raise ChecksumError(
             f"{name} checksum mismatch: expected {comp.sha256}, got {actual}. "
             "Upstream file changed or the download was tampered with."
         )
@@ -226,12 +242,33 @@ def _write_repo_data(dest: Path) -> None:
     )
 
 
+def _scaled_progress(on_progress: ProgressCallback, index: int,
+                     count: int) -> ProgressCallback:
+    """Map one component's 0-100% into its slice of the overall phase.
+
+    Without this the UI progress bar would reset to 0% for each of the
+    downloaded components; with it the bar climbs monotonically across all
+    of them (equal weight per component)."""
+    if on_progress is None:
+        return None
+
+    def _cb(p: DownloadProgress) -> None:
+        if p.total > 0:
+            done = int((index + p.downloaded / p.total) * 1000)
+            on_progress(DownloadProgress(downloaded=done, total=count * 1000,
+                                         phase=p.phase))
+
+    return _cb
+
+
 def assemble_efi_tree(cache_dir: Path, work_dir: Path,
                       on_progress: ProgressCallback = None) -> Path:
     """Download all pinned components and lay out the EFI tree in *work_dir*."""
+    items = list(OC_COMPONENTS.items())
     archives = {
-        name: _fetch_component(name, comp, cache_dir, on_progress)
-        for name, comp in OC_COMPONENTS.items()
+        name: _fetch_component(name, comp, cache_dir,
+                               _scaled_progress(on_progress, idx, len(items)))
+        for idx, (name, comp) in enumerate(items)
     }
 
     tree = work_dir / "tree"
@@ -256,6 +293,10 @@ def _iso_build_script(tree: Path, iso_tmp: Path) -> str:
     qt = shquote(str(tree))
     qi = shquote(str(iso_tmp))
     return (
+        # Detach loops left behind by a previous run that was killed hard
+        # (SIGKILL skips the EXIT trap, so the device would leak forever).
+        f"for lo in $(losetup -j {qi} -O NAME --noheadings 2>/dev/null); do "
+        "umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; "
         "ILOOP=''; IMNT=$(mktemp -d) && "
         "trap 'umount $IMNT 2>/dev/null; [ -n \"$ILOOP\" ] && losetup -d $ILOOP 2>/dev/null; "
         "rmdir $IMNT 2>/dev/null' EXIT; "
@@ -280,11 +321,12 @@ def build_opencore_iso(dest_dir: Path, on_progress: ProgressCallback = None) -> 
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     iso = dest_dir / _OPENCORE_UNIVERSAL
-    work_dir = dest_dir / f".oc-build-{iso.name}.tmp"
+    # mkdtemp: 0700 with an unpredictable name, so a hostile sibling in a
+    # user-chosen iso_dir cannot pre-create or race the assembly tree. Kept
+    # inside dest_dir so the final rename stays on one filesystem.
+    work_dir = Path(tempfile.mkdtemp(prefix=".oc-build-", dir=dest_dir))
     iso_tmp = dest_dir / (iso.name + ".part")
     try:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        work_dir.mkdir(parents=True)
         tree = assemble_efi_tree(dest_dir, work_dir, on_progress)
         result = get_proxmox_adapter().run(["bash", "-c", _iso_build_script(tree, iso_tmp)])
         if not result.ok or not iso_tmp.exists():
@@ -305,15 +347,20 @@ def ensure_opencore_iso(
 ) -> Path:
     """Return a ready OpenCore ISO, assembling it locally when missing.
 
-    Falls back to the prebuilt release asset when assembly fails (offline
-    upstream, checksum mismatch, missing host tools), so an install never
-    dies for a reason the old download path would have survived."""
+    Falls back to the prebuilt release asset when assembly fails for an
+    operational reason (offline upstream, missing host tools, loop/mount
+    trouble), so an install never dies for a reason the old download path
+    would have survived. A checksum mismatch is NOT such a reason: it
+    propagates as ChecksumError and aborts the install."""
     iso = dest_dir / _OPENCORE_UNIVERSAL
     if iso.exists() and not force:
         log.debug("OpenCore cache hit: %s", iso)
         return iso
     try:
         return build_opencore_iso(dest_dir, on_progress)
+    except ChecksumError:
+        # Tamper signal: never downgrade to the unpinned prebuilt image.
+        raise
     except (DownloadError, OSError) as exc:
         log.warning("Local OpenCore assembly failed (%s); falling back to prebuilt ISO", exc)
         return download_opencore(macos, dest_dir, on_progress, force=force)
