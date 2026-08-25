@@ -50,6 +50,8 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 **You get:**
 - A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
+- **Unattended install (BETA)**: tick one box and walk away - the tool erases the new disk, runs the installer, and answers every reboot until macOS sits at Setup Assistant
+- OpenCore boot image assembled on your host from pinned, checksum-verified upstream releases - no opaque prebuilt blob
 - Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
 - Intel, Xeon, and AMD CPU support - auto-detected, zero configuration needed
 - Automatic OpenCore and recovery/installer download - no manual file placement
@@ -155,7 +157,7 @@ Prefer a standalone bash script with no Python dependency?
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh)"
 ```
 
-Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv needed.
+Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv needed. The advanced settings include the same **Unattended install (BETA)** toggle as the TUI.
 
 ### 🪄 Wizard Walkthrough
 
@@ -260,6 +262,10 @@ osx-next-cli download --macos ventura --force
 
 # Check host readiness
 osx-next-cli preflight
+
+# BETA: hands-off install - run right after apply --execute; erases the new
+# VM disk, drives the whole install, ends at Setup Assistant
+osx-next-cli install-unattended --vmid 910
 
 # Preview commands (dry run) - SMBIOS identity auto-generated
 osx-next-cli apply \
