@@ -45,6 +45,7 @@ class VmConfig:
     iso_dir: str = ""
     cpu_model: str = ""
     net_model: str = "vmxnet3"
+    vlan: int = 0  # 0 = untagged
 
 
 @dataclass
@@ -125,6 +126,8 @@ def validate_config(config: VmConfig) -> list[str]:
         issues.append(f"At least {MIN_DISK_GB} GB disk is required.")
     if not re.fullmatch(r"vmbr[0-9]+", config.bridge):
         issues.append("Bridge must match vmbr<N> (e.g. vmbr0).")
+    if config.vlan and not (1 <= config.vlan <= 4094):
+        issues.append("VLAN tag must be between 1 and 4094 (or 0 for untagged).")
     if config.name and not re.fullmatch(r"[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?", config.name):
         issues.append("VM name must start with alphanumeric and contain only [a-zA-Z0-9.-].")
     if config.installer_path and not re.fullmatch(r"[a-zA-Z0-9/._\-]+", config.installer_path):

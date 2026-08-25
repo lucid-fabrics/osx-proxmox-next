@@ -278,3 +278,23 @@ def test_memory_below_minimum_beats_host_limit_message() -> None:
                                   host_memory_limit_mb=8000)
     assert "memory" in errors
     assert ">= 4096" in errors["memory"]
+# validate_form_values / builder - VLAN tag
+# ---------------------------------------------------------------------------
+
+
+def test_vlan_blank_is_untagged():
+    assert validate_form_values(_valid_values(vlan="")) == {}
+    config = build_vm_config_from_values(_valid_values(vlan=""))
+    assert config is not None and config.vlan == 0
+
+
+def test_vlan_valid_value_accepted():
+    assert validate_form_values(_valid_values(vlan="20")) == {}
+    config = build_vm_config_from_values(_valid_values(vlan="20"))
+    assert config is not None and config.vlan == 20
+
+
+def test_vlan_invalid_values_rejected():
+    for bad in ("0", "4095", "abc", "-1"):
+        errors = validate_form_values(_valid_values(vlan=bad))
+        assert "vlan" in errors, bad

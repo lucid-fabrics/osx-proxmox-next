@@ -124,6 +124,13 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     return steps
 
 
+def _net0_value(config: VmConfig, macaddr: str = "") -> str:
+    """Build the qm net0 value, honoring the optional VLAN tag."""
+    mac = f",macaddr={macaddr}" if macaddr else ""
+    tag = f",tag={config.vlan}" if config.vlan else ""
+    return f"{config.net_model},bridge={config.bridge}{mac}{tag},firewall=0"
+
+
 def _network_steps(config: VmConfig, vmid: str, cpu_flag: str) -> list[PlanStep]:
     """VM shell creation with network and CPU config."""
     return [
@@ -141,7 +148,7 @@ def _network_steps(config: VmConfig, vmid: str, cpu_flag: str) -> list[PlanStep]
                 "--cpu", "host",
                 "--balloon", "0",
                 "--agent", "enabled=1",
-                "--net0", f"{config.net_model},bridge={config.bridge},firewall=0",
+                "--net0", _net0_value(config),
             ],
         ),
         PlanStep(
@@ -440,7 +447,7 @@ def _apple_services_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
         ),
         PlanStep(
             title="Configure static MAC for Apple services",
-            argv=["qm", "set", vmid, "--net0", f"{config.net_model},bridge={config.bridge},macaddr={config.static_mac},firewall=0"],
+            argv=["qm", "set", vmid, "--net0", _net0_value(config, config.static_mac)],
         ),
     ]
 
@@ -567,15 +574,17 @@ def build_edit_plan(
 # ── VM Clone ────────────────────────────────────────────────────────
 
 
-def _parse_net0(current_net0: str | None) -> tuple[str, str]:
-    """Extract bridge and NIC model from a raw Proxmox VM config dump.
+def _parse_net0(current_net0: str | None) -> tuple[str, str, str]:
+    """Extract bridge, NIC model, and VLAN tag from a raw Proxmox VM config dump.
 
-    Returns ``(bridge, net_model)`` with safe defaults when not found.
+    Returns ``(bridge, net_model, vlan)`` with safe defaults when not found;
+    *vlan* is "" when the NIC is untagged.
     """
     bridge = "vmbr0"
     net_model = "vmxnet3"
+    vlan = ""
     if not current_net0:
-        return bridge, net_model
+        return bridge, net_model, vlan
     for line in current_net0.splitlines():
         if not line.startswith("net0:"):
             continue
@@ -589,8 +598,10 @@ def _parse_net0(current_net0: str | None) -> tuple[str, str]:
         for part in parts[1:]:
             if part.startswith("bridge="):
                 bridge = part.split("=", 1)[1]
+            elif part.startswith("tag="):
+                vlan = part.split("=", 1)[1]
         break
-    return bridge, net_model
+    return bridge, net_model, vlan
 
 
 def build_clone_plan(
@@ -644,13 +655,14 @@ def build_clone_plan(
             title="Regenerate vmgenid (Apple services isolation)",
             argv=["qm", "set", dst, "--vmgenid", vmgenid],
         ))
-        bridge, net_model = _parse_net0(current_net0)
+        bridge, net_model, vlan = _parse_net0(current_net0)
         fresh_mac = generate_mac()
+        tag = f",tag={vlan}" if vlan else ""
         steps.append(PlanStep(
             title="Assign fresh static MAC (Apple services isolation)",
             argv=[
                 "qm", "set", dst,
-                "--net0", f"{net_model},bridge={bridge},macaddr={fresh_mac},firewall=0",
+                "--net0", f"{net_model},bridge={bridge},macaddr={fresh_mac}{tag},firewall=0",
             ],
         ))
 

@@ -26,6 +26,7 @@ class FormValues:
     memory: str = str(DEFAULT_MEMORY_MB)
     disk: str = "128"
     bridge: str = DEFAULT_BRIDGE
+    vlan: str = ""
     storage: str = DEFAULT_STORAGE
     iso_dir: str = DEFAULT_ISO_DIR
     installer_path: str = ""
@@ -87,6 +88,14 @@ def validate_form_values(values: FormValues,
     if not re.fullmatch(r"vmbr[0-9]+", values.bridge):
         errors["bridge"] = "Bridge must match vmbr<N> (e.g. vmbr0)."
 
+    if values.vlan:
+        try:
+            vlan_val = int(values.vlan)
+            if vlan_val < 1 or vlan_val > 4094:
+                raise ValueError
+        except ValueError:
+            errors["vlan"] = "VLAN must be 1-4094 (or blank for untagged)."
+
     if not values.storage:
         errors["storage_input"] = "Storage target is required."
 
@@ -103,6 +112,7 @@ def build_vm_config_from_values(values: FormValues) -> VmConfig | None:
         cores = int(values.cores or "8")
         memory_mb = int(values.memory or DEFAULT_MEMORY_MB)
         disk_gb = int(values.disk or "128")
+        vlan = int(values.vlan) if values.vlan.strip() else 0
     except ValueError:
         return None
 
@@ -115,6 +125,7 @@ def build_vm_config_from_values(values: FormValues) -> VmConfig | None:
         memory_mb=memory_mb,
         disk_gb=disk_gb,
         bridge=values.bridge or DEFAULT_BRIDGE,
+        vlan=vlan,
         storage=values.storage or DEFAULT_STORAGE,
         installer_path=values.installer_path,
         iso_dir=values.iso_dir or DEFAULT_ISO_DIR,

@@ -946,3 +946,39 @@ def test_recovery_icon_stamp_is_nonfatal():
     assert 'cp "$ICON" $OC_REC/.VolumeIcon.icns &&' not in script
     assert "rm -f $OC_REC/.VolumeIcon.icns" not in script
     assert "rm -f $OC_REC/System/Library/CoreServices/.contentDetails" not in script
+# ---------------------------------------------------------------------------
+# VLAN tag on net0
+# ---------------------------------------------------------------------------
+
+
+def _vlan_config(**kwargs):
+    from osx_proxmox_next.domain import VmConfig
+    base = dict(vmid=907, name="macos-vlan", macos="sequoia", cores=8,
+                memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    base.update(kwargs)
+    return VmConfig(**base)
+
+
+def test_create_net0_includes_vlan_tag(tmp_path, monkeypatch):
+    from osx_proxmox_next.planner import build_plan
+    steps = build_plan(_vlan_config(vlan=20))
+    create = next(s for s in steps if s.title == "Create VM shell")
+    net0 = create.argv[create.argv.index("--net0") + 1]
+    assert net0 == "vmxnet3,bridge=vmbr0,tag=20,firewall=0"
+
+
+def test_create_net0_untagged_by_default(tmp_path):
+    from osx_proxmox_next.planner import build_plan
+    steps = build_plan(_vlan_config())
+    create = next(s for s in steps if s.title == "Create VM shell")
+    net0 = create.argv[create.argv.index("--net0") + 1]
+    assert "tag=" not in net0
+
+
+def test_apple_services_net0_keeps_vlan_tag():
+    from osx_proxmox_next.planner import build_plan
+    steps = build_plan(_vlan_config(vlan=30, apple_services=True))
+    mac_step = next(s for s in steps if "static MAC" in s.title)
+    net0 = mac_step.argv[mac_step.argv.index("--net0") + 1]
+    assert "tag=30" in net0
+    assert "macaddr=" in net0
