@@ -404,7 +404,50 @@ function detect_cpu_cores() {
   round_down_pow2 "$half"
 }
 
-# ── Detect smart memory default (half host, clamp 4096–32768) ──
+# Kept free for the Proxmox host itself (pve daemons, ZFS ARC headroom, ssh).
+# The VM runs with balloon=0, so its full allocation is pinned at qm start.
+HOST_RAM_RESERVE_MB=1024
+
+# ── Host MemAvailable in MiB (0 = unknown) ──
+function detect_available_memory_mb() {
+  local kb
+  kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if ! [[ "$kb" =~ ^[0-9]+$ ]] || [ "$kb" -le 0 ]; then
+    echo 0
+    return
+  fi
+  echo $((kb / 1024))
+}
+
+# ── Largest VM allocation the host can take right now (0 = unknown) ──
+function max_vm_memory_mb() {
+  local avail
+  avail=$(detect_available_memory_mb)
+  if [ "$avail" -le 0 ]; then
+    echo 0
+  elif [ "$avail" -le "$HOST_RAM_RESERVE_MB" ]; then
+    echo 0
+  else
+    echo $((avail - HOST_RAM_RESERVE_MB))
+  fi
+}
+
+# ── Block when the requested RAM exceeds what the host has free ──
+# balloon=0 pins the whole allocation at qm start, so more than the host's
+# free RAM either fails the start or OOM-kills mid-install. Keep in sync
+# with forms/form_handler.py validate_form_values.
+function require_vm_memory_fits() {
+  local requested="$1" limit
+  limit=$(max_vm_memory_mb)
+  if [ "$limit" -gt 0 ] && [ "$requested" -gt "$limit" ]; then
+    msg_error "Not enough free RAM on this host for a ${requested} MiB VM"
+    echo -e "  Host has only ${limit} MiB free for a VM (MemAvailable minus ${HOST_RAM_RESERVE_MB} MiB host reserve)."
+    echo -e "  Lower the VM memory or free up host RAM, then run the script again."
+    exit 1
+  fi
+}
+
+# ── Detect smart memory default (half host, clamp 4096–32768, fit free RAM) ──
 function detect_memory_mb() {
   local mem_kb
   mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
@@ -414,6 +457,12 @@ function detect_memory_mb() {
   fi
   local mem_mb=$((mem_kb / 1024))
   local half=$((mem_mb / 2))
+  # Never suggest more than what is actually free right now (balloon=0).
+  local limit
+  limit=$(max_vm_memory_mb)
+  if [ "$limit" -gt 0 ] && [ "$half" -gt "$limit" ]; then
+    half="$limit"
+  fi
   [ "$half" -lt 4096 ] && half=4096
   [ "$half" -gt 32768 ] && half=32768
   echo "$half"
@@ -964,9 +1013,12 @@ function advanced_settings() {
     exit-script
   fi
 
-  local default_ram
+  local default_ram ram_limit ram_hint
   default_ram=$(detect_memory_mb)
-  if RAM_SIZE=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "Allocate RAM in MiB (minimum 4096)" 8 58 "$default_ram" --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  ram_limit=$(max_vm_memory_mb)
+  ram_hint="Allocate RAM in MiB (minimum 4096)"
+  [ "$ram_limit" -gt 0 ] && ram_hint="Allocate RAM in MiB (minimum 4096, host has ${ram_limit} free)"
+  if RAM_SIZE=$(whiptail --backtitle "OSX Proxmox Next" --inputbox "$ram_hint" 8 58 "$default_ram" --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$RAM_SIZE" ]; then
       RAM_SIZE="$default_ram"
     fi
@@ -1074,6 +1126,10 @@ pve_check
 ssh_check
 check_dependencies
 start_script
+
+# Both settings paths have set RAM_SIZE by now; refuse to continue when the
+# host cannot actually back that allocation (balloon=0 pins it at qm start).
+require_vm_memory_fits "$RAM_SIZE"
 
 # ── Storage selection ──
 msg_info "Validating Storage"

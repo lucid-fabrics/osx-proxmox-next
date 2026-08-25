@@ -548,6 +548,26 @@ def test_validate_form_all_invalid() -> None:
     asyncio.run(_run())
 
 
+def test_validate_form_blocks_when_memory_exceeds_host_ram(monkeypatch) -> None:
+    """A VM bigger than the host's free RAM must flag the memory field and
+    keep Next disabled (balloon=0 pins the whole allocation at qm start)."""
+    async def _run() -> None:
+        monkeypatch.setattr("osx_proxmox_next._wizard_mixin.max_vm_memory_mb",
+                            lambda: 6000)
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            app.query_one("#memory", Input).value = "16384"
+            result = app._validate_form(quiet=True)
+            assert result is False
+            assert app.query_one("#memory", Input).has_class("invalid")
+            errors_text = str(app.query_one("#form_errors", Static).content)
+            assert "6000 MB free" in errors_text
+
+    asyncio.run(_run())
+
+
 def test_validate_form_valid() -> None:
     async def _run() -> None:
         app = NextApp()

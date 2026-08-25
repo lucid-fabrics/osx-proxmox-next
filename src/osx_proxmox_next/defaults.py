@@ -191,22 +191,50 @@ def detect_cpu_cores() -> int:
     return _round_down_power_of_2(half)
 
 
-def detect_memory_mb() -> int:
-    mem_total_kb = 0
+def _meminfo_mb(field: str) -> int:
+    """Read one /proc/meminfo field in MB; 0 when absent or unreadable."""
     meminfo = Path("/proc/meminfo")
-    if meminfo.exists():
-        for line in meminfo.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if line.startswith("MemTotal:"):
-                parts = line.split()
-                if len(parts) >= 2 and parts[1].isdigit():
-                    mem_total_kb = int(parts[1])
-                break
-    if mem_total_kb <= 0:
+    if not meminfo.exists():
+        return 0
+    for line in meminfo.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if line.startswith(field + ":"):
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                return int(parts[1]) // 1024
+            break
+    return 0
+
+
+# Kept free for the Proxmox host itself (pve daemons, ZFS ARC headroom, ssh).
+# The VM runs with balloon=0, so its full allocation is pinned at qm start.
+HOST_RAM_RESERVE_MB = 1024
+
+
+def detect_available_memory_mb() -> int:
+    """Host MemAvailable in MB; 0 when unknown (non-Linux or old kernel)."""
+    return _meminfo_mb("MemAvailable")
+
+
+def max_vm_memory_mb() -> int:
+    """Largest VM allocation the host can take right now (0 = unknown)."""
+    avail = detect_available_memory_mb()
+    if avail <= 0:
+        return 0
+    return max(0, avail - HOST_RAM_RESERVE_MB)
+
+
+def detect_memory_mb() -> int:
+    mem_total_mb = _meminfo_mb("MemTotal")
+    if mem_total_mb <= 0:
         return 8192
 
-    mem_total_mb = mem_total_kb // 1024
-    # Default to half of host memory with sane bounds.
-    return max(_MIN_MEMORY_MB, min(_MAX_MEMORY_MB, mem_total_mb // 2))
+    # Default to half of host memory, but never suggest more than what is
+    # actually free right now (the allocation is pinned, balloon=0).
+    default = mem_total_mb // 2
+    limit = max_vm_memory_mb()
+    if limit > 0:
+        default = min(default, limit)
+    return max(_MIN_MEMORY_MB, min(_MAX_MEMORY_MB, default))
 
 
 DEFAULT_ISO_DIR = "/var/lib/vz/template/iso"

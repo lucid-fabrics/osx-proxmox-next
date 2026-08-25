@@ -3,7 +3,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_MEMORY_MB, DEFAULT_STORAGE
+from ..defaults import (
+    DEFAULT_BRIDGE,
+    DEFAULT_ISO_DIR,
+    DEFAULT_MEMORY_MB,
+    DEFAULT_STORAGE,
+    HOST_RAM_RESERVE_MB,
+)
 from ..domain import MIN_DISK_GB, MIN_MEMORY_MB, MIN_VMID, MAX_VMID, VmConfig
 from ..smbios import SmbiosIdentity
 
@@ -34,10 +40,15 @@ class FormValues:
     smbios: SmbiosIdentity | None = None
 
 
-def validate_form_values(values: FormValues) -> dict[str, str]:
+def validate_form_values(values: FormValues,
+                         host_memory_limit_mb: int | None = None) -> dict[str, str]:
     """Return a dict of field_id → error message for invalid fields.
 
     Returns an empty dict when all fields are valid.
+
+    *host_memory_limit_mb* is the largest allocation the host can take right
+    now (defaults.max_vm_memory_mb()). None or 0 skips that check, so pure
+    unit tests and non-Linux hosts are unaffected.
     """
     errors: dict[str, str] = {}
 
@@ -55,6 +66,14 @@ def validate_form_values(values: FormValues) -> dict[str, str]:
         mem_val = int(values.memory)
         if mem_val < MIN_MEMORY_MB:
             raise ValueError
+        # balloon=0 pins the whole allocation at qm start, so more than the
+        # host's free RAM either fails the start or OOM-kills mid-install.
+        if host_memory_limit_mb and mem_val > host_memory_limit_mb:
+            errors["memory"] = (
+                f"Host has only {host_memory_limit_mb} MB free for a VM "
+                f"(MemAvailable minus {HOST_RAM_RESERVE_MB} MB host reserve). "
+                f"Lower the VM memory."
+            )
     except ValueError:
         errors["memory"] = f"Memory must be >= {MIN_MEMORY_MB} MB."
 

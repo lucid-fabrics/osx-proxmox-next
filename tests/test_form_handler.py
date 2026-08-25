@@ -246,3 +246,35 @@ def test_build_vm_config_from_values_no_apple_services_vmgenid_empty() -> None:
     values = _valid_values(apple_services=False, custom_vmgenid="some-id")
     result = build_vm_config_from_values(values)
     assert result.vmgenid == ""
+
+
+# ---------------------------------------------------------------------------
+# validate_form_values - host RAM headroom
+# ---------------------------------------------------------------------------
+
+
+def test_memory_over_host_limit_is_rejected() -> None:
+    errors = validate_form_values(_valid_values(memory="16384"),
+                                  host_memory_limit_mb=8000)
+    assert "memory" in errors
+    assert "8000 MB free" in errors["memory"]
+
+
+def test_memory_at_host_limit_is_accepted() -> None:
+    errors = validate_form_values(_valid_values(memory="8000"),
+                                  host_memory_limit_mb=8000)
+    assert errors == {}
+
+
+def test_memory_limit_unknown_skips_host_check() -> None:
+    for limit in (None, 0):
+        errors = validate_form_values(_valid_values(memory="16384"),
+                                      host_memory_limit_mb=limit)
+        assert errors == {}
+
+
+def test_memory_below_minimum_beats_host_limit_message() -> None:
+    errors = validate_form_values(_valid_values(memory="100"),
+                                  host_memory_limit_mb=8000)
+    assert "memory" in errors
+    assert ">= 4096" in errors["memory"]

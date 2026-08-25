@@ -593,3 +593,52 @@ def test_detect_iso_storage_resolves_path(monkeypatch):
     dirs = detect_iso_storage()
     assert "/mnt/pve/nas-iso/template/iso" in dirs
     assert DEFAULT_ISO_DIR in dirs
+
+
+def test_detect_available_memory_mb(monkeypatch, tmp_path):
+    from osx_proxmox_next.defaults import detect_available_memory_mb
+    fake = tmp_path / "meminfo"
+    fake.write_text("MemTotal:       32768000 kB\nMemAvailable:   8192000 kB\n")
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path",
+                        lambda p: fake if p == "/proc/meminfo" else Path(p))
+    assert detect_available_memory_mb() == 8000
+
+
+def test_detect_available_memory_unknown(monkeypatch):
+    from osx_proxmox_next.defaults import detect_available_memory_mb
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path",
+                        lambda p: Path("/nonexistent/meminfo"))
+    assert detect_available_memory_mb() == 0
+
+
+def test_max_vm_memory_subtracts_host_reserve(monkeypatch, tmp_path):
+    import osx_proxmox_next.defaults as d
+    fake = tmp_path / "meminfo"
+    fake.write_text("MemAvailable:   8192000 kB\n")
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path",
+                        lambda p: fake if p == "/proc/meminfo" else Path(p))
+    # conftest pins max_vm_memory_mb to 0; call the real one via the module dict
+    monkeypatch.undo()
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path",
+                        lambda p: fake if p == "/proc/meminfo" else Path(p))
+    assert d.max_vm_memory_mb() == 8000 - d.HOST_RAM_RESERVE_MB
+
+
+def test_max_vm_memory_unknown_when_no_meminfo(monkeypatch):
+    import osx_proxmox_next.defaults as d
+    monkeypatch.undo()
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path",
+                        lambda p: Path("/nonexistent/meminfo"))
+    assert d.max_vm_memory_mb() == 0
+
+
+def test_detect_memory_default_clamped_to_available(monkeypatch, tmp_path):
+    """Half of total would be 16000 MB, but only 6 GB is actually free:
+    the suggested default must fit what the host can pin (balloon=0)."""
+    import osx_proxmox_next.defaults as d
+    monkeypatch.undo()
+    fake = tmp_path / "meminfo"
+    fake.write_text("MemTotal:       32768000 kB\nMemAvailable:   6144000 kB\n")
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path",
+                        lambda p: fake if p == "/proc/meminfo" else Path(p))
+    assert d.detect_memory_mb() == 6000 - d.HOST_RAM_RESERVE_MB
