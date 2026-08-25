@@ -32,7 +32,9 @@ Header { background: #103252; color: #f6f8fa; }
 #config_grid {
     layout: grid;
     grid-size: 2;
-    grid-columns: 20 1fr;
+    /* 26 fits the longest labels (CPU Cores (auto-detected),
+       Existing UUID (optional)), both truncated at the previous 20. */
+    grid-columns: 28 1fr;
     grid-gutter: 0 1;
     height: auto;
     width: 100%;
