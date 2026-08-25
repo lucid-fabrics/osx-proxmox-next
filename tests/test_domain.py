@@ -261,3 +261,22 @@ def test_validate_name_max_length() -> None:
 def test_validate_name_at_max_length_ok() -> None:
     cfg = _valid_cfg(name="a" * 63)
     assert validate_config(cfg) == []
+
+
+def test_validate_config_vlan_valid_and_untagged():
+    from osx_proxmox_next.domain import validate_config
+    base = dict(vmid=901, name="macos-vm", macos="sequoia", cores=8,
+                memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    from osx_proxmox_next.domain import VmConfig
+    assert validate_config(VmConfig(**base)) == []
+    assert validate_config(VmConfig(**base, vlan=20)) == []
+    assert validate_config(VmConfig(**base, vlan=4094)) == []
+
+
+def test_validate_config_vlan_out_of_range():
+    from osx_proxmox_next.domain import VmConfig, validate_config
+    base = dict(vmid=901, name="macos-vm", macos="sequoia", cores=8,
+                memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    for bad in (4095, -3):
+        issues = validate_config(VmConfig(**base, vlan=bad))
+        assert any("VLAN" in i for i in issues), bad

@@ -26,7 +26,8 @@ def build_config_summary_text(
         f"Target: {meta.get('label', config.macos)} ({meta.get('channel', '?')})",
         f"VM: {config.vmid} / {config.name}",
         f"CPU: {cpu_label} - {config.cores} cores | Memory: {config.memory_mb} MB | Disk: {config.disk_gb} GB",
-        f"Storage: {config.storage} | Bridge: {config.bridge}",
+        f"Storage: {config.storage} | Bridge: {config.bridge}"
+        + (f" | VLAN: {config.vlan}" if config.vlan else ""),
     ]
     if config.installer_path:
         lines.append(f"Installer: {config.installer_path}")

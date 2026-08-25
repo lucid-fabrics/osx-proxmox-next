@@ -120,6 +120,8 @@ def _compose_step4_vm_fields() -> ComposeResult:
         yield Input(value="128", id="disk")
         yield Static("Bridge", classes="label")
         yield Input(value=DEFAULT_BRIDGE, id="bridge")
+        yield Static("VLAN Tag (optional)", classes="label")
+        yield Input(value="", id="vlan", placeholder="Untagged")
         yield Static("Storage", classes="label")
         yield Input(value=DEFAULT_STORAGE, id="storage_input")
         yield Static("ISO Storage", classes="label")

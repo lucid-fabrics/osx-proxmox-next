@@ -11,47 +11,47 @@ from osx_proxmox_next.planner import _parse_net0, build_clone_plan
 
 
 def test_parse_net0_returns_defaults_when_none():
-    bridge, model = _parse_net0(None)
+    bridge, model, _vlan = _parse_net0(None)
     assert bridge == "vmbr0"
     assert model == "vmxnet3"
 
 
 def test_parse_net0_returns_defaults_when_empty():
-    bridge, model = _parse_net0("")
+    bridge, model, _vlan = _parse_net0("")
     assert bridge == "vmbr0"
     assert model == "vmxnet3"
 
 
 def test_parse_net0_with_static_mac():
     raw = "name: macos-test\nnet0: vmxnet3=AA:BB:CC:DD:EE:FF,bridge=vmbr1,firewall=0\n"
-    bridge, model = _parse_net0(raw)
+    bridge, model, _vlan = _parse_net0(raw)
     assert bridge == "vmbr1"
     assert model == "vmxnet3"
 
 
 def test_parse_net0_without_mac():
     raw = "net0: vmxnet3,bridge=vmbr2,firewall=0\n"
-    bridge, model = _parse_net0(raw)
+    bridge, model, _vlan = _parse_net0(raw)
     assert bridge == "vmbr2"
     assert model == "vmxnet3"
 
 
 def test_parse_net0_e1000_model():
     raw = "net0: e1000-82545em=AA:BB:CC:DD:EE:FF,bridge=vmbr0,firewall=0\n"
-    bridge, model = _parse_net0(raw)
+    bridge, model, _vlan = _parse_net0(raw)
     assert bridge == "vmbr0"
     assert model == "e1000-82545em"
 
 
 def test_parse_net0_ignores_other_lines():
     raw = "cores: 4\nmemory: 8192\nnet0: vmxnet3,bridge=vmbr3,firewall=0\nsmbios1: uuid=...\n"
-    bridge, model = _parse_net0(raw)
+    bridge, model, _vlan = _parse_net0(raw)
     assert bridge == "vmbr3"
 
 
 def test_parse_net0_no_net0_line():
     raw = "cores: 4\nmemory: 8192\n"
-    bridge, model = _parse_net0(raw)
+    bridge, model, _vlan = _parse_net0(raw)
     assert bridge == "vmbr0"
     assert model == "vmxnet3"
 
@@ -193,3 +193,18 @@ def test_build_clone_plan_clone_step_has_action_risk():
 def test_build_clone_plan_smbios_step_has_safe_risk():
     steps = build_clone_plan(900, 901)
     assert steps[1].risk == "safe"
+
+
+def test_parse_net0_extracts_vlan_tag():
+    raw = "net0: vmxnet3=AA:BB:CC:DD:EE:FF,bridge=vmbr1,tag=20,firewall=0\n"
+    bridge, model, vlan = _parse_net0(raw)
+    assert (bridge, model, vlan) == ("vmbr1", "vmxnet3", "20")
+
+
+def test_clone_preserves_vlan_tag_on_fresh_mac():
+    raw = "net0: vmxnet3=AA:BB:CC:DD:EE:FF,bridge=vmbr1,tag=20,firewall=0\n"
+    steps = build_clone_plan(910, 911, apple_services=True, current_net0=raw)
+    mac_step = next(s for s in steps if "fresh static MAC" in s.title)
+    net0 = mac_step.argv[mac_step.argv.index("--net0") + 1]
+    assert "tag=20" in net0
+    assert "bridge=vmbr1" in net0

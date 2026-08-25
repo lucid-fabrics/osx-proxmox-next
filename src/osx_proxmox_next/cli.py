@@ -40,6 +40,7 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
         memory_mb=args.memory,
         disk_gb=args.disk,
         bridge=args.bridge,
+        vlan=getattr(args, "vlan", 0) or 0,
         storage=args.storage,
         installer_path=args.installer_path or "",
         smbios_serial=args.smbios_serial or "",
@@ -98,6 +99,8 @@ def _build_common_parser() -> argparse.ArgumentParser:
     common.add_argument("--memory", type=int, required=True)
     common.add_argument("--disk", type=int, required=True)
     common.add_argument("--bridge", type=str, required=True)
+    common.add_argument("--vlan", type=int, default=0,
+                        help="Optional VLAN tag for net0 (1-4094; 0/omitted = untagged)")
     common.add_argument("--storage", type=str, required=True)
     common.add_argument("--installer-path", type=str, default="")
     common.add_argument("--smbios-serial", type=str, default="")

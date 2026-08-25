@@ -164,7 +164,7 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | **1️⃣ Preflight** | Auto-detects CPU vendor (Intel/AMD), checks host readiness |
 | **2️⃣ Choose OS** | Pick macOS version (Ventura, Sonoma, Sequoia, Tahoe) - SMBIOS auto-generated |
 | **3️⃣ Storage** | Select storage target from auto-detected Proxmox storage pools |
-| **4️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk) with auto-filled defaults |
+| **4️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk, bridge, optional VLAN tag) with auto-filled defaults |
 | **5️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
 | **6️⃣ Install** | Creates the VM, builds OpenCore, imports disks, and starts the VM |
 
@@ -260,6 +260,12 @@ osx-next-cli apply --execute \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm
+
+# Put the VM on a tagged VLAN (blank/omitted = untagged)
+osx-next-cli apply --execute \
+  --vmid 910 --name macos-sequoia --macos sequoia \
+  --cores 8 --memory 16384 --disk 128 \
+  --bridge vmbr0 --vlan 20 --storage local-lvm
 
 # Enable verbose kernel log (shows text instead of Apple logo during boot)
 osx-next-cli apply --execute --verbose-boot \

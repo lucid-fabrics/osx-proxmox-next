@@ -54,6 +54,7 @@ class WizardStepsMixin:
         self._set_input_value("#memory", str(detect_memory_mb()))  # type: ignore[attr-defined]
         self._set_input_value("#disk", str(default_disk_gb(macos)))  # type: ignore[attr-defined]
         self._set_input_value("#bridge", DEFAULT_BRIDGE)  # type: ignore[attr-defined]
+        self._set_input_value("#vlan", "")  # type: ignore[attr-defined]
         self._set_input_value(  # type: ignore[attr-defined]
             "#storage_input",
             storage_fallback or self.state.selected_storage or DEFAULT_STORAGE,  # type: ignore[attr-defined]
@@ -89,7 +90,7 @@ class WizardStepsMixin:
     def _validate_form(self, quiet: bool = False) -> bool:
         values = self._read_form_values()  # type: ignore[attr-defined]
         errors = validate_form_values(values, host_memory_limit_mb=max_vm_memory_mb())
-        for field_id in ("vmid", "name", "memory", "disk", "bridge", "storage_input"):
+        for field_id in ("vmid", "name", "memory", "disk", "bridge", "vlan", "storage_input"):
             widget = self.query_one(f"#{field_id}", Input)
             (widget.add_class if field_id in errors else widget.remove_class)("invalid")
         self.state.form_errors = errors  # type: ignore[attr-defined]
@@ -116,6 +117,7 @@ class WizardStepsMixin:
             memory=self.query_one("#memory", Input).value.strip(),
             disk=self.query_one("#disk", Input).value.strip(),
             bridge=self.query_one("#bridge", Input).value.strip(),
+            vlan=self.query_one("#vlan", Input).value.strip(),
             storage=self.query_one("#storage_input", Input).value.strip(),
             iso_dir=self.query_one("#iso_dir", Input).value.strip(),
             installer_path=self.query_one("#installer_path", Input).value.strip(),
