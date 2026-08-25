@@ -1317,13 +1317,20 @@ fi
 safe_mount "${RLOOP}p1" "$RECOVERY_MNT" -t hfsplus -o rw
 # Write .contentDetails in CoreServices (matches Python planner)
 mkdir -p "$RECOVERY_MNT/System/Library/CoreServices"
-rm -f "$RECOVERY_MNT/System/Library/CoreServices/.contentDetails" 2>/dev/null
-printf '%s' "$MACOS_LABEL" > "$RECOVERY_MNT/System/Library/CoreServices/.contentDetails"
+# NEVER rm first: unlinking on the Linux hfsplus driver can leave a stale
+# catalog entry that makes any recreate fail with EEXIST. Overwrite through
+# the existing file; the label is cosmetic, so failure must not abort.
+printf '%s' "$MACOS_LABEL" > "$RECOVERY_MNT/System/Library/CoreServices/.contentDetails" 2>/dev/null \
+  || echo -e "  ${YW}WARN: .contentDetails stamp failed (cosmetic), continuing${CL}"
 # Copy InstallAssistant.icns → .VolumeIcon.icns (matches Python planner)
 ICON=$(find "$RECOVERY_MNT" -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1)
 if [ -n "$ICON" ]; then
-  rm -f "$RECOVERY_MNT/.VolumeIcon.icns"
-  cp "$ICON" "$RECOVERY_MNT/.VolumeIcon.icns"
+  # cat-overwrite instead of rm+cp: the Linux hfsplus driver sometimes
+  # refuses to unlink a .VolumeIcon.icns the BaseSystem already ships
+  # (Sonoma does); a cosmetic icon must never fail the install. Keep in
+  # sync with planner.py _recovery_steps.
+  cat "$ICON" > "$RECOVERY_MNT/.VolumeIcon.icns" 2>/dev/null \
+    || echo -e "  ${YW}WARN: volume icon copy failed (cosmetic), continuing${CL}"
 fi
 umount "$RECOVERY_MNT" 2>/dev/null || umount -l "$RECOVERY_MNT" 2>/dev/null || true
 losetup -d "$RLOOP" 2>/dev/null || true

@@ -925,3 +925,24 @@ def test_build_post_install_plan_targets_correct_vmid() -> None:
     steps = build_post_install_plan(999)
     assert "qm set 999" in steps[1].command
     assert "qm set 999" in steps[3].command
+
+
+def test_recovery_icon_stamp_is_nonfatal():
+    """A cosmetic .VolumeIcon.icns copy failure must never fail the apply:
+    Sonoma's BaseSystem ships its own icon and the Linux hfsplus driver can
+    refuse to unlink it (cp then dies with File exists)."""
+    from osx_proxmox_next.domain import VmConfig
+    from osx_proxmox_next.planner import build_plan
+    config = VmConfig(vmid=908, name="macos-icon", macos="sonoma", cores=8,
+                      memory_mb=16384, disk_gb=128, bridge="vmbr0",
+                      storage="local-lvm")
+    steps = build_plan(config)
+    stamp = next(s for s in steps if "Stamp recovery" in s.title)
+    script = stamp.argv[-1]
+    assert 'cat "$ICON" >' in script
+    assert script.count("cosmetic") >= 2  # label AND icon are both non-fatal
+    # the old fatal forms must be gone, and no rm may precede the writes:
+    # unlinking on linux-hfsplus corrupts the catalog and recreates then fail
+    assert 'cp "$ICON" $OC_REC/.VolumeIcon.icns &&' not in script
+    assert "rm -f $OC_REC/.VolumeIcon.icns" not in script
+    assert "rm -f $OC_REC/System/Library/CoreServices/.contentDetails" not in script

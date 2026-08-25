@@ -252,16 +252,22 @@ def _recovery_steps(
                 "{ [ -b \"${RLOOP}p1\" ] || { echo \"ERROR: ${RLOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
                 "mount -t hfsplus -o rw ${RLOOP}p1 $OC_REC && "
                 "{ mountpoint -q $OC_REC || { echo \"ERROR: $OC_REC is not mounted. Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
-                # Set custom name via .contentDetails in blessed directory
+                # Set custom name via .contentDetails in blessed directory.
+                # NEVER rm first: unlinking on the Linux hfsplus driver can
+                # leave a stale catalog entry that makes any recreate fail
+                # with EEXIST (hit on Sonoma's BaseSystem). Overwrite through
+                # the existing file instead, and treat failure as cosmetic:
+                # the label and icon only affect how the picker entry looks.
                 "mkdir -p $OC_REC/System/Library/CoreServices && "
-                "rm -f $OC_REC/System/Library/CoreServices/.contentDetails 2>/dev/null; "
-                f"printf '%s' '{macos_label}' > $OC_REC/System/Library/CoreServices/.contentDetails && "
+                f"{{ printf '%s' '{macos_label}' > $OC_REC/System/Library/CoreServices/.contentDetails 2>/dev/null "
+                "&& echo 'Recovery label stamped'; } "
+                "|| echo 'WARN: .contentDetails stamp failed (cosmetic), continuing'; "
                 # Copy macOS installer icon as .VolumeIcon.icns for boot picker
                 "ICON=$(find $OC_REC -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1) && "
                 "if [ -n \"$ICON\" ]; then "
-                "rm -f $OC_REC/.VolumeIcon.icns; "
-                "cp \"$ICON\" $OC_REC/.VolumeIcon.icns && "
-                "echo \"Volume icon set from $ICON\"; "
+                "{ cat \"$ICON\" > $OC_REC/.VolumeIcon.icns 2>/dev/null && "
+                "echo \"Volume icon set from $ICON\"; } "
+                "|| echo \"WARN: volume icon copy failed (cosmetic), continuing\"; "
                 "else echo \"No InstallAssistant.icns found, using default icon\"; fi && "
                 "{ umount $OC_REC || umount -l $OC_REC; } && losetup -d $RLOOP",
             ],
