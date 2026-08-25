@@ -11,6 +11,18 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _no_host_memory_limit(monkeypatch):
+    """Pin the host-RAM headroom check to 'unknown' for all tests.
+
+    max_vm_memory_mb() reads the live /proc/meminfo, so on a Linux CI runner
+    (or a loaded dev box) form validation would depend on how much RAM the
+    machine happens to have free. Tests that exercise the check re-patch it
+    with an explicit value."""
+    monkeypatch.setattr("osx_proxmox_next.defaults.max_vm_memory_mb", lambda: 0)
+    monkeypatch.setattr("osx_proxmox_next._wizard_mixin.max_vm_memory_mb", lambda: 0)
+
+
+@pytest.fixture(autouse=True)
 def _reset_event_loop_policy():
     """Reset the asyncio event loop policy before and after each test."""
     asyncio.set_event_loop_policy(None)

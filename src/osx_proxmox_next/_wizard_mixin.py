@@ -14,6 +14,7 @@ from .defaults import (
     detect_cpu_cores,
     detect_cpu_info,
     detect_memory_mb,
+    max_vm_memory_mb,
 )
 from .domain import SUPPORTED_MACOS, VmConfig
 from .forms import validate_form_values, build_vm_config_from_values
@@ -87,7 +88,7 @@ class WizardStepsMixin:
 
     def _validate_form(self, quiet: bool = False) -> bool:
         values = self._read_form_values()  # type: ignore[attr-defined]
-        errors = validate_form_values(values)
+        errors = validate_form_values(values, host_memory_limit_mb=max_vm_memory_mb())
         for field_id in ("vmid", "name", "memory", "disk", "bridge", "storage_input"):
             widget = self.query_one(f"#{field_id}", Input)
             (widget.add_class if field_id in errors else widget.remove_class)("invalid")
