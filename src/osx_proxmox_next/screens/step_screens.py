@@ -170,12 +170,25 @@ def _compose_step4_apple_services() -> ComposeResult:
         yield Input(value="", id="custom_mac", placeholder="Auto-generated if empty")
 
 
+def _compose_step4_unattended() -> ComposeResult:
+    """Yield the unattended-install (beta) checkbox with its warning hint."""
+    with Horizontal(classes="action_row"):
+        yield Checkbox("Unattended install (BETA) - hands-off until Setup Assistant", id="unattended_cb")
+    yield Static(
+        "Drives the whole install over the VM console: boots recovery, ERASES the "
+        "new VM disk, runs the installer, and handles every reboot. Verified on "
+        "Ventura, Sonoma, Sequoia, and Tahoe. Leave the VM alone while it runs.",
+        id="unattended_hint", classes="hint",
+    )
+
+
 def compose_step4(cpu_info: CpuInfo) -> ComposeResult:
     with Vertical(id="step4", classes="step_container step_hidden"):
         yield Static("VM Configuration")
         yield from _compose_step4_vm_fields()
         yield from _compose_step4_apple_services()
         yield from _compose_step4_cpu_network(cpu_info)
+        yield from _compose_step4_unattended()
         yield Static("", id="form_errors")
         with Horizontal(classes="action_row"):
             yield Button("Suggest Defaults", id="suggest_btn")

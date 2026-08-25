@@ -1366,3 +1366,68 @@ def test_cli_apply_post_install_hint_correct(monkeypatch, tmp_path, capsys) -> N
     assert "virtio0;ide0" not in out
     assert "ko-fi.com/lucidfabrics" in out
     assert "buymeacoffee" not in out
+
+
+# ---------------------------------------------------------------------------
+# install-unattended (BETA)
+# ---------------------------------------------------------------------------
+
+
+class _FakeAdapter:
+    def __init__(self, config_output="virtio0: local-lvm:vm-9-disk-0,iothread=1,size=128G",
+                 status_output="status: running"):
+        self._config = config_output
+        self._status = status_output
+
+    def qm(self, *args):
+        from osx_proxmox_next.infrastructure import CommandResult
+        if args[0] == "config":
+            return CommandResult(ok=True, returncode=0, output=self._config)
+        return CommandResult(ok=True, returncode=0, output=self._status)
+
+
+def test_install_unattended_reads_disk_from_vm_config(monkeypatch, capsys):
+    from osx_proxmox_next import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_proxmox_adapter", lambda: _FakeAdapter())
+    monkeypatch.setattr("osx_proxmox_next.unattended.run_unattended_install",
+                        lambda console, disk_gb, on_event: {"reboots": 3, "elapsed": 1800})
+    rc = cli_mod.run_cli(["install-unattended", "--vmid", "953"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "128 GB" in out
+    assert "post-install --vmid 953" in out
+
+
+def test_install_unattended_requires_running_vm(monkeypatch, capsys):
+    from osx_proxmox_next import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_proxmox_adapter",
+                        lambda: _FakeAdapter(status_output="status: stopped"))
+    rc = cli_mod.run_cli(["install-unattended", "--vmid", "953"])
+    assert rc == 2
+    assert "not running" in capsys.readouterr().out
+
+
+def test_install_unattended_unknown_disk_errors(monkeypatch, capsys):
+    from osx_proxmox_next import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_proxmox_adapter",
+                        lambda: _FakeAdapter(config_output="scsi0: whatever"))
+    rc = cli_mod.run_cli(["install-unattended", "--vmid", "953"])
+    assert rc == 2
+    assert "--disk-gb" in capsys.readouterr().out
+
+
+def test_install_unattended_reports_driver_failure(monkeypatch, capsys):
+    from osx_proxmox_next import cli as cli_mod
+    from osx_proxmox_next.unattended import UnattendedError
+
+    def boom(console, disk_gb, on_event):
+        raise UnattendedError("no picker")
+
+    monkeypatch.setattr(cli_mod, "get_proxmox_adapter", lambda: _FakeAdapter())
+    monkeypatch.setattr("osx_proxmox_next.unattended.run_unattended_install", boom)
+    rc = cli_mod.run_cli(["install-unattended", "--vmid", "953", "--disk-gb", "64"])
+    assert rc == 1
+    assert "no picker" in capsys.readouterr().out

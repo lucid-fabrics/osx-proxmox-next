@@ -158,6 +158,8 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
             self._toggle_apple_services_fields()
         if event.checkbox.id == "penryn_cb":
             self.state.use_penryn = event.checkbox.value
+        if event.checkbox.id == "unattended_cb":
+            self.state.unattended = event.checkbox.value
             if event.checkbox.value:
                 self.query_one("#cores", Input).value = "4"
                 self.query_one("#penryn_hint", Static).remove_class("step_hidden")
@@ -350,10 +352,35 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
         if ok:
             result_box.remove_class("result_fail")
             self.notify("macOS VM created", severity="information")
+            if self.state.unattended:
+                unattended_log = self._spawn_unattended_driver(vmid)
+                text += (
+                    "\n\nUnattended install (BETA) is running in the background - "
+                    "leave the VM alone; it erases the new disk and drives every "
+                    f"reboot until Setup Assistant.\nProgress: tail -f {unattended_log}"
+                )
         else:
             result_box.add_class("result_fail")
             self.notify("Install failed", severity="error")
         result_box.update(text)
+
+    UNATTENDED_LOG_DIR = "/var/log"
+
+    def _spawn_unattended_driver(self, vmid: int) -> str:
+        """Start install-unattended as a detached process that survives the TUI."""
+        import subprocess
+        import sys as _sys
+
+        log_path = f"{self.UNATTENDED_LOG_DIR}/osx-next-unattended-{vmid}.log"
+        disk_gb = self.state.config.disk_gb if self.state.config else 0
+        with open(log_path, "ab") as log_file:
+            subprocess.Popen(
+                [_sys.executable, "-m", "osx_proxmox_next.cli", "install-unattended",
+                 "--vmid", str(vmid), "--disk-gb", str(disk_gb)],
+                stdout=log_file, stderr=log_file,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        return log_path
 
     def _preflight_worker(self) -> None:
         def _on_status(msg: str) -> None:

@@ -889,6 +889,143 @@ function assemble_opencore_iso() {
   mv "$img" "$dest_iso" || { rm -f "$img"; return 1; }
 }
 
+# ── Unattended install driver (BETA) ──
+# Mirrors src/osx_proxmox_next/unattended.py; tests diff the constants and
+# key sequences. Frame-size heuristics: >5000000 bytes = 1920x1080 OpenCore
+# picker, smaller = 1280x800 macOS.
+UNATTENDED_PICKER_MIN_BYTES=5000000
+UNATTENDED_RECOVERY_SETTLE=240
+UNATTENDED_PICKER_TIMEOUT=600
+UNATTENDED_INSTALL_REBOOT_TIMEOUT=1800
+UNATTENDED_RECOVERY_TIMEOUT=900
+UNATTENDED_DONE_QUIET=900
+UNATTENDED_TOTAL_BUDGET=10800
+UNATTENDED_POLL=6
+
+function unattended_frame_size() {
+  local vmid="$1" probe="/tmp/osx-next-unattended-$1.ppm"
+  rm -f "$probe"
+  echo "screendump $probe" | qm monitor "$vmid" >/dev/null 2>&1
+  sleep 0.6
+  stat -c %s "$probe" 2>/dev/null || echo 0
+}
+
+function unattended_type() {
+  local vmid="$1" text="$2" i ch key
+  for ((i = 0; i < ${#text}; i++)); do
+    ch="${text:$i:1}"
+    case "$ch" in
+      " ") key="spc" ;;      ".") key="dot" ;;       "/") key="slash" ;;
+      "-") key="minus" ;;    "_") key="shift-minus" ;; ",") key="comma" ;;
+      ";") key="semicolon" ;; ":") key="shift-semicolon" ;; "=") key="equal" ;;
+      "+") key="shift-equal" ;; \') key="apostrophe" ;; \") key="shift-apostrophe" ;;
+      "\\") key="backslash" ;; "|") key="shift-backslash" ;; "*") key="shift-8" ;;
+      '$') key="shift-4" ;;  "(") key="shift-9" ;;   ")") key="shift-0" ;;
+      "&") key="shift-7" ;;  "!") key="shift-1" ;;   "{") key="shift-bracket_left" ;;
+      "}") key="shift-bracket_right" ;; "<") key="shift-comma" ;; ">") key="shift-dot" ;;
+      "?") key="shift-slash" ;; "#") key="shift-3" ;; "%") key="shift-5" ;;
+      "@") key="shift-2" ;;  "^") key="shift-6" ;;   "~") key="shift-grave_accent" ;;
+      [A-Z]) key="shift-$(tr "[:upper:]" "[:lower:]" <<< "$ch")" ;;
+      *) key="$ch" ;;
+    esac
+    qm sendkey "$vmid" "$key" >/dev/null 2>&1
+    sleep 0.12
+  done
+}
+
+# The one shell line typed into recovery Terminal: erase the disk matched by
+# its exact diskutil size, then run the non-interactive installer.
+function unattended_install_command() {
+  local disk_gb="$1" size
+  size=$(awk -v g="$disk_gb" 'BEGIN{printf "%.1f", g*1.073741824}' | sed 's/\./\\./')
+  printf '%s' "d=\$(diskutil list | awk '/\\*$size GB/{print \$NF; exit}') && diskutil eraseDisk APFS MACOS \$d && \"/Install macOS \"*.app/Contents/Resources/startosinstall --agreetolicense --volume /Volumes/MACOS --nointeraction"
+}
+
+function unattended_wait_frame() {
+  # args: vmid timeout mode(above|below)
+  local vmid="$1" timeout="$2" mode="$3" t0 size
+  t0=$(date +%s)
+  while (( $(date +%s) - t0 < timeout )); do
+    size=$(unattended_frame_size "$vmid")
+    if [ "$mode" == "above" ] && (( size > UNATTENDED_PICKER_MIN_BYTES )); then return 0; fi
+    if [ "$mode" == "below" ] && (( size > 0 && size < UNATTENDED_PICKER_MIN_BYTES )); then return 0; fi
+    sleep "$UNATTENDED_POLL"
+  done
+  return 1
+}
+
+function unattended_install() {
+  local vmid="$1" disk_gb="$2" t0 size reboots=0 last_picker
+  t0=$(date +%s)
+
+  msg_info "Unattended (BETA): waiting for the OpenCore boot picker"
+  unattended_wait_frame "$vmid" "$UNATTENDED_PICKER_TIMEOUT" above || {
+    msg_error "Unattended: boot picker never appeared"; return 1; }
+  sleep 2
+  qm sendkey "$vmid" ret >/dev/null 2>&1
+  msg_ok "Unattended: booting macOS recovery"
+
+  msg_info "Unattended: waiting for recovery (takes a few minutes)"
+  unattended_wait_frame "$vmid" "$UNATTENDED_RECOVERY_TIMEOUT" below || {
+    msg_error "Unattended: recovery never reached its UI"; return 1; }
+  sleep "$UNATTENDED_RECOVERY_SETTLE"
+  msg_ok "Unattended: recovery loaded"
+
+  # Utilities menu -> Terminal: ctrl-f2, right x4, down x3, ret
+  local key
+  for key in ctrl-f2 right right right right down down down ret; do
+    qm sendkey "$vmid" "$key" >/dev/null 2>&1
+    sleep 0.4
+  done
+  sleep 10
+
+  msg_info "Unattended: erasing the VM disk and starting the installer"
+  unattended_type "$vmid" "$(unattended_install_command "$disk_gb")"
+  sleep 1
+  qm sendkey "$vmid" ret >/dev/null 2>&1
+  msg_ok "Unattended: installer launched; waiting for its first reboot"
+
+  # First 1080p frame after launch = the install's first reboot. Detach the
+  # recovery disk now (the documented manual flow): from here the picker has
+  # a single real entry, so a blind selection can never boot the wrong
+  # volume. Walking entries with right+ret proved flaky.
+  unattended_wait_frame "$vmid" "$UNATTENDED_INSTALL_REBOOT_TIMEOUT" above || {
+    msg_error "Unattended: the installer never rebooted"; return 1; }
+  msg_ok "Unattended: first reboot reached; detaching recovery"
+  qm stop "$vmid" >/dev/null 2>&1
+  local _i
+  for _i in $(seq 1 40); do
+    qm status "$vmid" 2>/dev/null | grep -q stopped && break
+    sleep 3
+  done
+  qm status "$vmid" 2>/dev/null | grep -q stopped || {
+    msg_error "Unattended: VM did not stop for the recovery-detach step"; return 1; }
+  qm set "$vmid" --delete ide2 >/dev/null 2>&1
+  qm start "$vmid" >/dev/null 2>&1
+  msg_ok "Unattended: recovery detached; continuing hands-off (30-60 min)"
+
+  last_picker=$(date +%s)
+  while (( $(date +%s) - t0 < UNATTENDED_TOTAL_BUDGET )); do
+    size=$(unattended_frame_size "$vmid")
+    if (( size > UNATTENDED_PICKER_MIN_BYTES )); then
+      reboots=$((reboots + 1))
+      last_picker=$(date +%s)
+      sleep 2
+      # Single-entry picker (Timeout=0 still waits) or an ignored keystroke
+      # on the Apple-logo boot screen; either way safe.
+      qm sendkey "$vmid" ret >/dev/null 2>&1
+      msg_ok "Unattended: 1080p frame ${reboots}, confirmed the only boot entry"
+      sleep 30
+    elif (( reboots >= 1 && $(date +%s) - last_picker > UNATTENDED_DONE_QUIET )); then
+      msg_ok "Unattended: install finished after ${reboots} boot(s)"
+      return 0
+    fi
+    sleep "$UNATTENDED_POLL"
+  done
+  msg_error "Unattended: install did not finish within the time budget"
+  return 1
+}
+
 # ── Build OpenCore GPT+ESP disk from source ISO ──
 function build_opencore_disk() {
   local source_iso="$1"
@@ -1144,6 +1281,7 @@ function default_settings() {
   VLAN=""
   MTU=""
   START_VM="yes"
+  UNATTENDED="no"
   METHOD="default"
   echo -e "${OS}${BOLD}${DGN}macOS Version: ${BGN}${MACOS_LABELS[$MACOS_VER]}${CL}"
   echo -e "${CONTAINERID}${BOLD}${DGN}Virtual Machine ID: ${BGN}${VMID}${CL}"
@@ -1338,6 +1476,16 @@ function advanced_settings() {
   else
     echo -e "${DGN}Start VM when completed: ${BGN}no${CL}"
     START_VM="no"
+  fi
+
+  UNATTENDED="no"
+  if [ "$START_VM" == "yes" ] && whiptail --backtitle "OSX Proxmox Next" --title "UNATTENDED INSTALL (BETA)" --yesno \
+    "Drive the whole macOS install automatically?\n\nThe script boots recovery, ERASES the new VM disk, runs the\ninstaller, and handles every reboot until Setup Assistant.\nTakes 30-60 minutes; leave the VM console alone while it runs.\n\nVerified on Ventura, Sonoma, Sequoia and Tahoe." \
+    14 66 --defaultno 3>&1 1>&2 2>&3; then
+    UNATTENDED="yes"
+    echo -e "${DGN}Unattended install (BETA): ${BGN}yes${CL}"
+  else
+    echo -e "${DGN}Unattended install (BETA): ${BGN}no${CL}"
   fi
 
   if (whiptail --backtitle "OSX Proxmox Next" --title "ADVANCED SETTINGS COMPLETE" --yesno "Ready to create ${MACOS_LABELS[$MACOS_VER]} VM?" --no-button Do-Over 10 58); then
@@ -1685,6 +1833,16 @@ if [ "$START_VM" == "yes" ]; then
   sleep 1
   qm start "$VMID"
   msg_ok "Started macOS VM"
+fi
+
+# ── Unattended install (BETA) ──
+if [ "${UNATTENDED:-no}" == "yes" ] && [ "$START_VM" == "yes" ]; then
+  DISK_GB_NUM="${DISK_SIZE%G}"
+  if unattended_install "$VMID" "$DISK_GB_NUM"; then
+    echo -e "\n${INFO}${GN}Unattended install complete. Finish Setup Assistant in the VM console.${CL}"
+  else
+    echo -e "\n${INFO}${YW}Unattended install did not finish; continue manually in the VM console.${CL}"
+  fi
 fi
 
 echo ""

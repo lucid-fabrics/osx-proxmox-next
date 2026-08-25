@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -142,6 +143,19 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
     )
     post_install.add_argument("--vmid", type=int, required=True, help="VM ID to update")
     post_install.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
+    unattended = sub.add_parser(
+        "install-unattended",
+        help=(
+            "BETA: drive the whole macOS install over the VM console with no "
+            "manual steps: boots recovery, ERASES the VM disk, runs "
+            "startosinstall, and selects picker entries across reboots until "
+            "Setup Assistant. Run right after apply --execute while the VM "
+            "sits at the boot picker. Verified on Ventura, Sonoma, Sequoia, and Tahoe."
+        ),
+    )
+    unattended.add_argument("--vmid", type=int, required=True, help="VM ID to drive")
+    unattended.add_argument("--disk-gb", type=int, default=0,
+                            help="VM disk size in GB (default: read from the VM config)")
 
 
 def _add_download_subparser(sub: argparse._SubParsersAction) -> None:
@@ -292,7 +306,46 @@ def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
         return _run_clone(args)
     if args.cmd == "post-install":
         return _run_post_install(args)
+    if args.cmd == "install-unattended":
+        return _run_install_unattended(args)
     return None
+
+
+def _detect_vm_disk_gb(vmid: int) -> int:
+    """Read the virtio0 size (e.g. size=128G) from the VM config."""
+    result = get_proxmox_adapter().qm("config", str(vmid))
+    if result.ok:
+        match = re.search(r"^virtio0:.*?size=(\d+)G", result.output, re.M)
+        if match:
+            return int(match.group(1))
+    return 0
+
+
+def _run_install_unattended(args: argparse.Namespace) -> int:
+    from .unattended import QmConsole, UnattendedError, run_unattended_install
+
+    disk_gb = args.disk_gb or _detect_vm_disk_gb(args.vmid)
+    if disk_gb <= 0:
+        print(f"ERROR: could not determine the disk size of VM {args.vmid}; pass --disk-gb.")
+        return 2
+    status = get_proxmox_adapter().qm("status", str(args.vmid))
+    if "running" not in status.output:
+        print(f"ERROR: VM {args.vmid} is not running. Start it first (it must sit at the boot picker).")
+        return 2
+    print(f"BETA: unattended install for VM {args.vmid} ({disk_gb} GB target disk).")
+    print("The VM disk will be ERASED. Watch progress below or on the VM console.")
+    try:
+        summary = run_unattended_install(QmConsole(args.vmid), disk_gb,
+                                         on_event=lambda m: print(f"  {m}", flush=True))
+    except UnattendedError as exc:
+        print(f"ERROR: {exc}")
+        print("The VM was left as-is for inspection; check the console.")
+        return 1
+    print(f"Install finished after {summary['reboots']} reboot(s), "
+          f"{summary['elapsed'] // 60} minutes.")
+    print("Finish Setup Assistant on the VM console, then run:")
+    print(f"  osx-next-cli post-install --vmid {args.vmid} --execute")
+    return 0
 
 
 def _validate_and_fetch_assets(args: argparse.Namespace, config: VmConfig) -> int | None:

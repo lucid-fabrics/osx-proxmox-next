@@ -50,6 +50,8 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 **You get:**
 - A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
+- **Unattended install (BETA)**: tick one box and walk away - the tool erases the new disk, runs the installer, and answers every reboot until macOS sits at Setup Assistant
+- OpenCore boot image assembled on your host from pinned, checksum-verified upstream releases - no opaque prebuilt blob
 - Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
 - Intel, Xeon, and AMD CPU support - auto-detected, zero configuration needed
 - Automatic OpenCore and recovery/installer download - no manual file placement
@@ -155,7 +157,7 @@ Prefer a standalone bash script with no Python dependency?
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh)"
 ```
 
-Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv needed.
+Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv needed. The advanced settings include the same **Unattended install (BETA)** toggle as the TUI.
 
 ### 🪄 Wizard Walkthrough
 
@@ -167,8 +169,20 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | **4️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk, bridge, optional VLAN tag) with auto-filled defaults |
 | **5️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
 | **6️⃣ Install** | Creates the VM, builds OpenCore, imports disks, and starts the VM |
+| **🤖 Unattended (BETA)** | Optional: drives the whole macOS install automatically - erases the new disk, runs the installer, handles every reboot - until Setup Assistant |
 
 **Most users:** pick your macOS version, pick your storage, click through to **Install**. Preflight and CPU detection run automatically.
+
+### 🤖 Unattended Install (BETA)
+
+Tick **Unattended install** on the config step (or answer yes in the bash script's advanced settings) and the tool finishes the whole macOS install by itself: it boots recovery, **erases the new VM disk**, runs `startosinstall`, and answers the boot picker across every reboot. Thirty to sixty minutes later the VM is sitting at Setup Assistant. It works by watching the VM console (`qm screendump` frame sizes) and typing (`qm sendkey`), so it needs nothing extra installed.
+
+```bash
+# CLI flavour: run right after apply --execute, while the VM shows the boot picker
+osx-next-cli install-unattended --vmid 910
+```
+
+Beta notes: verified on Ventura, Sonoma, Sequoia and Tahoe across Intel and AMD hosts. Leave the VM console alone while it runs. If a phase times out it stops and leaves the VM as-is so you can continue manually.
 
 > **Smart caching:** OpenCore and recovery images are downloaded once and reused across VM installs. Creating a second Sonoma VM? No re-download needed. Use `--iso-dir` on shared storage to cache across Proxmox nodes.
 
@@ -248,6 +262,10 @@ osx-next-cli download --macos ventura --force
 
 # Check host readiness
 osx-next-cli preflight
+
+# BETA: hands-off install - run right after apply --execute; erases the new
+# VM disk, drives the whole install, ends at Setup Assistant
+osx-next-cli install-unattended --vmid 910
 
 # Preview commands (dry run) - SMBIOS identity auto-generated
 osx-next-cli apply \

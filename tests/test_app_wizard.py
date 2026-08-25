@@ -11,7 +11,7 @@ from osx_proxmox_next import app as app_module
 from osx_proxmox_next.app import NextApp, WizardState
 from osx_proxmox_next.executor import ApplyResult
 from osx_proxmox_next.infrastructure import CommandResult
-from osx_proxmox_next.domain import DEFAULT_VMID, PlanStep
+from osx_proxmox_next.domain import DEFAULT_VMID, PlanStep, VmConfig
 from osx_proxmox_next.services import detection_service
 from osx_proxmox_next.services import proxmox_service
 from osx_proxmox_next.services import download_service
@@ -497,7 +497,7 @@ def test_suggest_defaults_button() -> None:
 def test_generate_smbios_button() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 85)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             old_serial = app.state.smbios.serial if app.state.smbios else ""
@@ -2488,6 +2488,32 @@ def test_disabled_cores_field_explains_itself() -> None:
             labels = [str(w.content) for w in app.query(".label")]
             assert any("auto-detected" in lbl for lbl in labels)
             assert app.query_one("#cores", Input).disabled
+def test_unattended_checkbox_spawns_detached_driver(monkeypatch) -> None:
+    """Ticking the beta checkbox makes a successful install spawn the
+    detached install-unattended process and say so in the result box."""
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            app.query_one("#unattended_cb", Checkbox).value = True
+            await pilot.pause()
+            assert app.state.unattended is True
+
+            spawned = []
+            monkeypatch.setattr(
+                app, "_spawn_unattended_driver",
+                lambda vmid: spawned.append(vmid) or "/tmp/osx-next-unattended-900.log",
+            )
+            app.state.config = VmConfig(
+                vmid=900, name="test", macos="sequoia",
+                cores=8, memory_mb=16384, disk_gb=128,
+                bridge="vmbr0", storage="local-lvm",
+            )
+            app._finish_live_install(True, Path("/tmp/x.log"), None)
+            assert spawned == [900]
+            text = str(app.query_one("#result_box", Static).content)
+            assert "Unattended install (BETA)" in text
 
     asyncio.run(_run())
 
@@ -2504,5 +2530,30 @@ def test_form_errors_render_one_per_line() -> None:
             app._validate_form(quiet=True)
             text = str(app.query_one("#form_errors", Static).content)
             assert "\n" in text  # scannable list, not a joined blob
+def test_spawn_unattended_driver_detaches(monkeypatch, tmp_path) -> None:
+    calls = {}
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            calls["argv"] = argv
+            calls["kwargs"] = kwargs
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.pause()
+            app.state.config = VmConfig(
+                vmid=901, name="test", macos="sequoia",
+                cores=8, memory_mb=16384, disk_gb=128,
+                bridge="vmbr0", storage="local-lvm",
+            )
+            monkeypatch.setattr(type(app), "UNATTENDED_LOG_DIR", str(tmp_path))
+            monkeypatch.setattr("subprocess.Popen", _FakePopen)
+            log_path = app._spawn_unattended_driver(901)
+            assert "install-unattended" in calls["argv"]
+            assert "--vmid" in calls["argv"] and "901" in calls["argv"]
+            assert "--disk-gb" in calls["argv"] and "128" in calls["argv"]
+            assert calls["kwargs"]["start_new_session"] is True
+            assert log_path == str(tmp_path) + "/osx-next-unattended-901.log"
 
     asyncio.run(_run())
