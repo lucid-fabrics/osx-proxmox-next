@@ -93,7 +93,9 @@ class WizardStepsMixin:
             (widget.add_class if field_id in errors else widget.remove_class)("invalid")
         self.state.form_errors = errors  # type: ignore[attr-defined]
         if errors:
-            self.query_one("#form_errors", Static).update(" ".join(errors.values()))
+            # One error per line: every message leads with its field name, so
+            # a newline list maps error to field at a glance.
+            self.query_one("#form_errors", Static).update("\n".join(errors.values()))
             if not quiet:
                 self.notify("Fix form errors before continuing", severity="warning")  # type: ignore[attr-defined]
             return False

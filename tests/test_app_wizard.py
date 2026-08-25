@@ -481,7 +481,7 @@ def test_prefill_form_on_step3_next() -> None:
 def test_suggest_defaults_button() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 70)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.query_one("#vmid", Input).value = ""
@@ -2127,7 +2127,7 @@ def test_apple_services_checkbox_toggle() -> None:
 def test_generate_smbios_with_existing_uuid() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 50)) as pilot:
+        async with app.run_test(size=(120, 70)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             # Set an existing UUID
@@ -2146,7 +2146,7 @@ def test_generate_smbios_with_existing_uuid() -> None:
 def test_generate_smbios_apple_services_preview() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 50)) as pilot:
+        async with app.run_test(size=(120, 70)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             app.state.apple_services = True
@@ -2164,7 +2164,7 @@ def test_generate_smbios_apple_services_preview() -> None:
 def test_apply_host_defaults_with_existing_uuid() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 50)) as pilot:
+        async with app.run_test(size=(120, 70)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             # Clear smbios so _apply_host_defaults generates one
@@ -2454,5 +2454,35 @@ def test_penryn_checkbox_updates_cores(monkeypatch) -> None:
             await pilot.click("#penryn_cb")
             await pilot.pause()
             assert cores_input.value == original_cores
+
+    asyncio.run(_run())
+
+
+def test_disabled_cores_field_explains_itself() -> None:
+    """A disabled control must say why it is disabled (affordance rule)."""
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            labels = [str(w.content) for w in app.query(".label")]
+            assert any("auto-detected" in lbl for lbl in labels)
+            assert app.query_one("#cores", Input).disabled
+
+    asyncio.run(_run())
+
+
+def test_form_errors_render_one_per_line() -> None:
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            app.query_one("#vmid", Input).value = "abc"
+            app.query_one("#memory", Input).value = "1"
+            app.query_one("#name", Input).value = "ok-name"
+            app._validate_form(quiet=True)
+            text = str(app.query_one("#form_errors", Static).content)
+            assert "\n" in text  # scannable list, not a joined blob
 
     asyncio.run(_run())

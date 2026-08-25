@@ -112,7 +112,10 @@ Input:focus { border: tall #2ec27e; background: #1a2c3f; }
 .action_row Button { margin-right: 1; min-width: 14; }
 
 #form_errors {
-    height: auto;
+    /* Fixed height: errors appearing must not shift the buttons below
+       (layout jumping under the cursor breaks affordance). Three rows fit
+       the one-error-per-line list for typical mistakes. */
+    height: 3;
     color: #d44f4f;
     margin-bottom: 1;
 }
