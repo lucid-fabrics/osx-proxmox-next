@@ -167,8 +167,20 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | **4️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk, bridge, optional VLAN tag) with auto-filled defaults |
 | **5️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
 | **6️⃣ Install** | Creates the VM, builds OpenCore, imports disks, and starts the VM |
+| **🤖 Unattended (BETA)** | Optional: drives the whole macOS install automatically - erases the new disk, runs the installer, handles every reboot - until Setup Assistant |
 
 **Most users:** pick your macOS version, pick your storage, click through to **Install**. Preflight and CPU detection run automatically.
+
+### 🤖 Unattended Install (BETA)
+
+Tick **Unattended install** on the config step (or answer yes in the bash script's advanced settings) and the tool finishes the whole macOS install by itself: it boots recovery, **erases the new VM disk**, runs `startosinstall`, and answers the boot picker across every reboot. Thirty to sixty minutes later the VM is sitting at Setup Assistant. It works by watching the VM console (`qm screendump` frame sizes) and typing (`qm sendkey`), so it needs nothing extra installed.
+
+```bash
+# CLI flavour: run right after apply --execute, while the VM shows the boot picker
+osx-next-cli install-unattended --vmid 910
+```
+
+Beta notes: verified on Sequoia and Tahoe (Intel and AMD hosts); Ventura not yet. Leave the VM console alone while it runs. If a phase times out it stops and leaves the VM as-is so you can continue manually.
 
 > **Smart caching:** OpenCore and recovery images are downloaded once and reused across VM installs. Creating a second Sonoma VM? No re-download needed. Use `--iso-dir` on shared storage to cache across Proxmox nodes.
 
