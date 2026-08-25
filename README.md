@@ -87,7 +87,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 ### Demo
 
-**Wizard (6 steps: Preflight → OS → Storage → Config → Dry Run → Install):**
+**Wizard (6 steps: Preflight → OS → Storage → Config → Dry Run → Install), including the Unattended install (BETA) toggle:**
 
 ![osx-proxmox-next TUI wizard demo](docs/static/img/demo-tui.gif)
 
@@ -110,12 +110,12 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
   </tr>
   <tr>
     <td align="center">
-      <img src="docs/static/img/screenshots/step4-config-filled.svg" alt="Step 3: VM Configuration" width="400"><br>
-      <strong>Step 3:</strong> VM Configuration
+      <img src="docs/static/img/screenshots/step4-config-filled.svg" alt="Step 4: VM Configuration" width="400"><br>
+      <strong>Step 4:</strong> VM Configuration (VLAN tag + unattended beta)
     </td>
     <td align="center">
-      <img src="docs/static/img/screenshots/step5-review.svg" alt="Step 4: Review & Dry Run" width="400"><br>
-      <strong>Step 4:</strong> Review & Dry Run
+      <img src="docs/static/img/screenshots/step5-review.svg" alt="Step 5: Review & Dry Run" width="400"><br>
+      <strong>Step 5:</strong> Review & Dry Run
     </td>
   </tr>
 </table>

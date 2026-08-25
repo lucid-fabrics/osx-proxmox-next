@@ -73,7 +73,7 @@ def compose_step2() -> ComposeResult:
                 with Container(id="edit_grid"):
                     yield Static("Name", classes="label")
                     yield Input(value="", id="edit_name", placeholder="leave blank to keep")
-                    yield Static("CPU Cores (auto-detected from this host)", classes="label")
+                    yield Static("CPU Cores (auto-detected)", classes="label")
                     yield Input(value="", id="edit_cores", placeholder="leave blank to keep")
                     yield Static("Memory MB", classes="label")
                     yield Input(value="", id="edit_memory", placeholder="leave blank to keep")
