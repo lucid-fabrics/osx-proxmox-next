@@ -22,14 +22,18 @@ The OpenCore disk image is built as a **GPT-partitioned disk with an EFI System 
 
 ### Build Process
 
+The OpenCore boot image is assembled locally on the Proxmox host from pinned upstream releases. Every component is downloaded straight from its project's GitHub release at a fixed version and verified against a pinned SHA-256 before use, so the resulting image is reproducible and auditable. If assembly fails (upstream unreachable, checksum mismatch), the installer falls back to the prebuilt ISO from the project's release assets.
+
 ```mermaid
 flowchart LR
-    A[Download OpenCore ISO\nfrom GitHub releases] --> B[Create raw disk\nGPT partition table]
-    B --> C[Create ESP\nFAT32 format]
-    C --> D[Extract OpenCore EFI\ninto ESP]
+    A[Download pinned components\nverify SHA-256] --> B[Assemble EFI tree\nOpenCore + kexts + config]
+    B --> C[Create raw disk\nGPT partition table]
+    C --> D[Create ESP\nFAT32 format]
     D --> E[Patch config.plist\nvia plistlib]
     E --> F[Import to Proxmox\nide0 media=disk]
 ```
+
+The `config.plist` template, the SSDT tables, and the plist-only MCEReporterDisabler kext ship inside this repository (`src/osx_proxmox_next/data/opencore/`), so they can be reviewed like any other source file.
 
 The `config.plist` patching is done programmatically via `plistlib` to safely modify XML property lists without risking malformed output.
 
@@ -45,16 +49,19 @@ Boot order: `ide2;virtio0;ide0`
 
 ## Required Kexts
 
-Kexts are kernel extensions loaded by OpenCore before macOS boots.
+Kexts are kernel extensions loaded by OpenCore before macOS boots. Each is pulled from its upstream release at the pinned version below and checksum-verified during assembly.
 
-| Kext                  | Purpose |
-|-----------------------|---------|
-| Lilu                  | Patching framework required by most other kexts |
-| VirtualSMC            | Emulates Apple SMC chip; macOS refuses to boot without it |
-| WhateverGreen         | GPU/framebuffer patches for display output in VMs |
-| CryptexFixup          | Fixes Cryptex (security update) loading on Sonoma 14+ and newer. Without it, boot hangs at `EXITBS:START` |
-| AppleALC              | Audio codec support |
-| MCEReporterDisabler   | Suppresses Machine Check Exception reports that crash VMs |
+| Kext                  | Version | Purpose |
+|-----------------------|---------|---------|
+| Lilu                  | 1.7.2   | Patching framework required by most other kexts |
+| VirtualSMC            | 1.3.7   | Emulates Apple SMC chip; macOS refuses to boot without it |
+| WhateverGreen         | 1.7.0   | GPU/framebuffer patches for display output in VMs |
+| CryptexFixup          | 1.0.5   | Fixes Cryptex (security update) loading on Sonoma 14+ and newer. Without it, boot hangs at `EXITBS:START` |
+| AppleALC              | 1.9.7   | Audio codec support |
+| MCEReporterDisabler   | 0.5     | Suppresses Machine Check Exception reports that crash VMs (plist-only, ships in this repo) |
+| RestrictEvents        | 1.1.6   | Configured to silence the cosmetic MacPro7,1 memory notification |
+
+The bootloader itself is OpenCore 1.0.7, with its OpenCanopy picker resources (fonts, labels, Syrah icon set) taken from a commit-pinned OcBinaryData archive.
 
 ### Required Drivers
 
@@ -72,8 +79,8 @@ Kexts are kernel extensions loaded by OpenCore before macOS boots.
 |----------------------|----------|---------|
 | `ScanPolicy`         | `0`      | Scan all disks and filesystems (no filtering) |
 | `DmgLoading`         | `Any`    | Allow loading DMG images from any source |
-| `Timeout`            | `0`      | Auto-boot the default entry without waiting |
-| `csr-active-config`  | `0x0F26` | Disables SIP protections that block kext loading in VMs |
+| `Timeout`            | `0`      | Disable auto-boot during install so the picker waits for a choice |
+| `csr-active-config`  | `0x0F67` | Disables SIP protections that block kext loading in VMs |
 
 ### CryptexFixup and macOS Sonoma+
 

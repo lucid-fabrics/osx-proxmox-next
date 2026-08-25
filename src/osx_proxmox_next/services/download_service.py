@@ -10,10 +10,10 @@ from ..domain import VmConfig
 from ..downloader import (
     DownloadError,
     DownloadProgress,
-    download_opencore,
     download_recovery,
     ensure_restrictevents,
 )
+from ..oc_builder import ensure_opencore_iso
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def run_download_worker(
 ) -> list[str]:
     """Download missing assets and return a list of error strings.
 
-    *on_progress(phase, pct)* is called on the background thread — callers
+    *on_progress(phase, pct)* is called on the background thread - callers
     that need to update UI must dispatch to the main thread themselves.
 
     *force_opencore* bypasses the cached OpenCore ISO and re-downloads it.
@@ -51,8 +51,8 @@ def run_download_worker(
             continue
         if "OpenCore" in asset.name:
             try:
-                download_opencore(config.macos, dest_dir, on_progress=_progress_cb,
-                                  force=force_opencore)
+                ensure_opencore_iso(config.macos, dest_dir, on_progress=_progress_cb,
+                                    force=force_opencore)
             except DownloadError as exc:
                 errors.append(f"OpenCore: {exc}")
         elif "recovery" in asset.name.lower() or "installer" in asset.name.lower():  # pragma: no branch
@@ -67,8 +67,8 @@ def run_download_worker(
 def check_assets(config: VmConfig) -> tuple[list[AssetCheck], list[AssetCheck]]:
     """Return (missing, downloadable) asset lists for *config*.
 
-    *missing* — assets that are not present on disk.
-    *downloadable* — subset of missing that can be auto-downloaded.
+    *missing* - assets that are not present on disk.
+    *downloadable* - subset of missing that can be auto-downloaded.
     """
     assets = required_assets(config)
     missing = [a for a in assets if not a.ok]

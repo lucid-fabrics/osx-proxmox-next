@@ -108,7 +108,7 @@ The tool is built and tested for **Proxmox VE 9**. Proxmox 8 is not officially s
 | Component | Size |
 |-----------|------|
 | Recovery image | ~0.9 GB |
-| OpenCore ISO | ~30 MB |
+| OpenCore image (assembled locally) | ~130 MB |
 | VM disk (minimum) | 64 GB |
 | VM disk (recommended) | 128+ GB |
 

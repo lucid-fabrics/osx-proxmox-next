@@ -110,7 +110,8 @@ class PlanStep:
 | `domain.py`         | Core types (`VmConfig`, `EditChanges`, `PlanStep`), validation rules, supported OS map |
 | `planner.py`        | Converts a `VmConfig` into an ordered `list[PlanStep]` (`build_plan`). Also builds edit plans (`build_edit_plan`) from `EditChanges`, preserving MAC/NIC when changing bridge |
 | `executor.py`       | Runs `PlanStep[]` against Proxmox via `ProxmoxAdapter`. Supports dry-run (log only) and live execution. Emits `StepResult` per step with return codes and output |
-| `downloader.py`     | Downloads OpenCore ISO from GitHub releases and macOS recovery images from Apple's osrecovery API. Handles retries, progress callbacks, and board-ID mapping per OS version |
+| `downloader.py`     | Downloads macOS recovery images from Apple's osrecovery API and the fallback prebuilt OpenCore ISO. Handles retries, progress callbacks, and board-ID mapping per OS version |
+| `oc_builder.py`     | Assembles the OpenCore boot image locally from pinned, SHA-256-verified upstream releases (OpenCore, Lilu, VirtualSMC, WhateverGreen, AppleALC, CryptexFixup, RestrictEvents, OcBinaryData) plus the config.plist template shipped in the repo |
 | `smbios.py`         | Generates Apple-format serial numbers, MLB with mod-34 checksum, UUID, and ROM. Pure Python, no external binaries |
 | `smbios_planner.py` | Builds SMBIOS-related `PlanStep` objects for inclusion in VM creation plans |
 | `infrastructure.py` | `ProxmoxAdapter` abstraction for shell command execution on the Proxmox host |
