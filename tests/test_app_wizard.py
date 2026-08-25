@@ -909,7 +909,7 @@ def test_download_worker_success(monkeypatch) -> None:
             on_progress(DownloadProgress(downloaded=1000, total=1000, phase="recovery"))
         return dest / f"{macos}-recovery.img"
 
-    monkeypatch.setattr(download_service, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(download_service, "ensure_opencore_iso", fake_download_opencore)
     monkeypatch.setattr(download_service, "download_recovery", fake_download_recovery)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
@@ -951,7 +951,7 @@ def test_download_worker_opencore_error(monkeypatch) -> None:
     def raise_dl_error(*a, **kw):
         raise DownloadError("fail")
 
-    monkeypatch.setattr(download_service, "download_opencore", raise_dl_error)
+    monkeypatch.setattr(download_service, "ensure_opencore_iso", raise_dl_error)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:
@@ -1829,7 +1829,7 @@ def test_download_worker_skips_non_downloadable(monkeypatch) -> None:
         download_calls["opencore"] += 1
         return dest / f"opencore-{macos}.iso"
 
-    monkeypatch.setattr(download_service, "download_opencore", fake_download_opencore)
+    monkeypatch.setattr(download_service, "ensure_opencore_iso", fake_download_opencore)
     monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
 
     async def _run() -> None:

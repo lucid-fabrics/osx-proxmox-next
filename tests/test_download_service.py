@@ -51,7 +51,7 @@ def _stub_restrictevents(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Happy path — downloads succeed
+# Happy path - downloads succeed
 # ---------------------------------------------------------------------------
 
 
@@ -65,15 +65,15 @@ def test_run_download_worker_always_fetches_restrictevents(_stub_restrictevents)
     assert _stub_restrictevents == [Path("/tmp/iso")]
 
 
-def test_run_download_worker_opencore_calls_download_opencore(monkeypatch) -> None:
+def test_run_download_worker_opencore_calls_ensure_opencore_iso(monkeypatch) -> None:
     called = []
 
-    def fake_download_opencore(macos, dest_dir, on_progress=None, force=False):
+    def fake_ensure_opencore(macos, dest_dir, on_progress=None, force=False):
         called.append(("opencore", macos, force))
 
     monkeypatch.setattr(
-        "osx_proxmox_next.services.download_service.download_opencore",
-        fake_download_opencore,
+        "osx_proxmox_next.services.download_service.ensure_opencore_iso",
+        fake_ensure_opencore,
     )
     errors = run_download_worker(
         _make_config(), [_asset("OpenCore image")], _noop_progress
@@ -87,12 +87,12 @@ def test_run_download_worker_opencore_calls_download_opencore(monkeypatch) -> No
 def test_run_download_worker_force_opencore_passthrough(monkeypatch) -> None:
     called = []
 
-    def fake_download_opencore(macos, dest_dir, on_progress=None, force=False):
+    def fake_ensure_opencore(macos, dest_dir, on_progress=None, force=False):
         called.append(("opencore", macos, force))
 
     monkeypatch.setattr(
-        "osx_proxmox_next.services.download_service.download_opencore",
-        fake_download_opencore,
+        "osx_proxmox_next.services.download_service.ensure_opencore_iso",
+        fake_ensure_opencore,
     )
     errors = run_download_worker(
         _make_config(), [_asset("OpenCore image")], _noop_progress,
@@ -137,19 +137,19 @@ def test_run_download_worker_installer_calls_download_recovery(monkeypatch) -> N
 
 
 # ---------------------------------------------------------------------------
-# Error handling — DownloadError is caught, not raised
+# Error handling - DownloadError is caught, not raised
 # ---------------------------------------------------------------------------
 
 
 def test_run_download_worker_opencore_download_error_returns_error_string(
     monkeypatch,
 ) -> None:
-    def bad_download_opencore(macos, dest_dir, on_progress=None, force=False):
+    def bad_ensure_opencore(macos, dest_dir, on_progress=None, force=False):
         raise DownloadError("network timeout")
 
     monkeypatch.setattr(
-        "osx_proxmox_next.services.download_service.download_opencore",
-        bad_download_opencore,
+        "osx_proxmox_next.services.download_service.ensure_opencore_iso",
+        bad_ensure_opencore,
     )
     errors = run_download_worker(
         _make_config(), [_asset("OpenCore image")], _noop_progress
@@ -178,14 +178,14 @@ def test_run_download_worker_recovery_download_error_returns_error_string(
 
 
 def test_run_download_worker_does_not_raise_on_download_error(monkeypatch) -> None:
-    def bad_download_opencore(macos, dest_dir, on_progress=None, force=False):
+    def bad_ensure_opencore(macos, dest_dir, on_progress=None, force=False):
         raise DownloadError("fail")
 
     monkeypatch.setattr(
-        "osx_proxmox_next.services.download_service.download_opencore",
-        bad_download_opencore,
+        "osx_proxmox_next.services.download_service.ensure_opencore_iso",
+        bad_ensure_opencore,
     )
-    # Should not raise — errors are returned as list
+    # Should not raise - errors are returned as list
     result = run_download_worker(
         _make_config(), [_asset("OpenCore image")], _noop_progress
     )
@@ -204,7 +204,7 @@ def test_run_download_worker_skips_non_downloadable_assets(monkeypatch) -> None:
         called.append("opencore")
 
     monkeypatch.setattr(
-        "osx_proxmox_next.services.download_service.download_opencore",
+        "osx_proxmox_next.services.download_service.ensure_opencore_iso",
         fake_opencore,
     )
     errors = run_download_worker(
@@ -222,14 +222,14 @@ def test_run_download_worker_skips_non_downloadable_assets(monkeypatch) -> None:
 def test_run_download_worker_progress_callback_called(monkeypatch) -> None:
     progress_calls = []
 
-    def fake_download_opencore(macos, dest_dir, on_progress=None, force=False):
+    def fake_ensure_opencore(macos, dest_dir, on_progress=None, force=False):
         from osx_proxmox_next.downloader import DownloadProgress
         if on_progress:
             on_progress(DownloadProgress(phase="opencore", downloaded=50, total=100))
 
     monkeypatch.setattr(
-        "osx_proxmox_next.services.download_service.download_opencore",
-        fake_download_opencore,
+        "osx_proxmox_next.services.download_service.ensure_opencore_iso",
+        fake_ensure_opencore,
     )
 
     def capture_progress(phase, pct):
@@ -245,12 +245,12 @@ def test_run_download_worker_progress_callback_called(monkeypatch) -> None:
 def test_run_download_worker_uses_config_iso_dir(monkeypatch) -> None:
     seen_dirs = []
 
-    def fake_download_opencore(macos, dest_dir, on_progress=None, force=False):
+    def fake_ensure_opencore(macos, dest_dir, on_progress=None, force=False):
         seen_dirs.append(dest_dir)
 
     monkeypatch.setattr(
-        "osx_proxmox_next.services.download_service.download_opencore",
-        fake_download_opencore,
+        "osx_proxmox_next.services.download_service.ensure_opencore_iso",
+        fake_ensure_opencore,
     )
     cfg = _make_config(iso_dir="/custom/iso/path")
     run_download_worker(cfg, [_asset("OpenCore image")], _noop_progress)
