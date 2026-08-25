@@ -546,3 +546,44 @@ def test_plist_patch_script_registers_restrictevents_kext() -> None:
 def test_plist_patch_script_restrictevents_entry_guarded_by_kext_dir() -> None:
     script = _plist_patch_script()
     assert 'os.path.isdir(oc_dest+"/EFI/OC/Kexts/RestrictEvents.kext")' in script
+
+
+@pytest.mark.parametrize("version,accepted", [
+    ("8.0.4", True),
+    ("8.4.1", True),
+    ("9.0.3", True),
+    ("9.1.1", True),
+    ("9.2.4", True),   # regression: minor-version cap rejected 9.2 (#123)
+    ("9.7.0", True),
+    ("10.0.1", False),
+    ("7.4.1", False),
+    ("", False),
+])
+def test_bash_pve_check_gates_on_major_version_only(tmp_path: Path, version: str,
+                                                    accepted: bool) -> None:
+    """Execute the real pve_check with a stubbed pveversion.
+
+    Proxmox minor releases stay compatible, so only the major version may be
+    gated; capping the minor broke every new point release (9.2, issue #123).
+    """
+    import re as _re
+    import subprocess
+
+    script = (Path(__file__).resolve().parent.parent
+              / "scripts/bash/osx-proxmox-next.sh").read_text()
+    m = _re.search(r"pve_check\(\) \{.*?\n\}", script, _re.S)
+    assert m, "pve_check not found in bash script"
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        f'pveversion() {{ echo "pve-manager/{version}/abcdef"; }}\n'
+        'msg_error() { echo "ERR: $1"; }\n'
+        + m.group(0) + "\n"
+        "pve_check && echo ACCEPTED\n"
+    )
+    result = subprocess.run(["bash", str(harness)], capture_output=True, text=True)
+    if accepted:
+        assert "ACCEPTED" in result.stdout, result.stdout + result.stderr
+    else:
+        assert "ACCEPTED" not in result.stdout
+        assert result.returncode == 1

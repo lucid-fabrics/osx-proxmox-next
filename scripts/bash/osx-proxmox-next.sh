@@ -231,23 +231,12 @@ function check_root() {
 pve_check() {
   local PVE_VER
   PVE_VER="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
-  if [[ "$PVE_VER" =~ ^8\.([0-9]+) ]]; then
-    local MINOR="${BASH_REMATCH[1]}"
-    if ((MINOR > 9)); then
-      msg_error "Requires Proxmox VE 8.0–8.9"
-      exit 1
-    fi
+  # Gate on the major version only. Proxmox minor releases stay compatible,
+  # and capping the minor broke every new point release (9.2 rejected, #123).
+  if [[ "$PVE_VER" =~ ^(8|9)\. ]]; then
     return 0
   fi
-  if [[ "$PVE_VER" =~ ^9\.([0-9]+) ]]; then
-    local MINOR="${BASH_REMATCH[1]}"
-    if ((MINOR > 1)); then
-      msg_error "Requires Proxmox VE 9.0–9.1"
-      exit 1
-    fi
-    return 0
-  fi
-  msg_error "Requires Proxmox VE 8.x or 9.x"
+  msg_error "Requires Proxmox VE 8.x or 9.x (detected: ${PVE_VER:-unknown})"
   exit 1
 }
 
