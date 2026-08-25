@@ -11,8 +11,8 @@ host: ``qm monitor <vmid>`` screendump (the frame's byte size tells the
 screen state: ~6.2 MB = 1920x1080 OpenCore picker, ~3 MB = 1280x800
 macOS) and ``qm sendkey``. No VNC, no image processing, no dependencies.
 
-Verified end to end on Sequoia (Intel i9-14900K and AMD Ryzen 9950X) and
-previously on Tahoe. Ventura recovery is untested with this driver.
+Verified end to end on Ventura and Sequoia (Intel i9-14900K), Sonoma and
+Sequoia (AMD Ryzen 9950X), and previously Tahoe.
 
 Keep constants and key sequences in sync with the bash installer's
 unattended_install (scripts/bash/osx-proxmox-next.sh); tests diff both.
@@ -48,7 +48,7 @@ KEY_DELAY = 0.4
 TYPE_DELAY = 0.12
 
 # Recovery menu path to Terminal: focus the menu bar, walk to Utilities,
-# third item down. Stable across Sequoia and Tahoe recovery.
+# third item down. Stable across Ventura, Sonoma, Sequoia, and Tahoe recovery.
 TERMINAL_NAV = ("ctrl-f2", "right", "right", "right", "right",
                 "down", "down", "down", "ret")
 

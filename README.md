@@ -180,7 +180,7 @@ Tick **Unattended install** on the config step (or answer yes in the bash script
 osx-next-cli install-unattended --vmid 910
 ```
 
-Beta notes: verified on Sequoia and Tahoe (Intel and AMD hosts); Ventura not yet. Leave the VM console alone while it runs. If a phase times out it stops and leaves the VM as-is so you can continue manually.
+Beta notes: verified on Ventura, Sonoma, Sequoia and Tahoe across Intel and AMD hosts. Leave the VM console alone while it runs. If a phase times out it stops and leaves the VM as-is so you can continue manually.
 
 > **Smart caching:** OpenCore and recovery images are downloaded once and reused across VM installs. Creating a second Sonoma VM? No re-download needed. Use `--iso-dir` on shared storage to cache across Proxmox nodes.
 

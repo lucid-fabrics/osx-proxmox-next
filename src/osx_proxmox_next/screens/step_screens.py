@@ -177,7 +177,7 @@ def _compose_step4_unattended() -> ComposeResult:
     yield Static(
         "Drives the whole install over the VM console: boots recovery, ERASES the "
         "new VM disk, runs the installer, and handles every reboot. Verified on "
-        "Sequoia and Tahoe. Leave the VM alone while it runs.",
+        "Ventura, Sonoma, Sequoia, and Tahoe. Leave the VM alone while it runs.",
         id="unattended_hint", classes="hint",
     )
 

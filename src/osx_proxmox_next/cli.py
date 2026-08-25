@@ -150,7 +150,7 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
             "manual steps: boots recovery, ERASES the VM disk, runs "
             "startosinstall, and selects picker entries across reboots until "
             "Setup Assistant. Run right after apply --execute while the VM "
-            "sits at the boot picker. Verified on Sequoia/Tahoe."
+            "sits at the boot picker. Verified on Ventura, Sonoma, Sequoia, and Tahoe."
         ),
     )
     unattended.add_argument("--vmid", type=int, required=True, help="VM ID to drive")

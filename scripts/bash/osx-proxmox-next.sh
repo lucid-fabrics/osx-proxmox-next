@@ -1480,7 +1480,7 @@ function advanced_settings() {
 
   UNATTENDED="no"
   if [ "$START_VM" == "yes" ] && whiptail --backtitle "OSX Proxmox Next" --title "UNATTENDED INSTALL (BETA)" --yesno \
-    "Drive the whole macOS install automatically?\n\nThe script boots recovery, ERASES the new VM disk, runs the\ninstaller, and handles every reboot until Setup Assistant.\nTakes 30-60 minutes; leave the VM console alone while it runs.\n\nVerified on Sequoia and Tahoe." \
+    "Drive the whole macOS install automatically?\n\nThe script boots recovery, ERASES the new VM disk, runs the\ninstaller, and handles every reboot until Setup Assistant.\nTakes 30-60 minutes; leave the VM console alone while it runs.\n\nVerified on Ventura, Sonoma, Sequoia and Tahoe." \
     14 66 --defaultno 3>&1 1>&2 2>&3; then
     UNATTENDED="yes"
     echo -e "${DGN}Unattended install (BETA): ${BGN}yes${CL}"
