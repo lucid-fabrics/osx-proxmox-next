@@ -497,7 +497,7 @@ def test_suggest_defaults_button() -> None:
 def test_generate_smbios_button() -> None:
     async def _run() -> None:
         app = NextApp()
-        async with app.run_test(size=(120, 60)) as pilot:
+        async with app.run_test(size=(120, 85)) as pilot:
             await pilot.pause()
             await _advance_to_step(pilot, app, 4)
             old_serial = app.state.smbios.serial if app.state.smbios else ""
