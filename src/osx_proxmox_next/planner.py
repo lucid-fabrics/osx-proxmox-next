@@ -341,8 +341,9 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
     """Detach recovery and point boot at OpenCore.
 
     Run this as soon as the installer has rebooted once, not only when macOS is
-    fully installed. While recovery stays attached the OpenCore picker lists it
-    ahead of the installer and auto-boots it, so the install never resumes.
+    fully installed. The install-time image ships Timeout=0, so while recovery
+    stays attached every reboot stops at the picker with recovery listed ahead
+    of the installer and the install never resumes on its own.
 
     Switches from recovery-first (ide2;virtio0;ide0) to OpenCore-first
     (ide0;virtio0) so the VM boots into the installed macOS via OpenCore.
