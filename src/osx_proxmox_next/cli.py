@@ -137,8 +137,8 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
         help=(
             "Detach recovery and switch to OpenCore-first boot (ide0;virtio0). "
             "Run it after the installer's FIRST reboot, not only at the very end: "
-            "while recovery stays attached the picker lists it first and auto-boots "
-            "it, so the install restarts instead of resuming."
+            "while recovery stays attached the picker stops there every reboot with "
+            "recovery listed first, so the install does not resume on its own."
         ),
     )
     post_install.add_argument("--vmid", type=int, required=True, help="VM ID to update")
@@ -262,8 +262,8 @@ def _handle_apply_command(args: argparse.Namespace, config: VmConfig, steps: lis
         print("IMPORTANT: as soon as the installer reboots the VM the first time, run:")
         print(f"  osx-next-cli post-install --vmid {config.vmid} --execute")
         print(f"This detaches the recovery disk and sets boot order {POST_INSTALL_BOOT_ORDER}.")
-        print("Until you do, the boot picker lists recovery first and auto-boots it, so")
-        print("each reboot restarts the installer instead of resuming it.")
+        print("Until you do, every reboot stops at the picker with recovery listed")
+        print("first, so the install only resumes if you pick the installer by hand.")
         print()
         print(SUPPORT_LINE)
         return 0
