@@ -26,6 +26,8 @@ osx-next-cli --version
 | `bundle` | Export diagnostic log bundle |
 | `guide` | Show recovery guide for a given issue |
 | `doctor` | Diagnose a running or stopped macOS VM for common config issues |
+| `post-install` | Detach recovery and switch to OpenCore-first boot order |
+| `install-unattended` | (Beta) Drive the whole macOS install over the VM console |
 
 ## Common Flags
 
@@ -42,6 +44,7 @@ These flags are shared by `apply` and `plan`:
 | `--bridge` | string | Yes | Network bridge (e.g., `vmbr0`) |
 | `--storage` | string | Yes | Proxmox storage target (e.g., `local-lvm`) |
 | `--iso-dir` | string | No | Custom directory for ISO/recovery images |
+| `--vlan` | int | No | VLAN tag for `net0` (1-4094; `0` or omitted = untagged) |
 | `--cpu-model` | string | No | Override QEMU CPU model (default: auto-detect) |
 | `--net-model` | string | No | NIC model: `vmxnet3` or `e1000-82545em` (default: auto-detect) |
 | `--apple-services` | flag | No | Enable iCloud/iMessage/FaceTime support |
@@ -355,11 +358,12 @@ Sample output (with failures):
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Warnings (doctor with warnings but no failures) |
+| 1 | Warnings (`doctor` with warnings but no failures), or `install-unattended` timed out |
 | 2 | Validation error (bad VMID, invalid config, VM not found) |
 | 3 | Missing assets (OpenCore or recovery image not found) |
-| 4 | Execution failure (apply, edit, clone, or doctor with failures) |
+| 4 | Execution failure (`apply`, or `doctor` with failures) |
 | 5 | Download failed |
 | 6 | Destroy failed |
 | 7 | Edit failed |
 | 8 | Clone failed |
+| 9 | Post-install failed |

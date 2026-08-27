@@ -22,6 +22,7 @@ const sidebars: SidebarsConfig = {
         'guides/shared-storage',
         'guides/troubleshooting',
         'guides/macos-versions',
+        'guides/unattended-install',
         'guides/faq',
       ],
     },

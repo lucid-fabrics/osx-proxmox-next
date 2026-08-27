@@ -98,7 +98,7 @@ No. The tool runs entirely on Proxmox. It downloads macOS recovery images direct
 <details>
 <summary><strong>Can I use this on Proxmox 8?</strong></summary>
 
-The tool is built and tested for **Proxmox VE 9**. Proxmox 8 is not officially supported and may have differences in `qm` command behavior or storage APIs. Upgrade to Proxmox 9 for the best experience.
+Yes. The version gate accepts any Proxmox VE 8.x or 9.x point release. Proxmox 9 is the most-tested target and gets the fastest fixes, so upgrade if you can, but 8.x is not blocked.
 
 </details>
 

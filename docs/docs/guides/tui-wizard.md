@@ -60,18 +60,20 @@ Review and edit VM settings with auto-filled defaults based on your hardware.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| VMID | Next available | Must be unique, 100-999999 |
+| VMID | `900` | Must be unique, 100-999999 |
 | Name | `macos-{version}` | VM display name |
 | CPU Cores | Auto-detected | Must be power of 2 (2, 4, 8, 16) |
 | Memory (MB) | Auto-detected | Minimum 4096 MB |
 | Disk (GB) | Varies by version (80-160) | Minimum 64 GB |
 | Network Bridge | `vmbr0` | Proxmox bridge interface |
+| VLAN Tag | Untagged | Optional VLAN tag for `net0`, 1-4094 |
 
 Additional options available in this step:
 
 - **Generate SMBIOS** -- regenerate identity values
 - **Enable Apple Services** -- adds `vmgenid`, static MAC, and PlatformInfo patching
 - **Verbose Boot** -- shows kernel log instead of Apple logo
+- **Unattended install (BETA)** -- finishes the macOS install by itself, see [Unattended Install](./unattended-install.md)
 - **Existing UUID** -- enter a UUID to preserve identity for re-runs
 
 :::warning
@@ -87,7 +89,7 @@ The wizard auto-downloads any missing assets (OpenCore ISO, recovery image), the
 This step shows:
 
 - Each command with its title and risk level
-- The full `qm create`, `qm set`, and `qm importdisk` sequence
+- The full `qm create`, `qm set`, and disk import sequence
 - SMBIOS values that will be applied
 - Boot order configuration
 
@@ -103,7 +105,7 @@ Executes all commands from the dry-run preview:
 
 1. Creates the VM with `qm create`
 2. Builds the OpenCore bootloader (GPT + EFI partition)
-3. Imports OpenCore and recovery disks via `qm importdisk`
+3. Imports OpenCore and recovery disks via `qm disk import` (falls back to `qm importdisk` on older Proxmox)
 4. Configures boot order (`ide2;virtio0;ide0`)
 5. Starts the VM
 
@@ -117,7 +119,7 @@ Run this as soon as the installer reboots the VM for the first time, not only on
 osx-next-cli post-install --vmid <id> --execute
 ```
 
-It detaches recovery and sets boot order `ide0;virtio0`. Until you do, the OpenCore picker auto-boots recovery on every reboot and the install never finishes.
+It detaches recovery, sets boot order `ide0;virtio0`, and restores the picker's 15 second auto-boot. Until you run it, every reboot stops at the picker with recovery listed first, so the install only resumes if you pick the installer by hand.
 
 ---
 
