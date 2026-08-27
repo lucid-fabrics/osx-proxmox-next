@@ -20,7 +20,7 @@ The TUI wizard guides you through six steps:
 | 1. Preflight | Auto-detects CPU vendor (Intel/AMD), checks host readiness |
 | 2. Choose OS | Pick macOS version: Ventura 13, Sonoma 14, Sequoia 15, or Tahoe 26 |
 | 3. Storage | Select a storage target from auto-detected Proxmox storage pools |
-| 4. Config | Review/edit VM settings (VMID, cores, memory, disk) with auto-filled defaults |
+| 4. Config | Review/edit VM settings (VMID, cores, memory, disk, bridge, optional VLAN tag) with auto-filled defaults |
 | 5. Dry Run | Auto-downloads missing assets, then previews every `qm` command |
 | 6. Install | Creates the VM, builds OpenCore, imports disks, and starts the VM |
 

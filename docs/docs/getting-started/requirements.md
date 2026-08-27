@@ -20,6 +20,20 @@ Before installing OSX Proxmox Next, verify your hardware and software meet the f
 CPU core count **must be a power of 2** (2, 4, 8, 16). Non-power-of-2 values like 6 or 12 can cause the macOS kernel to hang at the Apple logo.
 :::
 
+### Host RAM Is Checked Before the VM Is Created
+
+macOS has no balloon driver, so every VM is built with `--balloon 0` and its full allocation is pinned at `qm start`. Asking for more RAM than the host has free either fails the start or gets the VM OOM-killed mid-install, so both the TUI and the bash script refuse the request up front:
+
+```text
+Not enough free RAM on this host for a 32768 MiB VM
+  Host has only 8192 MiB free for a VM (MemAvailable minus 1024 MiB host reserve).
+  Lower the VM memory or free up host RAM, then run the script again.
+```
+
+The limit is `MemAvailable` from `/proc/meminfo` minus a 1024 MiB reserve kept for the Proxmox host itself. `MemAvailable` is used rather than `MemFree` because reclaimable page cache is genuinely available to a starting VM.
+
+The suggested default is half the host's total RAM, capped to that same free-RAM limit and clamped to 4096-32768 MiB. When `/proc/meminfo` cannot be read the default is 8192 MiB and no cap is applied.
+
 ### CPU Compatibility
 
 | CPU Type | How It Works |
@@ -35,7 +49,7 @@ All CPU types are auto-detected. No manual configuration needed.
 
 | Requirement | Details |
 |------------|---------|
-| Proxmox VE | Version 9 with root shell access |
+| Proxmox VE | Version 8.x or 9.x with root shell access (9.x is the most-tested target) |
 | Python | 3.9+ (only for pipx/pip install method) |
 | dmg2img | Installed automatically by the tool |
 | Internet | Required for bootstrap and downloading macOS recovery images |

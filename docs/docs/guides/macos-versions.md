@@ -14,7 +14,7 @@ OSX Proxmox Next supports four macOS versions. This guide helps you pick the rig
 | Ventura 13 | Excellent | Full (iCloud, iMessage, FaceTime) | Good | Older hardware, maximum compatibility |
 | Sonoma 14 | Excellent | Full (iCloud, iMessage, FaceTime) | Very Good | Best all-around choice |
 | Sequoia 15 | Good | Full with `--apple-services` (kernel patch auto-applied) | Very Good | Users who need latest features |
-| Tahoe 26 | Beta | Full with `--apple-services` (kernel patch auto-applied) | Good | Early adopters, testing |
+| Tahoe 26 | Good | Full with `--apple-services` (kernel patch auto-applied) | Good | Users who want the newest release |
 
 ## Version Details
 
@@ -61,17 +61,17 @@ For users who want the latest stable release.
 
 ### Tahoe 26
 
-The bleeding-edge option, currently in beta.
+The newest supported release. The tool treats it as a stable target, and installs are verified end to end, but it has the least mileage of the four.
 
 **Pros:**
-- Access to the newest macOS features before general availability
-- Good for developers targeting the next macOS release
+- The newest macOS features
+- Good for developers targeting the current macOS release
 
 **Cons:**
-- Beta software with potential bugs and instability
+- Least battle-tested of the supported versions
 - Apple Services require the kernel patches applied by `--apple-services` (not officially verified)
 - Not recommended for production or daily-driver use
-- May require updates to OpenCore configuration as betas progress
+- Newer point releases can need OpenCore or kext updates before they boot cleanly
 
 ## Which Should I Choose?
 
@@ -84,7 +84,7 @@ Follow this decision path:
 
 2. **Do you want the latest macOS features?**
    - Yes, stable: **Sequoia 15** gives you the newest stable release.
-   - Yes, bleeding-edge: **Tahoe 26** if you accept beta instability.
+   - Yes, newest: **Tahoe 26**, supported and verified, just the least battle-tested.
    - No: Continue to step 3.
 
 3. **Are you running older or limited hardware?**
