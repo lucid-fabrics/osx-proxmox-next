@@ -20,6 +20,7 @@ unattended_install (scripts/bash/osx-proxmox-next.sh); tests diff both.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import subprocess
@@ -39,7 +40,9 @@ MACOS_MAX_BYTES = 4_500_000        # 1280x800 recovery / installer / Setup Assis
 PICKER_TIMEOUT = 600
 RECOVERY_TIMEOUT = 900
 INSTALL_REBOOT_TIMEOUT = 1800      # startosinstall prep before its first reboot
-RECOVERY_SETTLE = 240              # utilities window finishes loading well within this
+RECOVERY_SETTLE = 240              # minimum settle before the utilities window is looked for
+RECOVERY_STILL_MAX = 600           # extra grace while the recovery screen is still moving
+RECOVERY_STILL_FRAMES = 3          # identical consecutive frames = nothing animating
 TERMINAL_OPEN_WAIT = 10
 DONE_QUIET = 900                   # no picker for 15 min after reboots = install done
 TOTAL_BUDGET = 3 * 3600
@@ -113,6 +116,13 @@ class QmConsole:
         except FileNotFoundError:
             return 0
 
+    def frame_hash(self) -> str:
+        """md5 of a fresh screendump; "" when the dump failed."""
+        if not self.frame_size():
+            return ""
+        with open(self._probe, "rb") as probe:
+            return hashlib.md5(probe.read()).hexdigest()
+
     def sendkey(self, key: str) -> None:
         self._run(["qm", "sendkey", self.vmid, key], capture_output=True)
 
@@ -150,6 +160,32 @@ def _wait(console: QmConsole, predicate: Callable[[int], bool], timeout: float,
     raise UnattendedError(f"Timed out after {int(timeout)}s waiting for {what}")
 
 
+def _wait_still(console: QmConsole, on_event: Callable[[str], None],
+                clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
+    """Hold until the recovery screen stops animating.
+
+    A cold first boot can still be in Recovery Assistant ("Examining
+    volumes", a spinner) when the settle expires. Its menu bar carries no
+    Utilities menu, so the Terminal navigation walks the wrong menu bar,
+    the command is typed into the utilities window that appears later and
+    its closing return runs the highlighted "Restore from Time Machine".
+    Identical consecutive frames mean nothing is animating any more, which
+    is only true once the utilities window is up."""
+    deadline = clock() + RECOVERY_STILL_MAX
+    seen = console.frame_hash()
+    still = 1
+    while clock() < deadline:
+        sleep(POLL_INTERVAL)
+        current = console.frame_hash()
+        if current and current == seen:
+            still += 1
+            if still >= RECOVERY_STILL_FRAMES:
+                return
+        else:
+            seen, still = current, 1
+    on_event("Recovery screen never stopped moving; navigating anyway")
+
+
 def run_unattended_install(
     console: QmConsole,
     disk_gb: int,
@@ -174,6 +210,7 @@ def run_unattended_install(
           "recovery to start", clock, sleep)
     on_event(f"Recovery is booting; settling {RECOVERY_SETTLE}s for the utilities window")
     sleep(RECOVERY_SETTLE)
+    _wait_still(console, on_event, clock, sleep)
 
     on_event("Opening Terminal from the Utilities menu")
     console.seq(TERMINAL_NAV)
