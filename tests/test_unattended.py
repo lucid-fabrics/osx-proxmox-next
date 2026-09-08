@@ -15,6 +15,8 @@ from osx_proxmox_next.unattended import (
     PICKER_TIMEOUT,
     POLL_INTERVAL,
     RECOVERY_SETTLE,
+    RECOVERY_STILL_FRAMES,
+    RECOVERY_STILL_MAX,
     RECOVERY_TIMEOUT,
     TERMINAL_NAV,
     TOTAL_BUDGET,
@@ -74,9 +76,11 @@ class FakeClock:
 class FakeConsole:
     """Frame sizes come from a schedule of (from_time, size) entries."""
 
-    def __init__(self, clock: FakeClock, schedule: list[tuple[float, int]]):
+    def __init__(self, clock: FakeClock, schedule: list[tuple[float, int]],
+                 moving_until: float = 0.0):
         self.clock = clock
         self.schedule = schedule
+        self.moving_until = moving_until
         self.keys: list[str] = []
         self.typed: list[str] = []
         self.qm_calls: list[tuple[str, ...]] = []
@@ -90,6 +94,15 @@ class FakeConsole:
             if self.clock.now >= start:
                 size = value
         return size
+
+    def frame_hash(self) -> str:
+        """An animating screen hashes differently on every poll."""
+        size = self.frame_size()
+        if not size:
+            return ""
+        if self.clock.now < self.moving_until:
+            return f"{size}-moving-{self.clock.now}"
+        return f"{size}-still"
 
     def sendkey(self, key: str) -> None:
         self.keys.append(key)
@@ -154,6 +167,45 @@ def test_full_install_happy_path() -> None:
     assert any("Done" in e for e in events)
 
 
+def test_terminal_nav_waits_for_a_still_screen() -> None:
+    """A cold boot still animating Recovery Assistant at the end of the
+    settle must not be navigated: the wrong menu bar is on screen."""
+    clock = FakeClock()
+    moving_until = RECOVERY_SETTLE + 300
+    console = FakeConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS),
+                                  (2000, PICKER), (2100, PICKER), (2130, MACOS),
+                                  (2700, PICKER), (2730, MACOS)],
+                          moving_until=moving_until)
+    events: list[str] = []
+    nav_at: list[float] = []
+    original = console.sendkey
+
+    def watched(key: str) -> None:
+        if key == "ctrl-f2":
+            nav_at.append(clock.now)
+        original(key)
+
+    console.sendkey = watched  # type: ignore[method-assign]
+    run_unattended_install(console, 128, on_event=events.append,
+                           clock=clock.monotonic, sleep=clock.sleep)
+    assert nav_at and nav_at[0] >= moving_until
+    assert not any("never stopped moving" in e for e in events)
+
+
+def test_still_wait_gives_up_and_says_so() -> None:
+    """A screen that never stops moving still gets navigated, with a note."""
+    clock = FakeClock()
+    console = FakeConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS),
+                                  (2000, PICKER), (2100, PICKER), (2130, MACOS),
+                                  (2700, PICKER), (2730, MACOS)],
+                          moving_until=float("inf"))
+    events: list[str] = []
+    run_unattended_install(console, 128, on_event=events.append,
+                           clock=clock.monotonic, sleep=clock.sleep)
+    assert any("never stopped moving" in e for e in events)
+    assert "ctrl-f2" in console.keys
+
+
 def test_picker_timeout_raises() -> None:
     with pytest.raises(UnattendedError, match="OpenCore picker"):
         _run([(0, 0)])
@@ -209,6 +261,21 @@ def test_qmconsole_frame_size_zero_without_dump() -> None:
     assert console.frame_size() == 0
 
 
+def test_qmconsole_frame_hash(tmp_path: Path) -> None:
+    """No dump means no hash; a dumped frame hashes its bytes."""
+    console = QmConsole(997, runner=lambda *a, **k: subprocess.CompletedProcess(a, 0),
+                        sleep=lambda s: None)
+    console._probe = str(tmp_path / "frame.ppm")
+    assert console.frame_hash() == ""
+
+    def dumping_runner(*args, **kwargs):
+        Path(console._probe).write_bytes(b"P6 frame")
+        return subprocess.CompletedProcess(args, 0)
+
+    console._run = dumping_runner
+    assert console.frame_hash() == "e0dc4968b8f2767a4b4fe1f0db9e640c"
+
+
 # ---------------------------------------------------------------------------
 # Bash parity
 # ---------------------------------------------------------------------------
@@ -224,6 +291,8 @@ def test_bash_constants_match_python(bash_text: str) -> None:
         "UNATTENDED_INSTALL_REBOOT_TIMEOUT": INSTALL_REBOOT_TIMEOUT,
         "UNATTENDED_PICKER_MIN_BYTES": PICKER_MIN_BYTES,
         "UNATTENDED_RECOVERY_SETTLE": RECOVERY_SETTLE,
+        "UNATTENDED_RECOVERY_STILL_MAX": RECOVERY_STILL_MAX,
+        "UNATTENDED_RECOVERY_STILL_FRAMES": RECOVERY_STILL_FRAMES,
         "UNATTENDED_PICKER_TIMEOUT": PICKER_TIMEOUT,
         "UNATTENDED_RECOVERY_TIMEOUT": RECOVERY_TIMEOUT,
         "UNATTENDED_DONE_QUIET": DONE_QUIET,
@@ -270,3 +339,10 @@ def test_bash_detaches_recovery_at_first_reboot(bash_text: str) -> None:
     assert 'qm set "$vmid" --delete ide2' in fn
     assert fn.index("unattended_install_command") < fn.index("--delete ide2")
     assert 'qm sendkey "$vmid" right' not in fn  # no blind entry-walking
+
+
+def test_bash_waits_for_a_still_screen_before_the_nav(bash_text: str) -> None:
+    fn = bash_text[bash_text.index("function unattended_install()"):]
+    assert fn.index('sleep "$UNATTENDED_RECOVERY_SETTLE"') \
+        < fn.index('unattended_wait_still "$vmid"') < fn.index("ctrl-f2")
+    assert "md5sum" in bash_text[bash_text.index("function unattended_frame_hash()"):]

@@ -895,6 +895,8 @@ function assemble_opencore_iso() {
 # picker, smaller = 1280x800 macOS.
 UNATTENDED_PICKER_MIN_BYTES=5000000
 UNATTENDED_RECOVERY_SETTLE=240
+UNATTENDED_RECOVERY_STILL_MAX=600
+UNATTENDED_RECOVERY_STILL_FRAMES=3
 UNATTENDED_PICKER_TIMEOUT=600
 UNATTENDED_INSTALL_REBOOT_TIMEOUT=1800
 UNATTENDED_RECOVERY_TIMEOUT=900
@@ -908,6 +910,34 @@ function unattended_frame_size() {
   echo "screendump $probe" | qm monitor "$vmid" >/dev/null 2>&1
   sleep 0.6
   stat -c %s "$probe" 2>/dev/null || echo 0
+}
+
+function unattended_frame_hash() {
+  local vmid="$1" probe="/tmp/osx-next-unattended-$1.ppm"
+  [ "$(unattended_frame_size "$vmid")" == "0" ] && return 0
+  md5sum "$probe" 2>/dev/null | cut -d' ' -f1
+}
+
+# Hold until the recovery screen stops animating. A cold first boot can still
+# be in Recovery Assistant ("Examining volumes", a spinner) when the settle
+# expires; its menu bar carries no Utilities menu, so the Terminal navigation
+# walks the wrong menu bar, the command lands in the utilities window that
+# appears later and its closing return runs "Restore from Time Machine".
+function unattended_wait_still() {
+  local vmid="$1" t0 seen cur still=1
+  t0=$(date +%s)
+  seen=$(unattended_frame_hash "$vmid")
+  while (( $(date +%s) - t0 < UNATTENDED_RECOVERY_STILL_MAX )); do
+    sleep "$UNATTENDED_POLL"
+    cur=$(unattended_frame_hash "$vmid")
+    if [ -n "$cur" ] && [ "$cur" == "$seen" ]; then
+      still=$((still + 1))
+      (( still >= UNATTENDED_RECOVERY_STILL_FRAMES )) && return 0
+    else
+      seen="$cur"; still=1
+    fi
+  done
+  msg_info "Unattended: recovery screen never stopped moving; navigating anyway"
 }
 
 function unattended_type() {
@@ -969,6 +999,7 @@ function unattended_install() {
   unattended_wait_frame "$vmid" "$UNATTENDED_RECOVERY_TIMEOUT" below || {
     msg_error "Unattended: recovery never reached its UI"; return 1; }
   sleep "$UNATTENDED_RECOVERY_SETTLE"
+  unattended_wait_still "$vmid"
   msg_ok "Unattended: recovery loaded"
 
   # Utilities menu -> Terminal: ctrl-f2, right x4, down x3, ret
