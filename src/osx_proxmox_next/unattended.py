@@ -45,6 +45,7 @@ RECOVERY_STILL_MAX = 600           # extra grace while the recovery screen is st
 RECOVERY_STILL_FRAMES = 3          # identical consecutive frames = nothing animating
 TERMINAL_OPEN_WAIT = 10
 DONE_QUIET = 900                   # no picker for 15 min after reboots = install done
+HUNG_STILL = 600                   # frame byte-identical for 10 min = macOS is wedged
 TOTAL_BUDGET = 3 * 3600
 POLL_INTERVAL = 6
 KEY_DELAY = 0.4
@@ -116,12 +117,19 @@ class QmConsole:
         except FileNotFoundError:
             return 0
 
+    def probe_hash(self) -> str:
+        """md5 of the screendump frame_size() last wrote; "" when there is none."""
+        try:
+            with open(self._probe, "rb") as probe:
+                return hashlib.md5(probe.read()).hexdigest()
+        except FileNotFoundError:
+            return ""
+
     def frame_hash(self) -> str:
         """md5 of a fresh screendump; "" when the dump failed."""
         if not self.frame_size():
             return ""
-        with open(self._probe, "rb") as probe:
-            return hashlib.md5(probe.read()).hexdigest()
+        return self.probe_hash()
 
     def sendkey(self, key: str) -> None:
         self._run(["qm", "sendkey", self.vmid, key], capture_output=True)
@@ -240,8 +248,18 @@ def run_unattended_install(
 
     boots = 0
     last_big = clock()
+    last_change = clock()
+    seen = ""
     while clock() - start < TOTAL_BUDGET:
         size = console.frame_size()
+        # macOS wedged behind the boot logo is exactly as quiet as a finished
+        # install: no picker, no 1080p frame. What separates them is motion.
+        # Running macOS always moves, if only because the Setup Assistant menu
+        # bar ticks its clock every minute; a wedged kernel never redraws.
+        digest = console.probe_hash()
+        if digest and digest != seen:
+            seen = digest
+            last_change = clock()
         if size > PICKER_MIN_BYTES:
             boots += 1
             last_big = clock()
@@ -251,6 +269,10 @@ def run_unattended_install(
             console.sendkey("ret")
             on_event(f"1080p frame {boots}: confirmed the only boot entry")
             sleep(30)
+        elif boots >= 1 and clock() - last_change > HUNG_STILL:
+            raise UnattendedError(
+                f"macOS appears hung: screen unchanged for {HUNG_STILL // 60} min"
+            )
         elif boots >= 1 and clock() - last_big > DONE_QUIET:
             elapsed = int(clock() - start)
             on_event(
