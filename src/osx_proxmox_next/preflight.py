@@ -51,24 +51,53 @@ _BUILD_BINARIES: dict[str, str] = {
 }
 
 
-def _check_ignore_msrs(kvm_conf: Path | None = None) -> PreflightCheck:
-    """Check if KVM ignore_msrs=Y is set - critical for macOS (prevents MSR kernel panics)."""
+def _check_ignore_msrs(
+    kvm_conf: Path | None = None,
+    sysfs_path: Path | None = None,
+) -> PreflightCheck:
+    """Check that the running KVM module ignores unsupported MSR reads.
+
+    kvm.conf is only read when the module loads. On a node where the file was
+    written after kvm was already loaded and never rebooted, the conf says Y
+    while /sys/module/kvm/parameters/ignore_msrs still says N, and macOS hangs
+    at the Apple logo. The live sysfs value is the only one that decides, so the
+    conf file is treated as the persistence hint, not as the answer.
+    """
     if kvm_conf is None:
         kvm_conf = Path("/etc/modprobe.d/kvm.conf")
-    if kvm_conf.exists():
-        content = kvm_conf.read_text()
-        if "ignore_msrs=Y" in content:
-            return PreflightCheck(
-                name="KVM ignore_msrs",
-                ok=True,
-                details="ignore_msrs=Y set in /etc/modprobe.d/kvm.conf",
-            )
-    return PreflightCheck(
-        name="KVM ignore_msrs",
-        ok=False,
-        details="Missing ignore_msrs=Y - macOS will kernel panic on unsupported MSR access. "
-                "Fix: echo 'options kvm ignore_msrs=Y' >> /etc/modprobe.d/kvm.conf && update-initramfs -k all -u",
-    )
+    if sysfs_path is None:
+        sysfs_path = Path("/sys/module/kvm/parameters/ignore_msrs")
+
+    persisted = kvm_conf.exists() and "ignore_msrs=Y" in kvm_conf.read_text()
+    live = sysfs_path.read_text().strip() if sysfs_path.exists() else ""
+
+    if live in ("Y", "1"):
+        persistence = (
+            "persisted in /etc/modprobe.d/kvm.conf"
+            if persisted
+            else "not persisted, add 'options kvm ignore_msrs=Y' to "
+                 "/etc/modprobe.d/kvm.conf so it survives a reboot"
+        )
+        return PreflightCheck(
+            name="KVM ignore_msrs",
+            ok=True,
+            details=f"ignore_msrs=Y on the running kvm module ({persistence})",
+        )
+
+    if persisted:
+        details = (
+            "ignore_msrs=Y is in /etc/modprobe.d/kvm.conf but the running kvm module has not "
+            "picked it up (sysfs still reports N), so macOS will hang at the Apple logo. "
+            "Fix, no reboot needed: echo Y > /sys/module/kvm/parameters/ignore_msrs"
+        )
+    else:
+        details = (
+            "Missing ignore_msrs=Y - macOS will kernel panic on unsupported MSR access. "
+            "Fix now, no reboot needed: echo Y > /sys/module/kvm/parameters/ignore_msrs - "
+            "then persist it: echo 'options kvm ignore_msrs=Y' >> /etc/modprobe.d/kvm.conf "
+            "&& update-initramfs -k all -u"
+        )
+    return PreflightCheck(name="KVM ignore_msrs", ok=False, details=details)
 
 
 def _check_iommu(cmdline_path: Path | None = None) -> PreflightCheck:
