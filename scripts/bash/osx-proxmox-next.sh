@@ -901,6 +901,7 @@ UNATTENDED_PICKER_TIMEOUT=600
 UNATTENDED_INSTALL_REBOOT_TIMEOUT=1800
 UNATTENDED_RECOVERY_TIMEOUT=900
 UNATTENDED_DONE_QUIET=900
+UNATTENDED_HUNG_STILL=600
 UNATTENDED_TOTAL_BUDGET=10800
 UNATTENDED_POLL=6
 
@@ -912,10 +913,15 @@ function unattended_frame_size() {
   stat -c %s "$probe" 2>/dev/null || echo 0
 }
 
+# md5 of the frame unattended_frame_size last wrote, without dumping again.
+function unattended_probe_hash() {
+  md5sum "/tmp/osx-next-unattended-$1.ppm" 2>/dev/null | cut -d' ' -f1
+}
+
 function unattended_frame_hash() {
-  local vmid="$1" probe="/tmp/osx-next-unattended-$1.ppm"
+  local vmid="$1"
   [ "$(unattended_frame_size "$vmid")" == "0" ] && return 0
-  md5sum "$probe" 2>/dev/null | cut -d' ' -f1
+  unattended_probe_hash "$vmid"
 }
 
 # Hold until the recovery screen stops animating. A cold first boot can still
@@ -985,7 +991,7 @@ function unattended_wait_frame() {
 }
 
 function unattended_install() {
-  local vmid="$1" disk_gb="$2" t0 size reboots=0 last_picker
+  local vmid="$1" disk_gb="$2" t0 size reboots=0 last_picker last_change digest seen
   t0=$(date +%s)
 
   msg_info "Unattended (BETA): waiting for the OpenCore boot picker"
@@ -1036,8 +1042,19 @@ function unattended_install() {
   msg_ok "Unattended: recovery detached; continuing hands-off (30-60 min)"
 
   last_picker=$(date +%s)
+  last_change=$(date +%s)
+  seen=""
   while (( $(date +%s) - t0 < UNATTENDED_TOTAL_BUDGET )); do
     size=$(unattended_frame_size "$vmid")
+    # macOS wedged behind the boot logo is exactly as quiet as a finished
+    # install: no picker, no 1080p frame. What separates them is motion.
+    # Running macOS always moves, if only because the Setup Assistant menu bar
+    # ticks its clock every minute; a wedged kernel never redraws.
+    digest=$(unattended_probe_hash "$vmid")
+    if [ -n "$digest" ] && [ "$digest" != "$seen" ]; then
+      seen="$digest"
+      last_change=$(date +%s)
+    fi
     if (( size > UNATTENDED_PICKER_MIN_BYTES )); then
       reboots=$((reboots + 1))
       last_picker=$(date +%s)
@@ -1047,6 +1064,9 @@ function unattended_install() {
       qm sendkey "$vmid" ret >/dev/null 2>&1
       msg_ok "Unattended: 1080p frame ${reboots}, confirmed the only boot entry"
       sleep 30
+    elif (( reboots >= 1 && $(date +%s) - last_change > UNATTENDED_HUNG_STILL )); then
+      msg_error "Unattended: macOS appears hung: screen unchanged for $((UNATTENDED_HUNG_STILL / 60)) min"
+      return 1
     elif (( reboots >= 1 && $(date +%s) - last_picker > UNATTENDED_DONE_QUIET )); then
       msg_ok "Unattended: install finished after ${reboots} boot(s)"
       return 0

@@ -10,6 +10,7 @@ import pytest
 from osx_proxmox_next.unattended import (
     CHARMAP,
     DONE_QUIET,
+    HUNG_STILL,
     INSTALL_REBOOT_TIMEOUT,
     PICKER_MIN_BYTES,
     PICKER_TIMEOUT,
@@ -77,10 +78,11 @@ class FakeConsole:
     """Frame sizes come from a schedule of (from_time, size) entries."""
 
     def __init__(self, clock: FakeClock, schedule: list[tuple[float, int]],
-                 moving_until: float = 0.0):
+                 moving_until: float = 0.0, hung_from: float = float("inf")):
         self.clock = clock
         self.schedule = schedule
         self.moving_until = moving_until
+        self.hung_from = hung_from
         self.keys: list[str] = []
         self.typed: list[str] = []
         self.qm_calls: list[tuple[str, ...]] = []
@@ -103,6 +105,16 @@ class FakeConsole:
         if self.clock.now < self.moving_until:
             return f"{size}-moving-{self.clock.now}"
         return f"{size}-still"
+
+    def probe_hash(self) -> str:
+        """Live macOS redraws its menu-bar clock every minute; a wedged one
+        returns the same frame forever."""
+        size = self.frame_size()
+        if not size:
+            return ""
+        if self.clock.now >= self.hung_from:
+            return "frozen"
+        return f"{size}-{int(self.clock.now // 60)}"
 
     def sendkey(self, key: str) -> None:
         self.keys.append(key)
@@ -237,6 +249,25 @@ def test_done_requires_at_least_one_boot_after_detach() -> None:
         _run([(0, 0), (30, PICKER), (60, MACOS)])
 
 
+def test_a_frozen_screen_is_never_done() -> None:
+    """A wedged kernel is as quiet as a finished install. The screen going
+    byte-identical for HUNG_STILL is what tells them apart, and it must be
+    reported as a failure instead of a successful install."""
+    clock = FakeClock()
+    console = FakeConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS),
+                                  (1000, PICKER), (1100, PICKER), (1130, MACOS),
+                                  (1700, PICKER), (1730, MACOS)],
+                          hung_from=1730)
+    with pytest.raises(UnattendedError, match="appears hung"):
+        run_unattended_install(console, 128, on_event=lambda m: None,
+                               clock=clock.monotonic, sleep=clock.sleep)
+
+
+def test_hung_detection_fires_before_the_done_window() -> None:
+    """Otherwise a frozen screen would still be declared done first."""
+    assert HUNG_STILL < DONE_QUIET
+
+
 # ---------------------------------------------------------------------------
 # QmConsole plumbing
 # ---------------------------------------------------------------------------
@@ -267,6 +298,7 @@ def test_qmconsole_frame_hash(tmp_path: Path) -> None:
                         sleep=lambda s: None)
     console._probe = str(tmp_path / "frame.ppm")
     assert console.frame_hash() == ""
+    assert console.probe_hash() == ""   # nothing dumped yet
 
     def dumping_runner(*args, **kwargs):
         Path(console._probe).write_bytes(b"P6 frame")
@@ -274,6 +306,9 @@ def test_qmconsole_frame_hash(tmp_path: Path) -> None:
 
     console._run = dumping_runner
     assert console.frame_hash() == "e0dc4968b8f2767a4b4fe1f0db9e640c"
+    # probe_hash re-reads what frame_size already wrote, without dumping again
+    console._run = lambda *a, **k: subprocess.CompletedProcess(a, 0)
+    assert console.probe_hash() == "e0dc4968b8f2767a4b4fe1f0db9e640c"
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +331,7 @@ def test_bash_constants_match_python(bash_text: str) -> None:
         "UNATTENDED_PICKER_TIMEOUT": PICKER_TIMEOUT,
         "UNATTENDED_RECOVERY_TIMEOUT": RECOVERY_TIMEOUT,
         "UNATTENDED_DONE_QUIET": DONE_QUIET,
+        "UNATTENDED_HUNG_STILL": HUNG_STILL,
         "UNATTENDED_TOTAL_BUDGET": TOTAL_BUDGET,
         "UNATTENDED_POLL": POLL_INTERVAL,
     }
@@ -345,4 +381,11 @@ def test_bash_waits_for_a_still_screen_before_the_nav(bash_text: str) -> None:
     fn = bash_text[bash_text.index("function unattended_install()"):]
     assert fn.index('sleep "$UNATTENDED_RECOVERY_SETTLE"') \
         < fn.index('unattended_wait_still "$vmid"') < fn.index("ctrl-f2")
-    assert "md5sum" in bash_text[bash_text.index("function unattended_frame_hash()"):]
+    assert "md5sum" in bash_text[bash_text.index("function unattended_probe_hash()"):]
+
+
+def test_bash_refuses_to_call_a_frozen_screen_done(bash_text: str) -> None:
+    fn = bash_text[bash_text.index("function unattended_install()"):]
+    assert fn.index("UNATTENDED_HUNG_STILL") < fn.index("UNATTENDED_DONE_QUIET")
+    assert "macOS appears hung" in fn
+    assert "unattended_probe_hash" in fn
