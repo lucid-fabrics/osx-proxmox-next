@@ -12,7 +12,9 @@ from osx_proxmox_next.unattended import (
     DONE_QUIET,
     HUNG_STILL,
     INSTALL_REBOOT_TIMEOUT,
+    MAX_POWER_CYCLES,
     PICKER_MIN_BYTES,
+    PICKER_REPRESS,
     PICKER_TIMEOUT,
     POLL_INTERVAL,
     RECOVERY_SETTLE,
@@ -249,18 +251,96 @@ def test_done_requires_at_least_one_boot_after_detach() -> None:
         _run([(0, 0), (30, PICKER), (60, MACOS)])
 
 
+WEDGED_SCHEDULE = [(0, 0), (30, PICKER), (60, 0), (200, MACOS),
+                   (1000, PICKER), (1100, PICKER), (1130, MACOS),
+                   (1700, PICKER), (1730, MACOS)]
+
+
+class RecoveringConsole(FakeConsole):
+    """A guest wedged on its last frame that comes back after a power cycle,
+    which is what the AMD field runs showed: qm reset leaves the vCPUs
+    spinning, a full stop/start boots the finished install to Setup
+    Assistant."""
+
+    def qm(self, subcommand: str, *args: str) -> str:
+        frozen = self.clock.now >= self.hung_from
+        out = super().qm(subcommand, *args)
+        if subcommand == "start" and frozen:
+            self.hung_from = float("inf")
+        return out
+
+
 def test_a_frozen_screen_is_never_done() -> None:
     """A wedged kernel is as quiet as a finished install. The screen going
-    byte-identical for HUNG_STILL is what tells them apart, and it must be
-    reported as a failure instead of a successful install."""
+    byte-identical for HUNG_STILL is what tells them apart, and it must never
+    be reported as a successful install."""
     clock = FakeClock()
-    console = FakeConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS),
-                                  (1000, PICKER), (1100, PICKER), (1130, MACOS),
-                                  (1700, PICKER), (1730, MACOS)],
-                          hung_from=1730)
+    console = FakeConsole(clock, WEDGED_SCHEDULE, hung_from=1730)
+    events: list[str] = []
     with pytest.raises(UnattendedError, match="appears hung"):
-        run_unattended_install(console, 128, on_event=lambda m: None,
+        run_unattended_install(console, 128, on_event=events.append,
                                clock=clock.monotonic, sleep=clock.sleep)
+    assert not any("Done" in e for e in events)
+
+
+def test_a_wedged_guest_is_power_cycled_and_then_finishes() -> None:
+    """The install itself is done; only the guest's reboot wedged. One
+    stop/start clears it and the run reports success."""
+    clock = FakeClock()
+    console = RecoveringConsole(clock, WEDGED_SCHEDULE, hung_from=1730)
+    events: list[str] = []
+    summary = run_unattended_install(console, 128, on_event=events.append,
+                                     clock=clock.monotonic, sleep=clock.sleep)
+    assert any("power-cycling" in e for e in events)
+    # one stop for the recovery detach, one for the power cycle, no qm reset
+    assert console.qm_calls.count(("stop",)) == 2
+    assert console.qm_calls.count(("start",)) == 2
+    assert not any(call[0] == "reset" for call in console.qm_calls)
+    assert summary["reboots"] >= 1
+
+
+def test_power_cycling_gives_up_after_the_cap() -> None:
+    """A guest that wedges again after every cycle is a real failure."""
+    clock = FakeClock()
+    console = FakeConsole(clock, WEDGED_SCHEDULE, hung_from=1730)
+    events: list[str] = []
+    with pytest.raises(UnattendedError, match="appears hung"):
+        run_unattended_install(console, 128, on_event=events.append,
+                               clock=clock.monotonic, sleep=clock.sleep)
+    assert sum("power-cycling" in e for e in events) == MAX_POWER_CYCLES
+    assert console.qm_calls.count(("stop",)) == 1 + MAX_POWER_CYCLES
+
+
+class ParkedPickerConsole(FakeConsole):
+    """The OpenCore picker never redraws, so a parked one keeps a single md5
+    (Timeout=0 waits forever when the first return is dropped)."""
+
+    def probe_hash(self) -> str:
+        size = self.frame_size()
+        if not size:
+            return ""
+        if size > PICKER_MIN_BYTES:
+            return "picker"
+        return f"{size}-{int(self.clock.now // 60)}"
+
+
+def test_a_parked_picker_gets_pressed_again() -> None:
+    """A picker sitting on the same frame is re-pressed on a throttle, and
+    logs one line for the boot instead of one per poll."""
+    clock = FakeClock()
+    console = ParkedPickerConsole(
+        clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS),
+                (1000, PICKER), (1400, MACOS)])
+    events: list[str] = []
+    summary = run_unattended_install(console, 128, on_event=events.append,
+                                     clock=clock.monotonic, sleep=clock.sleep)
+    assert sum("1080p frame" in e for e in events) == 1
+    assert summary["reboots"] == 1
+    # 3 returns before the loop (picker, Terminal nav, command), then one per
+    # boot plus the throttled re-presses: many fewer than one per 6s poll.
+    presses = console.keys.count("ret") - 3
+    parked_for = 1400 - 1000
+    assert 5 <= presses <= parked_for // PICKER_REPRESS + 3
 
 
 def test_hung_detection_fires_before_the_done_window() -> None:
@@ -332,6 +412,8 @@ def test_bash_constants_match_python(bash_text: str) -> None:
         "UNATTENDED_RECOVERY_TIMEOUT": RECOVERY_TIMEOUT,
         "UNATTENDED_DONE_QUIET": DONE_QUIET,
         "UNATTENDED_HUNG_STILL": HUNG_STILL,
+        "UNATTENDED_PICKER_REPRESS": PICKER_REPRESS,
+        "UNATTENDED_MAX_POWER_CYCLES": MAX_POWER_CYCLES,
         "UNATTENDED_TOTAL_BUDGET": TOTAL_BUDGET,
         "UNATTENDED_POLL": POLL_INTERVAL,
     }
@@ -389,3 +471,19 @@ def test_bash_refuses_to_call_a_frozen_screen_done(bash_text: str) -> None:
     assert fn.index("UNATTENDED_HUNG_STILL") < fn.index("UNATTENDED_DONE_QUIET")
     assert "macOS appears hung" in fn
     assert "unattended_probe_hash" in fn
+
+
+def test_bash_power_cycles_a_wedged_guest(bash_text: str) -> None:
+    fn = bash_text[bash_text.index("function unattended_install()"):]
+    assert "power-cycling" in fn
+    assert fn.index("UNATTENDED_MAX_POWER_CYCLES") < fn.index("power-cycling")
+    assert "unattended_wait_stopped" in fn
+    assert not re.search(r"^\s*qm reset", bash_text, re.M)   # reset never clears it
+    assert "last_change <= UNATTENDED_DONE_QUIET" in fn   # done needs a moving screen
+
+
+def test_bash_represses_a_parked_picker(bash_text: str) -> None:
+    fn = bash_text[bash_text.index("function unattended_install()"):]
+    assert "UNATTENDED_PICKER_REPRESS" in fn
+    # picker, command, the per-boot press and the parked re-press
+    assert fn.count('qm sendkey "$vmid" ret') == 4
