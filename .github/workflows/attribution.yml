@@ -1,0 +1,25 @@
+name: Attribution
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  no-ai-attribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan commit messages, title and body
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          {
+            git log --format='%B' "$BASE_SHA..$HEAD_SHA"
+            printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY"
+          } | bash .githooks/check-attribution.sh
