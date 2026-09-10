@@ -895,10 +895,15 @@ function assemble_opencore_iso() {
 # picker, smaller = 1280x800 macOS.
 UNATTENDED_PICKER_MIN_BYTES=5000000
 UNATTENDED_RECOVERY_SETTLE=240
+UNATTENDED_RECOVERY_STILL_MAX=600
+UNATTENDED_RECOVERY_STILL_FRAMES=3
 UNATTENDED_PICKER_TIMEOUT=600
 UNATTENDED_INSTALL_REBOOT_TIMEOUT=1800
 UNATTENDED_RECOVERY_TIMEOUT=900
 UNATTENDED_DONE_QUIET=900
+UNATTENDED_HUNG_STILL=600
+UNATTENDED_PICKER_REPRESS=30
+UNATTENDED_MAX_POWER_CYCLES=2
 UNATTENDED_TOTAL_BUDGET=10800
 UNATTENDED_POLL=6
 
@@ -908,6 +913,39 @@ function unattended_frame_size() {
   echo "screendump $probe" | qm monitor "$vmid" >/dev/null 2>&1
   sleep 0.6
   stat -c %s "$probe" 2>/dev/null || echo 0
+}
+
+# md5 of the frame unattended_frame_size last wrote, without dumping again.
+function unattended_probe_hash() {
+  md5sum "/tmp/osx-next-unattended-$1.ppm" 2>/dev/null | cut -d' ' -f1
+}
+
+function unattended_frame_hash() {
+  local vmid="$1"
+  [ "$(unattended_frame_size "$vmid")" == "0" ] && return 0
+  unattended_probe_hash "$vmid"
+}
+
+# Hold until the recovery screen stops animating. A cold first boot can still
+# be in Recovery Assistant ("Examining volumes", a spinner) when the settle
+# expires; its menu bar carries no Utilities menu, so the Terminal navigation
+# walks the wrong menu bar, the command lands in the utilities window that
+# appears later and its closing return runs "Restore from Time Machine".
+function unattended_wait_still() {
+  local vmid="$1" t0 seen cur still=1
+  t0=$(date +%s)
+  seen=$(unattended_frame_hash "$vmid")
+  while (( $(date +%s) - t0 < UNATTENDED_RECOVERY_STILL_MAX )); do
+    sleep "$UNATTENDED_POLL"
+    cur=$(unattended_frame_hash "$vmid")
+    if [ -n "$cur" ] && [ "$cur" == "$seen" ]; then
+      still=$((still + 1))
+      (( still >= UNATTENDED_RECOVERY_STILL_FRAMES )) && return 0
+    else
+      seen="$cur"; still=1
+    fi
+  done
+  msg_info "Unattended: recovery screen never stopped moving; navigating anyway"
 }
 
 function unattended_type() {
@@ -941,6 +979,15 @@ function unattended_install_command() {
   printf '%s' "d=\$(diskutil list | awk '/\\*$size GB/{print \$NF; exit}') && diskutil eraseDisk APFS MACOS \$d && \"/Install macOS \"*.app/Contents/Resources/startosinstall --agreetolicense --volume /Volumes/MACOS --nointeraction"
 }
 
+function unattended_wait_stopped() {
+  local vmid="$1" _i
+  for _i in $(seq 1 40); do
+    qm status "$vmid" 2>/dev/null | grep -q stopped && return 0
+    sleep 3
+  done
+  return 1
+}
+
 function unattended_wait_frame() {
   # args: vmid timeout mode(above|below)
   local vmid="$1" timeout="$2" mode="$3" t0 size
@@ -955,7 +1002,7 @@ function unattended_wait_frame() {
 }
 
 function unattended_install() {
-  local vmid="$1" disk_gb="$2" t0 size reboots=0 last_picker
+  local vmid="$1" disk_gb="$2" t0 size reboots=0 last_picker last_change digest seen
   t0=$(date +%s)
 
   msg_info "Unattended (BETA): waiting for the OpenCore boot picker"
@@ -969,6 +1016,7 @@ function unattended_install() {
   unattended_wait_frame "$vmid" "$UNATTENDED_RECOVERY_TIMEOUT" below || {
     msg_error "Unattended: recovery never reached its UI"; return 1; }
   sleep "$UNATTENDED_RECOVERY_SETTLE"
+  unattended_wait_still "$vmid"
   msg_ok "Unattended: recovery loaded"
 
   # Utilities menu -> Terminal: ctrl-f2, right x4, down x3, ret
@@ -993,30 +1041,74 @@ function unattended_install() {
     msg_error "Unattended: the installer never rebooted"; return 1; }
   msg_ok "Unattended: first reboot reached; detaching recovery"
   qm stop "$vmid" >/dev/null 2>&1
-  local _i
-  for _i in $(seq 1 40); do
-    qm status "$vmid" 2>/dev/null | grep -q stopped && break
-    sleep 3
-  done
-  qm status "$vmid" 2>/dev/null | grep -q stopped || {
+  unattended_wait_stopped "$vmid" || {
     msg_error "Unattended: VM did not stop for the recovery-detach step"; return 1; }
   qm set "$vmid" --delete ide2 >/dev/null 2>&1
   qm start "$vmid" >/dev/null 2>&1
   msg_ok "Unattended: recovery detached; continuing hands-off (30-60 min)"
 
+  local last_press cycles=0 changed
   last_picker=$(date +%s)
+  last_change=$last_picker
+  last_press=$((last_picker - UNATTENDED_PICKER_REPRESS))
+  seen=""
   while (( $(date +%s) - t0 < UNATTENDED_TOTAL_BUDGET )); do
     size=$(unattended_frame_size "$vmid")
+    # macOS wedged behind the boot logo is exactly as quiet as a finished
+    # install: no picker, no 1080p frame. What separates them is motion.
+    # Running macOS always moves, if only because the Setup Assistant menu bar
+    # ticks its clock every minute; a wedged kernel never redraws.
+    digest=$(unattended_probe_hash "$vmid")
+    changed=0
+    if [ -n "$digest" ] && [ "$digest" != "$seen" ]; then
+      seen="$digest"
+      last_change=$(date +%s)
+      changed=1
+    fi
     if (( size > UNATTENDED_PICKER_MIN_BYTES )); then
-      reboots=$((reboots + 1))
       last_picker=$(date +%s)
-      sleep 2
-      # Single-entry picker (Timeout=0 still waits) or an ignored keystroke
-      # on the Apple-logo boot screen; either way safe.
-      qm sendkey "$vmid" ret >/dev/null 2>&1
-      msg_ok "Unattended: 1080p frame ${reboots}, confirmed the only boot entry"
-      sleep 30
-    elif (( reboots >= 1 && $(date +%s) - last_picker > UNATTENDED_DONE_QUIET )); then
+      if (( changed )); then
+        reboots=$((reboots + 1))
+        sleep 2
+        # Single-entry picker (Timeout=0 still waits) or an ignored keystroke
+        # on the Apple-logo boot screen; either way safe.
+        qm sendkey "$vmid" ret >/dev/null 2>&1
+        last_press=$(date +%s)
+        msg_ok "Unattended: 1080p frame ${reboots}, confirmed the only boot entry"
+        sleep "$UNATTENDED_PICKER_REPRESS"
+      elif (( $(date +%s) - last_press >= UNATTENDED_PICKER_REPRESS )); then
+        # A byte-identical 1080p frame is a picker still parked on its entry:
+        # Timeout=0 waits forever and the first return was dropped. Press
+        # again, quietly, so the log keeps one line per boot, not per poll.
+        qm sendkey "$vmid" ret >/dev/null 2>&1
+        last_press=$(date +%s)
+      fi
+    elif (( reboots >= 1 && $(date +%s) - last_change > UNATTENDED_HUNG_STILL )); then
+      # The guest's own reboot can wedge in an MP rendezvous with every vCPU
+      # spinning and the framebuffer stuck on its last frame. qm reset does
+      # not clear that; only a full stop/start does, and it boots the
+      # finished install to Setup Assistant in about 100s.
+      if (( cycles >= UNATTENDED_MAX_POWER_CYCLES )); then
+        msg_error "Unattended: macOS appears hung: screen unchanged for $((UNATTENDED_HUNG_STILL / 60)) min"
+        return 1
+      fi
+      cycles=$((cycles + 1))
+      msg_info "Unattended: guest appears wedged (screen unchanged for $((UNATTENDED_HUNG_STILL / 60)) min); power-cycling"
+      qm stop "$vmid" >/dev/null 2>&1
+      unattended_wait_stopped "$vmid" || {
+        msg_error "Unattended: VM did not stop for the power cycle"; return 1; }
+      qm start "$vmid" >/dev/null 2>&1
+      # The restarted guest earns its quiet window again: coming back from a
+      # power cycle is not by itself proof the install finished.
+      last_change=$(date +%s)
+      last_picker=$last_change
+      seen=""
+    # Ordering: HUNG_STILL (10 min) is checked above and is shorter than
+    # DONE_QUIET (15 min), so a frozen screen always power-cycles or fails
+    # before it can get here. The last_change clause is the belt to that
+    # guard's braces: a still screen is never a finished install.
+    elif (( reboots >= 1 && $(date +%s) - last_picker > UNATTENDED_DONE_QUIET
+            && $(date +%s) - last_change <= UNATTENDED_DONE_QUIET )); then
       msg_ok "Unattended: install finished after ${reboots} boot(s)"
       return 0
     fi
