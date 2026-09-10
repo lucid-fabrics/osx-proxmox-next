@@ -330,6 +330,25 @@ function check_dependencies() {
   fi
 }
 
+# ── Make sure KVM really ignores unsupported MSR reads ──
+# kvm.conf is only read when the module loads, so a node where the file was
+# written after kvm was already up (and never rebooted) still runs with
+# ignore_msrs=N and hangs macOS at the Apple logo. Set the live value too.
+function ensure_ignore_msrs() {
+  local param="/sys/module/kvm/parameters/ignore_msrs"
+  if ! grep -qs "ignore_msrs=Y" /etc/modprobe.d/kvm.conf; then
+    echo "options kvm ignore_msrs=Y" >>/etc/modprobe.d/kvm.conf
+    msg_ok "Persisted ignore_msrs=Y in /etc/modprobe.d/kvm.conf"
+  fi
+  [ -f "$param" ] || return 0
+  [ "$(cat "$param")" = "N" ] || return 0
+  if echo Y >"$param" 2>/dev/null; then
+    msg_ok "Enabled ignore_msrs on the running kvm module"
+  else
+    msg_error "Could not set ${param} - macOS will hang at the Apple logo"
+  fi
+}
+
 # ── Detect CPU vendor and model ──
 function detect_cpu_vendor() {
   if grep -q "AuthenticAMD" /proc/cpuinfo 2>/dev/null; then
@@ -1606,6 +1625,7 @@ arch_check
 pve_check
 ssh_check
 check_dependencies
+ensure_ignore_msrs
 start_script
 
 # Both settings paths have set RAM_SIZE by now; refuse to continue when the
