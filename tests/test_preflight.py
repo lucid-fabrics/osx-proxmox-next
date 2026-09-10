@@ -96,30 +96,68 @@ def test_find_binary_which_found(monkeypatch):
     assert preflight._find_binary("qm") == "/usr/bin/qm"
 
 
-def test_check_ignore_msrs_present(tmp_path):
-    """When kvm.conf has ignore_msrs=Y, check must pass."""
+def _msrs_paths(tmp_path, conf, live):
     kvm_conf = tmp_path / "kvm.conf"
-    kvm_conf.write_text("options kvm ignore_msrs=Y\n")
-    check = preflight._check_ignore_msrs(kvm_conf=kvm_conf)
+    if conf is not None:
+        kvm_conf.write_text(conf)
+    sysfs = tmp_path / "ignore_msrs"
+    if live is not None:
+        sysfs.write_text(live)
+    return kvm_conf, sysfs
+
+
+def test_check_ignore_msrs_present(tmp_path):
+    """When the conf has ignore_msrs=Y and the module agrees, check must pass."""
+    kvm_conf, sysfs = _msrs_paths(tmp_path, "options kvm ignore_msrs=Y\n", "Y\n")
+    check = preflight._check_ignore_msrs(kvm_conf=kvm_conf, sysfs_path=sysfs)
     assert check.name == "KVM ignore_msrs"
     assert check.ok is True
     assert "ignore_msrs=Y" in check.details
+    assert "persisted in /etc/modprobe.d/kvm.conf" in check.details
+
+
+def test_check_ignore_msrs_live_but_not_persisted(tmp_path):
+    """Live Y with no conf entry passes but warns it will not survive a reboot."""
+    kvm_conf, sysfs = _msrs_paths(tmp_path, None, "1\n")
+    check = preflight._check_ignore_msrs(kvm_conf=kvm_conf, sysfs_path=sysfs)
+    assert check.ok is True
+    assert "not persisted" in check.details
+
+
+def test_check_ignore_msrs_conf_set_but_module_stale(tmp_path):
+    """Conf says Y, running module says N: the live value decides, so it fails."""
+    kvm_conf, sysfs = _msrs_paths(tmp_path, "options kvm ignore_msrs=Y\n", "N\n")
+    check = preflight._check_ignore_msrs(kvm_conf=kvm_conf, sysfs_path=sysfs)
+    assert check.ok is False
+    assert "has not picked it up" in check.details
+    assert "echo Y > /sys/module/kvm/parameters/ignore_msrs" in check.details
 
 
 def test_check_ignore_msrs_missing(tmp_path):
-    """When kvm.conf doesn't exist, check must fail."""
-    check = preflight._check_ignore_msrs(kvm_conf=tmp_path / "nonexistent")
+    """When neither the conf nor sysfs has it, check must fail."""
+    check = preflight._check_ignore_msrs(
+        kvm_conf=tmp_path / "nonexistent",
+        sysfs_path=tmp_path / "no-sysfs",
+    )
     assert check.name == "KVM ignore_msrs"
     assert check.ok is False
     assert "ignore_msrs=Y" in check.details
+    assert "echo Y > /sys/module/kvm/parameters/ignore_msrs" in check.details
 
 
 def test_check_ignore_msrs_present_but_wrong_value(tmp_path):
     """When kvm.conf exists but lacks ignore_msrs=Y, check must fail."""
-    kvm_conf = tmp_path / "kvm.conf"
-    kvm_conf.write_text("options kvm report_ignored_msrs=N\n")
-    check = preflight._check_ignore_msrs(kvm_conf=kvm_conf)
+    kvm_conf, sysfs = _msrs_paths(tmp_path, "options kvm report_ignored_msrs=N\n", "N\n")
+    check = preflight._check_ignore_msrs(kvm_conf=kvm_conf, sysfs_path=sysfs)
     assert check.ok is False
+
+
+def test_bash_script_sets_live_ignore_msrs():
+    """Parity: the bash script must write the live sysfs value, not just the conf."""
+    script = (Path(__file__).resolve().parent.parent / "scripts/bash/osx-proxmox-next.sh").read_text()
+    assert "function ensure_ignore_msrs()" in script
+    assert "/sys/module/kvm/parameters/ignore_msrs" in script
+    assert "\nensure_ignore_msrs\n" in script
 
 
 def test_check_iommu_enabled(tmp_path):
