@@ -1,4 +1,4 @@
-name: trailers
+name: Commit lint
 
 on:
   pull_request:
