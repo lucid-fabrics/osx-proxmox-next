@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 # Determine remote branch to diff against
 REMOTE=${1:-origin}
 LOCAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -20,25 +22,13 @@ if [ -z "$MERGE_BASE" ]; then
   exit 0
 fi
 
-# ─── AI Attribution Patterns ───────────────────────────────────────
-AI_PATTERNS=(
-  '🤖'
-  'Generated with.*Claude'
-  'Generated with.*Codex'
-  'Co-Authored-By: Claude'
-  'Co-Authored-By: Codex'
-  'anthropic\.com'
-  'noreply@anthropic'
-  'openai\.com'
-)
-
-AI_REGEX=$(IFS='|'; echo "${AI_PATTERNS[*]}")
+BLOCKED_REGEX=$(blocked_regex)
 
 # ─── Check Commit Messages (BLOCKING) ─────────────────────────────
 COMMIT_VIOLATIONS=""
 while IFS= read -r commit_hash; do
   MSG=$(git log --format=%B -n 1 "$commit_hash")
-  if echo "$MSG" | grep -qiE "$AI_REGEX"; then
+  if echo "$MSG" | grep -qiE "$BLOCKED_REGEX"; then
     SUBJECT=$(git log --format=%s -n 1 "$commit_hash")
     COMMIT_VIOLATIONS="${COMMIT_VIOLATIONS}\n  ✗ ${commit_hash:0:8}: $SUBJECT"
   fi
@@ -47,22 +37,22 @@ done < <(git rev-list "$MERGE_BASE..HEAD")
 if [ -n "$COMMIT_VIOLATIONS" ]; then
   echo ""
   echo "╔══════════════════════════════════════════════╗"
-  echo "║  BLOCKED: AI attribution in commit messages. ║"
-  echo "║  Reword commits before pushing.              ║"
+  echo "║  BLOCKED: disallowed trailer in commit       ║"
+  echo "║  messages. Reword them before pushing.       ║"
   echo "╚══════════════════════════════════════════════╝"
   echo -e "$COMMIT_VIOLATIONS"
   exit 1
 fi
 
 # ─── Check Code Diff (BLOCKING) ───────────────────────────────────
-# Exclude .githooks/ from code diff check (they contain the patterns as strings)
-CODE_VIOLATIONS=$(git diff "$MERGE_BASE..HEAD" -- . ':!.githooks' | grep -iE "$AI_REGEX" || true)
+# The hook directory defines the check itself, so it is not subject to it.
+CODE_VIOLATIONS=$(git diff "$MERGE_BASE..HEAD" -- . ':!.githooks' | grep -iE "$BLOCKED_REGEX" || true)
 
 if [ -n "$CODE_VIOLATIONS" ]; then
   echo ""
   echo "╔══════════════════════════════════════════════╗"
-  echo "║  BLOCKED: AI attribution found in code diff. ║"
-  echo "║  Remove AI references before pushing.        ║"
+  echo "║  BLOCKED: disallowed trailer in the push     ║"
+  echo "║  diff. Remove it before pushing.             ║"
   echo "╚══════════════════════════════════════════════╝"
   echo ""
   echo "$CODE_VIOLATIONS" | head -10

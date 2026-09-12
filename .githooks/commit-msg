@@ -4,25 +4,14 @@ set -euo pipefail
 COMMIT_MSG_FILE="$1"
 COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
 
-# ─── AI Attribution Check (BLOCKING) ───────────────────────────────
-AI_PATTERNS=(
-  '🤖'
-  'Generated with.*Claude'
-  'Generated with.*Codex'
-  'Co-Authored-By: Claude'
-  'Co-Authored-By: Codex'
-  'anthropic\.com'
-  'noreply@anthropic'
-  'openai\.com'
-)
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-AI_REGEX=$(IFS='|'; echo "${AI_PATTERNS[*]}")
-
-if echo "$COMMIT_MSG" | grep -qiE "$AI_REGEX"; then
+# ─── Trailer Check (BLOCKING) ──────────────────────────────────────
+if echo "$COMMIT_MSG" | grep -qiE "$(blocked_regex)"; then
   echo ""
   echo "╔══════════════════════════════════════════════╗"
-  echo "║  BLOCKED: AI attribution in commit message.  ║"
-  echo "║  Remove AI references before committing.     ║"
+  echo "║  BLOCKED: disallowed trailer in the commit   ║"
+  echo "║  message. Remove it before committing.       ║"
   echo "╚══════════════════════════════════════════════╝"
   echo ""
   echo "  Message: $(head -1 "$COMMIT_MSG_FILE")"

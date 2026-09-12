@@ -19,6 +19,6 @@ chmod +x "$HOOKS_DIR"/*
 git config core.hooksPath .githooks
 
 echo "✓ Git hooks activated from .githooks/"
-echo "  • pre-commit  — AI attribution + secrets check"
-echo "  • commit-msg  — conventional commit format"
-echo "  • pre-push    — AI attribution + secrets in push diff"
+echo "  • pre-commit  - trailer + secrets check"
+echo "  • commit-msg  - conventional commit format"
+echo "  • pre-push    - trailer + secrets in push diff"

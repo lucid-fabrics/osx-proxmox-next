@@ -1,31 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─── AI Attribution Check (BLOCKING) ───────────────────────────────
-AI_PATTERNS=(
-  '🤖'
-  'Generated with.*Claude'
-  'Generated with.*Codex'
-  'Co-Authored-By: Claude'
-  'Co-Authored-By: Codex'
-  'anthropic\.com'
-  'noreply@anthropic'
-  'openai\.com'
-)
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# ─── Trailer Check (BLOCKING) ──────────────────────────────────────
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
 if [ -z "$STAGED_FILES" ]; then
   exit 0
 fi
 
-AI_REGEX=$(IFS='|'; echo "${AI_PATTERNS[*]}")
+BLOCKED_REGEX=$(blocked_regex)
 
 VIOLATIONS=""
 while IFS= read -r file; do
-  # Skip hook definition files (they contain the patterns as strings)
+  # The hook directory defines the check itself, so it is not subject to it.
   if [[ "$file" == .githooks/* ]]; then continue; fi
   if [ -f "$file" ]; then
-    MATCHES=$(git diff --cached -- "$file" | grep -iE "$AI_REGEX" || true)
+    MATCHES=$(git diff --cached -- "$file" | grep -iE "$BLOCKED_REGEX" || true)
     if [ -n "$MATCHES" ]; then
       VIOLATIONS="${VIOLATIONS}\n  ✗ ${file}:\n$(echo "$MATCHES" | head -3 | sed 's/^/      /')\n"
     fi
@@ -35,8 +26,8 @@ done <<< "$STAGED_FILES"
 if [ -n "$VIOLATIONS" ]; then
   echo ""
   echo "╔══════════════════════════════════════════════╗"
-  echo "║  BLOCKED: AI attribution detected in staged  ║"
-  echo "║  files. Remove before committing.            ║"
+  echo "║  BLOCKED: disallowed trailer in staged       ║"
+  echo "║  files. Remove it before committing.         ║"
   echo "╚══════════════════════════════════════════════╝"
   echo -e "$VIOLATIONS"
   exit 1

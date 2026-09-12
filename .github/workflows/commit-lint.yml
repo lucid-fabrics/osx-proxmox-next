@@ -1,11 +1,11 @@
-name: Attribution
+name: Commit lint
 
 on:
   pull_request:
     branches: [main]
 
 jobs:
-  no-ai-attribution:
+  trailers:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -22,4 +22,4 @@ jobs:
           {
             git log --format='%B' "$BASE_SHA..$HEAD_SHA"
             printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY"
-          } | bash .githooks/check-attribution.sh
+          } | bash .githooks/check-trailers.sh
