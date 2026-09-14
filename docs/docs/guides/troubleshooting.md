@@ -119,6 +119,17 @@ Then reboot the Proxmox host.
 - **GitHub Issues**: [lucid-fabrics/osx-proxmox-next/issues](https://github.com/lucid-fabrics/osx-proxmox-next/issues)
 - **Discord**: [Join the community](https://discord.gg/Ub6TunHYre)
 
+If the Discord invite page shows **"Unable to accept invite"**, the link itself is valid but your account is being blocked at the server or Discord level. Common causes and fixes:
+
+| Cause | Fix |
+|-------|-----|
+| Phone verification not completed on your Discord account | Open Discord > Settings > My Account > verify a phone number, then retry the invite |
+| Account is very new (Discord restricts brand-new accounts from joining servers) | Wait until the account is at least a few minutes old and has verified email, then retry |
+| Server-side block (matching email pattern, prior ban, or your IP/region) | Open a [GitHub issue](https://github.com/lucid-fabrics/osx-proxmox-next/issues) with your Discord username and we can unblock manually |
+| Already a member under a different account | Sign out and retry with the correct account |
+
+If none of the above applies, open a GitHub issue with your Discord username so we can investigate from the server admin side.
+
 When reporting an issue, include:
 
 1. Output of `osx-next-cli preflight`
