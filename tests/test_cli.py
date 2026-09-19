@@ -1431,3 +1431,21 @@ def test_install_unattended_reports_driver_failure(monkeypatch, capsys):
     rc = cli_mod.run_cli(["install-unattended", "--vmid", "953", "--disk-gb", "64"])
     assert rc == 1
     assert "no picker" in capsys.readouterr().out
+
+
+def test_apply_ok_says_the_picker_waits_for_enter(monkeypatch, capsys):
+    """Timeout=0 means the picker never boots on its own; a manual install
+    that is not told to press Enter looks stuck forever (issue #142)."""
+    from types import SimpleNamespace
+
+    from osx_proxmox_next import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "create_snapshot", lambda vmid: None)
+    monkeypatch.setattr(cli_mod, "apply_plan",
+                        lambda steps, execute: SimpleNamespace(ok=True, log_path="/tmp/a.log"))
+    config = SimpleNamespace(vmid=953)
+    rc = cli_mod._handle_apply_command(SimpleNamespace(execute=True), config, [])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "press\nEnter on the macOS entry" in out
+    assert "post-install --vmid 953" in out

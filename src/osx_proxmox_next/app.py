@@ -348,21 +348,16 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
         vmid = self.state.config.vmid if self.state.config else "???"
         result_box = self.query_one("#result_box", Static)
         result_box.remove_class("hidden")
-        text = format_install_result(ok, vmid, log_path, snapshot)
+        unattended_log = None
         if ok:
             result_box.remove_class("result_fail")
             self.notify("macOS VM created", severity="information")
             if self.state.unattended:
                 unattended_log = self._spawn_unattended_driver(vmid)
-                text += (
-                    "\n\nUnattended install (BETA) is running in the background - "
-                    "leave the VM alone; it erases the new disk and drives every "
-                    f"reboot until Setup Assistant.\nProgress: tail -f {unattended_log}"
-                )
         else:
             result_box.add_class("result_fail")
             self.notify("Install failed", severity="error")
-        result_box.update(text)
+        result_box.update(format_install_result(ok, vmid, log_path, snapshot, unattended_log))
 
     UNATTENDED_LOG_DIR = "/var/log"
 
@@ -427,7 +422,10 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
     def _append_log(self, selector: str, line: str, log: list[str]) -> None:
         log.append(line)
         widget = self.query_one(selector, Static)
-        widget.update("\n".join(log[-15:]))
+        # A Static never scrolls, so render only the 8 rows the 12-row box
+        # shows (app.tcss); a longer window hides the newest lines and a
+        # finished install reads as stuck mid-step.
+        widget.update("\n".join(log[-8:]))
 
 
 def run() -> None:
