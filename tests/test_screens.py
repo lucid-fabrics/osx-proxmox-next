@@ -134,6 +134,20 @@ class TestFormatInstallResult:
         assert POST_INSTALL_BOOT_ORDER in text
         assert "virtio0;ide0" not in text
         assert "ko-fi.com/lucidfabrics" in text
+        assert "auto-boots" not in text  # Timeout=0: the picker never auto-boots
+        assert "press\nEnter on the macOS entry" in text  # issue #142: nothing boots until you do
+
+    def test_unattended_success_does_not_contradict_the_driver(self):
+        """The driver owns every reboot, so "run post-install at the first
+        reboot" must not sit next to "leave the VM alone" (issue #142)."""
+        from osx_proxmox_next.screens.summary_screen import format_install_result
+        text = format_install_result(ok=True, vmid=100, log_path="/tmp/log.txt", snapshot=None,
+                                     unattended_log="/var/log/osx-next-unattended-100.log")
+        assert "as soon as the installer reboots" not in text
+        assert "tail -f /var/log/osx-next-unattended-100.log" in text
+        assert "boot picker" in text  # how to tell the driver stopped
+        assert "Press Enter" in text  # and how to carry on by hand
+        assert "osx-next-cli post-install --vmid 100 --execute" in text
 
     def test_failure_shows_rollback_hints_and_no_donation_ask(self):
         from osx_proxmox_next.rollback import RollbackSnapshot

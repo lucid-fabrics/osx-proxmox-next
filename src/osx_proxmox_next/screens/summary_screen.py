@@ -55,24 +55,41 @@ def format_install_result(
     vmid: int | str,
     log_path: object,
     snapshot: RollbackSnapshot | None,
+    unattended_log: str | None = None,
 ) -> str:
-    """Return the install result text for the result box."""
-    if ok:
-        lines = [
-            "Install completed successfully!",
-            f"Log: {log_path}",
-            "",
-            "IMPORTANT: as soon as the installer reboots the VM the first time, run:",
-            f"  osx-next-cli post-install --vmid {vmid} --execute",
-            f"Detaches recovery and sets boot order {POST_INSTALL_BOOT_ORDER}. Until you",
-            "do, the picker lists recovery first and auto-boots it, so each reboot",
-            "restarts the installer instead of resuming it.",
-            "",
-            SUPPORT_LINE,
-        ]
-    else:
+    """Return the install result text for the result box.
+
+    With unattended_log set the background driver owns every reboot, so the
+    manual "run post-install at the first reboot" advice would contradict it."""
+    if not ok:
         lines = ["Install FAILED.", f"Log: {log_path}"]
         if snapshot:
             lines.append("")
             lines.extend(rollback_hints(snapshot))
+        return "\n".join(lines)
+    lines = ["Install completed successfully!", f"Log: {log_path}", ""]
+    if unattended_log:
+        lines += [
+            "Unattended install (BETA) is running in the background. Leave the VM",
+            "alone: it erases the new disk and drives every reboot until Setup Assistant.",
+            f"Progress: tail -f {unattended_log}",
+            "If the console sits at the boot picker for more than a few minutes, the",
+            "driver has stopped and the last lines of that log say why. Press Enter",
+            "there to boot recovery and continue by hand.",
+            "",
+            "Once it finishes, complete Setup Assistant, then run:",
+            f"  osx-next-cli post-install --vmid {vmid} --execute",
+        ]
+    else:
+        lines += [
+            "The VM waits at the OpenCore boot picker: open its console and press",
+            "Enter on the macOS entry to boot recovery. It never boots on its own.",
+            "",
+            "IMPORTANT: as soon as the installer reboots the VM the first time, run:",
+            f"  osx-next-cli post-install --vmid {vmid} --execute",
+            f"Detaches recovery and sets boot order {POST_INSTALL_BOOT_ORDER}. Until you",
+            "do, every reboot stops at the picker with recovery listed first, so the",
+            "install only resumes if you pick the installer by hand.",
+        ]
+    lines += ["", SUPPORT_LINE]
     return "\n".join(lines)

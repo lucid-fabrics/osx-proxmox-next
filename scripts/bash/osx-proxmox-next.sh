@@ -1981,6 +1981,7 @@ fi
 if [ "${UNATTENDED:-no}" == "yes" ] && [ "$START_VM" == "yes" ]; then
   DISK_GB_NUM="${DISK_SIZE%G}"
   if unattended_install "$VMID" "$DISK_GB_NUM"; then
+    UNATTENDED_DONE=yes
     echo -e "\n${INFO}${GN}Unattended install complete. Finish Setup Assistant in the VM console.${CL}"
   else
     echo -e "\n${INFO}${YW}Unattended install did not finish; continue manually in the VM console.${CL}"
@@ -1989,11 +1990,14 @@ fi
 
 echo ""
 msg_ok "Completed successfully!"
-echo -e "\n${INFO}${YW}Next steps:${CL}"
-echo -e "  1. Open the VM console (VM ${VMID} → Console)"
-echo -e "  2. The picker waits for a choice; pick the macOS recovery entry"
-echo -e "  3. Use Disk Utility to erase the VirtIO disk as APFS"
-echo -e "  4. Run 'Reinstall macOS' from the recovery menu"
+# After a finished unattended run the manual recovery steps would contradict it.
+if [ "${UNATTENDED_DONE:-no}" != "yes" ]; then
+  echo -e "\n${INFO}${YW}Next steps:${CL}"
+  echo -e "  1. Open the VM console (VM ${VMID} → Console)"
+  echo -e "  2. The picker waits for a choice; pick the macOS recovery entry"
+  echo -e "  3. Use Disk Utility to erase the VirtIO disk as APFS"
+  echo -e "  4. Run 'Reinstall macOS' from the recovery menu"
+fi
 echo -e ""
 echo -e "  ${BL}Documentation: https://github.com/lucid-fabrics/osx-proxmox-next${CL}"
 echo -e ""

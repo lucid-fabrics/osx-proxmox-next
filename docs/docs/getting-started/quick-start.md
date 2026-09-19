@@ -35,7 +35,7 @@ OpenCore and recovery images are downloaded once and cached. Creating a second V
 Once the wizard completes:
 
 1. **The VM starts automatically** and boots into the OpenCore boot picker
-2. **OpenCore loads the macOS Recovery installer** -- this is normal for a fresh install
+2. **Press Enter on the macOS entry** in the VM console. The picker waits for you on purpose, so recovery never boots by itself mid-install
 3. **The macOS installer appears** -- follow Apple's standard installation flow
 
 The full macOS installation takes 20-45 minutes depending on your hardware.
