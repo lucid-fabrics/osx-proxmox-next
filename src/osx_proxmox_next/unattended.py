@@ -45,6 +45,7 @@ RECOVERY_STILL_MAX = 600           # extra grace while the recovery screen is st
 RECOVERY_STILL_FRAMES = 3          # identical consecutive frames = nothing animating
 TERMINAL_OPEN_WAIT = 10
 DONE_QUIET = 900                   # no picker for 15 min after reboots = install done
+DONE_MOTION = 120                  # Setup Assistant redraws its menu-bar clock every minute
 HUNG_STILL = 600                   # frame byte-identical for 10 min = macOS is wedged
 PICKER_REPRESS = 30                # seconds between return presses at a parked picker
 MAX_POWER_CYCLES = 2               # stop/start attempts on a wedged guest before giving up
@@ -196,6 +197,33 @@ def _wait_still(console: QmConsole, on_event: Callable[[str], None],
     on_event("Recovery screen never stopped moving; navigating anyway")
 
 
+def _wait_first_reboot(console: QmConsole, on_event: Callable[[str], None],
+                       clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
+    """Hold until startosinstall reboots the guest (the first 1080p frame).
+
+    The guest's own restart can wedge inside an EFI runtime call instead:
+    every vCPU spins and recovery Terminal stays frozen on "Restarting...".
+    A screen unchanged for HUNG_STILL counts as that reboot, because the
+    stop/start the caller does next is also the only thing that clears the
+    wedge. startosinstall prints its percentage as it prepares, so a live
+    install never sits that still."""
+    deadline = clock() + INSTALL_REBOOT_TIMEOUT
+    seen, last_change = "", clock()
+    while clock() < deadline:
+        if console.frame_size() > PICKER_MIN_BYTES:
+            return
+        digest = console.probe_hash()
+        if digest != seen:
+            seen, last_change = digest, clock()
+        elif digest and clock() - last_change > HUNG_STILL:
+            on_event(f"Guest froze while restarting (screen unchanged for "
+                     f"{HUNG_STILL // 60} min); power-cycling")
+            return
+        sleep(POLL_INTERVAL)
+    raise UnattendedError(f"Timed out after {INSTALL_REBOOT_TIMEOUT}s waiting for "
+                          "the installer's first reboot")
+
+
 def run_unattended_install(
     console: QmConsole,
     disk_gb: int,
@@ -239,8 +267,7 @@ def run_unattended_install(
     # selection can never boot the wrong volume. A picker selection that
     # merely walks entries (right+ret) proved flaky: one missed keystroke
     # boots recovery and the install silently stalls there.
-    _wait(console, lambda s: s > PICKER_MIN_BYTES, INSTALL_REBOOT_TIMEOUT,
-          "the installer's first reboot", clock, sleep)
+    _wait_first_reboot(console, on_event, clock, sleep)
     on_event("First reboot reached; detaching recovery so the picker has one entry")
     console.qm("stop")
     _wait_stopped(console, clock, sleep)
@@ -256,8 +283,9 @@ def run_unattended_install(
     seen = ""
     while clock() - start < TOTAL_BUDGET:
         size = console.frame_size()
-        # macOS wedged behind the boot logo is exactly as quiet as a finished
-        # install: no picker, no 1080p frame. What separates them is motion.
+        # macOS wedged behind the boot logo is as quiet as a finished install
+        # (1280x800 logo) or as a parked picker (1080p logo). What separates
+        # them is motion.
         # Running macOS always moves, if only because the Setup Assistant menu
         # bar ticks its clock every minute; a wedged kernel never redraws.
         digest = console.probe_hash()
@@ -265,7 +293,29 @@ def run_unattended_install(
         if changed:
             seen = digest
             last_change = clock()
-        if size > PICKER_MIN_BYTES:
+        if boots >= 1 and clock() - last_change > HUNG_STILL:
+            # The guest's own reboot can wedge in an MP rendezvous with every
+            # vCPU spinning and the framebuffer stuck on its last frame. qm
+            # reset does not clear that; only a full stop/start does, and it
+            # boots the finished install to Setup Assistant in about 100s.
+            # Checked before the 1080p branch: a wedge on the 1080p boot logo
+            # otherwise reads as a parked picker and gets pressed until the
+            # budget runs out, while a real picker moves once a press lands.
+            if cycles >= MAX_POWER_CYCLES:
+                raise UnattendedError(
+                    f"macOS appears hung: screen unchanged for {HUNG_STILL // 60} min"
+                )
+            cycles += 1
+            on_event(f"Guest appears wedged (screen unchanged for "
+                     f"{HUNG_STILL // 60} min); power-cycling")
+            console.qm("stop")
+            _wait_stopped(console, clock, sleep)
+            console.qm("start")
+            # The restarted guest earns its quiet window again: coming back
+            # from a power cycle is not by itself proof the install finished.
+            last_change = last_big = clock()
+            seen = ""
+        elif size > PICKER_MIN_BYTES:
             last_big = clock()
             if changed:
                 boots += 1
@@ -283,31 +333,12 @@ def run_unattended_install(
                 # per boot instead of one per poll.
                 console.sendkey("ret")
                 last_press = clock()
-        elif boots >= 1 and clock() - last_change > HUNG_STILL:
-            # The guest's own reboot can wedge in an MP rendezvous with every
-            # vCPU spinning and the framebuffer stuck on its last frame. qm
-            # reset does not clear that; only a full stop/start does, and it
-            # boots the finished install to Setup Assistant in about 100s.
-            if cycles >= MAX_POWER_CYCLES:
-                raise UnattendedError(
-                    f"macOS appears hung: screen unchanged for {HUNG_STILL // 60} min"
-                )
-            cycles += 1
-            on_event(f"Guest appears wedged (screen unchanged for "
-                     f"{HUNG_STILL // 60} min); power-cycling")
-            console.qm("stop")
-            _wait_stopped(console, clock, sleep)
-            console.qm("start")
-            # The restarted guest earns its quiet window again: coming back
-            # from a power cycle is not by itself proof the install finished.
-            last_change = last_big = clock()
-            seen = ""
-        # Ordering: HUNG_STILL (10 min) is checked above and is shorter than
-        # DONE_QUIET (15 min), so a frozen screen always power-cycles or
-        # raises before it can get here. The last_change clause is the belt
-        # to that guard's braces: a still screen is never a finished install.
+        # Done needs a screen that moved within DONE_MOTION: Setup Assistant
+        # ticks its clock every minute. A guest that wedged a few minutes ago
+        # is still under HUNG_STILL but already still; it must wait for the
+        # hang guard above, not be reported as a finished install.
         elif (boots >= 1 and clock() - last_big > DONE_QUIET
-              and clock() - last_change <= DONE_QUIET):
+              and clock() - last_change <= DONE_MOTION):
             elapsed = int(clock() - start)
             on_event(
                 f"Done: macOS has been running without a reboot for "

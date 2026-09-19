@@ -920,6 +920,7 @@ UNATTENDED_PICKER_TIMEOUT=600
 UNATTENDED_INSTALL_REBOOT_TIMEOUT=1800
 UNATTENDED_RECOVERY_TIMEOUT=900
 UNATTENDED_DONE_QUIET=900
+UNATTENDED_DONE_MOTION=120
 UNATTENDED_HUNG_STILL=600
 UNATTENDED_PICKER_REPRESS=30
 UNATTENDED_MAX_POWER_CYCLES=2
@@ -1020,6 +1021,31 @@ function unattended_wait_frame() {
   return 1
 }
 
+# Hold until startosinstall reboots the guest (the first 1080p frame). The
+# guest's own restart can wedge inside an EFI runtime call instead: every vCPU
+# spins and recovery Terminal stays frozen on "Restarting...". A screen
+# unchanged for UNATTENDED_HUNG_STILL counts as that reboot, because the
+# stop/start that follows is also the only thing that clears the wedge.
+function unattended_wait_first_reboot() {
+  local vmid="$1" t0 size digest seen="" last_change
+  t0=$(date +%s)
+  last_change=$t0
+  while (( $(date +%s) - t0 < UNATTENDED_INSTALL_REBOOT_TIMEOUT )); do
+    size=$(unattended_frame_size "$vmid")
+    (( size > UNATTENDED_PICKER_MIN_BYTES )) && return 0
+    digest=$(unattended_probe_hash "$vmid")
+    if [ "$digest" != "$seen" ]; then
+      seen="$digest"
+      last_change=$(date +%s)
+    elif [ -n "$digest" ] && (( $(date +%s) - last_change > UNATTENDED_HUNG_STILL )); then
+      msg_info "Unattended: guest froze while restarting (screen unchanged for $((UNATTENDED_HUNG_STILL / 60)) min); power-cycling"
+      return 0
+    fi
+    sleep "$UNATTENDED_POLL"
+  done
+  return 1
+}
+
 function unattended_install() {
   local vmid="$1" disk_gb="$2" t0 size reboots=0 last_picker last_change digest seen
   t0=$(date +%s)
@@ -1056,7 +1082,7 @@ function unattended_install() {
   # recovery disk now (the documented manual flow): from here the picker has
   # a single real entry, so a blind selection can never boot the wrong
   # volume. Walking entries with right+ret proved flaky.
-  unattended_wait_frame "$vmid" "$UNATTENDED_INSTALL_REBOOT_TIMEOUT" above || {
+  unattended_wait_first_reboot "$vmid" || {
     msg_error "Unattended: the installer never rebooted"; return 1; }
   msg_ok "Unattended: first reboot reached; detaching recovery"
   qm stop "$vmid" >/dev/null 2>&1
@@ -1073,8 +1099,9 @@ function unattended_install() {
   seen=""
   while (( $(date +%s) - t0 < UNATTENDED_TOTAL_BUDGET )); do
     size=$(unattended_frame_size "$vmid")
-    # macOS wedged behind the boot logo is exactly as quiet as a finished
-    # install: no picker, no 1080p frame. What separates them is motion.
+    # macOS wedged behind the boot logo is as quiet as a finished install
+    # (1280x800 logo) or as a parked picker (1080p logo). What separates them
+    # is motion.
     # Running macOS always moves, if only because the Setup Assistant menu bar
     # ticks its clock every minute; a wedged kernel never redraws.
     digest=$(unattended_probe_hash "$vmid")
@@ -1084,7 +1111,30 @@ function unattended_install() {
       last_change=$(date +%s)
       changed=1
     fi
-    if (( size > UNATTENDED_PICKER_MIN_BYTES )); then
+    if (( reboots >= 1 && $(date +%s) - last_change > UNATTENDED_HUNG_STILL )); then
+      # The guest's own reboot can wedge in an MP rendezvous with every vCPU
+      # spinning and the framebuffer stuck on its last frame. qm reset does
+      # not clear that; only a full stop/start does, and it boots the
+      # finished install to Setup Assistant in about 100s. Checked before the
+      # 1080p branch: a wedge on the 1080p boot logo otherwise reads as a
+      # parked picker and gets pressed until the budget runs out, while a
+      # real picker moves once a press lands.
+      if (( cycles >= UNATTENDED_MAX_POWER_CYCLES )); then
+        msg_error "Unattended: macOS appears hung: screen unchanged for $((UNATTENDED_HUNG_STILL / 60)) min"
+        return 1
+      fi
+      cycles=$((cycles + 1))
+      msg_info "Unattended: guest appears wedged (screen unchanged for $((UNATTENDED_HUNG_STILL / 60)) min); power-cycling"
+      qm stop "$vmid" >/dev/null 2>&1
+      unattended_wait_stopped "$vmid" || {
+        msg_error "Unattended: VM did not stop for the power cycle"; return 1; }
+      qm start "$vmid" >/dev/null 2>&1
+      # The restarted guest earns its quiet window again: coming back from a
+      # power cycle is not by itself proof the install finished.
+      last_change=$(date +%s)
+      last_picker=$last_change
+      seen=""
+    elif (( size > UNATTENDED_PICKER_MIN_BYTES )); then
       last_picker=$(date +%s)
       if (( changed )); then
         reboots=$((reboots + 1))
@@ -1102,32 +1152,12 @@ function unattended_install() {
         qm sendkey "$vmid" ret >/dev/null 2>&1
         last_press=$(date +%s)
       fi
-    elif (( reboots >= 1 && $(date +%s) - last_change > UNATTENDED_HUNG_STILL )); then
-      # The guest's own reboot can wedge in an MP rendezvous with every vCPU
-      # spinning and the framebuffer stuck on its last frame. qm reset does
-      # not clear that; only a full stop/start does, and it boots the
-      # finished install to Setup Assistant in about 100s.
-      if (( cycles >= UNATTENDED_MAX_POWER_CYCLES )); then
-        msg_error "Unattended: macOS appears hung: screen unchanged for $((UNATTENDED_HUNG_STILL / 60)) min"
-        return 1
-      fi
-      cycles=$((cycles + 1))
-      msg_info "Unattended: guest appears wedged (screen unchanged for $((UNATTENDED_HUNG_STILL / 60)) min); power-cycling"
-      qm stop "$vmid" >/dev/null 2>&1
-      unattended_wait_stopped "$vmid" || {
-        msg_error "Unattended: VM did not stop for the power cycle"; return 1; }
-      qm start "$vmid" >/dev/null 2>&1
-      # The restarted guest earns its quiet window again: coming back from a
-      # power cycle is not by itself proof the install finished.
-      last_change=$(date +%s)
-      last_picker=$last_change
-      seen=""
-    # Ordering: HUNG_STILL (10 min) is checked above and is shorter than
-    # DONE_QUIET (15 min), so a frozen screen always power-cycles or fails
-    # before it can get here. The last_change clause is the belt to that
-    # guard's braces: a still screen is never a finished install.
+    # Done needs a screen that moved within DONE_MOTION: Setup Assistant ticks
+    # its clock every minute. A guest that wedged a few minutes ago is still
+    # under HUNG_STILL but already still; it must wait for the hang guard
+    # above, not be reported as a finished install.
     elif (( reboots >= 1 && $(date +%s) - last_picker > UNATTENDED_DONE_QUIET
-            && $(date +%s) - last_change <= UNATTENDED_DONE_QUIET )); then
+            && $(date +%s) - last_change <= UNATTENDED_DONE_MOTION )); then
       msg_ok "Unattended: install finished after ${reboots} boot(s)"
       return 0
     fi

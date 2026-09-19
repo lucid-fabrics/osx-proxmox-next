@@ -9,6 +9,7 @@ import pytest
 
 from osx_proxmox_next.unattended import (
     CHARMAP,
+    DONE_MOTION,
     DONE_QUIET,
     HUNG_STILL,
     INSTALL_REBOOT_TIMEOUT,
@@ -299,6 +300,72 @@ def test_a_wedged_guest_is_power_cycled_and_then_finishes() -> None:
     assert summary["reboots"] >= 1
 
 
+def test_a_restart_wedged_before_the_first_reboot_is_power_cycled() -> None:
+    """startosinstall prints "Restarting..." and the guest wedges in firmware
+    with the Terminal frozen (seen live on Tahoe, PVE 9.2). Waiting out
+    INSTALL_REBOOT_TIMEOUT leaves the VM stuck; the stop/start of the recovery
+    detach clears it and the install carries on."""
+    clock = FakeClock()
+    schedule = [(0, 0), (30, PICKER), (60, 0), (200, MACOS),
+                (2000, PICKER), (2030, MACOS), (2600, PICKER), (2630, MACOS)]
+    console = RecoveringConsole(clock, schedule, hung_from=900)
+    events: list[str] = []
+    summary = run_unattended_install(console, 128, on_event=events.append,
+                                     clock=clock.monotonic, sleep=clock.sleep)
+    froze = next(i for i, e in enumerate(events) if "froze while restarting" in e)
+    assert "detaching recovery" in events[froze + 1]
+    assert ("set", "--delete", "ide2") in console.qm_calls
+    assert console.qm_calls.count(("stop",)) == 1
+    assert summary["reboots"] >= 1
+
+
+def test_a_preparing_installer_is_not_mistaken_for_a_wedge() -> None:
+    """A screen that keeps changing is startosinstall still preparing: the
+    wait for the first reboot must not cut it short."""
+    with pytest.raises(UnattendedError, match="first reboot"):
+        _run([(0, 0), (30, PICKER), (60, 0), (200, MACOS)])
+
+
+def test_bash_power_cycles_a_restart_wedged_before_the_first_reboot(bash_text: str) -> None:
+    fn = bash_text[bash_text.index("function unattended_wait_first_reboot()"):]
+    fn = fn[:fn.index("\n}\n")]
+    assert "UNATTENDED_HUNG_STILL" in fn and "unattended_probe_hash" in fn
+    assert "froze while restarting" in fn
+    install = bash_text[bash_text.index("function unattended_install()"):]
+    assert install.index('unattended_wait_first_reboot "$vmid"') < install.index("--delete ide2")
+
+
+def test_a_wedge_on_the_1080p_boot_logo_is_power_cycled() -> None:
+    """The stage-2 reboot can wedge on the 1080p Apple logo (seen live on
+    Tahoe, PVE 9.2). Byte-identical at 1080p it looks like a parked picker;
+    re-pressing it forever ran the 3h budget out with the install already
+    finished. It must be power-cycled like any other frozen screen."""
+    class FrozenLogoConsole(RecoveringConsole):
+        def frame_size(self) -> int:
+            if self.clock.now >= self.hung_from and not self.stopped:
+                return PICKER  # the wedged 1080p logo never changes size either
+            return super().frame_size()
+
+    clock = FakeClock()
+    schedule = [(0, 0), (30, PICKER), (60, 0), (200, MACOS),
+                (1000, PICKER), (1100, PICKER), (1130, MACOS),
+                (1700, PICKER), (1730, MACOS)]
+    console = FrozenLogoConsole(clock, schedule, hung_from=1700)
+    events: list[str] = []
+    summary = run_unattended_install(console, 128, on_event=events.append,
+                                     clock=clock.monotonic, sleep=clock.sleep)
+    assert any("power-cycling" in e for e in events)
+    assert console.qm_calls.count(("stop",)) == 2  # recovery detach + power cycle
+    assert summary["elapsed"] < TOTAL_BUDGET
+
+
+def test_bash_checks_for_a_wedge_before_the_1080p_branch(bash_text: str) -> None:
+    fn = bash_text[bash_text.index("function unattended_install()"):]
+    loop = fn[fn.index("while (( $(date +%s) - t0 < UNATTENDED_TOTAL_BUDGET ))"):]
+    assert loop.index("UNATTENDED_HUNG_STILL )); then") \
+        < loop.index("size > UNATTENDED_PICKER_MIN_BYTES )); then")
+
+
 def test_power_cycling_gives_up_after_the_cap() -> None:
     """A guest that wedges again after every cycle is a real failure."""
     clock = FakeClock()
@@ -341,6 +408,28 @@ def test_a_parked_picker_gets_pressed_again() -> None:
     presses = console.keys.count("ret") - 3
     parked_for = 1400 - 1000
     assert 5 <= presses <= parked_for // PICKER_REPRESS + 3
+
+
+def test_a_screen_that_froze_minutes_ago_is_not_done() -> None:
+    """The installer's final reboot wedged on a black frame a few minutes
+    before the DONE_QUIET window closed (seen live on Tahoe, PVE 9.2). Motion
+    within DONE_QUIET let that pass as a finished install, the driver quit
+    and the wedge was never cleared. Done needs motion within DONE_MOTION;
+    the frozen guest is power-cycled instead."""
+    clock = FakeClock()
+    console = RecoveringConsole(clock, WEDGED_SCHEDULE, hung_from=1730 + 12 * 60)
+    events: list[str] = []
+    summary = run_unattended_install(console, 128, on_event=events.append,
+                                     clock=clock.monotonic, sleep=clock.sleep)
+    cycled = next(i for i, e in enumerate(events) if "power-cycling" in e)
+    done = next(i for i, e in enumerate(events) if e.startswith("Done"))
+    assert cycled < done
+    assert summary["reboots"] >= 1
+
+
+def test_done_motion_fits_the_setup_assistant_clock() -> None:
+    """A per-minute clock tick must land inside the window, with poll slack."""
+    assert 60 + POLL_INTERVAL < DONE_MOTION < HUNG_STILL
 
 
 def test_hung_detection_fires_before_the_done_window() -> None:
@@ -411,6 +500,7 @@ def test_bash_constants_match_python(bash_text: str) -> None:
         "UNATTENDED_PICKER_TIMEOUT": PICKER_TIMEOUT,
         "UNATTENDED_RECOVERY_TIMEOUT": RECOVERY_TIMEOUT,
         "UNATTENDED_DONE_QUIET": DONE_QUIET,
+        "UNATTENDED_DONE_MOTION": DONE_MOTION,
         "UNATTENDED_HUNG_STILL": HUNG_STILL,
         "UNATTENDED_PICKER_REPRESS": PICKER_REPRESS,
         "UNATTENDED_MAX_POWER_CYCLES": MAX_POWER_CYCLES,
@@ -479,7 +569,7 @@ def test_bash_power_cycles_a_wedged_guest(bash_text: str) -> None:
     assert fn.index("UNATTENDED_MAX_POWER_CYCLES") < fn.index("power-cycling")
     assert "unattended_wait_stopped" in fn
     assert not re.search(r"^\s*qm reset", bash_text, re.M)   # reset never clears it
-    assert "last_change <= UNATTENDED_DONE_QUIET" in fn   # done needs a moving screen
+    assert "last_change <= UNATTENDED_DONE_MOTION" in fn   # done needs a moving screen
 
 
 def test_bash_represses_a_parked_picker(bash_text: str) -> None:
