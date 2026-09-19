@@ -22,6 +22,12 @@ from .smbios_planner import (
 
 POST_INSTALL_BOOT_ORDER = "order=ide0;virtio0"
 
+# Bare Penryn lacks SSE4.2, POPCNT, AVX and AVX2, which every supported macOS
+# needs: recovery hangs on the Apple logo at 0% and never reaches its UI
+# (issue #142). Keep the model, add back what macOS requires; "check" only
+# warns when the host lacks one (no AVX2 before Haswell, CryptexFixup covers it).
+_PENRYN_FEATURES = ",+ssse3,+sse4.2,+popcnt,+avx,+avx2,+aes,+fma,+bmi1,+bmi2,+xsave,+xsaveopt,check"
+
 def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
     """Return QEMU -cpu flag tailored to host CPU.
 
@@ -47,6 +53,7 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
             "vendor=GenuineIntel,"
             "+invtsc,"
             "vmware-cpuid-freq=on"
+            + (_PENRYN_FEATURES if override == "Penryn" else "")
         )
     if cpu.needs_emulated_cpu:
         return (

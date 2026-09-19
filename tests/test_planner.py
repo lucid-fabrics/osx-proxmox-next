@@ -312,6 +312,22 @@ def test_cpu_args_override() -> None:
     assert "host" not in args
 
 
+def test_cpu_args_penryn_adds_the_instructions_macos_needs() -> None:
+    """Bare Penryn hangs recovery on the Apple logo at 0% (issue #142, live
+    repro): the model predates SSE4.2, POPCNT and AVX/AVX2."""
+    cpu = _cpu(vendor="Intel", needs_emulated=False)
+    args = _cpu_args(cpu, override="Penryn")
+    assert args.startswith("-cpu Penryn,")
+    for flag in ("+sse4.2", "+popcnt", "+avx", "+avx2", "+fma", "+bmi2", "+xsave"):
+        assert f"{flag}," in args + ","
+    assert args.endswith(",check")  # warn, never refuse, when the host lacks one
+
+
+def test_cpu_args_other_overrides_get_no_penryn_features() -> None:
+    cpu = _cpu(vendor="Intel", needs_emulated=False)
+    assert "+avx2" not in _cpu_args(cpu, override="Skylake-Server-IBRS")
+
+
 def test_build_plan_amd_uses_cascadelake(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="AMD", needs_emulated=True))
