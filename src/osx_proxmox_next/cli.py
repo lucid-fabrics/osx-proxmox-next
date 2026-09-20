@@ -337,11 +337,15 @@ def _run_install_unattended(args: argparse.Namespace) -> int:
         return 2
     print(f"BETA: unattended install for VM {args.vmid} ({disk_gb} GB target disk).")
     print("The VM disk will be ERASED. Watch progress below or on the VM console.")
+    console = QmConsole(args.vmid)
     try:
-        summary = run_unattended_install(QmConsole(args.vmid), disk_gb,
+        summary = run_unattended_install(console, disk_gb,
                                          on_event=lambda m: print(f"  {m}", flush=True))
     except UnattendedError as exc:
         print(f"ERROR: {exc}")
+        shot = console.save_frame(f"/var/log/osx-next-unattended-{args.vmid}.png")
+        if shot:
+            print(f"The console at that moment was saved to {shot}.")
         print("The VM was left as-is for inspection; check the console.")
         return 1
     print(f"Install finished after {summary['reboots']} reboot(s), "

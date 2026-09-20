@@ -1008,16 +1008,40 @@ function unattended_wait_stopped() {
   return 1
 }
 
+# args: vmid timeout mode(above|below) [repress_key]
+# With a repress key, that key is pressed again every UNATTENDED_PICKER_REPRESS
+# seconds while the 1080p picker is still on screen: OpenCanopy reaches its
+# first 1080p frame before its input is ready, so on a slow boot disk the first
+# return is dropped and Timeout=0 parks the picker forever (issue #142).
 function unattended_wait_frame() {
-  # args: vmid timeout mode(above|below)
-  local vmid="$1" timeout="$2" mode="$3" t0 size
+  local vmid="$1" timeout="$2" mode="$3" repress="${4:-}" t0 size last_press
   t0=$(date +%s)
+  last_press=$((t0 - UNATTENDED_PICKER_REPRESS))
   while (( $(date +%s) - t0 < timeout )); do
     size=$(unattended_frame_size "$vmid")
     if [ "$mode" == "above" ] && (( size > UNATTENDED_PICKER_MIN_BYTES )); then return 0; fi
     if [ "$mode" == "below" ] && (( size > 0 && size < UNATTENDED_PICKER_MIN_BYTES )); then return 0; fi
+    if [ -n "$repress" ] && (( size > UNATTENDED_PICKER_MIN_BYTES )) \
+       && (( $(date +%s) - last_press >= UNATTENDED_PICKER_REPRESS )); then
+      qm sendkey "$vmid" "$repress" >/dev/null 2>&1
+      last_press=$(date +%s)
+    fi
     sleep "$UNATTENDED_POLL"
   done
+  return 1
+}
+
+# Save the console of a stalled run: it is gone by the time anyone reads the
+# log. PNG needs QEMU 7.1+; older hosts get the raw PPM next to it.
+function unattended_save_frame() {
+  local vmid="$1" png="/var/log/osx-next-unattended-${1}.png"
+  local ppm="/var/log/osx-next-unattended-${1}.ppm"
+  echo "screendump $png -f png" | qm monitor "$vmid" >/dev/null 2>&1
+  sleep 0.6
+  [ -s "$png" ] && { echo "$png"; return 0; }
+  echo "screendump $ppm" | qm monitor "$vmid" >/dev/null 2>&1
+  sleep 0.6
+  [ -s "$ppm" ] && { echo "$ppm"; return 0; }
   return 1
 }
 
@@ -1054,11 +1078,12 @@ function unattended_install() {
   unattended_wait_frame "$vmid" "$UNATTENDED_PICKER_TIMEOUT" above || {
     msg_error "Unattended: boot picker never appeared"; return 1; }
   sleep 2
-  qm sendkey "$vmid" ret >/dev/null 2>&1
   msg_ok "Unattended: booting macOS recovery"
 
+  # One return is not enough: it lands while OpenCanopy is still loading on a
+  # slow boot disk and is dropped. Keep pressing while the picker is up.
   msg_info "Unattended: waiting for recovery (takes a few minutes)"
-  unattended_wait_frame "$vmid" "$UNATTENDED_RECOVERY_TIMEOUT" below || {
+  unattended_wait_frame "$vmid" "$UNATTENDED_RECOVERY_TIMEOUT" below ret || {
     msg_error "Unattended: recovery never reached its UI"; return 1; }
   sleep "$UNATTENDED_RECOVERY_SETTLE"
   unattended_wait_still "$vmid"
@@ -1984,6 +2009,8 @@ if [ "${UNATTENDED:-no}" == "yes" ] && [ "$START_VM" == "yes" ]; then
     UNATTENDED_DONE=yes
     echo -e "\n${INFO}${GN}Unattended install complete. Finish Setup Assistant in the VM console.${CL}"
   else
+    SHOT=$(unattended_save_frame "$VMID") && \
+      echo -e "\n${INFO}${YW}The console at that moment was saved to ${SHOT}.${CL}"
     echo -e "\n${INFO}${YW}Unattended install did not finish; continue manually in the VM console.${CL}"
   fi
 fi

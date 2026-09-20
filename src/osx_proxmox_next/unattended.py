@@ -134,6 +134,26 @@ class QmConsole:
             return ""
         return self.probe_hash()
 
+    def save_frame(self, dest: str) -> str:
+        """Write the current screen to *dest* and return the path written.
+
+        A stalled run says nothing about what is on the console, and the
+        console is gone by the time anyone reads the log. PNG needs QEMU
+        7.1 or newer; older hosts get the raw PPM next to it. Returns ""
+        when neither lands."""
+        ppm = dest[:-4] + ".ppm" if dest.endswith(".png") else dest + ".ppm"
+        for command, path in ((f"screendump {dest} -f png", dest),
+                              (f"screendump {ppm}", ppm)):
+            self._run(f"echo '{command}' | qm monitor {self.vmid}",
+                      shell=True, capture_output=True)
+            self._sleep(0.6)
+            try:
+                if os.path.getsize(path) > 0:
+                    return path
+            except OSError:
+                continue
+        return ""
+
     def sendkey(self, key: str) -> None:
         self._run(["qm", "sendkey", self.vmid, key], capture_output=True)
 
@@ -161,12 +181,24 @@ class QmConsole:
 
 
 def _wait(console: QmConsole, predicate: Callable[[int], bool], timeout: float,
-          what: str, clock: Callable[[], float], sleep: Callable[[float], None]) -> int:
+          what: str, clock: Callable[[], float], sleep: Callable[[float], None],
+          repress: str = "") -> int:
+    """Poll the screen until *predicate* accepts its byte size.
+
+    With *repress* set, that key is pressed again every PICKER_REPRESS
+    seconds for as long as the screen is still the 1080p picker: OpenCanopy
+    reaches its first 1080p frame before its input is ready, so on a slow
+    boot disk the first return is dropped, and Timeout=0 then parks the
+    picker forever (issue #142)."""
     deadline = clock() + timeout
+    last_press = clock() - PICKER_REPRESS
     while clock() < deadline:
         size = console.frame_size()
         if predicate(size):
             return size
+        if repress and size > PICKER_MIN_BYTES and clock() - last_press >= PICKER_REPRESS:
+            console.sendkey(repress)
+            last_press = clock()
         sleep(POLL_INTERVAL)
     raise UnattendedError(f"Timed out after {int(timeout)}s waiting for {what}")
 
@@ -241,11 +273,14 @@ def run_unattended_install(
     _wait(console, lambda s: s > PICKER_MIN_BYTES, PICKER_TIMEOUT,
           "the OpenCore picker", clock, sleep)
     sleep(2)
-    console.sendkey("ret")
     on_event("Booting macOS recovery (first picker entry)")
 
+    # One return is not enough: it lands while OpenCanopy is still loading on
+    # a slow boot disk and is dropped, leaving the picker parked forever.
+    # Keep pressing while the 1080p picker is on screen, exactly as the
+    # post-detach loop does.
     _wait(console, lambda s: 0 < s < MACOS_MAX_BYTES, RECOVERY_TIMEOUT,
-          "recovery to start", clock, sleep)
+          "recovery to start", clock, sleep, repress="ret")
     on_event(f"Recovery is booting; settling {RECOVERY_SETTLE}s for the utilities window")
     sleep(RECOVERY_SETTLE)
     _wait_still(console, on_event, clock, sleep)
