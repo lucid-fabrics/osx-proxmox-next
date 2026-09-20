@@ -410,6 +410,77 @@ def test_a_parked_picker_gets_pressed_again() -> None:
     assert 5 <= presses <= parked_for // PICKER_REPRESS + 3
 
 
+class DeafPickerConsole(FakeConsole):
+    """The picker drops returns until OpenCanopy finishes loading.
+
+    Reproduces issue #142 on a slow boot disk: the first return lands too
+    early, Timeout=0 parks the picker, and nothing else ever moves."""
+
+    def __init__(self, clock: FakeClock, schedule, drops: int = 1):
+        super().__init__(clock, schedule)
+        self.drops = drops
+        self.booted = False
+
+    def sendkey(self, key: str) -> None:
+        super().sendkey(key)
+        if key == "ret" and not self.booted:
+            if self.drops:
+                self.drops -= 1
+            else:
+                self.booted = True
+
+    def frame_size(self) -> int:
+        if not self.booted:
+            return PICKER if self.clock.now >= 30 else 0
+        return super().frame_size()
+
+
+def test_a_dropped_first_return_is_pressed_again() -> None:
+    """The install still runs when the picker ignores the first return."""
+    clock = FakeClock()
+    console = DeafPickerConsole(
+        clock, [(0, 0), (30, PICKER), (65, 0), (200, MACOS), (1000, PICKER),
+                (1100, PICKER), (1130, MACOS), (1700, PICKER), (1730, MACOS)])
+    events: list[str] = []
+    summary = run_unattended_install(console, 128, on_event=events.append,
+                                     clock=clock.monotonic, sleep=clock.sleep)
+    assert console.keys[:2] == ["ret", "ret"]           # dropped, then accepted
+    assert list(TERMINAL_NAV) == console.keys[2:2 + len(TERMINAL_NAV)]
+    assert console.typed == [erase_install_command(128)]
+    assert summary["reboots"] >= 1
+
+
+def test_the_first_picker_is_only_pressed_while_it_is_on_screen() -> None:
+    """Returns must stop the moment the picker hands off: recovery boots for
+    minutes on a black screen and a stray return there lands in its UI."""
+    clock = FakeClock()
+    pressed_on: list[int] = []
+    console = FakeConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS),
+                                  (1000, PICKER), (1100, PICKER), (1130, MACOS),
+                                  (1700, PICKER), (1730, MACOS)])
+    original = console.sendkey
+
+    def watched(key: str) -> None:
+        if key == "ret" and clock.now < 200:
+            pressed_on.append(console.frame_size())
+        original(key)
+
+    console.sendkey = watched  # type: ignore[method-assign]
+    run_unattended_install(console, 128, on_event=lambda m: None,
+                           clock=clock.monotonic, sleep=clock.sleep)
+    assert pressed_on == [PICKER]     # one press, on the picker, none after
+
+
+def test_a_picker_that_never_accepts_a_return_still_times_out() -> None:
+    clock = FakeClock()
+    console = DeafPickerConsole(clock, [(0, 0), (30, PICKER)], drops=10_000)
+    with pytest.raises(UnattendedError, match="recovery to start"):
+        run_unattended_install(console, 128, on_event=lambda m: None,
+                               clock=clock.monotonic, sleep=clock.sleep)
+    # throttled, not one per poll
+    assert console.keys.count("ret") <= RECOVERY_TIMEOUT // PICKER_REPRESS + 1
+
+
 def test_a_screen_that_froze_minutes_ago_is_not_done() -> None:
     """The installer's final reboot wedged on a black frame a few minutes
     before the DONE_QUIET window closed (seen live on Tahoe, PVE 9.2). Motion
@@ -478,6 +549,40 @@ def test_qmconsole_frame_hash(tmp_path: Path) -> None:
     # probe_hash re-reads what frame_size already wrote, without dumping again
     console._run = lambda *a, **k: subprocess.CompletedProcess(a, 0)
     assert console.probe_hash() == "e0dc4968b8f2767a4b4fe1f0db9e640c"
+
+
+def test_save_frame_writes_a_png(tmp_path: Path) -> None:
+    dest = str(tmp_path / "stall.png")
+    commands: list[str] = []
+
+    def runner(command, **kwargs):
+        commands.append(command)
+        Path(dest).write_bytes(b"\x89PNG")
+        return subprocess.CompletedProcess(command, 0)
+
+    console = QmConsole(996, runner=runner, sleep=lambda s: None)
+    assert console.save_frame(dest) == dest
+    assert commands == [f"echo 'screendump {dest} -f png' | qm monitor 996"]
+
+
+def test_save_frame_falls_back_to_ppm(tmp_path: Path) -> None:
+    """QEMU older than 7.1 has no -f png; the raw frame is still worth having."""
+    dest = str(tmp_path / "stall.png")
+    ppm = str(tmp_path / "stall.ppm")
+
+    def runner(command, **kwargs):
+        if "-f png" not in command:
+            Path(ppm).write_bytes(b"P6 frame")
+        return subprocess.CompletedProcess(command, 0)
+
+    console = QmConsole(995, runner=runner, sleep=lambda s: None)
+    assert console.save_frame(dest) == ppm
+
+
+def test_save_frame_reports_nothing_when_no_frame_lands(tmp_path: Path) -> None:
+    console = QmConsole(994, runner=lambda *a, **k: subprocess.CompletedProcess(a, 0),
+                        sleep=lambda s: None)
+    assert console.save_frame(str(tmp_path / "stall.png")) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -575,5 +680,28 @@ def test_bash_power_cycles_a_wedged_guest(bash_text: str) -> None:
 def test_bash_represses_a_parked_picker(bash_text: str) -> None:
     fn = bash_text[bash_text.index("function unattended_install()"):]
     assert "UNATTENDED_PICKER_REPRESS" in fn
-    # picker, command, the per-boot press and the parked re-press
-    assert fn.count('qm sendkey "$vmid" ret') == 4
+    # command, the per-boot press and the parked re-press; the first picker
+    # is pressed by unattended_wait_frame now, not by a one-shot sendkey
+    assert fn.count('qm sendkey "$vmid" ret') == 3
+
+
+def test_bash_keeps_pressing_at_the_first_picker(bash_text: str) -> None:
+    """Issue #142: one return at the first picker is dropped while OpenCanopy
+    is still loading, and Timeout=0 then parks the picker for the whole
+    recovery timeout."""
+    fn = bash_text[bash_text.index("function unattended_install()"):]
+    assert 'unattended_wait_frame "$vmid" "$UNATTENDED_RECOVERY_TIMEOUT" below ret' in fn
+    waiter = bash_text[bash_text.index("function unattended_wait_frame()"):]
+    waiter = waiter[:waiter.index("\n}")]
+    assert 'qm sendkey "$vmid" "$repress"' in waiter
+    assert "UNATTENDED_PICKER_MIN_BYTES" in waiter        # only while the picker is up
+    assert "UNATTENDED_PICKER_REPRESS" in waiter          # throttled
+
+
+def test_bash_saves_the_console_when_a_run_stalls(bash_text: str) -> None:
+    assert "function unattended_save_frame()" in bash_text
+    saver = bash_text[bash_text.index("function unattended_save_frame()"):]
+    assert "-f png" in saver                              # PNG when QEMU can
+    assert "screendump $ppm" in saver                     # PPM fallback
+    caller = bash_text[bash_text.index("if unattended_install "):]
+    assert "unattended_save_frame" in caller[:caller.index("fi")]

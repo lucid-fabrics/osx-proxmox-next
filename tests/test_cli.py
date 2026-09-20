@@ -1420,17 +1420,40 @@ def test_install_unattended_unknown_disk_errors(monkeypatch, capsys):
 
 
 def test_install_unattended_reports_driver_failure(monkeypatch, capsys):
+    """A stalled run also saves the console: the log alone never says what
+    was on screen, and the screen is gone by the time anyone reads it."""
     from osx_proxmox_next import cli as cli_mod
-    from osx_proxmox_next.unattended import UnattendedError
+    from osx_proxmox_next.unattended import QmConsole, UnattendedError
 
     def boom(console, disk_gb, on_event):
         raise UnattendedError("no picker")
 
     monkeypatch.setattr(cli_mod, "get_proxmox_adapter", lambda: _FakeAdapter())
     monkeypatch.setattr("osx_proxmox_next.unattended.run_unattended_install", boom)
+    monkeypatch.setattr(QmConsole, "save_frame",
+                        lambda self, dest: "/var/log/osx-next-unattended-953.png")
     rc = cli_mod.run_cli(["install-unattended", "--vmid", "953", "--disk-gb", "64"])
+    out = capsys.readouterr().out
     assert rc == 1
-    assert "no picker" in capsys.readouterr().out
+    assert "no picker" in out
+    assert "/var/log/osx-next-unattended-953.png" in out
+
+
+def test_install_unattended_failure_without_a_frame_says_nothing_extra(monkeypatch, capsys):
+    from osx_proxmox_next import cli as cli_mod
+    from osx_proxmox_next.unattended import QmConsole, UnattendedError
+
+    def boom(console, disk_gb, on_event):
+        raise UnattendedError("no picker")
+
+    monkeypatch.setattr(cli_mod, "get_proxmox_adapter", lambda: _FakeAdapter())
+    monkeypatch.setattr("osx_proxmox_next.unattended.run_unattended_install", boom)
+    monkeypatch.setattr(QmConsole, "save_frame", lambda self, dest: "")
+    rc = cli_mod.run_cli(["install-unattended", "--vmid", "953", "--disk-gb", "64"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "saved to" not in out
+    assert "left as-is" in out
 
 
 def test_apply_ok_says_the_picker_waits_for_enter(monkeypatch, capsys):
