@@ -22,6 +22,26 @@ Testing, lab use and learning only: Apple's license terms govern where macOS may
 |       |            | root shell on serial in 21-22 s under TCG on a 14900K      |
 |       |            | (5 runs). Far faster than the estimate in section 8.       |
 |       |            | Independently audited.                                     |
+| 2     | 2026-10-25 | Snapintosh monitor enters XNU under QEMU 11.0.3 TCG and    |
+|       |            | stops at the documented single-CPU PMGR assertion. Fixes:  |
+|       |            | boot data preloaded from the QEMU disk (guest starts in    |
+|       |            | about 26 s instead of 40+ min over the UART), EL2 entered  |
+|       |            | in VHE mode by AAVMF converted for the monitor. Audited.   |
+| 3     | 2026-10-25 | Six CPUs online (GIC and MPIDR read from ACPI, A16 values  |
+|       |            | unchanged), BaseSystem RAM disk mounted as root at about   |
+|       |            | 347 s, launchd starts. QEMU-only profile drops             |
+|       |            | secure-repair (its GPIO wait races under TCG). Audited.    |
+| 4     | 2026-10-25 | launchd runs 65 processes; WindowServer launches and       |
+|       |            | aborts with "No suitable Metal devices present after 30    |
+|       |            | seconds" at 1244 s, same as the A16 before its GPU driver. |
+|       |            | Go for the GUI work (limit was 2 hours). Fixes: T0SZ for   |
+|       |            | pointer signing, A16 speed build flags, SEP services in    |
+|       |            | the TCG board. Audited.                                    |
+| 6a    | 2026-10-25 | SoftGPU protocol spec, revision 4, after three review      |
+|       |            | rounds. Ready to implement.                                |
+| 6b-S  | 2026-10-25 | Host shader sandbox prototype: no memory escape or leak    |
+|       |            | found by two security audits; a guest-triggered host crash |
+|       |            | class (compute-only ops in graphics stages) being fixed.   |
 +-------+------------+------------------------------------------------------------+
 ```
 
