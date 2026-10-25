@@ -152,17 +152,28 @@ Proxmox host:
   on a 14900K, adjust for other CPUs), 24 GB RAM, 200 GB disk, `cpu: host`.
 - In snaplab: build deps (clang, lld, LLVM 22, meson, ninja, python3, lzfse, glib/pixman
   for QEMU), `qemu-efi-aarch64` for `AAVMF_CODE.fd`, stock QEMU 11.0.x source tree.
+  Debian trixie packages clang/lld/llvm 22 directly (`clang-22`, `ld.lld-22`).
 - Clone Snapintosh with submodules and q1n1 at the commits named at the top of this
   file.
+- Smoke test the AArch64 build: `-M virt,virtualization=on,gic-version=3 -accel tcg
+  -cpu max -bios AAVMF_CODE.fd -nographic -nic none` reaches the UEFI `Shell>` prompt.
+  Without `-nic none`, EDK2 spends minutes trying PXE and HTTP boot first.
+- `tools/fetch-ipsw.py` and `tools/extract-firmware.py` for the J700 26A428 IPSW (about
+  27 GB), run in snaplab: they work on Linux unmodified. The IPSW itself has no pin;
+  check the extracted files against the SHA-256 pins in `probes/guestprofile.py`
+  (kernelcache, DeviceTree, SPTM, TXM, SEP firmware).
 
 The Mac (already on 26A428):
 - Install the KDK for 26A428, `ipsw` (Homebrew), meson/ninja/LLVM 22 per
-  gpu/air2ir3/README.md.
-- `tools/fetch-ipsw.py` and `tools/extract-firmware.py` for the J700 26A428 IPSW. Check
-  every hash against docs/COMPATIBILITY.md:13-20.
+  gpu/air2ir3/README.md. Without admin rights, the KDK package can be expanded
+  with `pkgutil --expand-full` into a user folder and passed to the tools with `--kdk`.
+- Generate the private class-layout headers per docs/BUILDING.md:
+  `IOMobileGraphicsFamily26A428.h` with `tools/gen-iomfb-header.py`, and
+  `IOGPUFamily26A428.h` by hand from the KDK using the recipe in AGENTS.md (no
+  generator ships for it). Both stay local, never committed.
 
-Gate 0: snaplab boots, the IPSW and firmware hashes match the pins, Xcode + KDK build
-the AdrenoX2 kext unmodified on the Mac (proves the kext toolchain).
+Gate 0: snaplab boots, the extracted firmware matches the pins, Xcode + KDK build the
+AdrenoX2 kext unmodified on the Mac (proves the kext toolchain).
 
 ### Phase 1. Baseline with qemu-sptm / darwin-vm (0.5-2 days)
 
