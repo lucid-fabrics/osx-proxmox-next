@@ -2,10 +2,28 @@
 
 Plan, 2026-10-24. Evidence base: [ANALYSIS.md](ANALYSIS.md) (same folder), the
 Snapintosh sources at commit `67013604d798` and q1n1 at `7872398694ca`, and checks run
-on the reference Proxmox host and Mac. Nothing has been built or booted yet. Every
-duration below is an estimate for one experienced engineer, not a measurement.
+on the reference Proxmox host and Mac. Durations below are estimates for one
+experienced engineer unless the progress log says they were measured.
 
 Testing, lab use and learning only: Apple's license terms govern where macOS may run.
+
+## Progress log
+
+```
++-------+------------+------------------------------------------------------------+
+| Phase | Date       | Result                                                     |
++-------+------------+------------------------------------------------------------+
+| 0     | 2026-10-24 | Lab VM up, QEMU 11.0.3 reaches the UEFI shell, extracted   |
+|       |            | firmware matches every pin. AdrenoX2 kext builds on the    |
+|       |            | Mac after two local fixes to upstream defects (generator   |
+|       |            | missing three IOMFB members; IONetworkController slots     |
+|       |            | 331-334 renamed in 26A428). Independently audited.         |
+| 1     | 2026-10-24 | qemu-sptm (2867d847) boots the J700 26A428 kernel to a     |
+|       |            | root shell on serial in 21-22 s under TCG on a 14900K      |
+|       |            | (5 runs). Far faster than the estimate in section 8.       |
+|       |            | Independently audited.                                     |
++-------+------------+------------------------------------------------------------+
+```
 
 
 ## 1. Goal and what "done" means

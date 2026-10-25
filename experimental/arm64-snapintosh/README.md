@@ -5,7 +5,8 @@ to boot Apple's arm64 macOS 27 on a regular x86 Proxmox host by running
 [Snapintosh](https://github.com/Snapintosh/Snapintosh), an EL2 monitor written for
 the ASUS Zenbook A16, inside an emulated arm64 machine (QEMU TCG).
 
-Status: planning. Nothing here has been built or booted.
+Status: Phases 0 and 1 done. The macOS 27 kernel boots to a root shell under QEMU
+TCG in about 22 seconds (see the progress log in [PLAN.md](PLAN.md)). No desktop yet.
 
 ## What makes it hard
 
