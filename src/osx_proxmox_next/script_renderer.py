@@ -295,11 +295,14 @@ def _mount_source_oc_script(opencore_path: Path) -> str:
         f'SRC_LOOP=$(losetup -fP --show {shquote(str(opencore_path))}) && '
         "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         f"{_partprobe_retry_snippet('SRC_LOOP')} && "
-        "SRC_PART=$(blkid -o device $SRC_LOOP ${SRC_LOOP}p* 2>/dev/null "
-        "| xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' "
-        "| head -1); "
-        "if [ -n \"$SRC_PART\" ]; then mount \"$SRC_PART\" $OC_SRC; "
-        "else echo 'WARN: No vfat partition found on source ISO via blkid, trying raw mount'; mount $SRC_LOOP $OC_SRC; fi && "
+        # Probe misses are expected for GPT containers and non-FAT partitions.
+        # Keep this selection in sync with the standalone bash installer.
+        "SRC_PART=''; "
+        'for SRC_CANDIDATE in "$SRC_LOOP" "${SRC_LOOP}"p*; do '
+        'if [ "$(blkid -s TYPE -o value "$SRC_CANDIDATE" 2>/dev/null || true)" = vfat ]; then '
+        'SRC_PART="$SRC_CANDIDATE"; break; fi; done; '
+        'if [ -n "$SRC_PART" ]; then mount "$SRC_PART" "$OC_SRC"; '
+        'else echo \'WARN: No vfat partition found on source ISO via blkid, trying raw mount\'; mount "$SRC_LOOP" "$OC_SRC"; fi && '
         "{ mountpoint -q $OC_SRC || { echo \"ERROR: $OC_SRC is not mounted. Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
     )
 
