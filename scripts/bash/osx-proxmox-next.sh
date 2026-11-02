@@ -1183,9 +1183,16 @@ function build_opencore_disk() {
   setup_loop src_loop "$source_iso" "OpenCore source ISO"
   BUILD_SRC_LOOP="$src_loop"
 
-  src_part=$(blkid -o device "$src_loop" "${src_loop}"p* 2>/dev/null \
-    | xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' \
-    | head -1)
+  # A GPT container or non-FAT partition is an expected probe miss. Do not
+  # let it abort the build through xargs/pipefail before reaching the ESP.
+  local src_candidate
+  src_part=""
+  for src_candidate in "$src_loop" "${src_loop}"p*; do
+    if [[ "$(blkid -s TYPE -o value "$src_candidate" 2>/dev/null || true)" == "vfat" ]]; then
+      src_part="$src_candidate"
+      break
+    fi
+  done
   if [ -n "$src_part" ]; then
     safe_mount "$src_part" "$src_mnt" -o ro
   else
