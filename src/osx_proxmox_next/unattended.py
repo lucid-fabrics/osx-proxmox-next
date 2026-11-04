@@ -49,6 +49,7 @@ DONE_MOTION = 120                  # Setup Assistant redraws its menu-bar clock 
 HUNG_STILL = 600                   # frame byte-identical for 10 min = macOS is wedged
 PICKER_REPRESS = 30                # seconds between return presses at a parked picker
 MAX_POWER_CYCLES = 2               # stop/start attempts on a wedged guest before giving up
+MAX_RECOVERY_RESETS = 2            # picker came back during the settle: re-boot recovery this often
 TOTAL_BUDGET = 3 * 3600
 POLL_INTERVAL = 6
 KEY_DELAY = 0.4
@@ -203,6 +204,25 @@ def _wait(console: QmConsole, predicate: Callable[[int], bool], timeout: float,
     raise UnattendedError(f"Timed out after {int(timeout)}s waiting for {what}")
 
 
+def _settle_recovery(console: QmConsole, clock: Callable[[], float],
+                     sleep: Callable[[float], None]) -> bool:
+    """Watch the screen for RECOVERY_SETTLE seconds after recovery looked
+    like it started. Returns False when the 1080p picker comes back.
+
+    Frame size alone cannot tell recovery from the firmware: OVMF draws at
+    1280x800 too. When the guest resets instead of booting recovery (a
+    picker parked long enough after a dropped return does exactly that),
+    the firmware screen passes for recovery and the Terminal navigation and
+    install command would be typed into the picker that follows. A real
+    recovery boot never returns to a 1080p frame, so one is proof of reset."""
+    deadline = clock() + RECOVERY_SETTLE
+    while clock() < deadline:
+        if console.frame_size() > PICKER_MIN_BYTES:
+            return False
+        sleep(POLL_INTERVAL)
+    return True
+
+
 def _wait_still(console: QmConsole, on_event: Callable[[str], None],
                 clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
     """Hold until the recovery screen stops animating.
@@ -279,10 +299,19 @@ def run_unattended_install(
     # a slow boot disk and is dropped, leaving the picker parked forever.
     # Keep pressing while the 1080p picker is on screen, exactly as the
     # post-detach loop does.
-    _wait(console, lambda s: 0 < s < MACOS_MAX_BYTES, RECOVERY_TIMEOUT,
-          "recovery to start", clock, sleep, repress="ret")
-    on_event(f"Recovery is booting; settling {RECOVERY_SETTLE}s for the utilities window")
-    sleep(RECOVERY_SETTLE)
+    resets = 0
+    while True:
+        _wait(console, lambda s: 0 < s < MACOS_MAX_BYTES, RECOVERY_TIMEOUT,
+              "recovery to start", clock, sleep, repress="ret")
+        on_event(f"Recovery is booting; settling {RECOVERY_SETTLE}s for the utilities window")
+        if _settle_recovery(console, clock, sleep):
+            break
+        resets += 1
+        if resets > MAX_RECOVERY_RESETS:
+            raise UnattendedError("The guest kept resetting to the boot picker "
+                                  "instead of starting recovery")
+        on_event("The guest reset to the boot picker instead of starting recovery; "
+                 "selecting recovery again")
     _wait_still(console, on_event, clock, sleep)
 
     on_event("Opening Terminal from the Utilities menu")

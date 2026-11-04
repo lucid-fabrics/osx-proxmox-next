@@ -14,6 +14,7 @@ from osx_proxmox_next.unattended import (
     HUNG_STILL,
     INSTALL_REBOOT_TIMEOUT,
     MAX_POWER_CYCLES,
+    MAX_RECOVERY_RESETS,
     PICKER_MIN_BYTES,
     PICKER_REPRESS,
     PICKER_TIMEOUT,
@@ -219,6 +220,60 @@ def test_still_wait_gives_up_and_says_so() -> None:
                            clock=clock.monotonic, sleep=clock.sleep)
     assert any("never stopped moving" in e for e in events)
     assert "ctrl-f2" in console.keys
+
+
+def test_a_guest_reset_during_the_settle_is_not_taken_for_recovery() -> None:
+    """A dropped return parks the picker until the guest resets to OVMF,
+    whose 1280x800 screen passes the recovery size check (seen live on a
+    throttled boot disk). The picker returning during the settle proves it:
+    the driver must press again, not type into the firmware screen."""
+    clock = FakeClock()
+    schedule = [(0, 0), (30, PICKER),
+                (330, MACOS),        # OVMF after the reset, looks like recovery
+                (345, PICKER),       # picker back
+                (400, 0), (500, MACOS),   # recovery for real this time
+                (2000, PICKER), (2100, PICKER), (2130, MACOS),
+                (2700, PICKER), (2730, MACOS)]
+    console = FakeConsole(clock, schedule)
+    events: list[str] = []
+    nav_at: list[float] = []
+    original = console.sendkey
+
+    def watched(key: str) -> None:
+        if key == "ctrl-f2":
+            nav_at.append(clock.now)
+        original(key)
+
+    console.sendkey = watched  # type: ignore[method-assign]
+    run_unattended_install(console, 128, on_event=events.append,
+                           clock=clock.monotonic, sleep=clock.sleep)
+    assert sum("reset to the boot picker" in e for e in events) == 1
+    assert nav_at and nav_at[0] >= 500 + RECOVERY_SETTLE
+    assert console.typed == [erase_install_command(128)]
+
+
+def test_a_guest_that_keeps_resetting_raises() -> None:
+    schedule: list[tuple[float, int]] = [(0, 0), (30, PICKER)]
+    for i in range(MAX_RECOVERY_RESETS + 1):
+        base = 100 + i * 100
+        schedule += [(base, MACOS), (base + 30, PICKER)]
+    clock = FakeClock()
+    console = FakeConsole(clock, schedule)
+    with pytest.raises(UnattendedError, match="kept resetting"):
+        run_unattended_install(console, 128, on_event=lambda e: None,
+                               clock=clock.monotonic, sleep=clock.sleep)
+    assert console.typed == []
+    assert "ctrl-f2" not in console.keys
+
+
+def test_bash_settle_watches_for_the_picker_coming_back(bash_text: str) -> None:
+    fn = bash_text[bash_text.index("function unattended_settle_recovery()"):]
+    fn = fn[:fn.index("\n}\n")]
+    assert "UNATTENDED_RECOVERY_SETTLE" in fn
+    assert "UNATTENDED_PICKER_MIN_BYTES" in fn and "return 1" in fn
+    install = bash_text[bash_text.index("function unattended_install()"):]
+    assert install.index("UNATTENDED_MAX_RECOVERY_RESETS") < install.index("ctrl-f2")
+    assert "kept resetting to the boot picker" in install
 
 
 def test_picker_timeout_raises() -> None:
@@ -609,6 +664,7 @@ def test_bash_constants_match_python(bash_text: str) -> None:
         "UNATTENDED_HUNG_STILL": HUNG_STILL,
         "UNATTENDED_PICKER_REPRESS": PICKER_REPRESS,
         "UNATTENDED_MAX_POWER_CYCLES": MAX_POWER_CYCLES,
+        "UNATTENDED_MAX_RECOVERY_RESETS": MAX_RECOVERY_RESETS,
         "UNATTENDED_TOTAL_BUDGET": TOTAL_BUDGET,
         "UNATTENDED_POLL": POLL_INTERVAL,
     }
@@ -656,7 +712,7 @@ def test_bash_detaches_recovery_at_first_reboot(bash_text: str) -> None:
 
 def test_bash_waits_for_a_still_screen_before_the_nav(bash_text: str) -> None:
     fn = bash_text[bash_text.index("function unattended_install()"):]
-    assert fn.index('sleep "$UNATTENDED_RECOVERY_SETTLE"') \
+    assert fn.index('unattended_settle_recovery "$vmid"') \
         < fn.index('unattended_wait_still "$vmid"') < fn.index("ctrl-f2")
     assert "md5sum" in bash_text[bash_text.index("function unattended_probe_hash()"):]
 
