@@ -123,11 +123,11 @@ class FakeConsole:
     def sendkey(self, key: str) -> None:
         self.keys.append(key)
 
-    restore_ok = True
+    restore_error = ""
 
-    def restore_picker_timeout(self) -> bool:
+    def restore_picker_timeout(self) -> str:
         self.qm_calls.append(("restore-timeout",))
-        return self.restore_ok
+        return self.restore_error
 
     def seq(self, keys, delay: float = 0.4) -> None:
         for key in keys:
@@ -300,11 +300,11 @@ def test_a_failed_auto_boot_restore_is_reported_not_fatal() -> None:
     console = FakeConsole(clock, [
         (0, 0), (30, PICKER), (60, 0), (200, MACOS), (1000, PICKER),
         (1100, PICKER), (1130, MACOS), (1700, PICKER), (1730, MACOS)])
-    console.restore_ok = False
+    console.restore_error = "ERROR: no ide0 (OpenCore) disk found"
     events: list[str] = []
     run_unattended_install(console, 128, on_event=events.append,
                            clock=clock.monotonic, sleep=clock.sleep)
-    assert any("post-install" in e for e in events)
+    assert any("post-install" in e and "no ide0" in e for e in events)
     assert any("Done" in e for e in events)
 
 
@@ -317,11 +317,15 @@ def test_qmconsole_restore_picker_timeout_runs_the_post_install_patch() -> None:
         return subprocess.CompletedProcess(argv, 0)
 
     console = QmConsole(993, runner=runner, sleep=lambda s: None)
-    assert console.restore_picker_timeout() is True
+    assert console.restore_picker_timeout() == ""
     assert seen == [["bash", "-c", _restore_picker_timeout_script("993")]]
-    failing = QmConsole(993, runner=lambda a, **k: subprocess.CompletedProcess(a, 1),
-                        sleep=lambda s: None)
-    assert failing.restore_picker_timeout() is False
+    failing = QmConsole(993, runner=lambda a, **k: subprocess.CompletedProcess(
+        a, 1, stdout="", stderr="mount: wrong fs type\nERROR: /dev/loop9p1 never appeared\n"),
+        sleep=lambda s: None)
+    assert failing.restore_picker_timeout() == "ERROR: /dev/loop9p1 never appeared"
+    silent = QmConsole(993, runner=lambda a, **k: subprocess.CompletedProcess(a, 3),
+                       sleep=lambda s: None)
+    assert silent.restore_picker_timeout() == "exit code 3"
 
 
 def test_bash_restores_auto_boot_after_the_detach(bash_text: str) -> None:
@@ -350,6 +354,8 @@ def test_bash_offers_post_install(bash_text: str) -> None:
     assert 'restore_picker_timeout "$vmid"' in fn
     assert '--boot "order=ide0;virtio0"' in fn
     assert "status: stopped" in fn
+    assert 'return "$rc"' in fn   # a failed patch must not exit 0
+    assert 'if post_install "${2:-}"; then exit 0; else exit 1; fi' in bash_text
     steps = bash_text[bash_text.index('echo -e "\\n${INFO}${YW}Next steps:${CL}"'):]
     assert "post-install ${VMID}" in steps[:1500]
 
