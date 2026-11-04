@@ -924,6 +924,7 @@ UNATTENDED_DONE_MOTION=120
 UNATTENDED_HUNG_STILL=600
 UNATTENDED_PICKER_REPRESS=30
 UNATTENDED_MAX_POWER_CYCLES=2
+UNATTENDED_MAX_RECOVERY_RESETS=2
 UNATTENDED_TOTAL_BUDGET=10800
 UNATTENDED_POLL=6
 
@@ -944,6 +945,21 @@ function unattended_frame_hash() {
   local vmid="$1"
   [ "$(unattended_frame_size "$vmid")" == "0" ] && return 0
   unattended_probe_hash "$vmid"
+}
+
+# Watch the screen through the recovery settle; fail (1) if the 1080p picker
+# comes back. OVMF draws at 1280x800 like recovery, so a guest that reset
+# instead of booting recovery passes the size check, and the Terminal
+# navigation would be typed into the picker that follows. A real recovery
+# boot never returns to a 1080p frame.
+function unattended_settle_recovery() {
+  local vmid="$1" t0
+  t0=$(date +%s)
+  while (( $(date +%s) - t0 < UNATTENDED_RECOVERY_SETTLE )); do
+    (( $(unattended_frame_size "$vmid") > UNATTENDED_PICKER_MIN_BYTES )) && return 1
+    sleep "$UNATTENDED_POLL"
+  done
+  return 0
 }
 
 # Hold until the recovery screen stops animating. A cold first boot can still
@@ -1083,9 +1099,18 @@ function unattended_install() {
   # One return is not enough: it lands while OpenCanopy is still loading on a
   # slow boot disk and is dropped. Keep pressing while the picker is up.
   msg_info "Unattended: waiting for recovery (takes a few minutes)"
-  unattended_wait_frame "$vmid" "$UNATTENDED_RECOVERY_TIMEOUT" below ret || {
-    msg_error "Unattended: recovery never reached its UI"; return 1; }
-  sleep "$UNATTENDED_RECOVERY_SETTLE"
+  local resets=0
+  while :; do
+    unattended_wait_frame "$vmid" "$UNATTENDED_RECOVERY_TIMEOUT" below ret || {
+      msg_error "Unattended: recovery never reached its UI"; return 1; }
+    unattended_settle_recovery "$vmid" && break
+    resets=$((resets + 1))
+    if (( resets > UNATTENDED_MAX_RECOVERY_RESETS )); then
+      msg_error "Unattended: the guest kept resetting to the boot picker instead of starting recovery"
+      return 1
+    fi
+    msg_info "Unattended: the guest reset to the boot picker instead of starting recovery; selecting recovery again"
+  done
   unattended_wait_still "$vmid"
   msg_ok "Unattended: recovery loaded"
 
