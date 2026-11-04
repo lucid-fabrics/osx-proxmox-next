@@ -925,6 +925,8 @@ UNATTENDED_HUNG_STILL=600
 UNATTENDED_PICKER_REPRESS=30
 UNATTENDED_MAX_POWER_CYCLES=2
 UNATTENDED_MAX_RECOVERY_RESETS=2
+# Picker auto-boot once recovery is detached (script_renderer.py PICKER_TIMEOUT_INSTALLED).
+PICKER_TIMEOUT_INSTALLED=15
 UNATTENDED_TOTAL_BUDGET=10800
 UNATTENDED_POLL=6
 
@@ -1086,6 +1088,66 @@ function unattended_wait_first_reboot() {
   return 1
 }
 
+# Put the OpenCore picker back to auto-boot on a stopped VM's boot disk.
+# The image ships Timeout=0 so an install can never auto-boot recovery; once
+# recovery is detached that guard has done its job, and left in place every
+# later boot waits for a return. Mirrors planner._restore_picker_timeout_script.
+# Non-fatal: returns 1 when the disk could not be patched.
+function restore_picker_timeout() {
+  local vmid="$1" vol path loop mnt rc=1 _i
+  vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
+  [ -n "$vol" ] || return 1
+  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
+  for _i in 1 2 3 4 5; do
+    partprobe "$loop" 2>/dev/null || true
+    [ -b "${loop}p1" ] && break
+    sleep 1
+  done
+  mnt=$(mktemp -d)
+  if [ -b "${loop}p1" ] && mount "${loop}p1" "$mnt" 2>/dev/null; then
+    if OC_PLIST="$mnt/EFI/OC/config.plist" OC_TIMEOUT="$PICKER_TIMEOUT_INSTALLED" python3 -c '
+import os, plistlib
+p = os.environ["OC_PLIST"]
+with open(p, "rb") as f:
+    c = plistlib.load(f)
+c["Misc"]["Boot"]["Timeout"] = int(os.environ["OC_TIMEOUT"])
+with open(p, "wb") as f:
+    plistlib.dump(c, f)
+'; then
+      # plistlib emits self-closing tags that OpenCore's OcXmlLib rejects
+      sed -i 's|<array/>|<array></array>|g; s|<dict/>|<dict></dict>|g; s|<data/>|<data></data>|g' \
+        "$mnt/EFI/OC/config.plist" && rc=0
+    fi
+    sync
+    umount "$mnt" 2>/dev/null || true
+  fi
+  losetup -d "$loop" 2>/dev/null || true
+  rmdir "$mnt" 2>/dev/null || true
+  return "$rc"
+}
+
+# Bash equivalent of `osx-next-cli post-install`: run once the installer has
+# rebooted the first time (VM stopped). Detaches recovery, restores the
+# picker's auto-boot and boots OpenCore first.
+function post_install() {
+  local vmid="$1"
+  [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh post-install <vmid>"; exit 1; }
+  qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || {
+    msg_error "VM $vmid is not stopped. Stop it first: qm stop $vmid"; exit 1; }
+  if qm config "$vmid" | grep -q '^ide2:'; then
+    qm set "$vmid" --delete ide2 >/dev/null
+    msg_ok "Detached the recovery disk"
+  fi
+  if restore_picker_timeout "$vmid"; then
+    msg_ok "Boot picker auto-boots after ${PICKER_TIMEOUT_INSTALLED}s again"
+  else
+    msg_error "Could not patch the OpenCore disk; the picker will keep waiting for return"
+  fi
+  qm set "$vmid" --boot "order=ide0;virtio0" >/dev/null
+  msg_ok "Boot order set to OpenCore first"
+}
+
 function unattended_install() {
   local vmid="$1" disk_gb="$2" t0 size reboots=0 last_picker last_change digest seen
   t0=$(date +%s)
@@ -1139,6 +1201,8 @@ function unattended_install() {
   unattended_wait_stopped "$vmid" || {
     msg_error "Unattended: VM did not stop for the recovery-detach step"; return 1; }
   qm set "$vmid" --delete ide2 >/dev/null 2>&1
+  restore_picker_timeout "$vmid" || \
+    msg_info "Unattended: could not restore the picker's auto-boot; run post-install after the install"
   qm start "$vmid" >/dev/null 2>&1
   msg_ok "Unattended: recovery detached; continuing hands-off (30-60 min)"
 
@@ -1460,6 +1524,14 @@ cd "${HOME:-/root}" 2>/dev/null || cd /
 
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
+
+# `osx-proxmox-next.sh post-install <vmid>`: leave install mode on an existing
+# VM, before any of the create-a-VM prompts.
+if [ "${1:-}" == "post-install" ]; then
+  check_root
+  post_install "${2:-}"
+  exit 0
+fi
 
 if whiptail --backtitle "OSX Proxmox Next" --title "macOS VM" --yesno "This will create a new macOS VM on Proxmox.\n\nRequirements:\n  - Intel or AMD CPU with VT-x/AMD-V\n  - 64GB+ free disk space\n  - Internet access (downloads ~1GB)\n\nProceed?" 14 58; then
   :
@@ -2056,6 +2128,9 @@ if [ "${UNATTENDED_DONE:-no}" != "yes" ]; then
   echo -e "  2. The picker waits for a choice; pick the macOS recovery entry"
   echo -e "  3. Use Disk Utility to erase the VirtIO disk as APFS"
   echo -e "  4. Run 'Reinstall macOS' from the recovery menu"
+  echo -e "  5. When the installer reboots the first time, stop the VM and run:"
+  echo -e "     bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh)\" -- post-install ${VMID}"
+  echo -e "     It detaches recovery and makes the picker auto-boot again."
 fi
 echo -e ""
 echo -e "  ${BL}Documentation: https://github.com/lucid-fabrics/osx-proxmox-next${CL}"
