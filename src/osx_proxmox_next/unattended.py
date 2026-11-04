@@ -164,18 +164,22 @@ class QmConsole:
                            capture_output=True, text=True)
         return (getattr(result, "stdout", "") or "") + (getattr(result, "stderr", "") or "")
 
-    def restore_picker_timeout(self) -> bool:
+    def restore_picker_timeout(self) -> str:
         """Put the OpenCore picker back to auto-boot on this VM's boot disk.
 
         The image ships Timeout=0 so an install can never auto-boot
         recovery. Once recovery is detached that guard has done its job;
         left in place, every later boot of the VM waits for a return.
-        The VM must be stopped. Returns False when the disk could not be
-        patched."""
+        The VM must be stopped. Returns "" on success, otherwise the
+        reason the disk could not be patched."""
         from .planner import _restore_picker_timeout_script
         result = self._run(["bash", "-c", _restore_picker_timeout_script(self.vmid)],
                            capture_output=True, text=True)
-        return getattr(result, "returncode", 1) == 0
+        if getattr(result, "returncode", 1) == 0:
+            return ""
+        output = ((getattr(result, "stdout", "") or "") + (getattr(result, "stderr", "") or "")).strip()
+        lines = output.splitlines()
+        return lines[-1] if lines else f"exit code {getattr(result, 'returncode', '?')}"
 
     def seq(self, keys: tuple[str, ...] | list[str], delay: float = KEY_DELAY) -> None:
         for key in keys:
@@ -349,9 +353,10 @@ def run_unattended_install(
     console.qm("stop")
     _wait_stopped(console, clock, sleep)
     console.qm("set", "--delete", "ide2")
-    if not console.restore_picker_timeout():
-        on_event("Could not restore the picker's auto-boot; run post-install "
-                 "after the install or every boot will wait for return")
+    restore_error = console.restore_picker_timeout()
+    if restore_error:
+        on_event(f"Could not restore the picker's auto-boot ({restore_error}); run "
+                 "post-install after the install or every boot will wait for return")
     console.qm("start")
     on_event("Recovery detached; continuing hands-off")
 

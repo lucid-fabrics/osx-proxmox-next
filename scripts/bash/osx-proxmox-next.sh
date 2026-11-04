@@ -1139,13 +1139,16 @@ function post_install() {
     qm set "$vmid" --delete ide2 >/dev/null
     msg_ok "Detached the recovery disk"
   fi
+  local rc=0
   if restore_picker_timeout "$vmid"; then
     msg_ok "Boot picker auto-boots after ${PICKER_TIMEOUT_INSTALLED}s again"
   else
     msg_error "Could not patch the OpenCore disk; the picker will keep waiting for return"
+    rc=1
   fi
   qm set "$vmid" --boot "order=ide0;virtio0" >/dev/null
   msg_ok "Boot order set to OpenCore first"
+  return "$rc"
 }
 
 function unattended_install() {
@@ -1529,8 +1532,8 @@ pushd "$TEMP_DIR" >/dev/null
 # VM, before any of the create-a-VM prompts.
 if [ "${1:-}" == "post-install" ]; then
   check_root
-  post_install "${2:-}"
-  exit 0
+  # In a condition so a failed patch exits 1 instead of tripping the ERR trap.
+  if post_install "${2:-}"; then exit 0; else exit 1; fi
 fi
 
 if whiptail --backtitle "OSX Proxmox Next" --title "macOS VM" --yesno "This will create a new macOS VM on Proxmox.\n\nRequirements:\n  - Intel or AMD CPU with VT-x/AMD-V\n  - 64GB+ free disk space\n  - Internet access (downloads ~1GB)\n\nProceed?" 14 58; then
