@@ -1742,6 +1742,27 @@ def test_append_log_rolling_window() -> None:
     asyncio.run(_run())
 
 
+def test_append_log_keeps_the_last_line_in_view() -> None:
+    """The log box is shorter than its window; a finished install must not
+    read as stuck on a step above the fold (issue #142)."""
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            app.current_step = 6
+            await pilot.pause()
+            widget = app.query_one("#live_log", Static)
+            widget.remove_class("hidden")
+            log_list: list[str] = []
+            for i in range(15):
+                app._append_log("#live_log", f"line {i}", log_list)
+            await pilot.pause()
+            shown = str(widget.content).splitlines()
+            assert shown[-1] == "line 14"
+            assert len(shown) <= widget.content_size.height  # nothing below the fold
+
+    asyncio.run(_run())
+
+
 def test_on_mount_no_storage_targets(monkeypatch) -> None:
     monkeypatch.setattr(NextApp, "_detect_storage_targets", lambda self: [])
 
@@ -2514,6 +2535,7 @@ def test_unattended_checkbox_spawns_detached_driver(monkeypatch) -> None:
             assert spawned == [900]
             text = str(app.query_one("#result_box", Static).content)
             assert "Unattended install (BETA)" in text
+            assert "as soon as the installer reboots" not in text
 
     asyncio.run(_run())
 
