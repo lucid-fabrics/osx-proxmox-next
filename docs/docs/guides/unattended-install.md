@@ -128,5 +128,5 @@ osx-next-cli post-install --vmid 910 --execute
 ```
 
 :::note
-The driver already detaches recovery at the first reboot, so `post-install` afterwards sets the OpenCore-first boot order (`ide0;virtio0`) and restores the picker's 15 second auto-boot, which the boot image disables during install.
+The driver already detaches recovery at the first reboot and restores the picker's 15 second auto-boot at the same time, so later boots no longer wait for a return. `post-install` afterwards only sets the OpenCore-first boot order (`ide0;virtio0`).
 :::

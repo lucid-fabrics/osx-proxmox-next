@@ -123,6 +123,12 @@ class FakeConsole:
     def sendkey(self, key: str) -> None:
         self.keys.append(key)
 
+    restore_ok = True
+
+    def restore_picker_timeout(self) -> bool:
+        self.qm_calls.append(("restore-timeout",))
+        return self.restore_ok
+
     def seq(self, keys, delay: float = 0.4) -> None:
         for key in keys:
             self.sendkey(key)
@@ -274,6 +280,78 @@ def test_bash_settle_watches_for_the_picker_coming_back(bash_text: str) -> None:
     install = bash_text[bash_text.index("function unattended_install()"):]
     assert install.index("UNATTENDED_MAX_RECOVERY_RESETS") < install.index("ctrl-f2")
     assert "kept resetting to the boot picker" in install
+
+
+def test_auto_boot_is_restored_with_recovery_detached() -> None:
+    """Timeout=0 only protects the install from booting recovery. Left in
+    place after the detach, every later boot of the VM waits for a return."""
+    console, events, _ = _run([
+        (0, 0), (30, PICKER), (60, 0), (200, MACOS), (1000, PICKER),
+        (1100, PICKER), (1130, MACOS), (1700, PICKER), (1730, MACOS)])
+    calls = console.qm_calls
+    detach = calls.index(("set", "--delete", "ide2"))
+    assert calls[detach + 1] == ("restore-timeout",)
+    assert calls[detach + 2] == ("start",)
+    assert not any("auto-boot" in e for e in events)
+
+
+def test_a_failed_auto_boot_restore_is_reported_not_fatal() -> None:
+    clock = FakeClock()
+    console = FakeConsole(clock, [
+        (0, 0), (30, PICKER), (60, 0), (200, MACOS), (1000, PICKER),
+        (1100, PICKER), (1130, MACOS), (1700, PICKER), (1730, MACOS)])
+    console.restore_ok = False
+    events: list[str] = []
+    run_unattended_install(console, 128, on_event=events.append,
+                           clock=clock.monotonic, sleep=clock.sleep)
+    assert any("post-install" in e for e in events)
+    assert any("Done" in e for e in events)
+
+
+def test_qmconsole_restore_picker_timeout_runs_the_post_install_patch() -> None:
+    from osx_proxmox_next.planner import _restore_picker_timeout_script
+    seen: list = []
+
+    def runner(argv, **kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    console = QmConsole(993, runner=runner, sleep=lambda s: None)
+    assert console.restore_picker_timeout() is True
+    assert seen == [["bash", "-c", _restore_picker_timeout_script("993")]]
+    failing = QmConsole(993, runner=lambda a, **k: subprocess.CompletedProcess(a, 1),
+                        sleep=lambda s: None)
+    assert failing.restore_picker_timeout() is False
+
+
+def test_bash_restores_auto_boot_after_the_detach(bash_text: str) -> None:
+    from osx_proxmox_next.script_renderer import PICKER_TIMEOUT_INSTALLED
+    m = re.search(r"^PICKER_TIMEOUT_INSTALLED=(\d+)$", bash_text, re.M)
+    assert m and int(m.group(1)) == PICKER_TIMEOUT_INSTALLED
+    fn = bash_text[bash_text.index("function unattended_install()"):]
+    assert fn.index("--delete ide2") < fn.index('restore_picker_timeout "$vmid"') \
+        < fn.index('qm start "$vmid"')
+    restore = bash_text[bash_text.index("function restore_picker_timeout()"):]
+    restore = restore[:restore.index("\n}\n")]
+    assert 'c["Misc"]["Boot"]["Timeout"]' in restore
+    assert "<dict></dict>" in restore   # OcXmlLib rejects self-closing tags
+    assert "umount" in restore and "losetup -d" in restore
+
+
+def test_bash_offers_post_install(bash_text: str) -> None:
+    """Bash users had no way to leave install mode: no post-install command,
+    so every boot of a manually installed VM waited at the picker."""
+    # before the "create a new macOS VM?" prompt, or post-install never runs
+    assert bash_text.index('if [ "${1:-}" == "post-install" ]') \
+        < bash_text.index("This will create a new macOS VM")
+    fn = bash_text[bash_text.index("function post_install()"):]
+    fn = fn[:fn.index("\n}\n")]
+    assert "--delete ide2" in fn
+    assert 'restore_picker_timeout "$vmid"' in fn
+    assert '--boot "order=ide0;virtio0"' in fn
+    assert "status: stopped" in fn
+    steps = bash_text[bash_text.index('echo -e "\\n${INFO}${YW}Next steps:${CL}"'):]
+    assert "post-install ${VMID}" in steps[:1500]
 
 
 def test_picker_timeout_raises() -> None:
