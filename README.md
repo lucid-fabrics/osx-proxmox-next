@@ -32,14 +32,6 @@
   </a>
 </p>
 
-<p align="center">
-  <a href="https://ko-fi.com/s/84fe857595">
-    <img alt="GPU Passthrough Fund progress" src="https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next/svg?v=2" width="600">
-  </a>
-  <br>
-  <sub>Goal: fund the workforce to build automated GPU compatibility detection and passthrough setup for macOS.</sub>
-</p>
-
 ---
 
 ## 🧰 Stop Wasting Afternoons on macOS VMs
@@ -767,7 +759,6 @@ In the TUI, tick **Force fresh download (ignore cached ISO)** on the Review step
 
 - 🧩 **Multi-VM templates** - save and reuse configurations across VMs
 - 🔄 **Auto-update OpenCore** - detect and pull latest OpenCore releases
-- 🎮 **GPU passthrough walkthrough** - guided IOMMU + VFIO setup, now in beta (`osx-next-cli gpu-setup`). Fund goal: pay the workforce to test it across more cards and boards.
 
 ---
 
