@@ -14,6 +14,7 @@ from pathlib import Path
 from shlex import quote as shquote
 from collections.abc import Callable
 
+from . import host_setup
 from .domain import PlanStep
 from .infrastructure import ProxmoxAdapter
 from .preflight import has_initcall_blacklist
@@ -181,9 +182,12 @@ def vfio_conf_hint(root: Path, bdf: str) -> list[str]:
         vendor, device = _read_hex(dev / "vendor"), _read_hex(dev / "device")
         if vendor is None or device is None:
             continue
+        pci_class = _read_hex(dev / "class")
+        # Only the card's own functions are suggested: never a storage or network function, never another vendor's.
+        if (pci_class is not None and pci_class >> 16 in (0x01, 0x02)) or (vendor_id is not None and vendor != vendor_id):
+            continue
         vendor_id = vendor if vendor_id is None else vendor_id
         ids.append(f"{vendor:04x}:{device:04x}")
-        pci_class = _read_hex(dev / "class")
         usb_c = usb_c or (pci_class is not None and pci_class >> 8 in (0x0C03, 0x0C80))
     softdeps = list(_SOFTDEPS.get(vendor_id or 0x10DE, _SOFTDEPS[0x10DE]))
     if usb_c:
@@ -344,6 +348,15 @@ class AttachRecord:
     vga: str | None = None
     vga_changed: bool = False
     oc: str = ""  # which patcher edited the OpenCore disk: "nullmoth", "gpu" or "" (none)
+    fp: str = ""  # identifies the VM (SMBIOS uuid or name): a record of a deleted VM never applies to a new one
+    after: dict | None = None  # what the attach wrote, so undo only reverts untouched fields
+
+
+def new_record(vmid: int, bdf: str, vendor: str, cfg: dict[str, str], profile: "GpuProfile", hostpci: str,
+               vga_none: bool = False, oc: str = "") -> "AttachRecord":
+    """The record for an attach about to run (built by the engine the bash installer shares)."""
+    return AttachRecord(**host_setup.make_record(vmid, bdf, vendor, cfg, hostpci, list(profile.global_args),
+                                                 vga_none, oc))
 
 
 def record_path(vmid: int) -> Path:
@@ -357,16 +370,25 @@ def load_record(vmid: int) -> AttachRecord | None:
         return None
 
 
-def record_step(record: AttachRecord) -> PlanStep:
-    """Plan step that writes the sidecar. It runs before any qm change."""
+def record_step(record: AttachRecord, replace: bool = False) -> PlanStep:
+    """Plan step that writes the sidecar. It runs before any change to the VM or its OpenCore disk.
+
+    An existing record of the same attach is kept (it holds the true originals); *replace* is set when
+    the record on disk belongs to another VM that once had this id."""
     path = record_path(record.vmid)
     body = json.dumps(asdict(record), sort_keys=True)
+    keep = "" if replace else f"[ -e {shquote(str(path))} ] || "
     return PlanStep(
         title="Record the original VM settings (for undo)",
         argv=["bash", "-c",
-              f"mkdir -p {shquote(str(path.parent))} && "
-              f"[ -e {shquote(str(path))} ] || printf %s {shquote(body)} > {shquote(str(path))}"],
+              f"mkdir -p {shquote(str(path.parent))} && {keep}printf %s {shquote(body)} > {shquote(str(path))}"],
     )
+
+
+def record_is_stale(record: AttachRecord) -> bool:
+    """True when the record on disk was written for a different VM than *record* describes."""
+    old = load_record(record.vmid)
+    return old is not None and old.fp != record.fp
 
 
 def hostpci_value(bdf: str, profile: GpuProfile, extra: str = "") -> str:
@@ -393,35 +415,36 @@ def build_hostpci_attach_steps(
     return steps
 
 
-def _restore_args_step(vid: str, original: str | None) -> PlanStep:
-    if original:
-        return PlanStep(title="Restore the original args", argv=["qm", "set", vid, "--args", original])
-    return PlanStep(title="Remove args (there were none before)", argv=["qm", "set", vid, "--delete", "args"])
-
-
 def build_hostpci_detach_steps(
     vmid: int, current_args: str, has_hostpci0: bool,
     record: AttachRecord | None = None, profile: GpuProfile = NVIDIA_PROFILE,
+    cfg: dict[str, str] | None = None, notes: list[str] | None = None,
 ) -> list[PlanStep]:
-    """Undo an attach. With a record the VM returns to exactly what it was.
+    """Undo an attach. With a record the VM returns to what it was, field by field.
 
-    Without one (attached by an older version) only the known additions go away."""
+    A field that no longer holds what the attach wrote keeps the user's value (reported in *notes*).
+    Without a record (attached by an older version) only the known additions go away."""
     vid = str(vmid)
     steps: list[PlanStep] = []
     if record is not None:
-        if record.hostpci0:
-            steps.append(PlanStep(title="Restore the original hostpci0",
-                                  argv=["qm", "set", vid, "--hostpci0", record.hostpci0], risk="action"))
-        elif has_hostpci0:
-            steps.append(PlanStep(title="Remove GPU (hostpci0)",
-                                  argv=["qm", "set", vid, "--delete", "hostpci0"], risk="action"))
-        if current_args != (record.args or ""):
-            steps.append(_restore_args_step(vid, record.args))
-        if record.vga_changed:
-            steps.append(PlanStep(
-                title="Restore the display setting",
-                argv=["qm", "set", vid, "--vga", record.vga] if record.vga else ["qm", "set", vid, "--delete", "vga"],
-            ))
+        current = dict(cfg or {})
+        if cfg is None:
+            current = {"args": current_args, **({"hostpci0": "?"} if has_hostpci0 else {})}
+        res = host_setup.vm_restore(asdict(record), current)
+        if notes is not None:
+            notes.extend(res["notes"])
+        titles = {"hostpci0": "Restore the original hostpci0", "args": "Restore the original args",
+                  "vga": "Restore the display setting"}
+        for act in res["actions"]:
+            key = act["key"]
+            if act["op"] == "set":
+                argv = ["qm", "set", vid, f"--{key}", act["value"]]
+                title = titles[key]
+            else:
+                argv = ["qm", "set", vid, "--delete", key]
+                title = {"hostpci0": "Remove GPU (hostpci0)", "args": "Remove args (there were none before)",
+                         "vga": "Restore the display setting"}[key]
+            steps.append(PlanStep(title=title, argv=argv, risk="action" if key == "hostpci0" else "info"))
         steps.append(PlanStep(title="Forget the recorded settings",
                               argv=["rm", "-f", str(record_path(vmid))]))
         return steps
@@ -445,15 +468,18 @@ def parse_config(raw: str) -> dict[str, str]:
     return cfg
 
 
-def hostpci_bdfs(cfg: dict[str, str]) -> dict[str, set[str]]:
-    """Map hostpci key -> normalized card addresses it passes through."""
+def hostpci_bdfs(cfg: dict[str, str], mappings: dict[str, set[str]] | None = None) -> dict[str, set[str]]:
+    """Map hostpci key -> normalized card addresses it passes through (resource mappings resolved)."""
     out: dict[str, set[str]] = {}
     for key, value in cfg.items():
         if not re.fullmatch(r"hostpci\d+", key):
             continue
         ids = set()
         for token in re.split(r"[,;]", value):
-            token = token.removeprefix("host=")
+            token = token.strip().removeprefix("host=")
+            if token.startswith("mapping="):
+                ids |= set((mappings or {}).get(token[len("mapping="):], ()))
+                continue
             bdf = normalize_bdf(token)
             if bdf:
                 ids.add(bdf)
@@ -461,17 +487,26 @@ def hostpci_bdfs(cfg: dict[str, str]) -> dict[str, set[str]]:
     return out
 
 
-def gpu_users(adapter: ProxmoxAdapter, bdf: str, vmid: int) -> list[tuple[int, bool]]:
-    """Other VMs that already hold this card, with whether they are running."""
+def pci_mappings(adapter: ProxmoxAdapter, root: str = "/") -> dict[str, set[str]]:
+    """Cluster PCI resource mappings (name -> card addresses), from the config file or pvesh."""
+    def run(argv: list[str], timeout: int = 20) -> tuple[int, str]:
+        res = adapter.run(argv)
+        return res.returncode, res.output
+    return host_setup.load_mappings(root, run)
+
+
+def gpu_users(adapter: ProxmoxAdapter, bdf: str, vmid: int, root: str = "/") -> list[tuple[int, bool]]:
+    """Other VMs that already hold this card (directly or through a resource mapping), and whether they run."""
     listing = adapter.qm("list")
     users: list[tuple[int, bool]] = []
     if not listing.ok:
         return users
+    mappings = pci_mappings(adapter, root)
     for line in listing.output.splitlines()[1:]:
         parts = line.split()
         if len(parts) < 3 or not parts[0].isdigit() or int(parts[0]) == vmid:
             continue
         cfg = adapter.qm("config", parts[0])
-        if cfg.ok and any(bdf in ids for ids in hostpci_bdfs(parse_config(cfg.output)).values()):
+        if cfg.ok and any(bdf in ids for ids in hostpci_bdfs(parse_config(cfg.output), mappings).values()):
             users.append((int(parts[0]), parts[2] == "running"))
     return users

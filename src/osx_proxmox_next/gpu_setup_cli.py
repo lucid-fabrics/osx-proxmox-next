@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Callable
 
 from . import bios_guide, gpu, host_setup, nullmoth
-from .gpu_setup import SUPPORTED_DOC, TROUBLESHOOTING, Session, card_text, render_rail
+from .gpu_setup import DISPLAY_OPTIONS, SUPPORTED_DOC, TROUBLESHOOTING, CardChanged, Session, card_text, render_rail
 
 __all__ = ["add_parser", "run"]
 
@@ -47,6 +47,20 @@ class _Io:
         return self.interactive and self.ask(f"{prompt} Type '{phrase}' to continue: ") == phrase
 
 
+def _with_qr_colours(text: str, qr: list[str]) -> str:
+    """The card with each QR row drawn dark-on-light, so a phone can read the code from the terminal."""
+    rows = list(qr)
+    out = []
+    for line in text.split("\n"):
+        for q in rows:
+            at = line.find(q)
+            if at >= 0 and q.strip():
+                line = line[:at] + _ANSI_QR.format(q) + line[at + len(q):]
+                break
+        out.append(line)
+    return "\n".join(out)
+
+
 def _print_qr(io: _Io, lines: list[str]) -> None:
     for ln in lines:
         io.say(_ANSI_QR.format(ln))
@@ -70,8 +84,6 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         io.say("No AMD or NVIDIA graphics card found in this host.")
     for card in cards:
         io.say(card_text(card))
-        if not card.selectable:
-            io.say("  Cannot be used: " + card.why_not)
     usable = [c for c in cards if c.selectable]
     if not usable:
         io.say(f"Nothing here can run macOS graphics. Cards that work: {SUPPORTED_DOC}")
@@ -95,21 +107,23 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         return EXIT_REFUSED
     vmid = args.vm
     if vmid is None and io.interactive:
-        listing = s.macos_vms()
-        io.say("macOS VMs made by this tool:" if listing else "No macOS VM found.")
-        for line in listing:
-            io.say("  " + line)
+        options = s.vm_options(chosen.vendor)
+        io.say("macOS VMs made by this tool:" if options else "No macOS VM found.")
+        for opt in options:
+            io.say("  " + opt.label)
         reply = io.ask("VM ID to use ('p' = set up the host now and pick the VM later, 'c' = create one first): ")
         if reply.lower() == "c":
             s.state["gpu"] = {"bdf": chosen.bdf, "vendor": chosen.vendor, "device": chosen.device_id,
-                              "boot_vga": chosen.boot_vga, "name": chosen.name}
+                              "boot_vga": chosen.boot_vga, "name": chosen.name,
+                              "identity": host_setup.identity_of(s.root, chosen.bdf)}
             io.say("Create the VM with 'osx-next' (menu: Create VM), then run: " + s.pause())
             return EXIT_OK
         vmid = int(reply) if reply.isdigit() else None
     display = args.display or "gpu"
     if chosen.vendor == "amd" and not args.display and io.interactive:
-        io.say("Display: 1) Monitor on the GPU (best performance, the Proxmox console goes blank)\n"
-               "         2) Keep the Proxmox console (the card only accelerates)")
+        io.say("Display:")
+        for idx, (_value, label, desc) in enumerate(DISPLAY_OPTIONS, start=1):
+            io.say(f"  {idx}) {label}\n     {desc}")
         display = "console" if io.ask("Choice [1]: ") == "2" else "gpu"
     ack = False
     if chosen.vendor == "nvidia":
@@ -136,8 +150,7 @@ def _step_bios(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     if s.state.get("bios_seen"):
         io.say("These are still off. Here is where they usually hide:")
     s.state["bios_seen"] = True
-    io.say(card["text"])
-    _print_qr(io, card["qr"])
+    io.say(_with_qr_colours(card["text"], card["qr"]))
     io.say(f"Saved to {card['path']} (print it or cat it from another machine).")
     running = s.running_vms()
     if io.interactive and not args.yes:
@@ -240,6 +253,8 @@ def _step_verify(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         io.say("The change is saved but not active yet. Reboot, then run: " + s.pause())
         return EXIT_REBOOT
     fix = fails[0]["fix"]
+    if fix == "scan":
+        raise CardChanged(fails[0]["detail"])
     if fix in ("bios", "host"):
         s.send_back(3 if fix == "bios" else 4)
         return None
@@ -248,6 +263,14 @@ def _step_verify(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
 
 
 def _step_vm(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
+    if s.state["vm"] is None and args.vm is not None:
+        issues = s.check_vm(args.vm, s.state["gpu"]["vendor"])
+        for issue in issues:
+            io.say("REFUSED: " + issue)
+        if issues:
+            return EXIT_REFUSED
+        s.state["vm"] = args.vm
+        s.save()
     if s.state["vm"] is None:
         io.say("The host is ready. Pick or create the macOS VM, then run: " + s.pause() + " --vm <vmid>")
         return EXIT_OK
@@ -314,6 +337,11 @@ def _status(s: Session, io: _Io) -> int:
         io.say("No setup in progress.")
         return EXIT_OK
     io.say(f"Chosen card: {s.state['gpu']['name']} ({s.state['gpu']['bdf']}), VM: {s.state['vm']}")
+    try:
+        s.target()
+    except CardChanged as exc:
+        io.say("WARN: " + str(exc))
+        return EXIT_REFUSED
     items = s.bios_items()
     data = bios_guide.load_data()
     for item in items:
@@ -348,7 +376,12 @@ def run(args: argparse.Namespace, session: Session | None = None, ask: Callable[
         io.say(render_rail(s.state))
         step = s.state["step"]
         before = (step, len(s.state["done"]), len(s.state["skipped"]))
-        code = _HANDLERS[step](s, io, args)
+        try:
+            code = _HANDLERS[step](s, io, args)
+        except CardChanged as exc:
+            io.say("REFUSED: " + s.card_changed(exc))
+            io.say("Nothing was changed. Run the scan again: " + s.pause())
+            return EXIT_REFUSED
         if code is not None:
             return code
         if s.state["finished"]:

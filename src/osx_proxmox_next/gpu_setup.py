@@ -9,6 +9,7 @@ through nullmoth.py (NVIDIA) and gpu_attach.py (AMD).
 from __future__ import annotations
 
 import re
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
@@ -20,7 +21,9 @@ from .infrastructure import ProxmoxAdapter
 from .services import fetch_vm_info, get_proxmox_adapter, list_macos_vms
 
 __all__ = [
+    "CardChanged",
     "GpuCard",
+    "VmOption",
     "Session",
     "TROUBLESHOOTING",
     "card_text",
@@ -30,6 +33,12 @@ __all__ = [
 ]
 
 RESUME_CMD = "osx-next-cli gpu-setup"
+# (value, label, one-line description) of the AMD display choice, shared by the CLI and the TUI
+DISPLAY_OPTIONS = (
+    ("gpu", "Monitor on the GPU", "Best performance. Plug a screen into the card. The Proxmox console goes blank."),
+    ("console", "Keep the Proxmox console",
+     "The card accelerates apps; you keep using the web console. Required for NVIDIA today."),
+)
 DOCS_ROOT = "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/"
 NULLMOTH_DOC = DOCS_ROOT + "nvidia-nullmoth"
 SUPPORTED_DOC = DOCS_ROOT + "gpu-passthrough#supported-cards"
@@ -74,6 +83,7 @@ class GpuCard:
     users: list[tuple[int, bool]] = field(default_factory=list)
     shares: list[str] = field(default_factory=list)
     risky: list[str] = field(default_factory=list)  # storage or network devices in the same IOMMU group
+    lxc: list[tuple[int, str]] = field(default_factory=list)  # containers that use the host GPU driver nodes
 
     @property
     def selectable(self) -> bool:
@@ -83,25 +93,30 @@ class GpuCard:
     def why_not(self) -> str:
         if self.kind == "unsupported":
             return self.detail
+        reasons = []
         if self.risky:
-            return ("Its IOMMU group also holds storage or network devices (" + ", ".join(self.risky)
-                    + "). Passing the card through would take them from the host. Move the card to another slot.")
+            reasons.append("Its IOMMU group also holds storage or network devices (" + ", ".join(self.risky)
+                           + "). Passing the card through would take them from the host. Move the card to another slot.")
         if self.users:
-            return "In use by " + ", ".join(
-                f"VM {vmid} ({'running' if running else 'stopped'})" for vmid, running in self.users)
-        return ""
+            reasons.append("In use by " + ", ".join(
+                f"VM {vmid} ({'running' if running else 'stopped'})" for vmid, running in self.users))
+        return " ".join(reasons)
+
+
+_MACOS_NUMBER = {"ventura": "13", "sonoma": "14", "sequoia": "15", "tahoe": "26"}
 
 
 def verdict(vendor: str, device_id: int) -> tuple[str, str, str]:
-    """(kind, headline, detail) for one card."""
+    """(kind, headline, detail) for one card. The headline is the plain-words verdict."""
     if vendor == "amd":
         fam = amd_host.family_for(device_id)
         if fam is None:
             return "unsupported", "Not supported by macOS", amd_host.unsupported_reason(device_id)
-        tail = "macOS Ventura 13 to Tahoe 26" if fam.tahoe == "ok" else "macOS Ventura 13 to Sequoia 15 (Tahoe 26 not confirmed)"
-        return "native", "Works natively", f"{fam.label}. {tail}."
+        span = "macOS 13 to 26" if fam.tahoe == "ok" else "macOS 13 to 15 (26 not confirmed)"
+        return "native", f"Works natively on {span}", fam.label
     if nvidia_host.is_supported_device(device_id):
-        return "nullmoth", "Works with NullMoth (beta)", "macOS Sequoia 15.5+ and Tahoe 26 only. Needs the third-party NullMoth driver."
+        return ("nullmoth", "Works with NullMoth (beta) on macOS 15.5 to 26",
+                "Needs the third-party NullMoth driver, which you install yourself.")
     return "unsupported", "Not supported by macOS", _PRE_TURING
 
 
@@ -109,21 +124,45 @@ def docs_url(page: str) -> str:
     return DOCS_ROOT + page
 
 
-def card_text(card: GpuCard) -> str:
-    """One scan card in a plain box (ASCII, safe on a serial console)."""
+CARD_WIDTH = 76
+
+
+def card_lines(card: GpuCard, width: int = CARD_WIDTH) -> list[str]:
+    """The text lines inside one scan card. A card that cannot be used ends with ``Can't use: <reason>``."""
     flags = []
     if card.boot_vga:
         flags.append("host console")
     if card.driver:
         flags.append(f"bound to {card.driver}")
-    flags += [f"in use by VM {vmid} ({'running' if run else 'stopped'})" for vmid, run in card.users]
-    if card.shares:
+    flags += [f"container {ctid} uses {node}" for ctid, node in card.lxc]
+    if card.shares and not card.risky:
         flags.append("shares IOMMU group with " + ", ".join(card.shares))
-    ident = f"{card.bdf}   {'NVIDIA' if card.vendor == 'nvidia' else 'AMD'} {0x10DE if card.vendor == 'nvidia' else 0x1002:04x}:{card.device_id:04x}"
-    lines = [card.name, ident, f"{card.headline}. {card.detail}"] + (["Status: " + ", ".join(flags)] if flags else [])
-    width = max(len(ln) for ln in lines)
-    border = "+" + "-" * (width + 2) + "+"
-    return "\n".join([border] + [f"| {ln.ljust(width)} |" for ln in lines] + [border])
+    chip = f"{0x10DE if card.vendor == 'nvidia' else 0x1002:04x}:{card.device_id:04x}"
+    lines = [card.name, f"{card.bdf}   {'NVIDIA' if card.vendor == 'nvidia' else 'AMD'} {chip}"]
+    if card.kind != "unsupported":
+        lines.append(card.headline)
+        lines.append(card.detail)
+    if flags:
+        lines.append("Status: " + ", ".join(flags))
+    if not card.selectable:
+        lines.append("Can't use: " + card.why_not)
+    inner = width - 7
+    out: list[str] = []
+    for ln in lines:
+        out += textwrap.wrap(ln, inner) or [""]
+    return out
+
+
+def card_text(card: GpuCard, width: int = CARD_WIDTH) -> str:
+    """One scan card in a full-width plain box (ASCII, safe on a serial console).
+
+    A usable card has a ``>`` marker at the left of its top line and a heavy frame; one that cannot be
+    used has a plain frame and a dimmed look in the TUI."""
+    inner = width - 7
+    mark = ">>" if card.selectable else "  "
+    rule = ("=" if card.selectable else "-") * (width - 5)
+    body = [f"{mark} | {ln.ljust(inner)} |" for ln in card_lines(card, width)]
+    return "\n".join([f"{mark} +{rule}+"] + body + [f"{mark} +{rule}+"])
 
 
 def render_rail(state: dict) -> str:
@@ -142,6 +181,25 @@ def render_rail(state: dict) -> str:
         names.append(label)
         marks.append(mark.center(len(label)))
     return " GPU passthrough   " + " ".join(names) + "\n" + " " * 19 + " ".join(marks).rstrip()
+
+
+class CardChanged(Exception):
+    """The device at the saved address is not the card that was chosen (the PCI layout changed)."""
+
+
+@dataclass
+class VmOption:
+    vmid: int
+    name: str
+    macos: str  # "15", "26" ... or "" when unknown
+    status: str
+    eligible: bool
+    why: str = ""
+
+    @property
+    def label(self) -> str:
+        base = f"{self.vmid:<5} {self.name or '(no name)'}  " + (f"macOS {self.macos}  " if self.macos else "") + self.status
+        return base + ("" if self.eligible else f"  ({self.why})")
 
 
 class Session:
@@ -201,12 +259,18 @@ class Session:
     def facts(self) -> dict:
         return host_setup.detect_facts(self.root, self.run)
 
-    def summary_line(self, facts: dict | None = None) -> str:
+    def summary_fields(self, facts: dict | None = None) -> list[str]:
         f = facts or self.facts()
         board = " ".join(x for x in (f["board_vendor"], f["board_name"]) if x) or "unknown board"
-        return (f"CPU: {f['cpu_vendor'].upper()}   Board: {board}   Boot loader: {f['bootloader']}   "
-                f"{f['pve'] or 'PVE version unknown'}   IOMMU: {'on' if f['iommu_groups'] else 'off'}   "
-                f"Boot: {'UEFI' if f['efi'] else 'CSM/legacy'}")
+        ver = re.search(r"pve-manager/(\d+\.\d+)", f["pve"] or "")
+        fields = [f"CPU: {f['cpu_vendor'].upper()}", f"Board: {board}", f"Boot loader: {f['bootloader']}"]
+        if ver:
+            fields.append(f"PVE {ver.group(1)}")
+        fields += [f"IOMMU: {'on' if f['iommu_groups'] else 'off'}", f"Boot: {'UEFI' if f['efi'] else 'CSM/legacy'}"]
+        return fields
+
+    def summary_line(self, facts: dict | None = None) -> str:
+        return "   ".join(self.summary_fields(facts))
 
     def _lspci_name(self, bdf: str) -> str:
         code, out = self.run(["lspci", "-nn", "-s", bdf + ".0"])
@@ -234,17 +298,42 @@ class Session:
                         shares.append(other["bdf"])
                         if (other["class"] or 0) >> 16 in (0x01, 0x02):
                             risky.append(other["bdf"])
+            containers = [(c, n) for c, n in host_setup.lxc_gpu_users(self.root) if n == "/dev/dri" or vendor == "nvidia"]
             cards.append(GpuCard(
                 bdf=bdf, vendor=vendor, device_id=disp["device"], name=self._lspci_name(bdf) or f"{vendor.upper()} GPU",
                 kind=kind, headline=headline, detail=detail, boot_vga=bool(first["boot_vga"]), driver=first["driver"],
-                users=gpu.gpu_users(self.pve, bdf, exclude_vm) if kind != "unsupported" else [], shares=shares, risky=risky,
+                users=gpu.gpu_users(self.pve, bdf, exclude_vm, self.root) if kind != "unsupported" else [],
+                shares=shares, risky=risky, lxc=containers if kind != "unsupported" else [],
             ))
-        return cards
+        return sorted(cards, key=lambda c: not c.selectable)  # usable cards first, stable otherwise
 
     # ── 2. choose ────────────────────────────────────────────────────
 
     def macos_vms(self) -> list[str]:
         return list_macos_vms()
+
+    def vm_options(self, vendor: str) -> list[VmOption]:
+        """The macOS VMs made by this tool, with whether each can take a card of *vendor* right now."""
+        out: list[VmOption] = []
+        for line in self.macos_vms()[1:]:
+            parts = line.split()
+            if len(parts) < 3 or not parts[0].isdigit():
+                continue
+            vmid, name, status = int(parts[0]), parts[1], parts[2]
+            info = fetch_vm_info(vmid, adapter=self.pve)
+            version = nullmoth.detect_macos(gpu.parse_config(info.config_raw)) if info else None
+            macos = _MACOS_NUMBER.get(version or "", "")
+            why = ""
+            if status == "running":
+                why = "running: stop it first"
+            elif vendor == "nvidia" and version not in ("sequoia", "tahoe"):
+                why = f"macOS {macos}: NullMoth needs 15.5+" if macos else "macOS version unknown: NullMoth needs 15.5+"
+            out.append(VmOption(vmid, name, macos, status, not why, why))
+        return out
+
+    def stop_vm(self, vmid: int) -> tuple[bool, str]:
+        res = self.pve.qm("stop", str(vmid))
+        return res.ok, res.output
 
     def check_vm(self, vmid: int, vendor: str) -> list[str]:
         """Why this VM cannot take the card (empty list when it can)."""
@@ -282,7 +371,8 @@ class Session:
         if issues:
             return issues
         self.state.update(gpu={"bdf": card.bdf, "vendor": card.vendor, "device": card.device_id,
-                               "boot_vga": card.boot_vga, "name": card.name},
+                               "boot_vga": card.boot_vga, "name": card.name,
+                               "identity": host_setup.identity_of(self.root, card.bdf)},
                           vm=vmid, display=display, ack_nullmoth=bool(ack and card.vendor == "nvidia"))
         self.complete(1)
         self.complete(2)
@@ -291,21 +381,43 @@ class Session:
     # ── 3. BIOS ──────────────────────────────────────────────────────
 
     def target(self) -> dict:
-        """The chosen card in the shape host_setup wants."""
+        """The chosen card in the shape host_setup wants. Raises CardChanged when the device at the saved
+        address is no longer the chosen card."""
         chosen = self.state["gpu"]
         reset = "none"
         if chosen["vendor"] == "amd":
             fam = amd_host.family_for(chosen["device"])
             reset = fam.reset if fam else "none"
-        target = host_setup.build_target(self.root, chosen["bdf"], chosen["vendor"], reset)
+        target = host_setup.build_target(self.root, chosen["bdf"], chosen["vendor"], reset, chosen.get("identity"))
+        if target["mismatch"]:
+            raise CardChanged(target["mismatch"])
         target["boot_vga"] = target["boot_vga"] or chosen["boot_vga"]
         return target
+
+    def card_changed(self, exc: Exception) -> str:
+        """The chosen card moved or changed: forget the choice and send the user back to the scan."""
+        self.state["gpu"] = None
+        self.state["vm"] = None
+        self.state["verify_retry"] = False
+        self.goto(1)
+        return str(exc)
 
     def bios_items(self, facts: dict | None = None) -> list[dict]:
         return bios_guide.check_items(facts or self.facts(), self.target(), self.root)
 
+    def checked_fields(self, items: list[dict]) -> list[str]:
+        """What the BIOS check looked at, one short field per item, for the top of the BIOS step."""
+        data = bios_guide.load_data()
+        fields = [f"[{'ok' if i['ok'] else '!!'}] {data['settings'][i['key']]['label']}" for i in items]
+        return ["What we checked:  " + fields[0]] + fields[1:] if fields else []
+
+    def checked_line(self, items: list[dict]) -> str:
+        return "   ".join(self.checked_fields(items))
+
     def bios_card(self, items: list[dict], save: bool = True) -> dict | None:
-        """The photo card for the failing items, or None when nothing needs the BIOS."""
+        """The photo card for the failing items, or None when nothing needs the BIOS.
+
+        The QR code of the guide sits inside the card, so one photo holds the steps and the code."""
         failing = [i for i in items if not i["ok"]]
         if not failing:
             return None
@@ -313,11 +425,12 @@ class Session:
         data = bios_guide.load_data()
         vendor = bios_guide.match_vendor(facts, data)
         rebar = bios_guide.rebar_capable(self.root, self.state["gpu"]["bdf"])
-        text = bios_guide.build_card(failing, facts, data, vendor, self.state["resume_cmd"], rebar)
+        url = bios_guide.doc_url(data, vendor)
+        qr = bios_guide.qr_lines(url)
+        text = bios_guide.build_card(failing, facts, data, vendor, self.state["resume_cmd"], rebar, qr)
         path = bios_guide.save_card(text, self.root) if save else ""
         self.state["bios_saved"] = bool(path)
-        url = bios_guide.doc_url(data, vendor)
-        return {"text": text, "path": path, "url": url, "qr": bios_guide.qr_lines(url), "vendor": vendor,
+        return {"text": text, "path": path, "url": url, "qr": qr, "vendor": vendor,
                 "firmware_reboot": bios_guide.firmware_setup_supported(self.root)}
 
     def running_vms(self) -> list[tuple[int, str]]:
@@ -343,6 +456,9 @@ class Session:
         return bool(plan["changes"] or plan["commands"] or plan["manual"])
 
     def host_apply(self, plan: dict, confirmed: bool = False) -> dict:
+        moved = host_setup.check_identity(self.root, plan.get("identity"))
+        if moved:
+            raise CardChanged(moved)
         res = host_setup.apply_plan(plan, self.state, self.root, self.run, confirmed)
         if res["ok"]:
             self.state["verify_retry"] = False
@@ -396,6 +512,7 @@ class Session:
 
     def vm_plan(self, allow_stop: bool = False) -> nullmoth.AttachPlan:
         chosen, vmid = self.state["gpu"], self.state["vm"]
+        self.target()  # raises CardChanged when the card moved
         if vmid is None:
             plan = nullmoth.AttachPlan(0)
             plan.issues.append("No VM chosen yet. Create or pick a macOS VM first.")
@@ -414,7 +531,10 @@ class Session:
                                              adapter=self.pve, sysfs_root=self.sysfs)
 
     def begin_attach(self) -> None:
-        """Remember the VM before touching it, so --undo can find a half-done attach."""
+        """Remember the VM before touching it, so --undo can find a half-done attach.
+
+        Also the last check before anything is written: the card must still be the chosen one."""
+        self.target()
         vmid = self.state["vm"]
         if vmid is not None and vmid not in self.state["vm_records"]:
             self.state["vm_records"].append(vmid)
@@ -465,26 +585,45 @@ class Session:
     # ── undo ─────────────────────────────────────────────────────────
 
     def undo(self, allow_stop: bool = False) -> tuple[bool, list[str]]:
-        """Revert VM settings, then host files. Returns (ok, messages). Safe to run twice."""
+        """Revert VM settings, then host files. Returns (ok, messages). Safe to run twice.
+
+        Only what this tool wrote is reverted; anything changed since stays as the user left it and is
+        reported. Nothing to revert (no record, the VM is gone, the attach was refused) is a success."""
         from .executor import apply_plan
         messages: list[str] = []
         ok = True
+        chosen = self.state["gpu"]
+        if chosen and host_setup.check_identity(self.root, chosen.get("identity")):
+            messages.append(f"Note: the card at {chosen['bdf']} is now a different device (your PCI layout "
+                            "changed). Undo only removes what this tool wrote, so nothing there is touched.")
         for vmid in list(self.state["vm_records"]):
-            plan = gpu_attach.prepare_detach(vmid, adapter=self.pve, allow_stop=allow_stop)
+            if load_record(vmid) is None:
+                self.state["vm_records"].remove(vmid)
+                messages.append(f"VM {vmid}: nothing to revert (the attach did not change it).")
+                continue
+            plan = gpu_attach.prepare_detach(vmid, adapter=self.pve, allow_stop=allow_stop, missing_ok=True)
             if not plan.ok:
                 ok = False
                 messages += [f"VM {vmid}: {issue}" for issue in plan.issues]
                 continue
+            if not plan.steps:  # the VM is gone
+                gpu.record_path(vmid).unlink(missing_ok=True)
+                self.state["vm_records"].remove(vmid)
+                messages += [f"VM {vmid}: {w}" for w in plan.warnings]
+                continue
             result = apply_plan(plan.steps, execute=True)
+            kept = [ln for r in result.results for ln in r.output.splitlines() if ln.startswith("KEPT:")]
             if result.ok:
                 self.state["vm_records"].remove(vmid)
                 messages.append(f"VM {vmid}: GPU settings restored.")
+                messages += [f"VM {vmid}: {w}" for w in plan.warnings]
+                messages += [f"VM {vmid}: {ln}" for ln in kept]
             else:
                 ok = False
                 messages.append(f"VM {vmid}: restoring failed. Log: {result.log_path}")
         res = host_setup.undo_host(self.state, self.root, self.run)
         ok = ok and res["ok"]
-        messages += [f"Restored {path}" for path in res["restored"]] + res["errors"]
+        messages += [f"Restored {path}" for path in res["restored"]] + res["kept"] + res["errors"]
         if res["reboot_required"]:
             messages.append("Reboot the host to finish undoing the boot changes.")
         if ok:

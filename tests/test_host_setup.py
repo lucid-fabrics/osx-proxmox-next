@@ -212,7 +212,7 @@ def test_identical_card_switches_to_per_device_binding(tmp_path):
     assert plan["binding"] == "per-device" and any("0000:41:00.0" in n for n in plan["notes"])
     script = next(c for c in plan["changes"] if c["path"] == hs.BIND_SCRIPT)
     assert script["mode"] == 0o755
-    assert "0000:06:00.0/driver_override" in script["new"] and "0000:41:00" not in script["new"]
+    assert "bind 0000:06:00.0 0x1002 0x73ff 0x03" in script["new"] and "0000:41:00" not in script["new"]
     assert "ids=" not in next(c for c in plan["changes"] if c["path"] == hs.MODPROBE_FILE)["new"]
     write(Path(root), "/etc/modprobe.d/vfio.conf", "options vfio-pci ids=1002:73ff\n")
     refused = plan_for(root)
@@ -647,9 +647,9 @@ def test_undo_survives_a_missing_backup_and_edits_made_since(tmp_path):
     Path(edited["backup"]).unlink()
     write(Path(root), hs.GRUB_DROPIN, "# the user changed this\n")
     res = hs.undo_host(state, root, FakeRun(default=(0, "")))
-    assert not res["ok"]
+    assert not res["ok"]  # a missing backup is a real problem; an edited file is not
     assert any("backup of /etc/modprobe.d/vfio.conf is missing" in e for e in res["errors"])
-    assert any("was changed after this tool wrote it" in e for e in res["errors"])
+    assert any("was changed after this tool wrote it" in k for k in res["kept"])
     assert (Path(root) / hs.GRUB_DROPIN.lstrip("/")).read_text() == "# the user changed this\n"
     assert hs.MODULES_FILE in res["restored"]  # the other files were still restored
 

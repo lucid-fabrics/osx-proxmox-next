@@ -18,8 +18,9 @@ from urllib.parse import unquote
 from .domain import PlanStep
 from .infrastructure import ProxmoxAdapter
 from .gpu import (
-    MMIO_ARG, AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps, gpu_users,
-    hostpci_bdfs, load_record, normalize_bdf, parse_config, record_step,
+    MMIO_ARG, NVIDIA_PROFILE, AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps,
+    gpu_users, hostpci_bdfs, hostpci_value, load_record, new_record, normalize_bdf, parse_config, record_is_stale,
+    record_step,
     stop_step as _stop_step, verify_stopped_step as _verify_stopped_step, with_mmio_arg, without_mmio_arg,
 )
 from .nvidia_host import check_nvidia_gpu
@@ -122,7 +123,10 @@ def oc_patch_script(vid: str, action: str, amfipass_zip: Path | None = None) -> 
     """Bash that mounts the VM's OpenCore disk and runs the shared patcher."""
     source = _oc_patch_source()
     assert _PYEOF not in source
-    env = f"AMFIPASS_ZIP={shquote(str(amfipass_zip))} " if amfipass_zip else ""
+    env = ""
+    if amfipass_zip:
+        from .oc_builder import AMFIPASS
+        env = f"AMFIPASS_ZIP={shquote(str(amfipass_zip))} AMFIPASS_SHA256={shquote(AMFIPASS.sha256)} "
     return (
         mount_oc_disk_script(vid)
         + f"{env}python3 - \"$OC_MNT/EFI/OC\" {action} <<'{_PYEOF}' && sync\n"
@@ -134,41 +138,43 @@ def oc_patch_script(vid: str, action: str, amfipass_zip: Path | None = None) -> 
 
 def build_attach_steps(
     vmid: int, bdf: str, current_args: str, amfipass_zip: Path, stop_first: bool = False,
-    record: AttachRecord | None = None,
+    record: AttachRecord | None = None, replace_record: bool = False,
 ) -> list[PlanStep]:
     """Mode H: all functions on hostpci0, MMIO window, NullMoth OpenCore changes.
 
-    The OpenCore step runs before any qm change: it is the one that can refuse
-    (SIP bits, SecureBootModel), and a refusal must leave the VM untouched."""
+    The record of the original settings is written first (a sidecar file, nothing on the VM changes),
+    so an undo after any later failure finds it. The OpenCore step runs before any qm change: it is
+    the one that can refuse (SIP bits, SecureBootModel), and a refusal must leave the VM untouched."""
     vid = str(vmid)
     steps = [_stop_step(vid)] if stop_first else []
     steps.append(_verify_stopped_step(vid))
+    if record is not None:
+        steps.append(record_step(record, replace=replace_record))
     steps.append(PlanStep(
         title="Prepare OpenCore for NullMoth (backup, AMFIPass, boot-args, IONDRVSupport block)",
         argv=["bash", "-c", oc_patch_script(vid, "attach", amfipass_zip)],
         risk="action",
     ))
-    if record is not None:
-        steps.append(record_step(record))
     steps += build_hostpci_attach_steps(vmid, bdf, current_args)
     return steps
 
 
 def build_detach_steps(
     vmid: int, current_args: str, has_hostpci0: bool, stop_first: bool = False,
-    record: AttachRecord | None = None,
+    record: AttachRecord | None = None, cfg: dict[str, str] | None = None, notes: list[str] | None = None,
 ) -> list[PlanStep]:
     vid = str(vmid)
     steps = [_stop_step(vid)] if stop_first else []
     steps.append(_verify_stopped_step(vid))
-    # Restore OpenCore first: with no config.plist.pre-nullmoth this step
-    # refuses, so a VM that was never attached keeps its hostpci0 and args.
+    # Without a record this step refuses when config.plist.pre-nullmoth is missing, so a VM that was
+    # never attached keeps its hostpci0 and args. With a record, "nothing to restore" is fine: the
+    # attach stopped before the OpenCore step, or an earlier undo already restored it.
     steps.append(PlanStep(
         title="Restore the previous OpenCore config",
-        argv=["bash", "-c", oc_patch_script(vid, "detach")],
+        argv=["bash", "-c", oc_patch_script(vid, "detach" if record is None else "restore")],
         risk="action",
     ))
-    steps += build_hostpci_detach_steps(vmid, current_args, has_hostpci0, record=record)
+    steps += build_hostpci_detach_steps(vmid, current_args, has_hostpci0, record=record, cfg=cfg, notes=notes)
     return steps
 
 
@@ -178,6 +184,15 @@ def _vm_issues(vmid: int, cfg: dict[str, str], running: bool, allow_stop: bool) 
         issues.append(f"VM {vmid} is not a macOS VM made by this tool (no isa-applesmc in its args).")
     if running and not allow_stop:
         issues.append(f"VM {vmid} is running. Stop it first: qm stop {vmid}")
+    return issues
+
+
+def _attach_vm_issues(vmid: int, cfg: dict[str, str], running: bool, allow_stop: bool) -> list[str]:
+    issues = _vm_issues(vmid, cfg, running, allow_stop)
+    if "ide2" in cfg:
+        issues.append(
+            f"VM {vmid} still has the recovery disk attached, so the install is not finished. Finish it, "
+            "run post-install, then attach the card.")
     return issues
 
 
@@ -200,7 +215,7 @@ def prepare_attach(
         return plan
     cfg = parse_config(info.config_raw)
     running = info.status == "running"
-    plan.issues += _vm_issues(vmid, cfg, running, allow_stop)
+    plan.issues += _attach_vm_issues(vmid, cfg, running, allow_stop)
 
     version = (macos or "").lower() or detect_macos(cfg)
     if version is None:
@@ -224,10 +239,11 @@ def prepare_attach(
             plan.warnings.append(f"VM {other} also has this card assigned; only one can run at a time.")
 
     if plan.ok:
-        record = AttachRecord(vmid, report.bdf, "nvidia", hostpci0=cfg.get("hostpci0"), args=cfg.get("args"),
-                              vga=cfg.get("vga"), oc="nullmoth")
+        record = new_record(vmid, report.bdf, "nvidia", cfg, NVIDIA_PROFILE,
+                            hostpci_value(report.bdf, NVIDIA_PROFILE), oc="nullmoth")
         plan.steps = build_attach_steps(
             vmid, report.bdf, cfg.get("args", ""), amfipass_zip, stop_first=running and allow_stop, record=record,
+            replace_record=record_is_stale(record),
         )
     return plan
 
@@ -241,18 +257,24 @@ def _slot_issues(cfg: dict[str, str], bdf: str) -> list[str]:
 
 
 def prepare_detach(
-    vmid: int, adapter: ProxmoxAdapter | None = None, allow_stop: bool = False,
+    vmid: int, adapter: ProxmoxAdapter | None = None, allow_stop: bool = False, missing_ok: bool = False,
 ) -> AttachPlan:
+    """Undo a NullMoth attach. *missing_ok* makes a VM that no longer exists a success with nothing to do
+    (gpu-setup --undo); the plain nvidia-detach command still reports it."""
     plan = AttachPlan(vmid)
     info = fetch_vm_info(vmid, adapter=adapter or get_proxmox_adapter())
     if info is None:
-        plan.issues.append(f"VM {vmid} not found.")
+        if missing_ok:
+            plan.warnings.append(f"VM {vmid} no longer exists, so there is nothing to revert on it.")
+        else:
+            plan.issues.append(f"VM {vmid} not found.")
         return plan
     cfg = parse_config(info.config_raw)
     plan.issues += _vm_issues(vmid, cfg, info.status == "running", allow_stop)
     if plan.ok:
         plan.steps = build_detach_steps(
             vmid, cfg.get("args", ""), "hostpci0" in cfg,
-            stop_first=info.status == "running" and allow_stop, record=load_record(vmid),
+            stop_first=info.status == "running" and allow_stop, record=load_record(vmid), cfg=cfg,
+            notes=plan.warnings,
         )
     return plan

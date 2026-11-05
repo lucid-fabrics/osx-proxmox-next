@@ -15,7 +15,7 @@ The host setup and the GPU attach have not been tested on real hardware yet. Eve
 
 | Where | How |
 |-------|-----|
-| TUI | `osx-next`, then step 2, **GPU Passthrough (guided)** |
+| TUI | `osx-next`, then step 2, **GPU Passthrough** |
 | CLI | `osx-next-cli gpu-setup` (also `--status`, `--undo`, `--yes`, `--vm <vmid>`, `--gpu <address>`, `--display gpu\|console`) |
 | Standalone script | `osx-proxmox-next.sh gpu-setup` (uses whiptail screens) |
 
@@ -123,6 +123,12 @@ Rules it keeps:
 ## Undo
 
 `osx-next-cli gpu-setup --undo` (a button in the TUI) restores the VM settings exactly as they were before the attach (the original `hostpci0`, `args` and `vga`), the OpenCore config, and every host file from its backup, newest first. It rebuilds the boot configuration and the initramfs when it touched them and says whether a reboot is needed. Running it twice is safe.
+
+Undo only reverts what this tool wrote. A VM field (`hostpci0`, `args`, `vga`) or a host file that you changed afterwards keeps your version and is reported; for `args` only the arguments this tool added are removed. The OpenCore `config.plist` goes back only while it is still the file this tool wrote: if it changed since (for example the NullMoth 1401 app edited it), your version stays and the original is left next to it as `config.plist.pre-nullmoth` or `config.plist.pre-gpu`. Undo also finishes when there is nothing to revert: the VM is gone, or an earlier attach was refused or failed before it changed anything.
+
+## If the card moves
+
+The tool remembers the card by its address, its vendor and device id, its subsystem ids and its PCI class, and checks all of them again before every step that reads or writes the host or a VM. PCIe addresses shift when you move a card to another slot or change a BIOS option, so a saved address can end up on an NVMe drive or a network card. In that case the tool stops with "The card at 0000:06:00 is now a different device. Your PCI layout changed. Run the scan again." and sends you back to the scan. The early-boot binding script checks the same things at boot and skips any device that does not match, and storage or network devices are never bound to `vfio-pci`.
 
 ## Troubleshooting the first boot
 

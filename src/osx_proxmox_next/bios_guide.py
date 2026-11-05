@@ -123,41 +123,68 @@ def board_title(facts):
     return ((name or "this server") + " (%s)" % ("Intel" if facts.get("cpu_vendor") == "intel" else "AMD")).upper()
 
 
-def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup", optional_rebar=False):
-    """ASCII-safe photo card (plain text). *failing* are the entries from check_items with ok false."""
-    inner = WIDTH - 4
+_ORDER_STEPS = (("csm", "CSM off"), ("above4g", "Above 4G Decoding on"), ("rebar", "Resizable BAR on Auto"))
+QR_GAP = 3
+
+
+def order_note(failing_keys, optional_rebar=False):
+    """The ordering tip, naming only the settings that are still off. Empty when order cannot matter."""
+    keys = set(failing_keys) | ({"rebar"} if optional_rebar else set())
+    parts = [label for key, label in _ORDER_STEPS if key in keys]
+    return "Do these in this order: " + ", then ".join(parts) + "." if len(parts) > 1 else ""
+
+
+def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup", optional_rebar=False, qr=None):
+    """ASCII-safe photo card (plain text). *failing* are the entries from check_items with ok false.
+
+    *qr* (lines of the guide's QR code) goes inside the frame beside the steps, so one photo of the
+    screen holds the steps and the code."""
+    qr = list(qr or [])
+    qr_w = max((len(q) for q in qr), default=0)
+    text_w = WIDTH - 4
+    inner = text_w + (qr_w + QR_GAP if qr else 0)
     ven = data["vendors"].get(vendor)
     body = ["BIOS STEPS FOR THIS SERVER", board_title(facts), "",
             "Take a photo of this screen, then reboot into the BIOS.", ""]
     if ven:
-        body.append("Open the BIOS with: %s. %s" % (ven["enter"], ven.get("mode", "")))
+        body += _wrap("Open the BIOS with: %s. %s" % (ven["enter"], ven.get("mode", "")), text_w, "")
         body.append("")
+    start = len(body)
     n = 0
     for item in failing:
         n += 1
         entry = _entry(data, vendor, item["key"])
         label = data["settings"][item["key"]]["label"]
         value = entry["value"] if entry else "Enabled"
-        body += _line(inner, "%d. %s" % (n, label), value)
+        body += _line(text_w, "%d. %s" % (n, label), value)
         if entry:
             lead = "Path: " if entry["verified"] else "Usually under: "
-            body += _wrap(lead + entry["path"], inner, "   ")
+            body += _wrap(lead + entry["path"], text_w, "   ")
         else:
             hint = _generic_hint(data, item["key"])
-            body += _wrap("Look for: " + hint["names"], inner, "   ")
-            body += _wrap(hint["where"], inner, "   ")
+            body += _wrap("Look for: " + hint["names"], text_w, "   ")
+            body += _wrap(hint["where"], text_w, "   ")
+        if item["key"] in ("vtx", "svm"):
+            body += _wrap("Without it no VM can start.", text_w, "   ")
     if optional_rebar:
         n += 1
-        body += _line(inner, "%d. Resizable BAR (optional)" % n, "Auto")
-        body += _wrap("Leave it on Auto. If the VM will not start, set it to Disabled.", inner, "   ")
+        body += _line(text_w, "%d. Resizable BAR (optional)" % n, "Auto")
+        body += _wrap("Leave it on Auto. If the VM will not start, set it to Disabled.", text_w, "   ")
     n += 1
     body.append("%d. Save and exit (usually F10)" % n)
     body.append("")
-    body += _wrap(data["search_tip"], inner, "")
-    body += _wrap(data["order_note"], inner, "")
+    body += _wrap(data["search_tip"], text_w, "")
+    note = order_note([i["key"] for i in failing], optional_rebar)
+    if note:
+        body += _wrap(note, text_w, "")
     body += ["", "Back in Proxmox, run:", "   " + resume_cmd, "", "Same steps with pictures on your phone:",
              "   " + re.sub(r"^https?://", "", doc_url(data, vendor))]
-    border = "+" + "=" * (WIDTH - 2) + "+"
+    if qr:
+        while len(body) < start + len(qr):
+            body.append("")
+        for i, q in enumerate(qr):
+            body[start + i] = body[start + i].ljust(text_w) + " " * QR_GAP + q
+    border = "+" + "=" * (inner + 2) + "+"
     rows = [border] + ["| " + ln.ljust(inner) + " |" for ln in body] + [border]
     return "\n".join(rows)
 
@@ -225,7 +252,8 @@ def main(argv):
             return 3
         vendor = match_vendor(facts, data)
         rebar = bool(payload.get("target")) and rebar_capable(root, payload["target"]["bdf"])
-        text = build_card(failing, facts, data, vendor, payload.get("resume_cmd") or "osx-next-cli gpu-setup", rebar)
+        text = build_card(failing, facts, data, vendor, payload.get("resume_cmd") or "osx-next-cli gpu-setup", rebar,
+                          payload.get("qr"))
         if payload.get("save"):
             save_card(text, root)
         print(text)

@@ -14,7 +14,8 @@ from . import amd_host, nullmoth
 from .domain import PlanStep
 from .gpu import (
     AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps, gpu_users, hostpci_bdfs,
-    load_record, parse_config, record_step, stop_step, verify_stopped_step,
+    hostpci_value, load_record, new_record, parse_config, record_is_stale, record_step, stop_step,
+    verify_stopped_step,
 )
 from .infrastructure import ProxmoxAdapter
 from .nullmoth import AttachPlan, detect_macos
@@ -61,16 +62,18 @@ def _oc_step(vid: str, action: str, boot_args: tuple[str, ...] = ()) -> PlanStep
 
 def build_attach_steps(
     vmid: int, bdf: str, current_args: str, device_id: int, vga_none: bool, record: AttachRecord,
-    stop_first: bool = False,
+    stop_first: bool = False, replace_record: bool = False,
 ) -> list[PlanStep]:
     vid = str(vmid)
     steps = [stop_step(vid)] if stop_first else []
     steps.append(verify_stopped_step(vid))
     boot_args = amd_host.boot_args_for(device_id)
     if boot_args:
-        steps.append(_oc_step(vid, "attach", boot_args))
         record.oc = "gpu"
-    steps.append(record_step(record))
+    # The record goes first: it only writes a sidecar file, and a failure later on still finds it.
+    steps.append(record_step(record, replace=replace_record))
+    if boot_args:
+        steps.append(_oc_step(vid, "attach", boot_args))
     steps += build_hostpci_attach_steps(
         vmid, bdf, current_args, amd_host.AMD_PROFILE, vga_none=vga_none,
         extra_hostpci=amd_host.hostpci_extra(device_id),
@@ -80,14 +83,15 @@ def build_attach_steps(
 
 def build_detach_steps(
     vmid: int, current_args: str, has_hostpci0: bool, record: AttachRecord, stop_first: bool = False,
+    cfg: dict[str, str] | None = None, notes: list[str] | None = None,
 ) -> list[PlanStep]:
     vid = str(vmid)
     steps = [stop_step(vid)] if stop_first else []
     steps.append(verify_stopped_step(vid))
     if record.oc == "gpu":
-        steps.append(_oc_step(vid, "detach"))
+        steps.append(_oc_step(vid, "restore"))
     steps += build_hostpci_detach_steps(vmid, current_args, has_hostpci0, record=record,
-                                        profile=amd_host.AMD_PROFILE)
+                                        profile=amd_host.AMD_PROFILE, cfg=cfg, notes=notes)
     return steps
 
 
@@ -143,26 +147,30 @@ def prepare_attach_amd(
     if plan.ok:
         dev_path = sysfs_root / "bus/pci/devices" / f"{report.bdf}.0" / "device"
         device_id = int(dev_path.read_text().strip(), 16)
-        record = AttachRecord(vmid, report.bdf, "amd", hostpci0=cfg.get("hostpci0"), args=cfg.get("args"),
-                              vga=cfg.get("vga"), vga_changed=display == "gpu")
+        extra = amd_host.hostpci_extra(device_id)
+        record = new_record(vmid, report.bdf, "amd", cfg, amd_host.AMD_PROFILE,
+                            hostpci_value(report.bdf, amd_host.AMD_PROFILE, extra), vga_none=display == "gpu")
         plan.steps = build_attach_steps(
             vmid, report.bdf, cfg.get("args", ""), device_id, display == "gpu", record,
-            stop_first=running and allow_stop,
+            stop_first=running and allow_stop, replace_record=record_is_stale(record),
         )
     return plan
 
 
 def prepare_detach(
-    vmid: int, adapter: ProxmoxAdapter | None = None, allow_stop: bool = False,
+    vmid: int, adapter: ProxmoxAdapter | None = None, allow_stop: bool = False, missing_ok: bool = False,
 ) -> AttachPlan:
     """Undo a GPU attach for either vendor (nvidia-detach and gpu-setup --undo share this)."""
     record = load_record(vmid)
     if record is None or record.vendor != "amd":
-        return nullmoth.prepare_detach(vmid, adapter=adapter, allow_stop=allow_stop)
+        return nullmoth.prepare_detach(vmid, adapter=adapter, allow_stop=allow_stop, missing_ok=missing_ok)
     plan = AttachPlan(vmid)
     info = fetch_vm_info(vmid, adapter=adapter or get_proxmox_adapter())
     if info is None:
-        plan.issues.append(f"VM {vmid} not found.")
+        if missing_ok:
+            plan.warnings.append(f"VM {vmid} no longer exists, so there is nothing to revert on it.")
+        else:
+            plan.issues.append(f"VM {vmid} not found.")
         return plan
     cfg = parse_config(info.config_raw)
     running = info.status == "running"
@@ -170,5 +178,5 @@ def prepare_detach(
         plan.issues.append(f"VM {vmid} is running. Stop it first: qm stop {vmid}")
     if plan.ok:
         plan.steps = build_detach_steps(vmid, cfg.get("args", ""), "hostpci0" in cfg, record,
-                                        stop_first=running and allow_stop)
+                                        stop_first=running and allow_stop, cfg=cfg, notes=plan.warnings)
     return plan

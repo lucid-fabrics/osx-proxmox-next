@@ -18,7 +18,7 @@ HINT = "etc/profile.d/osx-proxmox-next-gpu.sh"
 
 @pytest.fixture(autouse=True)
 def _vm_list(monkeypatch):
-    monkeypatch.setattr(gpu_setup, "list_macos_vms", lambda: ["100 macos-sequoia stopped"])
+    monkeypatch.setattr(gpu_setup, "list_macos_vms", lambda: ["VMID NAME STATUS", "100 macos-sequoia stopped"])
 
 
 def parse(*argv: str) -> argparse.Namespace:
@@ -76,6 +76,9 @@ def test_undo(host, monkeypatch):
     assert code == 0 and "Everything this setup changed is back as it was." in out and "Restored /etc/default/grub.d" in out
     s2 = host.session()
     s2.state["vm_records"] = [100]
+    from osx_proxmox_next import gpu
+    gpu.record_path(100).parent.mkdir(parents=True, exist_ok=True)
+    gpu.record_path(100).write_text('{"vmid": 100, "bdf": "0000:06:00", "vendor": "amd", "oc": "gpu"}')
     host.qm.vms[100] = ("running", SEQUOIA)
     s2.save()
     code, out = go(host, "--undo", session=host.session())
@@ -88,7 +91,7 @@ def test_nothing_usable(tmp_path):
     env = Env(tmp_path)
     add_card(env.root, device=0x73DF)
     code, out = go(env)
-    assert code == 2 and "Not supported by macOS" in out and "Cannot be used" in out and "gpu-passthrough#supported-cards" in out
+    assert code == 2 and "Can't use: " in out and out.count("Can't use:") == 1 and "Cannot be used" not in out and "gpu-passthrough#supported-cards" in out
     assert go(Env(tmp_path / "e2"))[0] == 2
 
 

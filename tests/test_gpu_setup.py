@@ -42,7 +42,7 @@ def amd(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _no_real_vm_listing(monkeypatch):
-    monkeypatch.setattr(gpu_setup, "list_macos_vms", lambda: ["100 macos-sequoia stopped"])
+    monkeypatch.setattr(gpu_setup, "list_macos_vms", lambda: ["VMID NAME STATUS", "100 macos-sequoia stopped"])
 
 
 def ready(env: Env) -> None:
@@ -59,15 +59,16 @@ def ready(env: Env) -> None:
 ])
 def test_verdicts(vendor, device, kind):
     got, headline, detail = gpu_setup.verdict(vendor, device)
-    assert got == kind and detail.endswith(".") and "—" not in headline + detail
+    assert got == kind and detail.strip() and "\u2014" not in headline + detail
     if kind == "unsupported":
         assert headline == "Not supported by macOS"
 
 
 def test_verdict_details():
-    assert "Tahoe 26 not confirmed" in gpu_setup.verdict("amd", 0x687F)[2]
-    assert "Ventura 13 to Tahoe 26" in gpu_setup.verdict("amd", 0x73FF)[2]
-    assert "Sequoia 15.5+" in gpu_setup.verdict("nvidia", 0x2504)[2]
+    assert "26 not confirmed" in gpu_setup.verdict("amd", 0x687F)[1]
+    assert gpu_setup.verdict("amd", 0x73FF)[1] == "Works natively on macOS 13 to 26"  # the verdict comes first, in plain words
+    assert gpu_setup.verdict("amd", 0x73FF)[2].startswith("Navi 23")
+    assert "macOS 15.5 to 26" in gpu_setup.verdict("nvidia", 0x2504)[1]
     assert "High Sierra" in gpu_setup.verdict("nvidia", 0x1B80)[2]
 
 
@@ -75,12 +76,30 @@ def test_card_text_and_why_not():
     card = GpuCard("0000:06:00", "amd", 0x73FF, "RX 6600", "native", "Works natively", "Navi 23.", boot_vga=True,
                    driver="vfio-pci", users=[(120, True), (121, False)], shares=["0000:07:00.0"])
     text = card.__str__ and gpu_setup.card_text(card)
-    assert text.isascii() and "host console" in text and "in use by VM 120 (running)" in text and "stopped" in text
-    assert "shares IOMMU group with 0000:07:00.0" in text and "AMD 1002:73ff" in text
+    assert text.isascii() and "host console" in text and "Can't use: In use by VM 120 (running), VM 121 (stopped)" in text
+    assert "shares IOMMU group" in text and "0000:07:00.0" in text and "AMD 1002:73ff" in text
     assert not card.selectable and card.why_not == "In use by VM 120 (running), VM 121 (stopped)"
     bad = GpuCard("0000:06:00", "nvidia", 0x1B80, "GTX", "unsupported", "Not supported by macOS", "old.")
     assert not bad.selectable and bad.why_not == "old." and "NVIDIA 10de:1b80" in gpu_setup.card_text(bad)
     assert GpuCard("0000:06:00", "amd", 1, "x", "native", "h", "d").why_not == ""
+
+
+def test_scan_cards_share_one_width_put_usable_first_and_say_why_once():
+    ok = GpuCard("0000:06:00", "amd", 0x73FF, "RX 6600", "native", "Works natively on macOS 13 to 26", "Navi 23.")
+    nope = GpuCard("0000:41:00", "amd", 0x73DF, "A much longer card name than the other one has [Radeon RX 6700 XT]",
+                   "unsupported", "Not supported by macOS", "No Apple driver for this chip.")
+    used = GpuCard("0000:01:00", "nvidia", 0x2504, "RTX 3060", "nullmoth", "Works with NullMoth", "Third party.",
+                   users=[(120, True)], risky=["0000:02:00.0"])
+    texts = [gpu_setup.card_text(c) for c in (ok, nope, used)]
+    assert {len(ln) for t in texts for ln in t.splitlines()} == {76}  # every card is the same full width
+    assert texts[0].startswith(">>") and not texts[1].startswith(">>") and not texts[2].startswith(">>")
+    assert texts[0].splitlines()[3].split("|")[1].strip() == "Works natively on macOS 13 to 26"  # verdict before detail
+    assert "Can't use:" not in texts[0] and texts[1].rstrip().splitlines()[-2].strip("| ").startswith(("No Apple", "Can't use"))
+    for t in texts[1:]:
+        assert t.count("Can't use:") == 1
+    assert "Not supported by macOS" not in texts[1]  # the verdict is not said twice
+    assert "storage or network devices" in texts[2] and "In use by VM 120" in texts[2]
+    assert gpu_setup.card_text(ok, 100).splitlines()[0].__len__() == 100
 
 
 def test_rail():
@@ -144,7 +163,11 @@ def test_begin_attach_records_the_vm_before_anything_changes(amd):
 def test_summary_line(amd):
     line = amd.session().summary_line()
     assert "CPU: INTEL" in line and "Boot loader: grub" in line and "IOMMU: on" in line and "Boot: UEFI" in line
-    assert "PVE version unknown" in line
+    assert "unknown" not in line and "PVE" not in line  # an unknown version is left out, not printed as "unknown"
+    s = amd.session()
+    facts = s.facts()
+    facts["pve"] = "pve-manager/9.2.5/abcdef (running kernel: 6.14.8-2-pve)"
+    assert "PVE 9.2" in s.summary_line(facts) and "9.2.5" not in s.summary_line(facts)
 
 
 def test_choose_amd_success_and_state(amd):
@@ -206,7 +229,13 @@ def test_bios_card_when_things_are_missing(tmp_path):
     items = s.bios_items()
     assert [i["key"] for i in items if not i["ok"]] == ["vtx", "vtd", "csm"]
     card = s.bios_card(items)
-    assert card["vendor"] == "msi" and card["text"].isascii() and card["qr"] and card["path"].endswith("bios-steps.txt")
+    assert card["vendor"] == "msi" and card["qr"] and card["path"].endswith("bios-steps.txt")
+    # one photo: the QR code sits inside the card frame, beside the steps, and the card fits a laptop screen
+    qr_rows = [r for r in card["qr"] if r.strip()]
+    assert all(any(r in line for line in card["text"].splitlines()) for r in qr_rows)
+    assert all(line.startswith("|") and line.endswith("|") for line in card["text"].splitlines()[1:-1])
+    assert len(card["text"].splitlines()) < 40
+    assert "".join(ch for ch in card["text"] if ch not in "".join(card["qr"])).isascii()
     assert (env.root / "root/osx-proxmox-next-bios-steps.txt").read_text().startswith("+====")
     assert card["url"].endswith("/msi") and card["firmware_reboot"] is False
     assert s.state["bios_saved"] is True
@@ -314,7 +343,7 @@ def test_vm_plan_without_a_vm_or_ack(tmp_path):
     assert "not been acknowledged" in n.vm_plan().issues[0]
     n.state["ack_nullmoth"] = True
     plan = n.vm_plan()
-    assert plan.ok and plan.steps[1].title.startswith("Prepare OpenCore")
+    assert plan.ok and plan.steps[1].title.startswith("Record the original") and plan.steps[2].title.startswith("Prepare OpenCore")
 
 
 def test_first_boot_text_and_finish(tmp_path):
@@ -384,8 +413,12 @@ def test_undo_reports_problems_and_keeps_the_state(amd, monkeypatch):
     s.state["vm_records"] = [100, 101]
     amd.qm.vms[100] = ("running", SEQUOIA)
     amd.qm.vms[101] = ("stopped", SEQUOIA)
+    from osx_proxmox_next import gpu
+    for vmid in (100, 101):
+        gpu.record_path(vmid).parent.mkdir(parents=True, exist_ok=True)
+        gpu.record_path(vmid).write_text('{"vmid": %d, "bdf": "0000:06:00", "vendor": "amd", "oc": "gpu"}' % vmid)
     patch_executor(monkeypatch, ok=False)
     ok, messages = s.undo()
     assert not ok and any("running" in m for m in messages) and any("restoring failed" in m for m in messages)
     assert host_setup.load_state(str(amd.root)) is not None and s.state["vm_records"] == [100, 101]
-    assert s.record_for(100) is None
+    assert s.record_for(100) is not None  # the VM that could not be restored keeps its record for the next try

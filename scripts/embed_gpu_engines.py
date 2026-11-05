@@ -2,7 +2,7 @@
 """Refresh the verbatim copies of the Python GPU engines inside the bash installer.
 
 Run after changing host_setup.py, bios_guide.py, data/gpu/bios_paths.json,
-data/gpu/amd_devices.txt or data/gpu/oc_boot_args.py:
+data/gpu/amd_devices.txt, data/gpu/oc_boot_args.py or data/nullmoth/oc_patch.py:
 
     python3 scripts/embed_gpu_engines.py
 
@@ -36,8 +36,17 @@ def render(label: str, var: str, source: Path) -> str:
             f"# ── GPU embedded: {label} end ──\n")
 
 
+OC_PATCH = PKG / "data/nullmoth/oc_patch.py"
+_OC_PATCH_RE = re.compile(r"(<<'NULLMOTH_PY'\n).*?(\nNULLMOTH_PY\n)", re.S)
+
+
 def main() -> int:
     script = BASH.read_text()
+    if not _OC_PATCH_RE.search(script):
+        print(f"NULLMOTH_PY heredoc not found in {BASH}", file=sys.stderr)
+        return 1
+    body = OC_PATCH.read_text()
+    script = _OC_PATCH_RE.sub(lambda m: m.group(1) + body.rstrip("\n") + m.group(2), script, count=1)
     for label, var, source in EMBEDS:
         pattern = re.compile(rf"# ── GPU embedded: {re.escape(label)} begin ──\n.*?# ── GPU embedded: {re.escape(label)} end ──\n", re.S)
         if not pattern.search(script):

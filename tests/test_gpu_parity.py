@@ -197,21 +197,47 @@ def test_bios_card_through_bash_equals_python(bash):
 
 # ── bookkeeping files ────────────────────────────────────────────────
 
-def test_record_bytes_match_python(bash, tmp_path, monkeypatch):
-    bash('gpu_record_write 100 0000:06:00 amd "0000:06:00,pcie=1" "-cpu host" std yes gpu; '
-         'gpu_record_write 101 0000:01:00 nvidia __NONE__ __NONE__ __NONE__ no nullmoth')
-    for vmid, rec in ((100, gpu.AttachRecord(100, "0000:06:00", "amd", "0000:06:00,pcie=1", "-cpu host", "std", True, "gpu")),
-                      (101, gpu.AttachRecord(101, "0000:01:00", "nvidia", None, None, None, False, "nullmoth"))):
+def test_record_bytes_match_python(bash, vm, tmp_path, monkeypatch):
+    amd_cfg = MAC + "smbios1: uuid=11111111-2222-3333-4444-555555555555\n"
+    vm(100, "stopped", amd_cfg)
+    vm(101, "stopped", MAC.replace("sequoia", "tahoe").replace("vga: std\n", ""))
+    bash('gpu_record_write 100 0000:06:00 amd "0000:06:00,pcie=1" "$GPU_HOTPLUG_ARG" yes gpu; '
+         'gpu_record_write 101 0000:01:00 nvidia "0000:01:00,pcie=0" "$GPU_MMIO_ARG" no nullmoth', env=vm.env)
+    cases = ((100, "amd", amd_cfg, amd_host.AMD_PROFILE, "0000:06:00", "0000:06:00,pcie=1", True, "gpu"),
+             (101, "nvidia", MAC.replace("sequoia", "tahoe").replace("vga: std\n", ""), gpu.NVIDIA_PROFILE, "0000:01:00",
+              "0000:01:00,pcie=0", False, "nullmoth"))
+    for vmid, vendor, cfg, profile, bdf, hostpci, vga_none, oc in cases:
+        rec = gpu.new_record(vmid, bdf, vendor, gpu.parse_config(cfg), profile, hostpci, vga_none, oc)
         monkeypatch.setattr(gpu, "STATE_DIR", tmp_path / "py")
         subprocess.run(gpu.record_step(rec).argv, check=True)
         assert (tmp_path / "py" / f"gpu-attach-{vmid}.json").read_bytes() == (tmp_path / "state" / f"gpu-attach-{vmid}.json").read_bytes()
+    saved = json.loads((tmp_path / "state/gpu-attach-100.json").read_text())
+    assert saved["after"] == {"hostpci0": "0000:06:00,pcie=1", "args": f'-device isa-applesmc,osk="x" -cpu host {gpu.HOTPLUG_ARG}',
+                              "vga": "none", "added_args": [gpu.HOTPLUG_ARG]}
 
 
-def test_record_load_and_keep(bash):
-    bash('gpu_record_write 100 0000:06:00 amd __NONE__ "-cpu host" __NONE__ no gpu')
-    out = bash('gpu_record_write 100 0000:06:00 amd changed changed changed yes nullmoth; gpu_record_load 100; '
-               'echo "$REC_FOUND|$REC_VENDOR|$REC_HOSTPCI0_SET|$REC_ARGS|$REC_ARGS_SET|$REC_VGA_SET|$REC_OC|$REC_VGA_CHANGED"').stdout
-    assert out.strip() == "yes|amd|no|-cpu host|yes|no|gpu|no"
+def put_record(tmp_path, vmid, bdf, vendor, hostpci0, args, vga, vga_changed, oc, after=None):
+    """A record as an earlier attach left it. With *after* unset it has no drift information (the old behaviour)."""
+    path = tmp_path / "state" / f"gpu-attach-{vmid}.json"
+    path.parent.mkdir(exist_ok=True)
+    rec = {"vmid": vmid, "bdf": bdf, "vendor": vendor, "hostpci0": hostpci0, "args": args, "vga": vga,
+           "vga_changed": vga_changed, "oc": oc, "fp": "", "after": after}
+    path.write_text(json.dumps(rec, sort_keys=True))
+
+
+def test_record_load_keeps_the_same_vm_and_replaces_a_stale_one(bash, vm, tmp_path):
+    vm(100, "stopped", MAC + "smbios1: uuid=11111111-2222-3333-4444-555555555555\n")
+    bash('gpu_record_write 100 0000:06:00 amd "0000:06:00,pcie=1" "$GPU_HOTPLUG_ARG" yes gpu', env=vm.env)
+    # the same VM attached again (an interrupted run): the first record holds the true originals
+    vm(100, "stopped", MAC + "smbios1: uuid=11111111-2222-3333-4444-555555555555\nhostpci0: changed\n")
+    out = bash('gpu_record_write 100 0000:06:00 amd "0000:06:00,pcie=1" "$GPU_HOTPLUG_ARG" yes gpu; gpu_record_load 100; '
+               'echo "$REC_FOUND|$REC_VENDOR|$REC_OC"', env=vm.env).stdout
+    assert out.strip() == "yes|amd|gpu"
+    assert json.loads((tmp_path / "state/gpu-attach-100.json").read_text())["hostpci0"] is None
+    # the VM id was reused by another VM: its record replaces the old one
+    vm(100, "stopped", MAC + "smbios1: uuid=99999999-2222-3333-4444-555555555555\nhostpci0: 0000:09:00\n")
+    bash('gpu_record_write 100 0000:06:00 amd "0000:06:00,pcie=1" "$GPU_HOTPLUG_ARG" yes gpu', env=vm.env)
+    assert json.loads((tmp_path / "state/gpu-attach-100.json").read_text())["hostpci0"] == "0000:09:00"
     assert bash("gpu_record_load 999", expect=1).returncode == 1
 
 
@@ -299,7 +325,10 @@ def test_amd_attach_oc_failure_leaves_the_vm_alone(bash, vm, tmp_path):
     env = {**vm.env, **amd_host_env(tmp_path)}
     res = bash("gpu_oc_boot_args() { return 1; }; amd_attach 100 06:00", env=env, expect=1)
     assert "Could not patch the OpenCore disk; the VM was not changed" in res.stdout and vm.calls() == []
-    assert not (tmp_path / "state/gpu-attach-100.json").exists()
+    # the record is written first; with the VM untouched, undoing it is a no-op that still finishes
+    assert (tmp_path / "state/gpu-attach-100.json").exists()
+    bash("gpu_oc_boot_args() { return 0; }; gpu_detach_record 100", env=vm.env)
+    assert vm.calls() == [] and not (tmp_path / "state/gpu-attach-100.json").exists()
 
 
 @pytest.mark.parametrize("conf,status,needle", [
@@ -333,24 +362,24 @@ def test_amd_attach_stops_a_running_vm_when_asked(bash, vm, tmp_path):
 
 
 def test_gpu_detach_restores_exactly(bash, vm, tmp_path):
-    bash(f'gpu_record_write 100 0000:06:00 amd __NONE__ "-device isa-applesmc,osk=\\"x\\" -cpu host" std yes gpu')
+    put_record(tmp_path, 100, "0000:06:00", "amd", None, '-device isa-applesmc,osk="x" -cpu host', "std", True, "gpu")
     attached = MAC.replace("-cpu host", f"-cpu host {gpu.HOTPLUG_ARG}").replace("vga: std", "vga: none") + "hostpci0: 0000:06:00,pcie=1\n"
     vm(100, "stopped", attached)
     res = bash("gpu_oc_boot_args() { echo \"OC $*\"; }; gpu_detach_record 100", env=vm.env)
-    assert "OC 100 detach" in res.stdout
+    assert "OC 100 restore" in res.stdout
     assert vm.calls() == ["qm set 100 --delete hostpci0", 'qm set 100 --args -device isa-applesmc,osk="x" -cpu host', "qm set 100 --vga std"]
     assert not (tmp_path / "state/gpu-attach-100.json").exists()
 
 
 def test_gpu_detach_restores_a_preexisting_slot_and_deletes_added_args(bash, vm, tmp_path):
-    bash('gpu_record_write 100 0000:06:00 amd "0000:06:00,pcie=0" __NONE__ __NONE__ yes ""')
+    put_record(tmp_path, 100, "0000:06:00", "amd", "0000:06:00,pcie=0", None, None, True, "")
     vm(100, "stopped", "args: " + gpu.HOTPLUG_ARG + "\nhostpci0: 0000:06:00,pcie=1\nvga: none\nname: macos-sequoia\n")
     bash("gpu_detach_record 100", env=vm.env)
     assert vm.calls() == ["qm set 100 --hostpci0 0000:06:00,pcie=0", "qm set 100 --delete args", "qm set 100 --delete vga"]
 
 
-def test_gpu_detach_dry_run_and_refusals(bash, vm):
-    bash('gpu_record_write 100 0000:06:00 amd __NONE__ "-cpu host" std yes gpu')
+def test_gpu_detach_dry_run_and_refusals(bash, vm, tmp_path):
+    put_record(tmp_path, 100, "0000:06:00", "amd", None, "-cpu host", "std", True, "gpu")
     vm(100, "stopped", "args: -cpu host x\nhostpci0: 0000:06:00,pcie=1\n")
     out = bash("gpu_detach_record 100 yes", env=vm.env).stdout
     assert "DRY RUN" in out and "pre-gpu" in out and "--delete hostpci0" in out and "--args '-cpu host'" in out and "--vga 'std'" in out
@@ -363,20 +392,21 @@ def test_gpu_detach_dry_run_and_refusals(bash, vm):
 
 @pytest.mark.parametrize("fail,needle", [("--delete hostpci0", "qm set --delete hostpci0 failed"), ("--args", "qm set --args failed"),
                                           ("--vga", "qm set --vga failed")])
-def test_gpu_detach_qm_set_failures(bash, vm, fail, needle):
-    bash('gpu_record_write 100 0000:06:00 amd __NONE__ "-cpu host" std yes gpu')
+def test_gpu_detach_qm_set_failures(bash, vm, tmp_path, fail, needle):
+    put_record(tmp_path, 100, "0000:06:00", "amd", None, "-cpu host", "std", True, "gpu")
     vm(100, "stopped", MAC.replace("vga: std", "vga: none") + f"hostpci0: 0000:06:00,pcie=1\n")
     res = bash("gpu_oc_boot_args() { true; }; gpu_detach_record 100", env={**vm.env, "QM_FAIL": fail}, expect=1)
     assert needle in res.stdout
     assert (tmp_state := res) and True
 
 
-def test_gpu_detach_oc_failure_changes_nothing(bash, vm):
-    bash('gpu_record_write 100 0000:06:00 amd __NONE__ "-cpu host" std yes gpu')
+def test_gpu_detach_oc_failure_changes_nothing(bash, vm, tmp_path):
+    put_record(tmp_path, 100, "0000:06:00", "amd", None, "-cpu host", "std", True, "gpu")
     vm(100, "stopped", MAC + "hostpci0: 0000:06:00,pcie=1\n")
     res = bash("gpu_oc_boot_args() { return 1; }; gpu_detach_record 100", env=vm.env, expect=1)
     assert "Could not restore the OpenCore config" in res.stdout and vm.calls() == []
-    nm = bash("nullmoth_oc_patch() { return 1; }; gpu_record_write 100 x nvidia __NONE__ __NONE__ __NONE__ no nullmoth; gpu_detach_record 100", env=vm.env, expect=1)
+    put_record(tmp_path, 100, "x", "nvidia", None, None, None, False, "nullmoth")
+    nm = bash("nullmoth_oc_patch() { return 1; }; gpu_detach_record 100", env=vm.env, expect=1)
     assert "Could not restore" in nm.stdout
 
 
@@ -419,7 +449,7 @@ def test_nvidia_detach_uses_the_record_and_the_legacy_path(bash, vm, tmp_path):
     vm(100, "stopped", attached)
     (Path(vm.env["QM_DIR"]) / "calls.log").unlink()
     res = bash(NV_STUBS + "nvidia_detach 100", env=env)
-    assert "NMOC 100 detach" in res.stdout
+    assert "NMOC 100 restore" in res.stdout
     assert vm.calls() == ["qm set 100 --delete hostpci0", 'qm set 100 --args -device isa-applesmc,osk="x" -cpu host']
     assert not (tmp_path / "state/gpu-attach-100.json").exists()
     # attached by an older version: no record, the known additions go away
@@ -434,7 +464,7 @@ def test_nvidia_detach_qm_set_failures(bash, vm, tmp_path, fail, needle):
     vm(100, "stopped", MAC.replace("sequoia", "tahoe").replace("-cpu host", f"-cpu host {gpu.MMIO_ARG}") + "hostpci0: 0000:01:00,pcie=0\n")
     legacy = bash(NV_STUBS + "nvidia_detach 100", env=env, expect=1)
     assert needle.split(" failed")[0].replace("qm set ", "qm set ") in legacy.stdout or "failed" in legacy.stdout
-    bash('gpu_record_write 100 0000:01:00 nvidia __NONE__ "-cpu host" __NONE__ no nullmoth')
+    put_record(tmp_path, 100, "0000:01:00", "nvidia", None, "-cpu host", None, False, "nullmoth")
     rec = bash(NV_STUBS + "nvidia_detach 100", env=env, expect=1)
     assert "failed" in rec.stdout
 
@@ -452,12 +482,26 @@ def test_scan_and_card_text(bash, tmp_path, vm):
     lspci.chmod(0o755)
     out = bash('gpu_scan; for l in "${GPU_CARDS[@]}"; do echo "$l"; gpu_card_selectable "$l" && echo SELECTABLE; gpu_card_text "$l"; done',
                env={**vm.env, "GPU_SYSFS": str(root / "sys")}).stdout
-    assert "0000:06:00|amd|29695|Test Vendor Card|native|Works natively|" in out
-    assert "|unsupported|Not supported by macOS|RX 6700 series (Navi 22)" in out
-    assert "|nullmoth|Works with NullMoth (beta)|" in out and "120:running" in out
+    assert "0000:06:00|amd|29695|Test Vendor Card|native|Works natively on macOS 13 to 26|" in out
+    assert "|unsupported|Not supported by macOS|" in out and "Navi 22" in out
+    assert "|nullmoth|Works with NullMoth (beta) on macOS 15.5 to 26|" in out and "120:running" in out
     assert out.count("SELECTABLE") == 1
-    assert "Status: host console, bound to vfio-pci" in out and "in use by VM 120 (running)" in out
+    assert "Status: host console, bound to vfio-pci" in out and "Can't use: In use by VM 120 (running)" in out
     assert "AMD 1002:73ff" in out and "NVIDIA 10de:2504" in out
+    assert out.splitlines()[0].startswith("0000:06:00|")  # usable cards come first
+    # the same cards through the Python renderer, line for line
+    cards = []
+    for line in out.splitlines():
+        parts = line.split("|")
+        if len(parts) < 12 or not parts[2].isdigit():
+            continue
+        users = [(int(u.split(":")[0]), u.split(":")[1] == "running") for u in parts[9].split(",") if u]
+        cards.append(gpu_setup.GpuCard(parts[0], parts[1], int(parts[2]), parts[3], parts[4], parts[5], parts[6],
+                                       parts[7] == "1", parts[8] or None, users, [], [r for r in parts[10].split(",") if r]))
+    assert len(cards) == 3
+    python_text = "\n".join(gpu_setup.card_text(c) for c in cards)
+    bash_text = "\n".join(ln for ln in out.splitlines() if ln.startswith((">> ", "   ")) and ("+" in ln or "|" in ln))
+    assert bash_text == python_text
 
 
 def test_walkthrough_through_the_reboot_attach_and_undo(bash, vm, tmp_path):
@@ -538,10 +582,10 @@ def test_scan_marks_cards_whose_group_holds_storage(bash, tmp_path, vm):
     add_other(root, "0000:07:00.0", 0x144D, 0xA808, 0x010802, 7)
     out = bash('gpu_scan; for l in "${GPU_CARDS[@]}"; do echo "$l"; gpu_card_selectable "$l" && echo SELECTABLE; done; true',
                env={**vm.env, "GPU_SYSFS": str(root / "sys")}).stdout
-    assert out.splitlines()[0].endswith("|0000:07:00.0") and "SELECTABLE" not in out
+    assert out.splitlines()[0].endswith("|0000:07:00.0|") and "SELECTABLE" not in out
 
 
-def test_undo_without_a_record_falls_back_to_the_nvidia_path(bash, vm, tmp_path):
+def test_undo_without_a_record_has_nothing_to_revert_and_finishes(bash, vm, tmp_path):
     root = make_host(tmp_path / "root")
     state_dir = root / "var/lib/osx-proxmox-next"
     state_dir.mkdir(parents=True)
@@ -549,5 +593,5 @@ def test_undo_without_a_record_falls_back_to_the_nvidia_path(bash, vm, tmp_path)
     vm(100, "stopped", MAC + "hostpci0: 0000:01:00,pcie=0\n")
     env = {**vm.env, "GPU_ROOT": str(root), "GPU_STATE_DIR": str(state_dir), "GPU_SYSFS": str(root / "sys")}
     res = bash(NV_STUBS + "gpu_setup --undo", env=env)
-    assert "NMOC 100 detach" in res.stdout and "VM 100: GPU settings restored" in res.stdout
-    assert not (state_dir / "gpu-setup.json").exists()
+    assert "NMOC" not in res.stdout and "VM 100: nothing to revert" in res.stdout
+    assert vm.calls() == [] and not (state_dir / "gpu-setup.json").exists()  # the VM kept its hostpci0

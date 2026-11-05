@@ -1,6 +1,6 @@
 """Add boot-args to (or restore) a VM's OpenCore config for a passed-through GPU.
 
-Usage: oc_boot_args.py <EFI/OC directory> attach|detach
+Usage: oc_boot_args.py <EFI/OC directory> attach|detach|restore
 
 The Python CLI/TUI and the standalone bash installer run this exact text (the
 bash script embeds it verbatim; tests/test_gpu_parity.py diffs the two).
@@ -11,17 +11,23 @@ attach  Backs up config.plist to config.plist.pre-gpu (kept if it already
         GPU_BOOT_ARGS (space separated; an arg that is already there is
         replaced, never duplicated). Refuses when config.plist.pre-nullmoth
         exists: the NVIDIA profile owns the config then.
-detach  Puts config.plist.pre-gpu back byte for byte and removes it. With no backup
-        it does nothing and succeeds, so an interrupted undo can be repeated.
+detach  Puts config.plist.pre-gpu back byte for byte and removes it, but only while
+        config.plist still has the SHA-256 attach stored next to the backup. When the
+        file changed since, the changed config and the backup stay and a KEPT line says
+        so. With no backup it does nothing and succeeds, so an interrupted undo can be
+        repeated. (restore is the same as detach.)
+The config is always written to a temporary file and renamed into place.
 
 Exit codes: 0 ok, 2 refused (nothing changed).
 """
+import hashlib
 import os
 import plistlib
 import shutil
 import sys
 
 BACKUP = 'config.plist.pre-gpu'
+PATCHED_SHA = BACKUP + '.patched-sha256'
 OTHER_BACKUP = 'config.plist.pre-nullmoth'
 NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 
@@ -37,16 +43,25 @@ def merge_boot_args(current, wanted):
     return ' '.join(kept + list(wanted))
 
 
+def file_sha(path):
+    with open(path, 'rb') as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 def write_plist(cfg, path):
-    with open(path, 'wb') as f:
+    tmp = path + '.tmp'
+    with open(tmp, 'wb') as f:
         plistlib.dump(cfg, f)
     # plistlib emits self-closing tags that OpenCore's OcXmlLib rejects
-    with open(path, 'rb') as f:
+    with open(tmp, 'rb') as f:
         data = f.read()
     for tag in ('array', 'dict', 'data'):
         data = data.replace(('<%s/>' % tag).encode(), ('<%s></%s>' % (tag, tag)).encode())
-    with open(path, 'wb') as f:
+    with open(tmp, 'wb') as f:
         f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def attach(oc_dir):
@@ -62,6 +77,8 @@ def attach(oc_dir):
     nv = cfg.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault(NVRAM_GUID, {})
     nv['boot-args'] = merge_boot_args(nv.get('boot-args', ''), wanted)
     write_plist(cfg, path)
+    with open(os.path.join(oc_dir, PATCHED_SHA), 'w') as f:
+        f.write(file_sha(path) + '\n')
     sys.stderr.write('GPU boot-args applied (backup: ' + BACKUP + ')\n')
 
 
@@ -72,13 +89,23 @@ def detach(oc_dir):
         # already restored (an earlier undo got this far): nothing left to do
         sys.stderr.write('no ' + BACKUP + ' found, nothing to restore\n')
         return
+    stamp = os.path.join(oc_dir, PATCHED_SHA)
+    if os.path.exists(stamp):
+        with open(stamp) as f:
+            wrote = f.read().strip()
+        if os.path.exists(path) and file_sha(path) != wrote:
+            sys.stderr.write(
+                'KEPT: config.plist was changed after the boot-args were added, so your version stays. '
+                'The original is still on the disk as ' + BACKUP + '.\n')
+            return
+        os.remove(stamp)
     os.replace(backup, path)
     sys.stderr.write('OpenCore config restored from ' + BACKUP + '\n')
 
 
 def main(argv):
-    if len(argv) != 3 or argv[2] not in ('attach', 'detach'):
-        refuse('usage: oc_boot_args.py <EFI/OC dir> attach|detach', 64)
+    if len(argv) != 3 or argv[2] not in ('attach', 'detach', 'restore'):
+        refuse('usage: oc_boot_args.py <EFI/OC dir> attach|detach|restore', 64)
     (attach if argv[2] == 'attach' else detach)(argv[1])
 
 

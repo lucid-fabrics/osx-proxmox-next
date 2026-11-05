@@ -11,9 +11,11 @@ GUID = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
 
 def add_dev(root: Path, bdf: str, vendor: int, device: int, cls: int = 0x030000,
             driver: str | None = "vfio-pci", group: int = 1, boot_vga: bool = False,
-            bar1: int = 256 * 1024 * 1024) -> None:
+            bar1: int = 256 * 1024 * 1024, subsys: tuple[int, int] = (0x1043, 0x8800)) -> None:
     dev = root / "bus/pci/devices" / bdf
     dev.mkdir(parents=True)
+    (dev / "subsystem_vendor").write_text(f"0x{subsys[0]:04x}\n")
+    (dev / "subsystem_device").write_text(f"0x{subsys[1]:04x}\n")
     (dev / "vendor").write_text(f"0x{vendor:04x}\n")
     (dev / "device").write_text(f"0x{device:04x}\n")
     (dev / "class").write_text(f"0x{cls:06x}\n")

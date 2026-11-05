@@ -175,7 +175,8 @@ def test_detach_restores_exactly_what_was_there(tmp_path):
 
 def test_detach_restores_a_pre_existing_hostpci0_and_removes_added_args():
     rec = gpu.AttachRecord(100, "0000:06:00", "amd", hostpci0="0000:06:00,pcie=1", args=None, vga=None, vga_changed=True)
-    steps = gpu.build_hostpci_detach_steps(100, HOTPLUG, True, record=rec)
+    cfg = {"args": HOTPLUG, "hostpci0": "0000:06:00,pcie=1,x-vga=1", "vga": "none"}
+    steps = gpu.build_hostpci_detach_steps(100, HOTPLUG, True, record=rec, cfg=cfg)
     assert steps[0].argv == ["qm", "set", "100", "--hostpci0", "0000:06:00,pcie=1"]
     assert steps[1].argv == ["qm", "set", "100", "--delete", "args"]
     assert steps[2].argv == ["qm", "set", "100", "--delete", "vga"]
@@ -204,13 +205,13 @@ def test_amd_attach_plan_for_navi(tmp_path):
     plan = amd_prep(tmp_path)
     assert plan.ok, plan.issues
     titles = [s.title for s in plan.steps]
-    assert titles[0] == "Verify VM is stopped" and titles[1].startswith("Add the display boot-args")
-    assert titles[2].startswith("Record the original VM settings")
+    assert titles[0] == "Verify VM is stopped" and titles[1].startswith("Record the original VM settings")
+    assert titles[2].startswith("Add the display boot-args")
     assert plan.steps[3].argv == ["qm", "set", "100", "--hostpci0", "0000:06:00,pcie=1"]
     assert plan.steps[4].argv[-1].endswith(HOTPLUG) and plan.steps[5].argv == ["qm", "set", "100", "--vga", "none"]
-    script = plan.steps[1].argv[2]
+    script = plan.steps[2].argv[2]
     assert "GPU_BOOT_ARGS=agdpmod=pikera python3" in script and "GPU_OC_PY" in script
-    record = json.loads(plan.steps[2].argv[2].split("printf %s ")[1].split(" > ")[0].strip("'"))
+    record = json.loads(plan.steps[1].argv[2].split("printf %s ")[1].split(" > ")[0].strip("'"))
     assert record["oc"] == "gpu" and record["vga"] == "std" and record["vga_changed"] is True
 
 
@@ -265,7 +266,7 @@ def test_prepare_detach_amd_uses_the_record_and_the_gpu_patcher(tmp_path):
     assert plan.ok
     titles = [s.title for s in plan.steps]
     assert titles[:2] == ["Verify VM is stopped", "Restore the previous OpenCore config"]
-    assert "GPU_BOOT_ARGS=" not in plan.steps[1].argv[2] and '"$OC_MNT/EFI/OC" detach' in plan.steps[1].argv[2]
+    assert "GPU_BOOT_ARGS=" not in plan.steps[1].argv[2] and '"$OC_MNT/EFI/OC" restore' in plan.steps[1].argv[2]
     assert "Restore the display setting" in titles and titles[-1] == "Forget the recorded settings"
     assert not gpu_attach.prepare_detach(100, adapter=FakeQm({})).ok
     running = gpu_attach.prepare_detach(100, adapter=FakeQm({100: ("running", cfg)}))

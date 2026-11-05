@@ -1181,9 +1181,11 @@ function gpu_vfio_hint() {
     [ -e "$fn" ] || continue
     v=$(gpu_sys_num "$fn/vendor") || continue
     d=$(gpu_sys_num "$fn/device") || continue
+    c=$(gpu_sys_num "$fn/class") || c=0
+    case $(( c >> 16 )) in 1|2) continue ;; esac
+    [ -z "$vendor" ] || [ "$v" == "$vendor" ] || continue
     [ -n "$vendor" ] || vendor="$v"
     ids+="${ids:+,}$(printf '%04x:%04x' "$v" "$d")"
-    c=$(gpu_sys_num "$fn/class") || c=0
     case $(( c >> 8 )) in 3075|3200) usb_c=yes ;; esac
   done
   GPU_HINTS=("Put this in /etc/modprobe.d/vfio.conf:" "  options vfio-pci ids=${ids}")
@@ -1274,13 +1276,14 @@ function gpu_without_mmio_arg() {
   echo "$a" | sed 's/^ *//; s/ *$//'
 }
 
-# Other VMs that already hold the card. Prints "<vmid> running|stopped".
+# Other VMs that already hold the card, directly or through a resource mapping. Prints "<vmid> running|stopped".
 function gpu_users() {
-  local vmid="$1" bdf="$2" id status
+  local vmid="$1" bdf="$2" id status cfg
   while read -r id _ status _; do
     [[ "$id" =~ ^[0-9]+$ ]] || continue
     [ "$id" == "$vmid" ] && continue
-    if qm config "$id" 2>/dev/null | grep -E "^hostpci[0-9]+:" | grep -qE "(^|[ =;,])(0000:)?${bdf#0000:}(\.[0-7])?([,;]|\$)"; then
+    cfg=$(qm config "$id" 2>/dev/null) || continue
+    if [ "$(python3 -c 'import json,sys; print(json.dumps({"bdf": sys.argv[1], "cfg_raw": sys.stdin.read()}))' "$bdf" <<<"$cfg" | gpu_host holds)" == "yes" ]; then
       echo "$id $status"
     fi
   done < <(qm list 2>/dev/null | tail -n +2)
@@ -1368,9 +1371,9 @@ function nullmoth_detect_macos() {
 }
 
 # Mount the VM's ide0 (OpenCore) disk, run the shared patcher, unmount.
-# $1 vmid, $2 attach|detach, $3 AMFIPass zip (attach only).
+# $1 vmid, $2 attach|detach|restore, $3 AMFIPass zip (attach only).
 function nullmoth_oc_patch() {
-  local vmid="$1" action="$2" zip="${3:-}" vol path loop mnt rc=1 _i
+  local vmid="$1" action="$2" zip="${3:-}" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
   path=$(pvesm path "$vol" 2>/dev/null) || return 1
@@ -1381,13 +1384,14 @@ function nullmoth_oc_patch() {
     sleep 1
   done
   mnt=$(mktemp -d)
+  old_trap=$(trap -p INT TERM)
   # shellcheck disable=SC2064
-  trap "umount '$mnt' 2>/dev/null; losetup -d '$loop' 2>/dev/null; rmdir '$mnt' 2>/dev/null" INT TERM
+  trap "umount '$mnt' 2>/dev/null; losetup -d '$loop' 2>/dev/null; rmdir '$mnt' 2>/dev/null; exit 130" INT TERM
   if [ -b "${loop}p1" ] && mount "${loop}p1" "$mnt" 2>/dev/null; then
-    if AMFIPASS_ZIP="$zip" python3 - "$mnt/EFI/OC" "$action" <<'NULLMOTH_PY'
+    if AMFIPASS_ZIP="$zip" AMFIPASS_SHA256="${zip:+$NULLMOTH_AMFIPASS_SHA256}" python3 - "$mnt/EFI/OC" "$action" <<'NULLMOTH_PY'
 """Prepare (or restore) a VM's OpenCore config for the NullMoth NVIDIA driver.
 
-Usage: oc_patch.py <EFI/OC directory> attach|detach
+Usage: oc_patch.py <EFI/OC directory> attach|detach|restore
 
 The Python CLI/TUI and the standalone bash installer run this exact text (the
 bash script embeds it verbatim; tests/test_nullmoth_parity.py diffs the two),
@@ -1399,11 +1403,24 @@ attach  Backs up config.plist to config.plist.pre-nullmoth (kept if it already
         MacPro7,1. Environment AMFIPASS_ZIP names the pinned, already
         verified AMFIPass release zip to unpack into Kexts/.
 detach  Puts config.plist.pre-nullmoth back byte for byte and removes it,
-        together with the AMFIPass.kext directory.
+        together with the AMFIPass.kext directory. Refuses (exit 3) when there is
+        no backup: a VM that was never attached keeps whatever it has.
+restore Like detach, but succeeds when there is nothing to restore (the attach
+        never got that far, or an earlier undo already finished).
+
+attach stores the SHA-256 of the config it wrote next to the backup. detach and
+restore put the backup back only while config.plist still has that hash. When
+the file changed since (the NullMoth 1401 app edits it, or the user did), the
+changed config and the kext stay, the backup stays, and a KEPT line says so.
+The config is always written to a temporary file and renamed into place.
+
+Environment AMFIPASS_SHA256, when set, is checked against the zip right before
+it is unpacked.
 
 Exit codes: 0 ok, 2 refused (precondition not met, nothing changed),
 3 nothing to restore.
 """
+import hashlib
 import os
 import plistlib
 import shutil
@@ -1411,6 +1428,7 @@ import sys
 import zipfile
 
 BACKUP = 'config.plist.pre-nullmoth'
+PATCHED_SHA = BACKUP + '.patched-sha256'
 NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 BOOT_ARGS = (
     'nvfb=1', 'nvaccel=1', 'nvfbheads=4', '-nvkmsnosmooth',
@@ -1477,8 +1495,16 @@ def add_block_entry(cfg):
     })
 
 
+def file_sha(path):
+    with open(path, 'rb') as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 def unpack_kext(zip_path, oc_dir):
     dest = os.path.join(oc_dir, 'Kexts')
+    expected = os.environ.get('AMFIPASS_SHA256', '')
+    if expected and file_sha(zip_path) != expected:
+        refuse('the AMFIPass zip does not match its pinned SHA-256; it changed after it was verified.')
     with zipfile.ZipFile(zip_path) as z:
         members = [i for i in z.infolist()
                    if i.filename.startswith(KEXT + '/') and not i.is_dir()]
@@ -1497,15 +1523,19 @@ def unpack_kext(zip_path, oc_dir):
 
 
 def write_plist(cfg, path):
-    with open(path, 'wb') as f:
+    tmp = path + '.tmp'
+    with open(tmp, 'wb') as f:
         plistlib.dump(cfg, f)
     # plistlib emits self-closing tags that OpenCore's OcXmlLib rejects
-    with open(path, 'rb') as f:
+    with open(tmp, 'rb') as f:
         data = f.read()
     for tag in ('array', 'dict', 'data'):
         data = data.replace(('<%s/>' % tag).encode(), ('<%s></%s>' % (tag, tag)).encode())
-    with open(path, 'wb') as f:
+    with open(tmp, 'wb') as f:
         f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def attach(oc_dir):
@@ -1529,23 +1559,42 @@ def attach(oc_dir):
     if generic.get('SystemProductName') != SMBIOS_MODEL:
         generic['SystemProductName'] = SMBIOS_MODEL
     write_plist(cfg, path)
+    with open(os.path.join(oc_dir, PATCHED_SHA), 'w') as f:
+        f.write(file_sha(path) + '\n')
     sys.stderr.write('NullMoth OpenCore changes applied (backup: ' + BACKUP + ')\n')
 
 
-def detach(oc_dir):
+def detach(oc_dir, soft=False):
     path = os.path.join(oc_dir, 'config.plist')
     backup = os.path.join(oc_dir, BACKUP)
+    stamp = os.path.join(oc_dir, PATCHED_SHA)
     if not os.path.exists(backup):
+        if soft and not os.path.isdir(os.path.join(oc_dir, 'Kexts', KEXT)):
+            sys.stderr.write('no ' + BACKUP + ' found, nothing to restore\n')
+            return
         refuse('no ' + BACKUP + ' found, nothing to restore.', 3)
+    if os.path.exists(stamp):
+        with open(stamp) as f:
+            wrote = f.read().strip()
+        if os.path.exists(path) and file_sha(path) != wrote:
+            sys.stderr.write(
+                'KEPT: config.plist was changed after NullMoth was prepared, so your version stays (and so does '
+                + KEXT + ', which it may use). The original is still on the disk as ' + BACKUP + '.\n')
+            return
     os.replace(backup, path)
+    if os.path.exists(stamp):
+        os.remove(stamp)
     shutil.rmtree(os.path.join(oc_dir, 'Kexts', KEXT), ignore_errors=True)
     sys.stderr.write('OpenCore config restored from ' + BACKUP + '\n')
 
 
 def main(argv):
-    if len(argv) != 3 or argv[2] not in ('attach', 'detach'):
-        refuse('usage: oc_patch.py <EFI/OC dir> attach|detach', 64)
-    (attach if argv[2] == 'attach' else detach)(argv[1])
+    if len(argv) != 3 or argv[2] not in ('attach', 'detach', 'restore'):
+        refuse('usage: oc_patch.py <EFI/OC dir> attach|detach|restore', 64)
+    if argv[2] == 'attach':
+        attach(argv[1])
+    else:
+        detach(argv[1], soft=argv[2] == 'restore')
 
 
 if __name__ == '__main__':
@@ -1560,6 +1609,7 @@ then
   losetup -d "$loop" 2>/dev/null || true
   rmdir "$mnt" 2>/dev/null || true
   trap - INT TERM
+  [ -z "$old_trap" ] || eval "$old_trap"
   return "$rc"
 }
 
@@ -1627,12 +1677,14 @@ function nvidia_attach() {
     esac
     shift
   done
+  GPU_ISSUES=(); GPU_WARNS=(); GPU_HINTS=()
   [[ "$vmid" =~ ^[0-9]+$ ]] && bdf=$(gpu_normalize_bdf "$gpu") || {
     msg_error "Usage: osx-proxmox-next.sh nvidia-attach <vmid> <pci-address> [--accept-nullmoth-risk] [--dry-run]"; return 1; }
   if [ "$dry" == "yes" ]; then nullmoth_show_notice; else nullmoth_acknowledge "$accept" || return 1; fi
 
   nullmoth_vm_check "$vmid" || true
   if [ -n "$NM_CFG" ]; then
+    grep -q '^ide2:' <<<"$NM_CFG" && GPU_ISSUES+=("VM $vmid still has the recovery disk attached, so the install is not finished. Finish it, run post-install, then attach the card.")
     version="${macos,,}"
     [ -n "$version" ] || version=$(nullmoth_detect_macos "$NM_CFG") || version=""
     if [ -z "$version" ]; then
@@ -1681,13 +1733,13 @@ function nvidia_attach() {
   zip=$(nullmoth_fetch_amfipass "${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/iso}") || { msg_error "Could not download AMFIPass"; return 1; }
   qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || { msg_error "VM $vmid is no longer stopped"; return 1; }
   gpu_snapshot "$vmid" >/dev/null || { msg_error "Could not save the VM config snapshot"; return 1; }
+  # The record goes first: it only writes a sidecar file, and a failure later on still finds it.
+  gpu_record_write "$vmid" "$bdf" nvidia "${bdf},pcie=0" "$GPU_MMIO_ARG" no nullmoth || { msg_error "Could not record the original VM settings"; return 1; }
   if nullmoth_oc_patch "$vmid" attach "$zip"; then
     msg_ok "OpenCore prepared for NullMoth (backup: config.plist.pre-nullmoth)"
   else
     msg_error "Could not prepare the OpenCore disk; the VM was not changed"; return 1
   fi
-  gpu_record_write "$vmid" "$bdf" nvidia "${hp0:-__NONE__}" "$([ -n "$args" ] && echo "$args" || echo __NONE__)" \
-    "$(sed -n 's/^vga: //p' <<<"$NM_CFG" | grep . || echo __NONE__)" no nullmoth || { msg_error "Could not record the original VM settings"; return 1; }
   qm set "$vmid" --hostpci0 "${bdf},pcie=0" >/dev/null || { msg_error "qm set --hostpci0 failed"; return 1; }
   msg_ok "Attached ${bdf} (all functions) as hostpci0"
   if [ "$new_args" != "$args" ]; then
@@ -1699,21 +1751,23 @@ function nvidia_attach() {
 
 # `osx-proxmox-next.sh nvidia-detach <vmid> [--dry-run]`
 function nvidia_detach() {
-  local vmid="${1:-}" dry=no args new_args
+  local vmid="${1:-}" dry=no stop=no args new_args
   shift 1 2>/dev/null || true
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) dry=yes ;;
+      --stop-vm) stop=yes ;;
       *) msg_error "Unknown option: $1"; return 1 ;;
     esac
     shift
   done
   [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh nvidia-detach <vmid> [--dry-run]"; return 1; }
+  GPU_ISSUES=(); GPU_WARNS=(); GPU_HINTS=()
   nullmoth_vm_check "$vmid" || true
   nullmoth_print_findings
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
   # Attached by this version: put the VM back exactly as it was (shared with gpu-setup --undo).
-  if gpu_record_load "$vmid"; then gpu_detach_record "$vmid" "$dry"; return; fi
+  if gpu_record_load "$vmid"; then gpu_detach_record "$vmid" "$dry" "$stop"; return; fi
   args=$(sed -n 's/^args: //p' <<<"$NM_CFG")
   new_args=$(gpu_without_mmio_arg "$args")
   if [ "$dry" == "yes" ]; then
@@ -1780,6 +1834,8 @@ import os
 import re
 import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import time
@@ -1789,6 +1845,7 @@ STATE_DIR = "/var/lib/osx-proxmox-next"
 STATE_FILE = STATE_DIR + "/gpu-setup.json"
 BACKUP_ROOT = STATE_DIR + "/backups"
 LOGIN_HINT = "/etc/profile.d/osx-proxmox-next-gpu.sh"
+PBT_UUIDS = "/etc/kernel/proxmox-boot-uuids"
 GRUB_DROPIN = "/etc/default/grub.d/osx-proxmox-next.cfg"
 KERNEL_CMDLINE = "/etc/kernel/cmdline"
 MODULES_FILE = "/etc/modules-load.d/osx-proxmox-next-vfio.conf"
@@ -1850,6 +1907,57 @@ def _now():
 
 def _tokens(text):
     return (text or "").split()
+
+
+# ── device identity ──────────────────────────────────────────────────
+#
+# The saved selection is (address, vendor:device, subsystem ids, PCI class). Every step that
+# reads or writes host or VM state checks it again, because PCIe addresses move when a card
+# changes slot, a BIOS option re-enumerates the buses, or another device is added.
+
+VENDOR_IDS = {"amd": 0x1002, "nvidia": 0x10DE}
+_IDENTITY_KEYS = ("vendor", "device", "subsys_vendor", "subsys_device", "class")
+_FN_BDF_RE = re.compile(r"^(?:([0-9a-fA-F]{4}):)?([0-9a-fA-F]{2}):([0-9a-fA-F]{2})(?:\.([0-7]))?$")
+
+
+def norm_bdf(raw):
+    """domain:bus:slot (lowercase, function dropped) or None."""
+    m = _FN_BDF_RE.match((raw or "").strip())
+    return "%s:%s:%s" % ((m.group(1) or "0000").lower(), m.group(2).lower(), m.group(3).lower()) if m else None
+
+
+def identity_of(root, bdf):
+    """What sits at function 0 of *bdf* now, or None when nothing does."""
+    base = _p(root, "/sys/bus/pci/devices/%s.0" % bdf)
+    if not base.exists():
+        return None
+    return {"bdf": bdf, "vendor": _hex(base / "vendor"), "device": _hex(base / "device"),
+            "subsys_vendor": _hex(base / "subsystem_vendor"), "subsys_device": _hex(base / "subsystem_device"),
+            "class": _hex(base / "class")}
+
+
+def changed_card_message(bdf):
+    return "The card at %s is now a different device. Your PCI layout changed. Run the scan again." % bdf
+
+
+def check_identity(root, saved):
+    """"" when the device at the saved address is still the saved card, else a plain explanation."""
+    if not saved or not saved.get("bdf"):
+        return ""
+    now = identity_of(root, saved["bdf"])
+    if now is None or (now["class"] or 0) >> 16 != 0x03:
+        return changed_card_message(saved["bdf"])
+    for key in _IDENTITY_KEYS:
+        if key in saved and saved[key] != now[key]:
+            return changed_card_message(saved["bdf"])
+    return ""
+
+
+def bindable(fn, vendor):
+    """True for a function this tool may hand to vfio-pci: the card's display, audio, USB and UCSI
+    functions of the expected vendor. Storage (0x01) and network (0x02) are never bindable."""
+    cls = fn.get("class") or 0
+    return fn.get("vendor") == VENDOR_IDS.get(vendor) and (cls >> 16 == 0x03 or cls >> 8 in (0x0403, 0x0C03, 0x0C80))
 
 
 # ── facts ────────────────────────────────────────────────────────────
@@ -2038,6 +2146,10 @@ def plan_kernel_args(facts, target, root, plan):
         _add_change(plan, root, GRUB_DROPIN, content, "Kernel arguments for passthrough: " + " ".join(missing))
         plan["commands"].append({"argv": ["update-grub"], "reason": "Rebuild the GRUB menu"})
         plan["refresh"].append("grub")
+        if _p(root, PBT_UUIDS).exists():  # BIOS/ZFS hosts boot GRUB from copies on the ESPs
+            plan["commands"].append({"argv": ["proxmox-boot-tool", "refresh"],
+                                     "reason": "Copy the GRUB config to the boot partitions"})
+            plan["refresh"].append("pbt")
     elif facts["bootloader"] == "systemd-boot":
         old = _read(_p(root, KERNEL_CMDLINE))
         if old is None:
@@ -2055,7 +2167,7 @@ def plan_kernel_args(facts, target, root, plan):
     if "initcall_blacklist=sysfb_init" in missing:
         plan["warnings"].append(
             "The chosen card is the host console GPU. After the next reboot the screen plugged into the host goes "
-            "dark once the boot loader hands over. SSH and the web UI keep working.")
+            "dark once the boot loader hands over. Use SSH or the web UI from then on; both keep working.")
 
 
 # ── plan helpers ─────────────────────────────────────────────────────
@@ -2069,7 +2181,8 @@ def _add_change(plan, root, path, content, reason, mode=0o644):
 
 def new_plan():
     return {"changes": [], "commands": [], "notes": [], "warnings": [], "hard_warnings": [], "refusals": [],
-            "manual": [], "skipped": [], "refresh": [], "reboot_required": False, "binding": "", "initramfs": False}
+            "manual": [], "skipped": [], "refresh": [], "reboot_required": False, "binding": "", "initramfs": False,
+            "identity": None}
 
 
 def _modules_present(root):
@@ -2149,9 +2262,36 @@ def _existing_ids_lines(root):
     return out
 
 
+def _guard_target(target, plan):
+    """Refuse unless the target is a display card with only bindable functions. True when it is."""
+    if target.get("mismatch"):
+        plan["refusals"].append(target["mismatch"])
+        return False
+    fns = target.get("functions") or []
+    fn0 = next((f for f in fns if f["bdf"].endswith(".0")), None)
+    if fn0 is None or (fn0.get("class") or 0) >> 16 != 0x03 or fn0.get("vendor") != VENDOR_IDS.get(target["vendor"]):
+        plan["refusals"].append(
+            "The device at %s.0 is not a %s graphics card. Your PCI layout changed. Run the scan again."
+            % (target["bdf"], {"amd": "AMD", "nvidia": "NVIDIA"}.get(target["vendor"], "supported")))
+        return False
+    for fn in fns:
+        if (fn.get("class") or 0) >> 16 in (0x01, 0x02):
+            plan["refusals"].append(
+                "%s is a storage or network device and is never bound to vfio-pci. Run the scan again." % fn["bdf"])
+            return False
+    return True
+
+
+def _bind_entries(text):
+    """(bdf, vendor, device, class prefix) rows of an existing bind script written by this tool."""
+    return [tuple(m.groups()) for m in re.finditer(
+        r"^bind (\S+) (0x[0-9a-f]{4}) (0x[0-9a-f]{4}) (0x[0-9a-f]+)$", text or "", re.M)]
+
+
 def plan_binding(facts, target, root, plan):
+    fns = [f for f in target["functions"] if bindable(f, target["vendor"])]
     ids = []
-    for fn in target["functions"]:
+    for fn in fns:
         ident = "%04x:%04x" % (fn["vendor"], fn["device"])
         if ident not in ids:
             ids.append(ident)
@@ -2159,6 +2299,7 @@ def plan_binding(facts, target, root, plan):
     twins = sorted(d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d["vendor"] is not None
                    and "%04x:%04x" % (d["vendor"], d["device"]) in ids)
     existing = _existing_ids_lines(root)
+    earlier = _live_ids(_read(_p(root, MODPROBE_FILE)) or "")  # ids this tool bound for a card set up before
     softdep = "".join("softdep %s pre: vfio-pci\n" % n for n in _softdeps(target))
     if twins:
         plan["binding"] = "per-device"
@@ -2171,8 +2312,15 @@ def plan_binding(facts, target, root, plan):
                 "%s already binds the id %s to vfio-pci for every device with that id, including the other "
                 "card. Remove that id from the file first." % (covered[0], ", ".join(ids)))
             return
-        _add_change(plan, root, MODPROBE_FILE, HEADER + softdep, "Load vfio-pci before the GPU drivers")
-        _add_change(plan, root, BIND_SCRIPT, _bind_script([f["bdf"] for f in target["functions"]]),
+        keep = [i for i in earlier if i not in ids]
+        head = HEADER + ("options vfio-pci ids=%s disable_vga=1\n" % ",".join(keep) if keep else "")
+        _add_change(plan, root, MODPROBE_FILE, head + softdep, "Load vfio-pci before the GPU drivers")
+        rows = _bind_entries(_read(_p(root, BIND_SCRIPT)))
+        for fn in fns:
+            row = (fn["bdf"], "0x%04x" % fn["vendor"], "0x%04x" % fn["device"], _class_prefix(fn))
+            if row not in rows:
+                rows.append(row)
+        _add_change(plan, root, BIND_SCRIPT, _bind_script(rows),
                     "Bind this card by PCI address early in boot", mode=0o755)
     else:
         plan["binding"] = "ids"
@@ -2184,19 +2332,38 @@ def plan_binding(facts, target, root, plan):
                 _add_change(plan, root, path, new, "Add the card's ids to your existing vfio-pci line")
         body = HEADER + softdep
         if not existing:
-            body = HEADER + "options vfio-pci ids=%s disable_vga=1\n" % ",".join(ids) + softdep
+            union = earlier + [i for i in ids if i not in earlier]
+            if len(union) > len(ids):
+                plan["notes"].append("The ids of the card you set up before stay bound: " + ", ".join(earlier) + ".")
+            body = HEADER + "options vfio-pci ids=%s disable_vga=1\n" % ",".join(union) + softdep
         elif merged_all:
             plan["notes"].append("The card's ids are already in your vfio-pci options.")
         _add_change(plan, root, MODPROBE_FILE, body, "Bind the card to vfio-pci before its driver loads")
 
 
-def _bind_script(bdfs):
-    lines = "\n".join('  echo vfio-pci > /sys/bus/pci/devices/%s/driver_override 2>/dev/null || true' % shlex.quote(b)
-                      for b in bdfs)
+def _class_prefix(fn):
+    """Prefix of the sysfs class value the boot script insists on: 0x03 for the display, 0x0403 and so on."""
+    cls = fn.get("class") or 0
+    return "0x03" if cls >> 16 == 0x03 else "0x%04x" % (cls >> 8)
+
+
+def _bind_script(rows):
+    """Initramfs script. Each line re-checks vendor, device and class at boot: an address that now
+    holds a different device (a card moved, an NVMe added) is skipped, never bound."""
+    lines = "\n".join("bind %s %s %s %s" % row for row in rows)
     return (
         "#!/bin/sh\n" + HEADER +
         'PREREQ=""\nprereqs() { echo "$PREREQ"; }\ncase "$1" in prereqs) prereqs; exit 0 ;; esac\n'
-        "# Mark this card's functions for vfio-pci before any GPU driver can claim them.\n"
+        "# Mark this card's functions for vfio-pci before any GPU driver can claim them, but only when the\n"
+        "# device at that address still has the vendor, device id and class recorded at setup time.\n"
+        "bind() {\n"
+        '  d="${OSX_NEXT_SYSFS:-/sys}/bus/pci/devices/$1"\n'
+        '  [ -r "$d/vendor" ] || return 0\n'
+        '  read -r v < "$d/vendor"; read -r dev < "$d/device"; read -r c < "$d/class"\n'
+        '  [ "$v" = "$2" ] && [ "$dev" = "$3" ] || return 0\n'
+        '  case "$c" in "$4"*) ;; *) return 0 ;; esac\n'
+        '  echo vfio-pci > "$d/driver_override" 2>/dev/null || true\n'
+        "}\n"
         + lines + "\n/sbin/modprobe -q vfio-pci || true\nexit 0\n")
 
 
@@ -2224,19 +2391,27 @@ def plan_vendor_reset(facts, target, root, run, plan):
     code, out = run(["dkms", "status"])
     built = any(re.search(r"vendor-reset/[^,]+,\s*" + re.escape(facts["kernel"]) + r"[^:]*:\s*installed", ln)
                 for ln in out.splitlines()) if code == 0 else False
+    # A vendor-reset the user registered with dkms before is theirs: build for this kernel if needed, never remove it.
+    code, known = run(["dkms", "status", "-m", "vendor-reset"])
+    tag = "vendor-reset-existing" if code == 0 and known.strip() else "vendor-reset"
     if built:
         plan["skipped"].append("vendor-reset is already built for this kernel")
     else:
         kernel = facts["kernel"]
         plan["commands"].append({"argv": ["apt-get", "install", "-y", "dkms", "git", "proxmox-default-headers",
                                           "proxmox-headers-" + kernel], "reason": "Packages needed to build vendor-reset"})
+        src = shlex.quote(VR_SRC)
         plan["commands"].append({"argv": ["bash", "-c",
-            "[ -d %s/.git ] || git clone %s %s; git -C %s checkout %s" % (VR_SRC, VR_REPO, VR_SRC, VR_SRC, VR_SHA)],
+            "[ -d %s/.git ] || git clone %s %s || exit 1; "
+            "[ -z \"$(git -C %s status --porcelain)\" ] || { echo 'ERROR: %s has local changes, not building from it'; exit 1; }; "
+            "git -C %s checkout -q %s || exit 1; "
+            "[ \"$(git -C %s rev-parse HEAD)\" = %s ] || { echo 'ERROR: %s is not at the pinned commit'; exit 1; }"
+            % (src, VR_REPO, src, src, VR_SRC, src, VR_SHA, src, VR_SHA, VR_SRC)],
             "reason": "Fetch vendor-reset at the pinned commit " + VR_SHA[:12]})
         plan["commands"].append({"argv": ["bash", "-c",
             "dkms status -m vendor-reset -v %s | grep -q . || dkms add -m vendor-reset -v %s; "
             "dkms install -m vendor-reset -v %s" % (VR_VERSION, VR_VERSION, VR_VERSION)],
-            "reason": "Build and install the vendor-reset module", "tag": "vendor-reset"})
+            "reason": "Build and install the vendor-reset module", "tag": tag})
     _add_change(plan, root, VR_MODULES_FILE, HEADER + "vendor-reset\n", "Load vendor-reset at boot")
     existing = _read(_p(root, INITRAMFS_MODULES)) or ""
     if not re.search(r"^\s*vendor-reset\s*$", existing, re.M):
@@ -2257,7 +2432,7 @@ def plan_console(facts, target, opts, plan):
         if not opts.get("allow_no_console"):
             plan["refusals"].append(
                 "This card is the only display adapter in the host. Binding it to a VM leaves the host with no "
-                "screen. Type the confirmation to continue, and make sure you can reach this host over SSH.")
+                "screen. Type 'I understand' to continue, and make sure you can reach this host over SSH first.")
         elif not facts["ssh"]:
             plan["warnings"].append("You are not on an SSH session. Make sure you can log in over the network "
                                     "before you reboot.")
@@ -2268,18 +2443,53 @@ def plan_console(facts, target, opts, plan):
                              "a screen only if the BIOS uses it as the primary display (see the BIOS step).")
 
 
+def lxc_gpu_users(root="/"):
+    """(container id, device node) for every container config that passes /dev/nvidia* or /dev/dri in."""
+    d = _p(root, "/etc/pve/lxc")
+    out = []
+    if not d.is_dir():
+        return out
+    for f in sorted(d.glob("*.conf")):
+        if not f.stem.isdigit():
+            continue
+        nodes = []
+        for line in (_read(f) or "").splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            for m in re.finditer(r"/dev/(nvidia\w*|dri)\b", line):
+                node = "/dev/dri" if m.group(1) == "dri" else "/dev/nvidia"
+                if node not in nodes:
+                    nodes.append(node)
+        out += [(int(f.stem), node) for node in nodes]
+    return out
+
+
+def plan_containers(target, root, plan):
+    for ctid, node in lxc_gpu_users(root):
+        if node == "/dev/nvidia" and target["vendor"] != "nvidia":
+            continue
+        plan["warnings"].append(
+            "Container %d passes %s through. Once this card is bound to vfio-pci that container loses the GPU at "
+            "the next boot (transcoding and other GPU work in it stops). Remove the device from its config first "
+            "if you still need it there." % (ctid, node))
+
+
 def plan_host(facts, target, opts=None, root="/", run=default_run):
     """Everything this host still needs for *target* (see module doc for the shape)."""
     opts = opts or {}
     plan = new_plan()
+    plan["identity"] = target.get("identity")
+    if not _guard_target(target, plan):
+        return plan
     plan_console(facts, target, opts, plan)
     plan_kernel_args(facts, target, root, plan)
     plan_modules(root, plan)
     plan_binding(facts, target, root, plan)
     plan_vendor_reset(facts, target, root, run, plan)
+    plan_containers(target, root, plan)
     boot_files = (GRUB_DROPIN, KERNEL_CMDLINE)
     plan["initramfs"] = any(c["path"] not in boot_files for c in plan["changes"]) or \
-        any(c.get("tag") == "vendor-reset" for c in plan["commands"])
+        any(c.get("tag", "").startswith("vendor-reset") for c in plan["commands"])
     plan["reboot_required"] = plan["reboot_required"] or bool(plan["changes"])
     if plan["initramfs"]:
         plan["commands"].append({"argv": ["update-initramfs", "-u", "-k", "all"], "reason": "Rebuild the boot image"})
@@ -2366,12 +2576,17 @@ def goto_step(state, step):
         state[name] = [n for n in state[name] if n < step]
 
 
-def build_target(root, bdf, vendor, reset="none"):
-    """The chosen card in the shape plan_host and verify_host want."""
+def build_target(root, bdf, vendor, reset="none", identity=None):
+    """The chosen card in the shape plan_host and verify_host want.
+
+    *identity* is the saved selection (see check_identity). When the device at *bdf* no longer
+    matches it the target carries ``mismatch`` and every step refuses to act on it."""
+    devices = pci_devices(root)
     funcs = [{"bdf": d["bdf"], "vendor": d["vendor"], "device": d["device"], "class": d["class"]}
-             for d in pci_devices(root) if d["bdf"].startswith(bdf + ".")]
-    boot = any(d["boot_vga"] for d in pci_devices(root) if d["bdf"].startswith(bdf + "."))
-    return {"vendor": vendor, "bdf": bdf, "boot_vga": boot, "reset": reset, "functions": funcs}
+             for d in devices if d["bdf"].startswith(bdf + ".")]
+    boot = any(d["boot_vga"] for d in devices if d["bdf"].startswith(bdf + "."))
+    return {"vendor": vendor, "bdf": bdf, "boot_vga": boot, "reset": reset, "functions": funcs,
+            "identity": identity, "mismatch": check_identity(root, identity)}
 
 
 def hint_text(state):
@@ -2405,13 +2620,28 @@ def _safe_path(path):
     return isinstance(path, str) and path.startswith("/etc/") and ".." not in path.split("/")
 
 
+def _real(root, path):
+    """The file behind *path*. A symlink is written through, never replaced, so it stays a link."""
+    return Path(os.path.realpath(_p(root, path)))
+
+
 def _write_file(root, path, content, mode):
-    target = _p(root, path)
+    target = _real(root, path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        st = target.stat()
+        mode = stat.S_IMODE(st.st_mode)  # keep the mode of a file that already existed
+    except OSError:
+        st = None
     tmp = target.with_name(target.name + ".osx-tmp")
     try:
         tmp.write_text(content)
         os.chmod(tmp, mode)
+        if st is not None:
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except OSError:
+                pass
         os.replace(tmp, target)
     finally:
         if tmp.exists():
@@ -2420,7 +2650,7 @@ def _write_file(root, path, content, mode):
 
 def _restore(root, entry, check_drift=False):
     """Put one file back. Returns "" or the reason it was left alone."""
-    target = _p(root, entry["path"])
+    target = _real(root, entry["path"])
     if not _safe_path(entry["path"]):
         return "%s is not a path this tool manages" % entry["path"]
     if check_drift and target.exists() and _sha(_read(target)) != entry.get("sha_after"):
@@ -2439,19 +2669,21 @@ def _restore(root, entry, check_drift=False):
     return ""
 
 
-_REFRESH = {"grub": ["update-grub"], "systemd-boot": ["proxmox-boot-tool", "refresh"],
+_REFRESH = {"grub": ["update-grub"], "pbt": ["proxmox-boot-tool", "refresh"],
+            "systemd-boot": ["proxmox-boot-tool", "refresh"],
             "initramfs": ["update-initramfs", "-u", "-k", "all"]}
+_KINDS = ("grub", "pbt", "systemd-boot", "initramfs")
 
 
 def _refresh_commands(kinds):
-    return [_REFRESH[k] for k in ("grub", "systemd-boot", "initramfs") if k in kinds]
+    return [_REFRESH[k] for k in _KINDS if k in kinds]
 
 
 def _run_refreshes(kinds, state, run):
     """Rebuild boot config for *kinds*. Failures stay in state["pending_refresh"] so a later undo retries them."""
     errors = []
     pending = []
-    for kind in ("grub", "systemd-boot", "initramfs"):
+    for kind in _KINDS:
         if kind not in kinds:
             continue
         code, out = run(_REFRESH[kind], timeout=LONG_TIMEOUT)
@@ -2462,15 +2694,31 @@ def _run_refreshes(kinds, state, run):
     return errors
 
 
+def _ignore_sigint():
+    """Ignore Ctrl-C while a rollback runs. Returns what to restore (None when it cannot be changed here)."""
+    try:
+        return signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (ValueError, OSError):  # not the main thread
+        return None
+
+
 def apply_plan(plan, state, root="/", run=default_run, confirmed=False):
     """Write the plan. Returns {ok, error, rolled_back, reboot_required, backup_dir}."""
     if plan["refusals"]:
         return {"ok": False, "error": plan["refusals"][0], "rolled_back": False}
     if plan["hard_warnings"] and not confirmed:
         return {"ok": False, "error": "A hard warning needs a typed confirmation first.", "rolled_back": False}
+    moved = check_identity(root, plan.get("identity"))
+    if moved:
+        return {"ok": False, "error": moved, "rolled_back": False}
     bad = [c["path"] for c in plan["changes"] if not _safe_path(c["path"])]
     if bad:
         return {"ok": False, "error": "Refusing to write outside /etc: " + ", ".join(bad), "rolled_back": False}
+    stale = [c["path"] for c in plan["changes"] if _read(_real(root, c["path"])) != c["old"]]
+    if stale:
+        return {"ok": False, "rolled_back": False,
+                "error": "%s changed after the preview was made, so nothing was written. Run the step again to "
+                         "see the new preview." % ", ".join(stale)}
     stamp = _now()
     n = 1
     while _p(root, BACKUP_ROOT).joinpath(stamp).exists():
@@ -2479,7 +2727,7 @@ def apply_plan(plan, state, root="/", run=default_run, confirmed=False):
     done = []
     try:
         for ch in plan["changes"]:
-            target = _p(root, ch["path"])
+            target = _real(root, ch["path"])
             existed = target.exists()
             backup = ""
             if existed:
@@ -2505,10 +2753,18 @@ def apply_plan(plan, state, root="/", run=default_run, confirmed=False):
             state["boot_id"] = boot_id(root)
         save_state(state, root)
     except BaseException as exc:  # noqa: BLE001  (Ctrl-C included: never leave half-applied files)
-        for entry in reversed(done):
-            _restore(root, entry)
-        errors = _run_refreshes(set(plan["refresh"]), state, run)
-        save_state(state, root)
+        # Saved first: a second Ctrl-C during the slow rebuilds must still leave undo able to redo them.
+        state["pending_refresh"] = list(plan["refresh"])
+        previous = _ignore_sigint()
+        try:
+            save_state(state, root)
+            for entry in reversed(done):
+                _restore(root, entry)
+            errors = _run_refreshes(set(plan["refresh"]), state, run)
+            save_state(state, root)
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGINT, previous)
         if not isinstance(exc, (OSError, RuntimeError)):
             raise
         extra = [e for e in errors if e not in str(exc)]
@@ -2518,20 +2774,32 @@ def apply_plan(plan, state, root="/", run=default_run, confirmed=False):
 
 
 def undo_host(state, root="/", run=default_run):
-    """Restore every file this tool changed, newest first. Safe to run twice; a failed rebuild is retried."""
+    """Restore every file this tool changed, newest first. Safe to run twice; a failed rebuild is retried.
+
+    A file somebody changed after this tool wrote it is kept as it is and reported."""
     kinds = set(state.get("pending_refresh", []))
     restored = []
     errors = []
+    kept = []
     for entry in reversed(state["host_changes"]):
         if entry.get("reverted"):
             continue
-        problem = _restore(root, entry, check_drift=True)
+        real = _real(root, entry["path"])
+        if _safe_path(entry["path"]) and real.exists() and _sha(_read(real)) != entry.get("sha_after"):
+            # Somebody changed it after this tool wrote it: their version stays and undo carries on.
+            entry["reverted"] = True
+            kept.append("%s was changed after this tool wrote it, so your version was kept (the original is in %s)."
+                        % (entry["path"], entry.get("backup") or "no backup: it was a new file"))
+            continue
+        problem = _restore(root, entry)
         if problem:
             errors.append(problem)
             continue
         restored.append(entry["path"])
         if entry["path"] == GRUB_DROPIN:
             kinds.add("grub")
+            if _p(root, PBT_UUIDS).exists():
+                kinds.add("pbt")
         elif entry["path"] == KERNEL_CMDLINE:
             kinds.add("systemd-boot")
         else:
@@ -2544,7 +2812,8 @@ def undo_host(state, root="/", run=default_run):
             errors.append("dkms remove failed: " + out.strip()[-200:])
     errors += _run_refreshes(kinds, state, run)
     save_state(state, root)
-    return {"ok": not errors, "restored": restored, "errors": errors, "reboot_required": bool(restored)}
+    return {"ok": not errors, "restored": restored, "errors": errors, "kept": kept,
+            "reboot_required": bool(restored)}
 
 
 # ── verify ───────────────────────────────────────────────────────────
@@ -2555,6 +2824,12 @@ def _check(cid, label, status, detail="", fix=""):
 
 def verify_host(target, root="/", run=default_run):
     """Post-reboot checks. status is ok, fail, warn or info; fix says where to go on a failure."""
+    moved = check_identity(root, target.get("identity"))
+    if moved:
+        return [_check("identity", "The chosen card is still there", "fail", moved, "scan")]
+    probe = new_plan()
+    if not _guard_target(dict(target, mismatch=""), probe):
+        return [_check("identity", "The chosen card is still there", "fail", probe["refusals"][0], "scan")]
     facts = detect_facts(root, run)
     out = []
     configured = configured_cmdline(facts["bootloader"], root)
@@ -2580,7 +2855,8 @@ def verify_host(target, root="/", run=default_run):
     mine = {f["bdf"] for f in target["functions"]}
     devs = {d["bdf"]: d for d in facts["pci"]}
     wrong = [f["bdf"] + " (" + (devs.get(f["bdf"], {}).get("driver") or "no driver") + ")"
-             for f in target["functions"] if devs.get(f["bdf"], {}).get("driver") != "vfio-pci"]
+             for f in target["functions"]
+             if bindable(f, target["vendor"]) and devs.get(f["bdf"], {}).get("driver") != "vfio-pci"]
     out.append(_check("driver", "The card is held by vfio-pci", "ok" if not wrong else "fail",
                       "" if not wrong else "Not bound: " + ", ".join(wrong), "" if not wrong else "host"))
     group = (devs.get(target["bdf"] + ".0") or {}).get("group")
@@ -2642,6 +2918,181 @@ def _bar_size(path, index):
     return size if size > 1 else None
 
 
+# ── VM bookkeeping (shared by the Python front ends and the bash installer) ──
+
+def parse_config(raw):
+    """`qm config` text as a dict."""
+    cfg = {}
+    for line in (raw or "").splitlines():
+        if ":" in line and not line.startswith("#"):
+            key, _, value = line.partition(":")
+            cfg[key.strip()] = value.strip()
+    return cfg
+
+
+def _global_re(arg):
+    key = arg.split("=", 1)[0].replace("-global ", "", 1)
+    return re.compile(r"-global\s+" + re.escape(key) + r"=\S+")
+
+
+def with_global_args(args, wanted):
+    """*args* with each ``-global key=value`` set to the wanted value, never duplicated."""
+    out = args
+    for arg in wanted:
+        rx = _global_re(arg)
+        out = rx.sub(arg, out) if rx.search(out) else "%s %s" % (out.rstrip(), arg)
+    return out.strip()
+
+
+def without_global_args(args, wanted):
+    out = args
+    for arg in wanted:
+        out = re.sub(r"\s*" + _global_re(arg).pattern, "", out)
+    return out.strip()
+
+
+def vm_fingerprint(cfg):
+    """Identifies one VM across a VMID that was reused: its SMBIOS uuid, else its name."""
+    m = re.search(r"uuid=([0-9a-fA-F-]+)", cfg.get("smbios1", ""))
+    return m.group(1).lower() if m else cfg.get("name", "")
+
+
+def hostpci_key(value):
+    """Order-free form of a hostpci value, so `pcie=1,0000:06:00` equals `0000:06:00,pcie=1`."""
+    addrs, opts = set(), set()
+    for tok in re.split(r"[,;]", value or ""):
+        tok = tok.strip()
+        if not tok:
+            continue
+        bare = tok[5:] if tok.startswith("host=") else tok
+        if "=" not in bare:
+            addrs.add(norm_bdf(bare) or bare)
+        else:
+            opts.add(bare)
+    return (frozenset(addrs), frozenset(opts))
+
+
+def make_record(vmid, bdf, vendor, cfg, hostpci, global_args, vga_none, oc):
+    """What undo needs: the VM before the attach, and what the attach wrote."""
+    args = cfg.get("args")
+    return {"vmid": int(vmid), "bdf": bdf, "vendor": vendor, "hostpci0": cfg.get("hostpci0"), "args": args,
+            "vga": cfg.get("vga"), "vga_changed": bool(vga_none), "oc": oc, "fp": vm_fingerprint(cfg),
+            "after": {"hostpci0": hostpci, "args": with_global_args(args or "", global_args),
+                      "vga": "none" if vga_none else None, "added_args": list(global_args)}}
+
+
+def vm_restore(record, cfg):
+    """Actions that put a VM back: {"actions": [{"op": "set"|"delete", "key", "value"}], "notes": [...]}.
+
+    Only what the attach wrote is reverted. A field somebody changed afterwards keeps the user's
+    value and is reported; an edited args line only loses the arguments this tool added."""
+    actions, notes = [], []
+    after = record.get("after")
+    cur_hp, orig_hp = cfg.get("hostpci0"), record.get("hostpci0")
+    if after is None or (cur_hp is not None and hostpci_key(cur_hp) == hostpci_key(after.get("hostpci0"))):
+        if orig_hp:
+            if cur_hp != orig_hp:
+                actions.append({"op": "set", "key": "hostpci0", "value": orig_hp})
+        elif cur_hp is not None:
+            actions.append({"op": "delete", "key": "hostpci0"})
+    elif cur_hp is not None:
+        notes.append("hostpci0 was changed after the card was attached (%s). Your value was kept." % cur_hp)
+    cur_args, orig_args = cfg.get("args", ""), record.get("args") or ""
+    if after is None or cur_args == after.get("args"):
+        if cur_args != orig_args:
+            actions.append({"op": "set", "key": "args", "value": orig_args} if orig_args
+                           else {"op": "delete", "key": "args"})
+    else:
+        stripped = without_global_args(cur_args, after.get("added_args") or [])
+        if stripped != cur_args:
+            actions.append({"op": "set", "key": "args", "value": stripped} if stripped
+                           else {"op": "delete", "key": "args"})
+        notes.append("args were edited after the card was attached. Only the arguments this tool added were "
+                     "removed; your edits were kept.")
+    if record.get("vga_changed"):
+        cur_vga, orig_vga = cfg.get("vga"), record.get("vga")
+        if after is None or cur_vga == after.get("vga"):
+            if cur_vga != orig_vga:
+                actions.append({"op": "set", "key": "vga", "value": orig_vga} if orig_vga
+                               else {"op": "delete", "key": "vga"})
+        else:
+            notes.append("The display setting (vga) was changed after the card was attached (%s). Your value "
+                         "was kept." % (cur_vga or "unset"))
+    return {"actions": actions, "notes": notes}
+
+
+def cfg_holds_card(cfg, bdf, mappings):
+    """True when any hostpci entry of the VM config passes *bdf* through, directly or by resource mapping."""
+    want = norm_bdf(bdf)
+    for key, value in cfg.items():
+        if not re.fullmatch(r"hostpci\d+", key):
+            continue
+        for tok in re.split(r"[,;]", value):
+            tok = tok.strip()
+            tok = tok[5:] if tok.startswith("host=") else tok
+            if tok.startswith("mapping="):
+                if want in mappings.get(tok[len("mapping="):], ()):
+                    return True
+            elif norm_bdf(tok) == want:
+                return True
+    return False
+
+
+def record_write(payload):
+    """Write the attach record unless one for this very VM exists (it holds the true originals).
+    A record left behind by a deleted VM whose id was reused is replaced."""
+    path = Path(payload["path"])
+    cfg = parse_config(payload["cfg_raw"])
+    record = make_record(payload["vmid"], payload["bdf"], payload["vendor"], cfg, payload["hostpci"],
+                         payload.get("global_args") or [], bool(payload.get("vga_none")), payload.get("oc", ""))
+    try:
+        old = json.loads(path.read_text())
+    except (OSError, ValueError):
+        old = None
+    if isinstance(old, dict) and old.get("fp", "") == record["fp"]:
+        return {"written": False}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, sort_keys=True))
+    return {"written": True}
+
+
+def load_mappings(root="/", run=default_run):
+    """Resource mappings: {name: {card address, ...}} from /etc/pve/mapping/pci.cfg, else pvesh."""
+    out = {}
+
+    def add(name, path):
+        bdf = norm_bdf(path)
+        if name and bdf:
+            out.setdefault(name, set()).add(bdf)
+
+    text = _read(_p(root, "/etc/pve/mapping/pci.cfg"))
+    if text is not None:
+        name = ""
+        for line in text.splitlines():
+            if line and not line[0].isspace() and not line.startswith("#"):
+                name = line.strip().rstrip(":")
+            elif line.strip().startswith("map "):
+                for part in line.split(None, 1)[1].split(","):
+                    key, _, value = part.strip().partition("=")
+                    if key == "path":
+                        add(name, value)
+        return out
+    code, raw = run(["pvesh", "get", "/cluster/mapping/pci", "--output-format", "json"])
+    if code != 0:
+        return out
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return out
+    for entry in entries if isinstance(entries, list) else []:
+        for item in entry.get("map", []) if isinstance(entry, dict) else []:
+            for part in (item.split(",") if isinstance(item, str) else []):
+                key, _, value = part.partition("=")
+                if key == "path":
+                    add(entry.get("id"), value)
+    return out
+
+
 # ── command line (used by the bash installer) ────────────────────────
 
 def _emit(obj):
@@ -2655,7 +3106,21 @@ def main(argv):
     if cmd == "facts":
         _emit(detect_facts(root))
     elif cmd == "target":
-        _emit(build_target(root, payload["bdf"], payload["vendor"], payload.get("reset", "none")))
+        _emit(build_target(root, payload["bdf"], payload["vendor"], payload.get("reset", "none"),
+                           payload.get("identity")))
+    elif cmd == "identity":
+        _emit(identity_of(root, payload["bdf"]) or {})
+    elif cmd == "mappings":
+        _emit({k: sorted(v) for k, v in load_mappings(root).items()})
+    elif cmd == "holds":
+        print("yes" if cfg_holds_card(parse_config(payload["cfg_raw"]), payload["bdf"], load_mappings(root)) else "no")
+    elif cmd == "lxc":
+        for ctid, node in lxc_gpu_users(root):
+            print("%d %s" % (ctid, node))
+    elif cmd == "record-write":
+        _emit(record_write(payload))
+    elif cmd == "vm-restore":
+        _emit(vm_restore(payload["record"], parse_config(payload["cfg_raw"])))
     elif cmd == "step":
         state = load_state(root) or new_state()
         (goto_step(state, payload["step"]) if payload.get("goto")
@@ -2673,7 +3138,7 @@ def main(argv):
     elif cmd == "undo":
         state = load_state(root)
         if state is None:
-            _emit({"ok": True, "restored": [], "errors": [], "reboot_required": False})
+            _emit({"ok": True, "restored": [], "errors": [], "kept": [], "reboot_required": False})
             return 0
         res = undo_host(state, root)
         _emit(res)
@@ -2700,7 +3165,7 @@ def main(argv):
     elif cmd == "hint-clear":
         clear_login_hint(root)
     else:
-        sys.stderr.write("usage: host_setup.py facts|target|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
+        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
         return 64
     return 0
 
@@ -2836,41 +3301,68 @@ def board_title(facts):
     return ((name or "this server") + " (%s)" % ("Intel" if facts.get("cpu_vendor") == "intel" else "AMD")).upper()
 
 
-def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup", optional_rebar=False):
-    """ASCII-safe photo card (plain text). *failing* are the entries from check_items with ok false."""
-    inner = WIDTH - 4
+_ORDER_STEPS = (("csm", "CSM off"), ("above4g", "Above 4G Decoding on"), ("rebar", "Resizable BAR on Auto"))
+QR_GAP = 3
+
+
+def order_note(failing_keys, optional_rebar=False):
+    """The ordering tip, naming only the settings that are still off. Empty when order cannot matter."""
+    keys = set(failing_keys) | ({"rebar"} if optional_rebar else set())
+    parts = [label for key, label in _ORDER_STEPS if key in keys]
+    return "Do these in this order: " + ", then ".join(parts) + "." if len(parts) > 1 else ""
+
+
+def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup", optional_rebar=False, qr=None):
+    """ASCII-safe photo card (plain text). *failing* are the entries from check_items with ok false.
+
+    *qr* (lines of the guide's QR code) goes inside the frame beside the steps, so one photo of the
+    screen holds the steps and the code."""
+    qr = list(qr or [])
+    qr_w = max((len(q) for q in qr), default=0)
+    text_w = WIDTH - 4
+    inner = text_w + (qr_w + QR_GAP if qr else 0)
     ven = data["vendors"].get(vendor)
     body = ["BIOS STEPS FOR THIS SERVER", board_title(facts), "",
             "Take a photo of this screen, then reboot into the BIOS.", ""]
     if ven:
-        body.append("Open the BIOS with: %s. %s" % (ven["enter"], ven.get("mode", "")))
+        body += _wrap("Open the BIOS with: %s. %s" % (ven["enter"], ven.get("mode", "")), text_w, "")
         body.append("")
+    start = len(body)
     n = 0
     for item in failing:
         n += 1
         entry = _entry(data, vendor, item["key"])
         label = data["settings"][item["key"]]["label"]
         value = entry["value"] if entry else "Enabled"
-        body += _line(inner, "%d. %s" % (n, label), value)
+        body += _line(text_w, "%d. %s" % (n, label), value)
         if entry:
             lead = "Path: " if entry["verified"] else "Usually under: "
-            body += _wrap(lead + entry["path"], inner, "   ")
+            body += _wrap(lead + entry["path"], text_w, "   ")
         else:
             hint = _generic_hint(data, item["key"])
-            body += _wrap("Look for: " + hint["names"], inner, "   ")
-            body += _wrap(hint["where"], inner, "   ")
+            body += _wrap("Look for: " + hint["names"], text_w, "   ")
+            body += _wrap(hint["where"], text_w, "   ")
+        if item["key"] in ("vtx", "svm"):
+            body += _wrap("Without it no VM can start.", text_w, "   ")
     if optional_rebar:
         n += 1
-        body += _line(inner, "%d. Resizable BAR (optional)" % n, "Auto")
-        body += _wrap("Leave it on Auto. If the VM will not start, set it to Disabled.", inner, "   ")
+        body += _line(text_w, "%d. Resizable BAR (optional)" % n, "Auto")
+        body += _wrap("Leave it on Auto. If the VM will not start, set it to Disabled.", text_w, "   ")
     n += 1
     body.append("%d. Save and exit (usually F10)" % n)
     body.append("")
-    body += _wrap(data["search_tip"], inner, "")
-    body += _wrap(data["order_note"], inner, "")
+    body += _wrap(data["search_tip"], text_w, "")
+    note = order_note([i["key"] for i in failing], optional_rebar)
+    if note:
+        body += _wrap(note, text_w, "")
     body += ["", "Back in Proxmox, run:", "   " + resume_cmd, "", "Same steps with pictures on your phone:",
              "   " + re.sub(r"^https?://", "", doc_url(data, vendor))]
-    border = "+" + "=" * (WIDTH - 2) + "+"
+    if qr:
+        while len(body) < start + len(qr):
+            body.append("")
+        for i, q in enumerate(qr):
+            body[start + i] = body[start + i].ljust(text_w) + " " * QR_GAP + q
+    border = "+" + "=" * (inner + 2) + "+"
     rows = [border] + ["| " + ln.ljust(inner) + " |" for ln in body] + [border]
     return "\n".join(rows)
 
@@ -2938,7 +3430,8 @@ def main(argv):
             return 3
         vendor = match_vendor(facts, data)
         rebar = bool(payload.get("target")) and rebar_capable(root, payload["target"]["bdf"])
-        text = build_card(failing, facts, data, vendor, payload.get("resume_cmd") or "osx-next-cli gpu-setup", rebar)
+        text = build_card(failing, facts, data, vendor, payload.get("resume_cmd") or "osx-next-cli gpu-setup", rebar,
+                          payload.get("qr"))
         if payload.get("save"):
             save_card(text, root)
         print(text)
@@ -3271,7 +3764,7 @@ GPU_EMBED_AMD_DEVICES_EOF
 IFS= read -r -d '' GPU_EMBED_OC_BOOT_ARGS <<'GPU_EMBED_OC_BOOT_ARGS_EOF' || true
 """Add boot-args to (or restore) a VM's OpenCore config for a passed-through GPU.
 
-Usage: oc_boot_args.py <EFI/OC directory> attach|detach
+Usage: oc_boot_args.py <EFI/OC directory> attach|detach|restore
 
 The Python CLI/TUI and the standalone bash installer run this exact text (the
 bash script embeds it verbatim; tests/test_gpu_parity.py diffs the two).
@@ -3282,17 +3775,23 @@ attach  Backs up config.plist to config.plist.pre-gpu (kept if it already
         GPU_BOOT_ARGS (space separated; an arg that is already there is
         replaced, never duplicated). Refuses when config.plist.pre-nullmoth
         exists: the NVIDIA profile owns the config then.
-detach  Puts config.plist.pre-gpu back byte for byte and removes it. With no backup
-        it does nothing and succeeds, so an interrupted undo can be repeated.
+detach  Puts config.plist.pre-gpu back byte for byte and removes it, but only while
+        config.plist still has the SHA-256 attach stored next to the backup. When the
+        file changed since, the changed config and the backup stay and a KEPT line says
+        so. With no backup it does nothing and succeeds, so an interrupted undo can be
+        repeated. (restore is the same as detach.)
+The config is always written to a temporary file and renamed into place.
 
 Exit codes: 0 ok, 2 refused (nothing changed).
 """
+import hashlib
 import os
 import plistlib
 import shutil
 import sys
 
 BACKUP = 'config.plist.pre-gpu'
+PATCHED_SHA = BACKUP + '.patched-sha256'
 OTHER_BACKUP = 'config.plist.pre-nullmoth'
 NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 
@@ -3308,16 +3807,25 @@ def merge_boot_args(current, wanted):
     return ' '.join(kept + list(wanted))
 
 
+def file_sha(path):
+    with open(path, 'rb') as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 def write_plist(cfg, path):
-    with open(path, 'wb') as f:
+    tmp = path + '.tmp'
+    with open(tmp, 'wb') as f:
         plistlib.dump(cfg, f)
     # plistlib emits self-closing tags that OpenCore's OcXmlLib rejects
-    with open(path, 'rb') as f:
+    with open(tmp, 'rb') as f:
         data = f.read()
     for tag in ('array', 'dict', 'data'):
         data = data.replace(('<%s/>' % tag).encode(), ('<%s></%s>' % (tag, tag)).encode())
-    with open(path, 'wb') as f:
+    with open(tmp, 'wb') as f:
         f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def attach(oc_dir):
@@ -3333,6 +3841,8 @@ def attach(oc_dir):
     nv = cfg.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault(NVRAM_GUID, {})
     nv['boot-args'] = merge_boot_args(nv.get('boot-args', ''), wanted)
     write_plist(cfg, path)
+    with open(os.path.join(oc_dir, PATCHED_SHA), 'w') as f:
+        f.write(file_sha(path) + '\n')
     sys.stderr.write('GPU boot-args applied (backup: ' + BACKUP + ')\n')
 
 
@@ -3343,13 +3853,23 @@ def detach(oc_dir):
         # already restored (an earlier undo got this far): nothing left to do
         sys.stderr.write('no ' + BACKUP + ' found, nothing to restore\n')
         return
+    stamp = os.path.join(oc_dir, PATCHED_SHA)
+    if os.path.exists(stamp):
+        with open(stamp) as f:
+            wrote = f.read().strip()
+        if os.path.exists(path) and file_sha(path) != wrote:
+            sys.stderr.write(
+                'KEPT: config.plist was changed after the boot-args were added, so your version stays. '
+                'The original is still on the disk as ' + BACKUP + '.\n')
+            return
+        os.remove(stamp)
     os.replace(backup, path)
     sys.stderr.write('OpenCore config restored from ' + BACKUP + '\n')
 
 
 def main(argv):
-    if len(argv) != 3 or argv[2] not in ('attach', 'detach'):
-        refuse('usage: oc_boot_args.py <EFI/OC dir> attach|detach', 64)
+    if len(argv) != 3 or argv[2] not in ('attach', 'detach', 'restore'):
+        refuse('usage: oc_boot_args.py <EFI/OC dir> attach|detach|restore', 64)
     (attach if argv[2] == 'attach' else detach)(argv[1])
 
 
@@ -3444,11 +3964,11 @@ function gpu_verdict() {
       echo "unsupported|Not supported by macOS|$(amd_unsupported_reason "$dev")"; return 0
     fi
     IFS='|' read -r key label reset args tahoe <<<"$fam"
-    tail="macOS Ventura 13 to Tahoe 26"
-    [ "$tahoe" == "ok" ] || tail="macOS Ventura 13 to Sequoia 15 (Tahoe 26 not confirmed)"
-    echo "native|Works natively|${label}. ${tail}."
+    tail="macOS 13 to 26"
+    [ "$tahoe" == "ok" ] || tail="macOS 13 to 15 (26 not confirmed)"
+    echo "native|Works natively on ${tail}|${label}"
   elif nullmoth_supported_device "$dev"; then
-    echo "nullmoth|Works with NullMoth (beta)|macOS Sequoia 15.5+ and Tahoe 26 only. Needs the third-party NullMoth driver."
+    echo "nullmoth|Works with NullMoth (beta) on macOS 15.5 to 26|Needs the third-party NullMoth driver, which you install yourself."
   else
     echo "unsupported|Not supported by macOS|${GPU_PRE_TURING_REASON}"
   fi
@@ -3477,31 +3997,23 @@ function amd_check() {
 
 function gpu_record_path() { echo "$GPU_STATE_DIR/gpu-attach-$1.json"; }
 
-# $1 vmid $2 bdf $3 vendor $4 hostpci0 $5 args $6 vga (use __NONE__ for "not set") $7 vga_changed yes|no $8 oc
-# An existing record is kept: it holds the true originals.
+# $1 vmid $2 bdf $3 vendor $4 hostpci0 value to be written $5 the profile's -global arg $6 vga_none yes|no $7 oc
+# Writes the record (the VM before the attach, plus what the attach will write) through the shared engine.
+# A record of the same VM is kept: it holds the true originals. One left by a deleted VM is replaced.
 function gpu_record_write() {
-  local path
+  local path cfg
   path=$(gpu_record_path "$1")
-  [ -e "$path" ] && return 0
   mkdir -p "$GPU_STATE_DIR" || return 1
-  python3 - "$path" "$@" <<'GPU_RECORD_PY'
-import json, sys
-path, vmid, bdf, vendor, hostpci0, args, vga, vga_changed, oc = sys.argv[1:10]
-def v(x):
-    return None if x == "__NONE__" else x
-rec = {"vmid": int(vmid), "bdf": bdf, "vendor": vendor, "hostpci0": v(hostpci0), "args": v(args),
-       "vga": v(vga), "vga_changed": vga_changed == "yes", "oc": oc}
-open(path, "w").write(json.dumps(rec, sort_keys=True))
-GPU_RECORD_PY
+  cfg=$(qm config "$1" 2>/dev/null) || return 1
+  python3 -c 'import json,sys; a=sys.argv; print(json.dumps({"path": a[1], "vmid": int(a[2]), "bdf": a[3], "vendor": a[4], "hostpci": a[5], "global_args": [a[6]], "vga_none": a[7] == "yes", "oc": a[8], "cfg_raw": sys.stdin.read()}))' \
+    "$path" "$1" "$2" "$3" "$4" "$5" "$6" "$7" <<<"$cfg" | gpu_host record-write >/dev/null
 }
 
-# Load the record into REC_* variables (REC_<NAME>_SET says whether the original existed). rc 1 when none.
+# Load the record into REC_* variables. rc 1 when there is none.
 function gpu_record_load() {
   local out
   # shellcheck disable=SC2034  # read by the callers
-  REC_FOUND=no; REC_BDF=""; REC_VENDOR=""; REC_OC=""; REC_VGA_CHANGED=no
-  # shellcheck disable=SC2034  # read by the callers
-  REC_HOSTPCI0=""; REC_HOSTPCI0_SET=no; REC_ARGS=""; REC_ARGS_SET=no; REC_VGA=""; REC_VGA_SET=no
+  REC_FOUND=no; REC_BDF=""; REC_VENDOR=""; REC_OC=""
   out=$(python3 - "$(gpu_record_path "$1")" <<'GPU_RECORD_PY'
 import json, shlex, sys
 try:
@@ -3514,10 +4026,6 @@ put("FOUND", "yes")
 put("BDF", str(r.get("bdf", "")))
 put("VENDOR", str(r.get("vendor", "")))
 put("OC", str(r.get("oc", "")))
-put("VGA_CHANGED", "yes" if r.get("vga_changed") else "no")
-for key in ("hostpci0", "args", "vga"):
-    put(key.upper(), "" if r.get(key) is None else str(r[key]))
-    put(key.upper() + "_SET", "no" if r.get(key) is None else "yes")
 GPU_RECORD_PY
   ) || return 1
   eval "$out"
@@ -3534,9 +4042,9 @@ function gpu_snapshot() {
 }
 
 # Mount the VM's ide0 (OpenCore) disk, run the boot-args patcher, unmount.
-# $1 vmid, $2 attach|detach, $3 boot-args (attach only).
+# $1 vmid, $2 attach|detach|restore, $3 boot-args (attach only).
 function gpu_oc_boot_args() {
-  local vmid="$1" action="$2" args="${3:-}" vol path loop mnt rc=1 _i
+  local vmid="$1" action="$2" args="${3:-}" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
   path=$(pvesm path "$vol" 2>/dev/null) || return 1
@@ -3547,8 +4055,9 @@ function gpu_oc_boot_args() {
     sleep 1
   done
   mnt=$(mktemp -d)
+  old_trap=$(trap -p INT TERM)
   # shellcheck disable=SC2064
-  trap "umount '$mnt' 2>/dev/null; losetup -d '$loop' 2>/dev/null; rmdir '$mnt' 2>/dev/null" INT TERM
+  trap "umount '$mnt' 2>/dev/null; losetup -d '$loop' 2>/dev/null; rmdir '$mnt' 2>/dev/null; exit 130" INT TERM
   if [ -b "${loop}p1" ] && mount "${loop}p1" "$mnt" 2>/dev/null; then
     if GPU_BOOT_ARGS="$args" python3 - "$mnt/EFI/OC" "$action" <<<"$GPU_EMBED_OC_BOOT_ARGS"; then
       rc=0
@@ -3559,6 +4068,7 @@ function gpu_oc_boot_args() {
   losetup -d "$loop" 2>/dev/null || true
   rmdir "$mnt" 2>/dev/null || true
   trap - INT TERM
+  [ -z "$old_trap" ] || eval "$old_trap"
   return "$rc"
 }
 
@@ -3632,13 +4142,13 @@ function amd_attach() {
   qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || { msg_error "VM $vmid is no longer stopped"; return 1; }
   gpu_snapshot "$vmid" >/dev/null || { msg_error "Could not save the VM config snapshot"; return 1; }
   local oc=""
+  [ -z "$boot_args" ] || oc="gpu"
+  # The record goes first: it only writes a sidecar file, and a failure later on still finds it.
+  gpu_record_write "$vmid" "$bdf" amd "${bdf},pcie=1${extra}" "$GPU_HOTPLUG_ARG" "$([ "$display" == "gpu" ] && echo yes || echo no)" "$oc" || { msg_error "Could not record the original VM settings"; return 1; }
   if [ -n "$boot_args" ]; then
     gpu_oc_boot_args "$vmid" attach "$boot_args" || { msg_error "Could not patch the OpenCore disk; the VM was not changed"; return 1; }
-    oc="gpu"
     msg_ok "OpenCore boot-args added (backup: config.plist.pre-gpu)"
   fi
-  gpu_record_write "$vmid" "$bdf" amd "${hp0:-__NONE__}" "$([ -n "$args" ] && echo "$args" || echo __NONE__)" \
-    "${vga:-__NONE__}" "$([ "$display" == "gpu" ] && echo yes || echo no)" "$oc" || { msg_error "Could not record the original VM settings"; return 1; }
   gpu_qm_set "$vmid" "--hostpci0" --hostpci0 "${bdf},pcie=1${extra}" || return 1
   msg_ok "Attached ${bdf} (all functions) as hostpci0"
   if [ "$new_args" != "$args" ]; then
@@ -3651,45 +4161,43 @@ function amd_attach() {
   fi
 }
 
-# Undo any GPU attach from its record: hostpci0, args and vga go back exactly; the OpenCore
-# backup is restored by the patcher that made it. $1 vmid, then --dry-run.
+# Undo any GPU attach from its record. Only what the attach wrote is reverted: a field changed since keeps the
+# user's value and is reported (the shared engine decides). The OpenCore backup is restored by the patcher that
+# made it, unless config.plist changed since. $1 vmid, $2 dry-run yes|no, $3 stop-vm yes|no.
 # Mirrors gpu.build_hostpci_detach_steps (with a record) and gpu_attach.prepare_detach.
 function gpu_detach_record() {
-  local vmid="$1" dry="${2:-no}" cfg args hp0
+  local vmid="$1" dry="${2:-no}" stop="${3:-no}" cfg plan line op key value
   cfg=$(qm config "$vmid" 2>/dev/null) || { msg_error "VM $vmid not found."; return 1; }
-  qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || { msg_error "VM $vmid is running. Stop it first: qm stop $vmid"; return 1; }
+  if ! qm status "$vmid" 2>/dev/null | grep -q 'status: stopped'; then
+    if [ "$stop" == "yes" ] && [ "$dry" != "yes" ]; then
+      qm stop "$vmid" >/dev/null || { msg_error "Could not stop VM $vmid"; return 1; }
+    elif [ "$dry" != "yes" ]; then
+      msg_error "VM $vmid is running. Stop it first: qm stop $vmid"; return 1
+    fi
+  fi
   gpu_record_load "$vmid" || return 2
-  args=$(sed -n 's/^args: //p' <<<"$cfg")
-  hp0=$(sed -n 's/^hostpci0: //p' <<<"$cfg")
+  plan=$(python3 -c 'import json,sys; print(json.dumps({"record": json.load(open(sys.argv[1])), "cfg_raw": sys.stdin.read()}))' "$(gpu_record_path "$vmid")" <<<"$cfg" | gpu_host vm-restore) || return 1
   if [ "$dry" == "yes" ]; then
     echo -e "\nDRY RUN - nothing is changed. Plan:"
-    case "$REC_OC" in nullmoth) echo "  - Restore the previous OpenCore config from config.plist.pre-nullmoth" ;; gpu) echo "  - Restore the previous OpenCore config from config.plist.pre-gpu" ;; esac
-    if [ "$REC_HOSTPCI0_SET" == "yes" ]; then echo "  - qm set $vmid --hostpci0 '$REC_HOSTPCI0'"; elif [ -n "$hp0" ]; then echo "  - qm set $vmid --delete hostpci0"; fi
-    [ "$args" == "$REC_ARGS" ] || { if [ -n "$REC_ARGS" ]; then echo "  - qm set $vmid --args '$REC_ARGS'"; else echo "  - qm set $vmid --delete args"; fi; }
-    [ "$REC_VGA_CHANGED" != "yes" ] || { if [ -n "$REC_VGA" ]; then echo "  - qm set $vmid --vga '$REC_VGA'"; else echo "  - qm set $vmid --delete vga"; fi; }
+    case "$REC_OC" in nullmoth) echo "  - Restore the previous OpenCore config from config.plist.pre-nullmoth (kept if it changed since)" ;; gpu) echo "  - Restore the previous OpenCore config from config.plist.pre-gpu (kept if it changed since)" ;; esac
+    while IFS=$'\t' read -r op key value; do
+      [ -z "$op" ] && continue
+      if [ "$op" == "set" ]; then echo "  - qm set $vmid --$key '$value'"; else echo "  - qm set $vmid --delete $key"; fi
+    done < <(gpu_json '"\n".join("%s\t%s\t%s" % (a["op"], a["key"], a.get("value", "")) for a in d["actions"])' <<<"$plan")
     return 0
   fi
   case "$REC_OC" in
-    nullmoth) nullmoth_oc_patch "$vmid" detach || { msg_error "Could not restore the OpenCore config. The VM was not changed."; return 1; } ;;
-    gpu) gpu_oc_boot_args "$vmid" detach || { msg_error "Could not restore the OpenCore config. The VM was not changed."; return 1; } ;;
+    nullmoth) nullmoth_oc_patch "$vmid" restore || { msg_error "Could not restore the OpenCore config. The VM was not changed."; return 1; } ;;
+    gpu) gpu_oc_boot_args "$vmid" restore || { msg_error "Could not restore the OpenCore config. The VM was not changed."; return 1; } ;;
   esac
-  [ -z "$REC_OC" ] || msg_ok "Restored the previous OpenCore config"
-  if [ "$REC_HOSTPCI0_SET" == "yes" ]; then
-    gpu_qm_set "$vmid" "--hostpci0" --hostpci0 "$REC_HOSTPCI0" || return 1
-  elif [ -n "$hp0" ]; then
-    gpu_qm_set "$vmid" "--delete hostpci0" --delete hostpci0 || return 1
-    msg_ok "Removed hostpci0"
-  fi
-  if [ "$args" != "$REC_ARGS" ]; then
-    if [ -n "$REC_ARGS" ]; then gpu_qm_set "$vmid" "--args" --args "$REC_ARGS" || return 1
-    else gpu_qm_set "$vmid" "--delete args" --delete args || return 1; fi
-    msg_ok "Restored the original args"
-  fi
-  if [ "$REC_VGA_CHANGED" == "yes" ]; then
-    if [ -n "$REC_VGA" ]; then gpu_qm_set "$vmid" "--vga" --vga "$REC_VGA" || return 1
-    else gpu_qm_set "$vmid" "--delete vga" --delete vga || return 1; fi
-    msg_ok "Restored the display setting"
-  fi
+  [ -z "$REC_OC" ] || msg_ok "Checked the OpenCore config"
+  while IFS=$'\t' read -r op key value; do
+    [ -z "$op" ] && continue
+    if [ "$op" == "set" ]; then gpu_qm_set "$vmid" "--$key" "--$key" "$value" || return 1
+    else gpu_qm_set "$vmid" "--delete $key" --delete "$key" || return 1; fi
+    msg_ok "Restored $key"
+  done < <(gpu_json '"\n".join("%s\t%s\t%s" % (a["op"], a["key"], a.get("value", "")) for a in d["actions"])' <<<"$plan")
+  gpu_json '"\n".join(d["notes"])' <<<"$plan" | while IFS= read -r line; do [ -z "$line" ] || echo -e "${INFO}${YW}KEPT: ${line}${CL}"; done
   rm -f "$(gpu_record_path "$vmid")"
 }
 
@@ -3746,13 +4254,14 @@ function gpu_state_save() { printf '%s' "$1" | gpu_host state-save; }
 function gpu_step_complete() { printf '{"step": %s, "skipped": %s}' "$1" "${2:-false}" | gpu_host step; }
 function gpu_step_goto() { printf '{"step": %s, "goto": true}' "$1" | gpu_host step; }
 
-# One line about the host. Mirrors Session.summary_line.
+# One line about the host. Mirrors Session.summary_line (PVE is left out when the version is unknown).
 function gpu_summary_line() {
-  gpu_host facts </dev/null | gpu_json '"CPU: %s   Board: %s   Boot loader: %s   %s   IOMMU: %s   Boot: %s" % (d["cpu_vendor"].upper(), (" ".join(x for x in (d["board_vendor"], d["board_name"]) if x) or "unknown board"), d["bootloader"], d["pve"] or "PVE version unknown", "on" if d["iommu_groups"] else "off", "UEFI" if d["efi"] else "CSM/legacy")'
+  gpu_host facts </dev/null | gpu_json '"   ".join(["CPU: %s" % d["cpu_vendor"].upper(), "Board: %s" % (" ".join(x for x in (d["board_vendor"], d["board_name"]) if x) or "unknown board"), "Boot loader: %s" % d["bootloader"]] + (["PVE " + __import__("re").search(r"pve-manager/(\d+\.\d+)", d["pve"]).group(1)] if __import__("re").search(r"pve-manager/(\d+\.\d+)", d["pve"] or "") else []) + ["IOMMU: %s" % ("on" if d["iommu_groups"] else "off"), "Boot: %s" % ("UEFI" if d["efi"] else "CSM/legacy")])'
 }
 
 # Scan the display adapters. Fills GPU_CARDS with one line per AMD/NVIDIA card:
-# bdf|vendor|device(dec)|name|kind|headline|detail|boot_vga|driver|users(comma list "vmid:state")|risky(comma list)
+# bdf|vendor|device(dec)|name|kind|headline|detail|boot_vga|driver|users(comma list "vmid:state")|risky(comma list)|lxc(comma list "ctid:node")
+# Usable cards come first. A "|" in the card name is replaced so it cannot shift the fields.
 function gpu_scan() {
   local sys="${GPU_SYSFS:-/sys}" dev bdf vendor device cls vname v_kind v_head v_detail boot driver users risky line name seen=" "
   GPU_CARDS=()
@@ -3788,57 +4297,111 @@ function gpu_scan() {
       done
     fi
     name=$(lspci -nn -s "$bdf.0" 2>/dev/null | sed -n 's/^[^[]*\[[0-9a-f]\{4\}\]: *\(.*\) \[[0-9a-f]\{4\}:[0-9a-f]\{4\}\].*/\1/p' | head -1)
-    GPU_CARDS+=("${bdf}|${vname}|${device}|${name:-${vname^^} GPU}|${v_kind}|${v_head}|${v_detail}|${boot}|${driver}|${users}|${risky}")
+    name="${name//|/\/}"
+    local lxc="" ct node
+    if [ "$v_kind" != "unsupported" ]; then
+      while read -r ct node; do
+        [ -z "$ct" ] && continue
+        [ "$node" == "/dev/dri" ] || [ "$vname" == "nvidia" ] || continue
+        lxc+="${lxc:+,}${ct}:${node}"
+      done < <(gpu_host lxc </dev/null)
+    fi
+    GPU_CARDS+=("${bdf}|${vname}|${device}|${name:-${vname^^} GPU}|${v_kind}|${v_head}|${v_detail}|${boot}|${driver}|${users}|${risky}|${lxc}")
   done
+  local -a first=() last=()
+  local card
+  for card in "${GPU_CARDS[@]}"; do
+    if gpu_card_selectable "$card"; then first+=("$card"); else last+=("$card"); fi
+  done
+  GPU_CARDS=("${first[@]}" "${last[@]}")
 }
 
-# Print one card in a plain box. $1 = a GPU_CARDS line. Mirrors gpu_setup.card_text.
+# Why a GPU_CARDS line cannot be picked (empty when it can). Mirrors GpuCard.why_not.
+function gpu_card_why_not() {
+  local kind detail users risky u out=""
+  IFS='|' read -r _ _ _ _ kind _ detail _ _ users risky _ <<<"$1"
+  if [ "$kind" == "unsupported" ]; then echo "$detail"
+  elif [ -n "$risky" ]; then echo "Its IOMMU group also holds storage or network devices (${risky//,/, }). Passing the card through would take them from the host. Move the card to another slot."
+  elif [ -n "$users" ]; then
+    for u in ${users//,/ }; do out+="${out:+, }VM ${u%%:*} (${u#*:})"; done
+    echo "In use by ${out}"
+  fi
+}
+
+# Print one card in a full-width plain box. $1 = a GPU_CARDS line. Mirrors gpu_setup.card_text.
 function gpu_card_text() {
-  local bdf vname device name kind head detail boot driver users flags="" u
-  IFS='|' read -r bdf vname device name kind head detail boot driver users _ <<<"$1"
+  local bdf vname device name kind head detail boot driver users lxc flags="" u mark rule c why
+  IFS='|' read -r bdf vname device name kind head detail boot driver users _ lxc <<<"$1"
   [ "$boot" == "1" ] && flags+="host console"
   [ -n "$driver" ] && flags+="${flags:+, }bound to ${driver}"
-  for u in ${users//,/ }; do flags+="${flags:+, }in use by VM ${u%%:*} (${u#*:})"; done
-  local ident
+  for c in ${lxc//,/ }; do flags+="${flags:+, }container ${c%%:*} uses ${c#*:}"; done
+  mark="  "; rule="-"
+  if gpu_card_selectable "$1"; then mark=">>"; rule="="; fi
+  local ident lines
   ident=$(printf '%s   %s %04x:%04x' "$bdf" "$([ "$vname" == nvidia ] && echo NVIDIA || echo AMD)" "$([ "$vname" == nvidia ] && echo $((0x10DE)) || echo $((0x1002)))" "$device")
-  echo "+-- $name"
-  echo "|   $ident"
-  echo "|   ${head}. ${detail}"
-  [ -z "$flags" ] || echo "|   Status: $flags"
-  echo "+--"
+  lines="${name}"$'\n'"${ident}"
+  [ "$kind" == "unsupported" ] || lines+=$'\n'"${head}"$'\n'"${detail}"
+  [ -z "$flags" ] || lines+=$'\n'"Status: ${flags}"
+  why=$(gpu_card_why_not "$1")
+  [ -z "$why" ] || lines+=$'\n'"Can't use: ${why}"
+  python3 -c '
+import sys, textwrap
+mark, rule, text = sys.argv[1:4]
+width = 76
+inner = width - 7
+rows = []
+for ln in text.split("\n"):
+    rows += textwrap.wrap(ln, inner) or [""]
+border = "%s +%s+" % (mark, rule * (width - 5))
+print("\n".join([border] + ["%s | %s |" % (mark, r.ljust(inner)) for r in rows] + [border]))
+' "$mark" "$rule" "$lines"
 }
 
 # 0 when a GPU_CARDS line can be picked (supported and not used by a VM).
 function gpu_card_selectable() {
   local kind users risky
-  IFS='|' read -r _ _ _ _ kind _ _ _ _ users risky <<<"$1"
+  IFS='|' read -r _ _ _ _ kind _ _ _ _ users risky _ <<<"$1"
   [ "$kind" != "unsupported" ] && [ -z "$users" ] && [ -z "$risky" ]
 }
 
-# Print the host_setup target JSON for $1 bdf, $2 vendor, $3 device (decimal).
+# Print the host_setup target JSON for $1 bdf, $2 vendor, $3 device (decimal), $4 saved identity JSON (optional).
 function gpu_target() {
   local reset=none fam
   if [ "$2" == "amd" ] && fam=$(amd_family_for "$3"); then reset=$(cut -d'|' -f3 <<<"$fam"); fi
-  printf '{"bdf": "%s", "vendor": "%s", "reset": "%s"}' "$1" "$2" "$reset" | gpu_host target
+  python3 -c 'import json,sys; a=sys.argv; print(json.dumps({"bdf": a[1], "vendor": a[2], "reset": a[3], "identity": json.loads(a[4]) if a[4] else None}))' "$1" "$2" "$reset" "${4:-}" | gpu_host target
 }
 
-# Undo everything: VMs first, then host files. Mirrors Session.undo.
+# The saved choice no longer matches the device at its address: say so, forget the choice, go back to the scan.
+function gpu_card_changed() {
+  gpu_say "REFUSED: $1" >&2
+  gpu_say "Nothing was changed. Run the scan again: $GPU_RESUME_CMD" >&2
+  gpu_state_save '{"gpu": null, "vm": null, "verify_retry": false}'
+  gpu_step_goto 1
+}
+
+# Undo everything: VMs first, then host files. Mirrors Session.undo. $1 = stop the VMs first (yes|no).
+# Nothing to revert (no record, the VM is gone, the attach was refused) counts as done.
 function gpu_undo() {
-  local vmid ok=yes res
+  local stop="${1:-no}" vmid ok=yes res rc
   for vmid in $(gpu_state_get '" ".join(str(v) for v in d["vm_records"])'); do
-    local rc=0
-    gpu_detach_record "$vmid" || rc=$?
-    # no record (attached by an older version): the NVIDIA path restores what it knows about
-    if [ "$rc" == "2" ]; then rc=0; nvidia_detach "$vmid" || rc=$?; fi
+    rc=0
+    if ! gpu_record_load "$vmid"; then
+      msg_ok "VM ${vmid}: nothing to revert (the attach did not change it)"
+    elif ! qm status "$vmid" >/dev/null 2>&1; then
+      rm -f "$(gpu_record_path "$vmid")"
+      msg_ok "VM ${vmid}: it no longer exists, so there is nothing to revert on it"
+    else
+      gpu_detach_record "$vmid" no "$stop" || rc=$?
+      [ "$rc" == "0" ] && msg_ok "VM ${vmid}: GPU settings restored"
+    fi
     if [ "$rc" == "0" ]; then
-      msg_ok "VM ${vmid}: GPU settings restored"
       gpu_state_save "$(gpu_state_get 'json.dumps({"vm_records": [v for v in d["vm_records"] if v != '"$vmid"']})')"
     else
       ok=no
     fi
   done
   res=$(gpu_host undo </dev/null) || ok=no
-  [ -z "$res" ] || echo "$res" | gpu_json '"\n".join(["Restored " + p for p in d["restored"]] + d["errors"]) + ("\nReboot the host to finish undoing the boot changes." if d["reboot_required"] else "")'
+  [ -z "$res" ] || echo "$res" | gpu_json '"\n".join(["Restored " + p for p in d["restored"]] + d.get("kept", []) + d["errors"]) + ("\nReboot the host to finish undoing the boot changes." if d["reboot_required"] else "")'
   if [ "$ok" == "yes" ]; then
     gpu_host hint-clear </dev/null
     rm -f "$GPU_STATE_DIR/gpu-setup.json"
@@ -3870,7 +4433,7 @@ function gpu_setup() {
   done
   [ -z "$vmid" ] || [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "--vm needs a number"; return 2; }
   if [ "$status" == "yes" ]; then gpu_status; return; fi
-  if [ "$undo" == "yes" ]; then gpu_undo; return; fi
+  if [ "$undo" == "yes" ]; then gpu_undo "$([ "$stop" == "yes" ] && echo yes || echo no)"; return; fi
   gpu_host state-save <<<"{\"resume_cmd\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$GPU_RESUME_CMD")}" || return 1
   local fin
   fin=$(gpu_state_get 'd["finished"]')
@@ -3889,7 +4452,7 @@ function gpu_setup() {
       4) gpu_step_host || rc=$? ;;
       5) gpu_step_reboot || rc=$? ;;
       6) gpu_step_verify || rc=$? ;;
-      7) gpu_step_vm "$stop" || rc=$? ;;
+      7) gpu_step_vm "$stop" "$vmid" || rc=$? ;;
       8) gpu_step_first_boot || rc=$? ;;
     esac
     [ "$rc" == "100" ] && continue   # a step moved the state: render the next one
@@ -3898,7 +4461,7 @@ function gpu_setup() {
 }
 
 function gpu_status() {
-  local line chosen
+  local line chosen moved
   gpu_rail "$(gpu_state)"
   gpu_summary_line
   gpu_scan
@@ -3907,6 +4470,8 @@ function gpu_status() {
   chosen=$(gpu_state_get 'd["gpu"] and d["gpu"]["bdf"] or ""')
   [ -n "$chosen" ] || { echo "No setup in progress."; return 0; }
   echo "Chosen card: $(gpu_state_get 'd["gpu"]["name"]') ($chosen), VM: $(gpu_state_get 'd["vm"]')"
+  moved=$(gpu_chosen_target_raw | gpu_json 'd.get("mismatch", "")')
+  if [ -n "$moved" ]; then echo "WARN: $moved"; return 2; fi
 }
 
 function gpu_summary() {
@@ -3921,11 +4486,7 @@ function gpu_step_choose() {
   gpu_scan "${want_vm:--1}"
   for line in "${GPU_CARDS[@]}"; do
     gpu_card_text "$line"
-    local risky
-    IFS='|' read -r bdf vname device name kind head detail boot driver users risky <<<"$line"
-    if gpu_card_selectable "$line"; then usable+=("$line")
-    elif [ -n "$risky" ] && [ "$kind" != "unsupported" ]; then echo "  Cannot be used: its IOMMU group also holds storage or network devices (${risky//,/, }). Move the card to another slot."
-    else echo "  Cannot be used: ${users:+in use by a VM}${users:-$detail}"; fi
+    if gpu_card_selectable "$line"; then usable+=("$line"); fi
   done
   if [ ${#usable[@]} -eq 0 ]; then
     gpu_say "Nothing here can run macOS graphics. Cards that work: ${GPU_DOCS_ROOT}gpu-passthrough#supported-cards"
@@ -3951,8 +4512,8 @@ function gpu_step_choose() {
     display="gpu"
     if gpu_use_ui; then
       display=$(whiptail --title "Display" --menu "Where do you want to see macOS?" 14 90 2 \
-        gpu "Monitor on the GPU (best performance, the Proxmox console goes blank)" \
-        console "Keep the Proxmox console (the card only accelerates)" 3>&1 1>&2 2>&3) || return 0
+        gpu "Monitor on the GPU. Best performance. Plug a screen into the card; the Proxmox console goes blank." \
+        console "Keep the Proxmox console. The card accelerates apps; you keep using the web console." 3>&1 1>&2 2>&3) || return 0
     fi
   fi
   if [ -z "$want_vm" ] && gpu_use_ui; then
@@ -3980,20 +4541,32 @@ function gpu_step_choose() {
     local i; for i in "${issues[@]}"; do gpu_say "REFUSED: $i"; done
     return 2
   fi
-  local ack_json=false; [ "$vname" == "nvidia" ] && ack_json=true
-  gpu_state_save "$(python3 -c 'import json,sys; a=sys.argv; print(json.dumps({"gpu": {"bdf": a[1], "vendor": a[2], "device": int(a[3]), "boot_vga": a[4] == "1", "name": a[5]}, "vm": int(a[6]) if a[6] else None, "display": a[7], "ack_nullmoth": a[8] == "true"}))' "$bdf" "$vname" "$device" "$boot" "$name" "$want_vm" "$display" "$ack_json")"
+  local ack_json=false ident; [ "$vname" == "nvidia" ] && ack_json=true
+  ident=$(printf '{"bdf": "%s"}' "$bdf" | gpu_host identity)
+  gpu_state_save "$(python3 -c 'import json,sys; a=sys.argv; print(json.dumps({"gpu": {"bdf": a[1], "vendor": a[2], "device": int(a[3]), "boot_vga": a[4] == "1", "name": a[5], "identity": json.loads(a[9])}, "vm": int(a[6]) if a[6] else None, "display": a[7], "ack_nullmoth": a[8] == "true"}))' "$bdf" "$vname" "$device" "$boot" "$name" "$want_vm" "$display" "$ack_json" "$ident")"
   gpu_step_complete 1; gpu_step_complete 2
   return 100
 }
 
+# The chosen card as a host_setup target, after checking the device at its address is still that card.
+# rc 2 (message on stderr, choice forgotten, state back at the scan) when it is not.
+function gpu_chosen_target_raw() {
+  gpu_target "$(gpu_state_get 'd["gpu"]["bdf"]')" "$(gpu_state_get 'd["gpu"]["vendor"]')" "$(gpu_state_get 'd["gpu"]["device"]')" \
+    "$(gpu_state_get 'json.dumps(d["gpu"].get("identity")) if d["gpu"].get("identity") else ""')"
+}
+
 function gpu_chosen_target() {
-  gpu_target "$(gpu_state_get 'd["gpu"]["bdf"]')" "$(gpu_state_get 'd["gpu"]["vendor"]')" "$(gpu_state_get 'd["gpu"]["device"]')"
+  local target moved
+  target=$(gpu_chosen_target_raw) || return 1
+  moved=$(gpu_json 'd.get("mismatch", "")' <<<"$target")
+  if [ -n "$moved" ]; then gpu_card_changed "$moved"; return 2; fi
+  echo "$target"
 }
 
 # Step 3: BIOS. Returns 100 to continue, 3 when paused for the BIOS.
 function gpu_step_bios() {
   local target facts items card running reply
-  target=$(gpu_chosen_target) || return 1
+  target=$(gpu_chosen_target) || return $?
   facts=$(gpu_host facts </dev/null) || return 1
   items=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1]), "target": json.loads(sys.argv[2])}))' "$facts" "$target" | gpu_bios check) || return 1
   python3 - "$items" <<'GPU_ITEMS_PY'
@@ -4001,15 +4574,20 @@ import json, sys
 for i in json.loads(sys.argv[1]):
     print("  [%s] %s%s" % ("ok" if i["ok"] else "!!", i["key"], "" if i["ok"] else " - " + i["detail"]))
 GPU_ITEMS_PY
-  card=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1]), "target": json.loads(sys.argv[2]), "items": json.loads(sys.argv[3]), "save": True, "resume_cmd": sys.argv[4]}))' "$facts" "$target" "$items" "$GPU_RESUME_CMD" | gpu_bios card) || {
+  local url qr='[]'
+  url=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1])}))' "$facts" | gpu_bios url)
+  # The QR code goes inside the card, so one photo of the screen holds the steps and the code.
+  if command -v qrencode >/dev/null 2>&1; then
+    qr=$(qrencode -t UTF8 -m 2 -o - "$url" 2>/dev/null | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))') || qr='[]'
+  fi
+  card=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1]), "target": json.loads(sys.argv[2]), "items": json.loads(sys.argv[3]), "save": True, "resume_cmd": sys.argv[4], "qr": json.loads(sys.argv[5])}))' "$facts" "$target" "$items" "$GPU_RESUME_CMD" "$qr" | gpu_bios card) || {
     gpu_say "Nothing to change in the BIOS."
     gpu_step_complete 3 true
     return 100
   }
   gpu_ui_text "BIOS steps for this server (take a photo)" "$card"
   gpu_say "$card"
-  local url; url=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1])}))' "$facts" | gpu_bios url)
-  if command -v qrencode >/dev/null 2>&1; then qrencode -t ANSIUTF8 "$url"; else gpu_say "Same steps with pictures: $url"; fi
+  [ "$qr" != '[]' ] || gpu_say "Same steps with pictures: $url"
   gpu_say "Saved to /root/osx-proxmox-next-bios-steps.txt (print it or cat it from another machine)."
   running=$(qm list 2>/dev/null | python3 -c 'import json,sys; print(json.dumps({"qm_list": sys.stdin.read()}))' | gpu_bios running)
   if [ "${GPU_YES:-no}" != "yes" ] && [ -t 0 ]; then
@@ -4030,7 +4608,7 @@ GPU_ITEMS_PY
 # Step 4: host configuration. Returns 100 to continue.
 function gpu_step_host() {
   local target plan preview refusals confirmed=false
-  target=$(gpu_chosen_target) || return 1
+  target=$(gpu_chosen_target) || return $?
   plan=$(python3 -c 'import json,sys; print(json.dumps({"target": json.loads(sys.argv[1]), "opts": {}}))' "$target" | gpu_host plan) || return 1
   refusals=$(gpu_json '"\n".join(d["refusals"])' <<<"$plan")
   if [ -n "$refusals" ]; then
@@ -4068,6 +4646,7 @@ function gpu_step_host() {
   gpu_ui_yesno "Apply" "Apply these changes? Each file is backed up first." || { gpu_say "Nothing was changed."; return 0; }
   local res
   res=$(python3 -c 'import json,sys; print(json.dumps({"plan": json.loads(sys.argv[1]), "confirmed": sys.argv[2] == "true"}))' "$plan" "$confirmed" | gpu_host apply) || {
+    if [[ "$(gpu_json 'd["error"]' <<<"$res")" == "The card at "* ]]; then gpu_card_changed "$(gpu_json 'd["error"]' <<<"$res")"; return 2; fi
     gpu_say "FAILED: $(gpu_json 'd["error"] + (" The files were put back." if d["rolled_back"] else "")' <<<"$res")"
     return 1
   }
@@ -4103,7 +4682,7 @@ function gpu_step_reboot() {
 # Step 6: verify.
 function gpu_step_verify() {
   local target checks fails fix
-  target=$(gpu_chosen_target) || return 1
+  target=$(gpu_chosen_target) || return $?
   checks=$(printf '{"target": %s}' "$target" | gpu_host verify) || return 1
   gpu_json '"\n".join("  [%s] %s%s" % ({"ok": "ok", "fail": "!!", "warn": "??", "info": ".."}[c["status"]], c["label"], (" - " + c["detail"]) if c["detail"] else "") for c in d)' <<<"$checks"
   fails=$(gpu_json 'len([c for c in d if c["status"] == "fail"])' <<<"$checks")
@@ -4124,6 +4703,7 @@ function gpu_step_verify() {
     return 4
   fi
   fix=$(gpu_json '[c for c in d if c["status"] == "fail"][0]["fix"]' <<<"$checks")
+  if [ "$fix" == "scan" ]; then gpu_card_changed "$(gpu_json '[c for c in d if c["status"] == "fail"][0]["detail"]' <<<"$checks")"; return 2; fi
   case "$fix" in
     bios) gpu_step_goto 3; gpu_state_save '{"verify_retry": true}'; return 100 ;;
     host) gpu_step_goto 4; gpu_state_save '{"verify_retry": true}'; return 100 ;;
@@ -4133,10 +4713,26 @@ function gpu_step_verify() {
   return 2
 }
 
-# Step 7: attach the card to the VM. $1 = stop (yes|no)
+# Step 7: attach the card to the VM. $1 = stop (yes|no), $2 = the --vm given on the command line
 function gpu_step_vm() {
-  local stop="$1" vmid vendor bdf display zip flags=()
+  local stop="$1" want_vm="${2:-}" vmid vendor bdf display zip flags=() cfg ver issue
+  gpu_chosen_target >/dev/null || return $?
   vmid=$(gpu_state_get 'd["vm"] if d["vm"] is not None else ""')
+  if [ -z "$vmid" ] && [ -n "$want_vm" ]; then
+    if ! cfg=$(qm config "$want_vm" 2>/dev/null); then issue="VM $want_vm not found."
+    elif ! grep -q '^args:.*isa-applesmc' <<<"$cfg"; then issue="VM $want_vm is not a macOS VM made by this tool."
+    elif [ "$(gpu_state_get 'd["gpu"]["vendor"]')" == "nvidia" ]; then
+      ver=$(nullmoth_detect_macos "$cfg") || ver=""
+      case "$ver" in
+        sequoia|tahoe) ;;
+        "") issue="Cannot tell which macOS this VM runs. NVIDIA cards need Sequoia 15.5+ or Tahoe." ;;
+        *) issue="NVIDIA cards need macOS Sequoia 15.5+ or Tahoe, this VM is ${ver}. Pick another VM or create a Sequoia or Tahoe VM first." ;;
+      esac
+    fi
+    if [ -n "${issue:-}" ]; then gpu_say "REFUSED: $issue"; return 2; fi
+    gpu_state_save "{\"vm\": $want_vm}"
+    vmid="$want_vm"
+  fi
   if [ -z "$vmid" ]; then
     gpu_say "The host is ready. Pick or create the macOS VM, then run: $GPU_RESUME_CMD --vm <vmid>"
     gpu_host hint-set </dev/null
@@ -4146,7 +4742,12 @@ function gpu_step_vm() {
   bdf=$(gpu_state_get 'd["gpu"]["bdf"]')
   display=$(gpu_state_get 'd["display"]')
   [ "$stop" != "yes" ] || flags+=(--stop-vm)
+  if [ "$vendor" == "nvidia" ] && [ "$(gpu_state_get 'd["ack_nullmoth"]')" != "True" ]; then
+    gpu_say "REFUSED: The NullMoth notice has not been acknowledged. Run the scan again: $GPU_RESUME_CMD"
+    return 2
+  fi
   gpu_ui_yesno "Attach the card" "Attach the card to VM ${vmid} now? A snapshot of its config is saved first." || { gpu_say "Nothing was changed."; return 0; }
+  gpu_chosen_target >/dev/null || return $?   # last check before anything is written
   gpu_state_save "$(gpu_state_get 'json.dumps({"vm_records": d["vm_records"] + ([d["vm"]] if d["vm"] not in d["vm_records"] else [])})')"
   if [ "$vendor" == "nvidia" ]; then
     nvidia_attach "$vmid" "$bdf" --accept-nullmoth-risk || return 1
