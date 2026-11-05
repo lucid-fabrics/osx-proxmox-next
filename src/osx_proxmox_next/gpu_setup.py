@@ -642,6 +642,11 @@ class Session:
                 messages.append(f"VM {vmid}: nothing to revert (the attach did not change it).")
                 continue
             info = fetch_vm_info(vmid, adapter=self.pve)
+            if info is not None and not (info.config_raw or "").strip():
+                # qm config failed: keep the record, undo can be run again
+                ok = False
+                messages.append(f"VM {vmid}: could not read its config, so nothing was changed. Try again.")
+                continue
             if info is not None and host_setup.record_vm_changed(asdict(record), parse_config(info.config_raw)):
                 stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
                 path = gpu.record_path(vmid)

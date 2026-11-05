@@ -72,7 +72,7 @@ def test_guide_has_the_notice_the_matrix_and_the_anchor():
         assert reason in guide
     assert gpu_setup._PRE_TURING in guide
     assert gpu_setup.SUPPORTED_DOC.endswith("gpu-passthrough#supported-cards")
-    assert "not been tested on real hardware" in guide
+    assert "not yet tried on real hardware" in guide
 
 
 def test_readme_points_to_the_guide_and_has_no_invalid_argument():

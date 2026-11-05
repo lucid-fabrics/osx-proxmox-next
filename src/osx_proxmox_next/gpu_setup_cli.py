@@ -187,9 +187,11 @@ def _step_bios(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
 
 def _step_host(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     plan = s.host_plan()
+    no_console = False
     if plan["refusals"] and io.interactive and any("only display adapter" in r for r in plan["refusals"]):
         io.say("REFUSED: " + plan["refusals"][0])
         if io.typed("This card is the only display the host has.", "I understand"):
+            no_console = True
             plan = s.host_plan(allow_no_console=True)
     for line in plan["refusals"]:
         io.say("REFUSED: " + line)
@@ -201,7 +203,7 @@ def _step_host(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     if plan.get("optional") and not s.plan_needs_work(plan) and not s.state.get("verify_retry") \
             and io.interactive and not args.yes \
             and io.confirm("Write the boot-time binding anyway? (optional)", False):
-        plan = s.host_plan(write_optional=True)
+        plan = s.host_plan(allow_no_console=no_console, write_optional=True)
         for key, prefix in (("refusals", "REFUSED: "), ("notes", "Note: "), ("warnings", "WARN: "),
                             ("manual", "Manual step: ")):
             for line in plan[key]:

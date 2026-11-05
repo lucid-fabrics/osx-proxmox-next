@@ -258,3 +258,28 @@ def test_the_bash_vfio_hint_matches_the_pythons_and_skips_storage(bash, tmp_path
     add_other(root, "0000:06:00.3", 0x1002, 0x4444, 0x020000, group=7, driver="e1000")
     out = bash(f'GPU_HINTS=(); gpu_vfio_hint "{root}/sys" 0000:06:00; printf "%s\\n" "${{GPU_HINTS[@]}}"').stdout.splitlines()
     assert out == gpu.vfio_conf_hint(root / "sys", "0000:06:00")
+
+
+def _recreated_record(tmp_path, vm, fp):
+    root, state_dir, env = walkthrough_env(tmp_path, vm)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    put_record(tmp_path, 100, "0000:06:00", "amd", None, None, "std", True, "")
+    rec = json.loads((tmp_path / "state/gpu-attach-100.json").read_text())
+    rec["fp"] = fp
+    (state_dir / "gpu-attach-100.json").write_text(json.dumps(rec))
+    vm(100, "stopped", MAC)
+    return state_dir, env
+
+
+def test_bash_undo_keeps_the_record_when_qm_config_fails(bash, vm, tmp_path):
+    state_dir, env = _recreated_record(tmp_path, vm, "something")
+    res = bash("gpu_undo no", env={**env, "QM_FAIL_CONFIG": "1"}, expect=None)
+    assert "could not read its config" in res.stdout + res.stderr
+    assert (state_dir / "gpu-attach-100.json").exists() and not list(state_dir.glob("gpu-attach-100.json.stale-*"))
+
+
+def test_bash_standalone_detach_refuses_a_record_written_for_another_vm(bash, vm, tmp_path):
+    state_dir, env = _recreated_record(tmp_path, vm, "an-older-vm")
+    res = bash("gpu_oc_boot_args() { true; }; gpu_detach_record 100", env=env, expect=1)
+    assert "different VM" in res.stdout + res.stderr and vm.calls() == []
+    assert (state_dir / "gpu-attach-100.json").exists()

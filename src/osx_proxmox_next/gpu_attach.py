@@ -173,6 +173,10 @@ def prepare_detach(
             plan.issues.append(f"VM {vmid} not found.")
         return plan
     cfg = parse_config(info.config_raw)
+    stale = nullmoth.record_issue(vmid, info, cfg)
+    if stale:
+        plan.issues.append(stale)
+        return plan
     running = info.status == "running"
     if running and not allow_stop:
         plan.issues.append(f"VM {vmid} is running. Stop it first: qm stop {vmid}")

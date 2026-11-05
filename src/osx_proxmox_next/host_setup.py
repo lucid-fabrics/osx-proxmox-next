@@ -489,17 +489,19 @@ _CMD_IDS_RE = re.compile(r"^vfio[-_]pci\.ids=([0-9A-Fa-f:,]+)$")
 _SOFTDEP_RE = re.compile(r"^\s*softdep\s+(\S+)\s+pre:(.*)$")
 
 
-def _persistent_binding(facts, target, fns, ids, root, by_id=True, ids_only=False):
+def _persistent_binding(facts, target, fns, ids, root, by_id=True, ids_only=False, ordered=True):
     """What already binds this card to vfio-pci at boot, as a short phrase, or "" when nothing we can find does.
     Looks at: modprobe.d `options vfio-pci ids=` covering every id, a driver_override in an initramfs script or
     udev rule that names the card, `vfio-pci.ids=` on the live or configured kernel command line, and
-    Softdep lines only order module loading; they bind nothing, so they are handled apart (_softdeps_listed)."""
+    Softdep lines only order module loading; they bind nothing, so they are handled apart (_softdeps_listed).
+    *ordered* is False when a host driver can claim the card and nothing orders vfio-pci first: ids alone then
+    prove nothing, only an early per-address bind that covers every function does."""
     d = _p(root, "/etc/modprobe.d")
     confs = sorted(d.glob("*.conf")) if d.is_dir() else []
     have = set()
     for f in confs:
         have.update(_live_ids(_read(f) or ""))
-    if by_id and ids and all(i in have for i in ids):
+    if ordered and by_id and ids and all(i in have for i in ids):
         return "vfio-pci ids in /etc/modprobe.d"
     cmd_ids = set()
     # what the boot loader will pass next time; the live command line only when that cannot be read
@@ -508,19 +510,24 @@ def _persistent_binding(facts, target, fns, ids, root, by_id=True, ids_only=Fals
         m = _CMD_IDS_RE.match(tok)
         if m:
             cmd_ids.update(i.lower() for i in m.group(1).split(","))
-    if by_id and ids and all(i in cmd_ids for i in ids):
+    if ordered and by_id and ids and all(i in cmd_ids for i in ids):
         return "vfio-pci.ids on the kernel command line"
     if ids_only:
         return ""
-    needles = [f["bdf"].lower() for f in fns] + [target["bdf"].lower() + "."]
+    own = _bind_entries(_read(_p(root, BIND_SCRIPT)))
+    if fns and all(any(r[0].lower() == f["bdf"].lower() and r[1] == "0x%04x" % f["vendor"]
+                       and r[2] == "0x%04x" % f["device"] for r in own) for f in fns):
+        return "a driver_override script (%s)" % Path(BIND_SCRIPT).name
     scripts = []
     for sub in ("/etc/initramfs-tools/scripts", "/etc/udev/rules.d"):
         top = _p(root, sub)
         if top.is_dir():
             scripts += [f for f in sorted(top.rglob("*")) if f.is_file()]
     for f in scripts:
+        if "/" + f.relative_to(Path(root)).as_posix() == BIND_SCRIPT:
+            continue
         text = (_read(f) or "").lower()
-        if "driver_override" in text and "vfio-pci" in text and any(n in text for n in needles):
+        if "driver_override" in text and "vfio-pci" in text and fns and all(x["bdf"].lower() in text for x in fns):
             return "a driver_override script (%s)" % f.name
     return ""
 
@@ -576,19 +583,22 @@ def plan_binding(facts, target, root, plan, opts=None):
         has_twin = any(d["bdf"] not in mine_bdfs and d["vendor"] is not None
                        and "%04x:%04x" % (d["vendor"], d["device"]) in ids for d in facts["pci"])
         # an id-wide binding also takes an identical second card: that is the refusal further down, not "already OK"
-        idwide = has_twin and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
-        how = "" if idwide else _persistent_binding(facts, target, fns, ids, root, by_id=not has_twin)
+        # a host driver that can claim the card makes ids alone worthless: vfio-pci must be ordered first
+        claimers = _claiming_drivers(root) if target["vendor"] == "nvidia" else ["amdgpu", "radeon"]
+        ordered = not claimers or _softdeps_listed(target, root)
+        idwide = has_twin and ordered and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
+        how = "" if idwide else _persistent_binding(facts, target, fns, ids, root, by_id=not has_twin,
+                                                    ordered=ordered)
         if how:
             plan["skipped"].append("The card is already bound to vfio-pci and set to bind at boot (%s)" % how)
             return
-        if not how and not idwide and target["vendor"] == "nvidia" and _softdeps_listed(target, root) \
-                and not _claiming_drivers(root):
+        if not idwide and not claimers and _softdeps_listed(target, root):
             plan["skipped"].append("The card is already bound to vfio-pci and no host driver claims it at boot")
             plan["notes"].append("Proxmox hands the card to vfio-pci when the VM starts; no host driver claims it "
                                  "at boot.")
             return
-        # AMD cards need an early binding (reset bug): no optional skip, fall through to the write
-        if not idwide and target["vendor"] != "amd" and not opts.get("write_optional"):
+        # a driver that can claim the card (and AMD's reset bug) needs the early binding: no optional skip
+        if not idwide and not claimers and not opts.get("write_optional"):
             plan["optional"] = True
             plan["warnings"].append(
                 "The card is bound to vfio-pci now, but nothing we can find binds it at boot; it may be lost "

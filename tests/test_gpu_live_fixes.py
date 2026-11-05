@@ -427,3 +427,56 @@ def test_bash_nvidia_attach_asks_the_guest_question(bash, vm, tmp_path):
     env = nvidia_env(tmp_path, vm.env)
     out = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk", env=env, expect=2)
     assert "Nothing was changed" in out.stdout + out.stderr and vm.calls() == []
+
+
+# ── check 5 follow-ups: config read failure, standalone detach fingerprint, no-console re-plan ──
+
+def test_undo_keeps_the_record_when_the_vm_config_cannot_be_read(attached):
+    env, applied = attached
+    env.qm.vms[100] = ("stopped", "")  # qm config answered nothing
+    code, out = run(env, "--undo")
+    assert code != 0 and "could not read its config" in out and not applied
+    assert gpu.record_vmids() == [100] and not list(gpu.STATE_DIR.glob("gpu-attach-100.json.stale-*"))
+
+
+def test_standalone_detach_refuses_a_record_written_for_another_vm(attached):
+    env, _applied = attached
+    env.qm.vms[100] = ("stopped", env.qm.vms[100][1].replace("macos-sequoia", "another-vm"))
+    for fn in (nullmoth.prepare_detach, gpu_attach.prepare_detach):
+        plan = fn(100, adapter=env.qm)
+        assert not plan.ok and not plan.steps and "different VM" in plan.issues[0]
+    env.qm.vms[100] = ("stopped", "")
+    assert "Could not read the config" in gpu_attach.prepare_detach(100, adapter=env.qm).issues[0]
+
+
+def test_standalone_detach_still_works_for_the_vm_the_record_belongs_to(attached):
+    env, _applied = attached
+    assert gpu_attach.prepare_detach(100, adapter=env.qm).ok
+
+
+def test_amd_detach_refuses_a_record_written_for_another_vm(tmp_path):
+    env = Env(tmp_path, cpu="intel", vms={100: ("stopped", SEQUOIA)})
+    rec = gpu.new_record(100, "0000:06:00", "amd", gpu.parse_config(SEQUOIA), gpu.NVIDIA_PROFILE, None, oc="gpu")
+    gpu.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    gpu.record_path(100).write_text(json.dumps(gpu.asdict(rec)))
+    env.qm.vms[100] = ("stopped", SEQUOIA.replace("macos-sequoia", "another-vm"))
+    plan = gpu_attach.prepare_detach(100, adapter=env.qm)
+    assert not plan.ok and "different VM" in plan.issues[0]
+
+
+def test_optional_replan_keeps_allow_no_console(tmp_path, monkeypatch):
+    from test_gpu_host_only_missing import _cli_host, _step
+    _env, s = _cli_host(tmp_path)
+    seen = []
+    real = s.host_plan
+
+    def spy(allow_no_console=False, write_optional=False):
+        seen.append((allow_no_console, write_optional))
+        plan = real(allow_no_console=allow_no_console, write_optional=write_optional)
+        if len(seen) == 1:
+            plan = dict(plan, refusals=["The card is the only display adapter on this host."])
+        return plan
+
+    monkeypatch.setattr(s, "host_plan", spy)
+    _step(s, ["I understand", "y", "n"])
+    assert seen[:3] == [(False, False), (True, False), (True, True)]

@@ -258,7 +258,7 @@ QM = r'''#!/bin/bash
 echo "qm $*" >> "$QM_DIR/calls.log"
 case "$1" in
   status) [ -f "$QM_DIR/$2.status" ] || exit 2; echo "status: $(cat "$QM_DIR/$2.status")" ;;
-  config) [ -f "$QM_DIR/$2.conf" ] || exit 2; cat "$QM_DIR/$2.conf" ;;
+  config) [ -n "${QM_FAIL_CONFIG:-}" ] && exit 1; [ -f "$QM_DIR/$2.conf" ] || exit 2; cat "$QM_DIR/$2.conf" ;;
   list) echo "VMID NAME STATUS MEM BOOTDISK PID"; for f in "$QM_DIR"/*.status; do [ -e "$f" ] || continue; id=$(basename "$f" .status); echo "$id vm$id $(cat "$f") 4096 32 1"; done ;;
   set) if [ -n "${QM_FAIL:-}" ] && [[ "$*" == *"$QM_FAIL"* ]]; then echo "boom" >&2; exit 1; fi ;;
   stop) echo stopped > "$QM_DIR/$2.status" ;;

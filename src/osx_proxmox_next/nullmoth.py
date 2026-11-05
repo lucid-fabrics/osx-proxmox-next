@@ -9,17 +9,18 @@ installer and the docs; tests/test_nullmoth_parity.py diffs the bash copy.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from importlib import resources
 from pathlib import Path
 from shlex import quote as shquote
 from urllib.parse import unquote
 
+from . import host_setup
 from .domain import PlanStep
 from .infrastructure import ProxmoxAdapter
 from .gpu import (
     MMIO_ARG, NVIDIA_PROFILE, AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps,
-    gpu_users, hostpci_bdfs, running_user_issue, shared_note, hostpci_value, load_record, new_record, normalize_bdf, parse_config, record_is_stale,
+    gpu_users, hostpci_bdfs, running_user_issue, shared_note, hostpci_value, load_record, new_record, normalize_bdf, parse_config, record_is_stale, record_path,
     record_step,
     stop_step as _stop_step, verify_stopped_step as _verify_stopped_step, with_mmio_arg, without_mmio_arg,
 )
@@ -277,6 +278,21 @@ def _slot_issues(cfg: dict[str, str], bdf: str) -> list[str]:
     return []
 
 
+def record_issue(vmid: int, info, cfg: dict[str, str]) -> str | None:
+    """Why the saved attach record must not be applied to this VM, or None. A config that cannot be read, or a
+    record written for another VM (a deleted and re-created VMID), is never applied."""
+    record = load_record(vmid)
+    if record is None:
+        return None
+    if not (info.config_raw or "").strip():
+        return f"Could not read the config of VM {vmid}, so nothing was changed. Try again."
+    if host_setup.record_vm_changed(asdict(record), cfg):
+        return (f"The saved attach record for VM {vmid} was written for a different VM (it was deleted and "
+                f"created again), so nothing was reverted. Check its hostpci0, args and vga by hand, then remove "
+                f"{record_path(vmid)}.")
+    return None
+
+
 def prepare_detach(
     vmid: int, adapter: ProxmoxAdapter | None = None, allow_stop: bool = False, missing_ok: bool = False,
 ) -> AttachPlan:
@@ -291,6 +307,10 @@ def prepare_detach(
             plan.issues.append(f"VM {vmid} not found.")
         return plan
     cfg = parse_config(info.config_raw)
+    stale = record_issue(vmid, info, cfg)
+    if stale:
+        plan.issues.append(stale)
+        return plan
     plan.issues += _vm_issues(vmid, cfg, info.status == "running", allow_stop)
     if plan.ok:
         plan.steps = build_detach_steps(
