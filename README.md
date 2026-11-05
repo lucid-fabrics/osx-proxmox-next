@@ -83,6 +83,10 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 ![osx-proxmox-next TUI wizard demo](docs/static/img/demo-tui.gif)
 
+**Guided GPU passthrough: scan, BIOS card, host setup, attach:**
+
+![osx-proxmox-next GPU passthrough walkthrough demo](docs/static/img/demo-gpu.gif)
+
 **CLI tools (preflight, plan, doctor):**
 
 ![osx-proxmox-next CLI demo](docs/static/img/demo-cli.gif)
