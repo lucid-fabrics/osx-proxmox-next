@@ -151,8 +151,7 @@ def test_the_nvidia_setup_is_not_blocked_by_a_kept_amd_config(tmp_path):
     assert run_patcher(GPU_OC, oc, "attach", {"GPU_BOOT_ARGS": "agdpmod=pikera"}).returncode == 0
     (oc / "config.plist").write_bytes((oc / "config.plist").read_bytes() + b"<!-- e -->")
     assert run_patcher(GPU_OC, oc, "restore").returncode == 0
-    (oc / "config.plist.pre-nullmoth").write_text("x")
-    assert run_patcher(GPU_OC, oc, "attach", {"GPU_BOOT_ARGS": "a=1"}).returncode == 2  # a live NullMoth backup still blocks
+    assert run_patcher(GPU_OC, oc, "attach", {"GPU_BOOT_ARGS": "a=1"}).returncode == 0
 
 
 # ── bash: the same engine, and NEW-6 ──────────────────────────────────
@@ -182,3 +181,107 @@ def test_bash_undo_notes_a_card_that_changed_like_python(bash, vm, tmp_path):
     out = bash("gpu_undo no", env=env, expect=None).stdout
     assert "Note: the card at 0000:06:00 is now a different device" in out
     assert "nothing there is touched" in out
+
+
+# ── third check: MEDIUM-1, LOW-B, LOW-C, LOW-D ────────────────────────
+
+def kept_nullmoth(tmp_path):
+    """An OpenCore disk after an NVIDIA attach whose undo kept the (app-edited) config."""
+    oc = oc_dir(tmp_path)
+    env = {"AMFIPASS_ZIP": str(fake_zip(tmp_path))}
+    assert run_patcher(NM, oc, "attach", env).returncode == 0
+    (oc / "config.plist").write_bytes((oc / "config.plist").read_bytes() + b"<!-- app edit -->")
+    assert "KEPT:" in run_patcher(NM, oc, "restore").stderr
+    return oc, env
+
+
+def test_amd_attach_is_refused_by_config_content_after_a_kept_nvidia_undo(tmp_path):
+    oc, _ = kept_nullmoth(tmp_path)
+    assert not (oc / "config.plist.pre-nullmoth").exists()  # no backup file: only the content can stop it
+    before = (oc / "config.plist").read_bytes()
+    res = run_patcher(GPU_OC, oc, "attach", {"GPU_BOOT_ARGS": "agdpmod=pikera"})
+    assert res.returncode == 2 and (oc / "config.plist").read_bytes() == before
+    for what in ("AMFIPass kext entry", "IONDRVSupport Block entry", "NullMoth boot-args", "pre-nullmoth.kept-"):
+        assert what in res.stderr
+    assert not (oc / "config.plist.pre-gpu").exists()
+
+
+def test_a_stray_nullmoth_backup_file_alone_no_longer_blocks_an_amd_attach(tmp_path):
+    oc = oc_dir(tmp_path)
+    (oc / "config.plist.pre-nullmoth").write_text("x")
+    assert run_patcher(GPU_OC, oc, "attach", {"GPU_BOOT_ARGS": "agdpmod=pikera"}).returncode == 0
+
+
+def test_nvidia_attach_is_refused_while_the_config_has_the_amd_boot_args(tmp_path):
+    oc = oc_dir(tmp_path)
+    assert run_patcher(GPU_OC, oc, "attach", {"GPU_BOOT_ARGS": "agdpmod=pikera"}).returncode == 0
+    (oc / "config.plist").write_bytes((oc / "config.plist").read_bytes() + b"<!-- e -->")
+    assert run_patcher(GPU_OC, oc, "restore").returncode == 0  # kept
+    before = (oc / "config.plist").read_bytes()
+    res = run_patcher(NM, oc, "attach", {"AMFIPASS_ZIP": str(fake_zip(tmp_path))})
+    assert res.returncode == 2 and "agdpmod=pikera" in res.stderr and "pre-gpu.kept-" in res.stderr
+    assert (oc / "config.plist").read_bytes() == before and not (oc / "Kexts/AMFIPass.kext").exists()
+
+
+def test_clean_undo_after_a_kept_config_does_not_leave_a_dangling_kext_entry(tmp_path):
+    import plistlib
+    oc, env = kept_nullmoth(tmp_path)
+    assert run_patcher(NM, oc, "attach", env).returncode == 0  # backs up the kept, still patched config
+    res = run_patcher(NM, oc, "restore")
+    assert res.returncode == 0 and "restored" in res.stderr
+    cfg = plistlib.loads((oc / "config.plist").read_bytes())
+    listed = any(k.get("BundlePath") == "AMFIPass.kext" for k in cfg["Kernel"]["Add"])
+    assert listed == (oc / "Kexts/AMFIPass.kext").is_dir() and listed
+
+
+def test_a_clean_nvidia_undo_still_removes_the_kext_with_its_entry(tmp_path):
+    oc = oc_dir(tmp_path)
+    assert run_patcher(NM, oc, "attach", {"AMFIPASS_ZIP": str(fake_zip(tmp_path))}).returncode == 0
+    assert run_patcher(NM, oc, "restore").returncode == 0 and not (oc / "Kexts/AMFIPass.kext").exists()
+
+
+def test_undo_keeps_an_added_arg_whose_value_the_user_changed():
+    cfg = {"args": "-cpu host", "vga": "std"}
+    arg = "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off"
+    rec = hs.make_record(100, "0000:06:00", "amd", cfg, "0000:06:00,pcie=1", [arg], False, "gpu")
+    assert rec["after"]["added_args"] == [arg]
+    edited = {"hostpci0": "0000:06:00,pcie=1", "args": "-cpu host -smp 4 -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=on"}
+    out = hs.vm_restore(rec, edited)
+    assert not any(a["key"] == "args" for a in out["actions"])
+    assert any("support=on was changed" in n and "left as you set it" in n for n in out["notes"])
+    assert not any("None of the arguments" in n for n in out["notes"])
+    exact = dict(edited, args="-cpu host -smp 4 " + arg)  # untouched value: still removed
+    out = hs.vm_restore(rec, exact)
+    assert {"op": "set", "key": "args", "value": "-cpu host -smp 4"} in out["actions"]
+
+
+def test_python_undo_does_not_claim_everything_is_back_after_keeping_files(monkeypatch):
+    import argparse
+    from osx_proxmox_next import gpu_setup_cli
+
+    class S:
+        undo_kept = 1
+        def undo(self, allow_stop=False):
+            return True, ["KEPT: x"]
+    out = []
+    ns = argparse.Namespace(status=False, undo=True, stop_vm=False)
+    assert gpu_setup_cli.run(ns, session=S(), say=out.append, interactive=False) == 0
+    assert any("listed as kept above" in m for m in out) and not any("Everything this setup" in m for m in out)
+
+
+def test_session_undo_counts_kept_host_files(tmp_path, monkeypatch):
+    from osx_proxmox_next import gpu_setup
+    s = gpu_setup.Session(root=str(tmp_path))
+    s.state["vm_records"] = []
+    monkeypatch.setattr(hs, "undo_host", lambda *a, **k: {"ok": True, "restored": [], "kept": ["a"], "errors": [], "reboot_required": False})
+    ok, _ = s.undo()
+    assert ok and s.undo_kept == 1
+
+
+def test_bash_undo_counts_opencore_kept_lines(bash):
+    stub = ('gpu_host() { case "$1" in undo) echo \'{"ok": true, "restored": [], "kept": [], "errors": [], '
+            '"reboot_required": false}\' ;; esac; }; GPU_OC_KEPT=0; ')
+    out = bash(stub + "gpu_undo no").stdout
+    assert "Everything this setup changed is back" in out
+    src = BASH
+    assert src.count("GPU_OC_KEPT=$((${GPU_OC_KEPT:-0} + 1))") == 2 and "kept=$((kept + GPU_OC_KEPT))" in src

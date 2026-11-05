@@ -1225,7 +1225,9 @@ def vm_restore(record, cfg):
         actions.append({"op": "set", "key": "args", "value": orig_args} if orig_args
                        else {"op": "delete", "key": "args"})
     else:
-        stripped = without_global_args(cur_args, after.get("added_args") or [])
+        stripped = cur_args
+        for arg in after.get("added_args") or []:
+            stripped = re.sub(r"\s*(?<!\S)" + re.escape(arg) + r"(?!\S)", "", stripped).strip()
         for new, old in (after.get("replaced_args") or {}).items():
             if new in stripped:
                 stripped = stripped.replace(new, old, 1)
@@ -1234,9 +1236,13 @@ def vm_restore(record, cfg):
                            else {"op": "delete", "key": "args"})
             notes.append("args were edited after the card was attached. Only the arguments this tool added "
                          "were removed; your edits were kept.")
-        else:
+        elif not any(_global_re(a).search(stripped) for a in after.get("added_args") or []):
             notes.append("args were edited after the card was attached. None of the arguments this tool "
                          "added are left in them, so your edits were kept as they are.")
+        for arg in after.get("added_args") or []:
+            now = _global_re(arg).search(stripped)
+            if now:
+                notes.append("%s was changed after the card was attached, so it was left as you set it." % now.group(0))
     if record.get("vga_changed"):
         cur_vga, orig_vga = cfg.get("vga"), record.get("vga")
         if cur_vga == orig_vga:

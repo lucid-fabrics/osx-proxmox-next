@@ -365,7 +365,14 @@ def run(args: argparse.Namespace, session: Session | None = None, ask: Callable[
         ok, messages = s.undo(allow_stop=args.stop_vm)
         for m in messages:
             io.say(m)
-        io.say("Everything this setup changed is back as it was." if ok else "Some parts could not be undone; run --undo again after fixing the above.")
+        kept = getattr(s, "undo_kept", 0)
+        if not ok:
+            io.say("Some parts could not be undone; run --undo again after fixing the above.")
+        elif kept:
+            io.say("Done, except for the files listed as kept above. They stay as you left them, so any "
+                   "vfio-pci binding in them still applies.")
+        else:
+            io.say("Everything this setup changed is back as it was.")
         return EXIT_OK if ok else EXIT_FAIL
     if s.state["finished"]:
         if not args.yes and not (io.interactive and io.confirm("Setup is finished. Start a new one?", False)):

@@ -214,6 +214,7 @@ class Session:
     ) -> None:
         self.root = root
         self.run = run
+        self.undo_kept = 0  # files and OpenCore configs the last undo left as the user had them
         self.adapter = adapter
         self.sysfs = Path(root) / "sys"
         self.state = host_setup.load_state(root) or host_setup.new_state()
@@ -592,6 +593,7 @@ class Session:
         from .executor import apply_plan
         messages: list[str] = []
         ok = True
+        self.undo_kept = 0
         chosen = self.state["gpu"]
         if chosen and host_setup.check_identity(self.root, chosen.get("identity")):
             messages.append(f"Note: the card at {chosen['bdf']} is now a different device (your PCI layout "
@@ -613,6 +615,7 @@ class Session:
                 continue
             result = apply_plan(plan.steps, execute=True)
             kept = [ln for r in result.results for ln in r.output.splitlines() if ln.startswith("KEPT:")]
+            self.undo_kept += len(kept)
             if result.ok:
                 self.state["vm_records"].remove(vmid)
                 messages.append(f"VM {vmid}: GPU settings restored.")
@@ -623,6 +626,7 @@ class Session:
                 messages.append(f"VM {vmid}: restoring failed. Log: {result.log_path}")
         res = host_setup.undo_host(self.state, self.root, self.run)
         ok = ok and res["ok"]
+        self.undo_kept += len(res["kept"])
         messages += [f"Restored {path}" for path in res["restored"]] + res["kept"] + res["errors"]
         if res["reboot_required"]:
             messages.append("Reboot the host to finish undoing the boot changes.")

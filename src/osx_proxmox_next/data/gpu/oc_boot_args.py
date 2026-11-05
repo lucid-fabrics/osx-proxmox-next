@@ -9,8 +9,9 @@ Standard library only.
 attach  Backs up config.plist to config.plist.pre-gpu (kept if it already
         exists) and appends the boot-args named in the environment variable
         GPU_BOOT_ARGS (space separated; an arg that is already there is
-        replaced, never duplicated). Refuses when config.plist.pre-nullmoth
-        exists: the NVIDIA profile owns the config then.
+        replaced, never duplicated). Refuses when config.plist itself still carries
+        the NVIDIA (NullMoth) changes (AMFIPass kext entry, IONDRVSupport Block entry
+        or the NullMoth boot-args), whatever backup files exist.
 detach  Puts config.plist.pre-gpu back byte for byte and removes it, but only while
         config.plist still has the SHA-256 attach stored next to the backup. When the
         file changed since, the changed config and the backup stay and a KEPT line says
@@ -29,7 +30,8 @@ import time
 
 BACKUP = 'config.plist.pre-gpu'
 PATCHED_SHA = BACKUP + '.patched-sha256'
-OTHER_BACKUP = 'config.plist.pre-nullmoth'
+NULLMOTH_ARGS = ('nvfb', 'nvaccel', 'nvfbheads', '-nvkmsnosmooth')
+IONDRV = 'com.apple.iokit.IONDRVSupport'
 NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 
 
@@ -65,14 +67,30 @@ def write_plist(cfg, path):
     os.replace(tmp, path)
 
 
+def nullmoth_leftovers(cfg):
+    """What of the NVIDIA (NullMoth) setup config.plist still holds."""
+    found = []
+    if any(k.get('BundlePath') == 'AMFIPass.kext' for k in cfg.get('Kernel', {}).get('Add', [])):
+        found.append('the AMFIPass kext entry')
+    if any(b.get('Identifier') == IONDRV for b in cfg.get('Kernel', {}).get('Block', [])):
+        found.append('the IONDRVSupport Block entry')
+    args = cfg.get('NVRAM', {}).get('Add', {}).get(NVRAM_GUID, {}).get('boot-args', '')
+    if any(t.split('=', 1)[0] in NULLMOTH_ARGS for t in args.split()):
+        found.append('the NullMoth boot-args')
+    return found
+
+
 def attach(oc_dir):
     path = os.path.join(oc_dir, 'config.plist')
     backup = os.path.join(oc_dir, BACKUP)
-    if os.path.exists(os.path.join(oc_dir, OTHER_BACKUP)):
-        refuse('the NVIDIA (NullMoth) setup is active on this disk; run nvidia-detach first.')
     wanted = os.environ.get('GPU_BOOT_ARGS', '').split()
     with open(path, 'rb') as f:
         cfg = plistlib.load(f)
+    left = nullmoth_leftovers(cfg)
+    if left:
+        refuse('config.plist still has the NVIDIA (NullMoth) changes: ' + ', '.join(left) + '. '
+               'Run nvidia-detach first. If that keeps your config, put back the original from the '
+               'config.plist.pre-nullmoth.kept-* file on the OpenCore disk, or remove those entries by hand.')
     if not os.path.exists(backup):
         shutil.copyfile(path, backup)
     nv = cfg.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault(NVRAM_GUID, {})

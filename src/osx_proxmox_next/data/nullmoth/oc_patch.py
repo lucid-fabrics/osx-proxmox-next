@@ -12,7 +12,7 @@ attach  Backs up config.plist to config.plist.pre-nullmoth (kept if it already
         MacPro7,1. Environment AMFIPASS_ZIP names the pinned, already
         verified AMFIPass release zip to unpack into Kexts/.
 detach  Puts config.plist.pre-nullmoth back byte for byte and removes it,
-        together with the AMFIPass.kext directory. Refuses (exit 3) when there is
+        together with the AMFIPass.kext directory (unless the restored config still lists it). Refuses (exit 3) when there is
         no backup: a VM that was never attached keeps whatever it has.
 restore Like detach, but succeeds when there is nothing to restore (the attach
         never got that far, or an earlier undo already finished).
@@ -47,6 +47,7 @@ BOOT_ARGS = (
     'gfxrst=4',
 )
 REMOVE_ARGS = ('nv_disable=1', '-wegnoegpu')
+AMD_ARGS = ('agdpmod',)
 CSR_REQUIRED = 0x0A43
 IONDRV = 'com.apple.iokit.IONDRVSupport'
 KEXT = 'AMFIPass.kext'
@@ -155,6 +156,12 @@ def attach(oc_dir):
     with open(path, 'rb') as f:
         cfg = plistlib.load(f)
     check_preconditions(cfg)
+    args = cfg.get('NVRAM', {}).get('Add', {}).get(NVRAM_GUID, {}).get('boot-args', '')
+    amd = [t for t in args.split() if t.split('=', 1)[0] in AMD_ARGS]
+    if amd:
+        refuse('config.plist still has the AMD GPU boot-args (' + ' '.join(amd) + '). Undo the AMD GPU setup '
+               'first (gpu-setup --undo). If that keeps your config, put back the original from the '
+               'config.plist.pre-gpu.kept-* file on the OpenCore disk, or remove those boot-args by hand.')
     zip_path = os.environ.get('AMFIPASS_ZIP', '')
     if zip_path:
         unpack_kext(zip_path, oc_dir)
@@ -173,6 +180,16 @@ def attach(oc_dir):
     with open(os.path.join(oc_dir, PATCHED_SHA), 'w') as f:
         f.write(file_sha(path) + '\n')
     sys.stderr.write('NullMoth OpenCore changes applied (backup: ' + BACKUP + ')\n')
+
+
+def references_kext(path):
+    """Whether config.plist still lists AMFIPass.kext (unreadable counts as yes: keep the kext)."""
+    try:
+        with open(path, 'rb') as f:
+            cfg = plistlib.load(f)
+        return any(k.get('BundlePath') == KEXT for k in cfg.get('Kernel', {}).get('Add', []))
+    except Exception:
+        return True
 
 
 def detach(oc_dir, soft=False):
@@ -199,7 +216,8 @@ def detach(oc_dir, soft=False):
     os.replace(backup, path)
     if os.path.exists(stamp):
         os.remove(stamp)
-    shutil.rmtree(os.path.join(oc_dir, 'Kexts', KEXT), ignore_errors=True)
+    if not references_kext(path):
+        shutil.rmtree(os.path.join(oc_dir, 'Kexts', KEXT), ignore_errors=True)
     sys.stderr.write('OpenCore config restored from ' + BACKUP + '\n')
 
 

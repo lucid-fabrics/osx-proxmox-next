@@ -1373,7 +1373,7 @@ function nullmoth_detect_macos() {
 # Mount the VM's ide0 (OpenCore) disk, run the shared patcher, unmount.
 # $1 vmid, $2 attach|detach|restore, $3 AMFIPass zip (attach only).
 function nullmoth_oc_patch() {
-  local vmid="$1" action="$2" zip="${3:-}" vol path loop mnt rc=1 _i old_trap
+  local nkept=0 vmid="$1" action="$2" zip="${3:-}" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
   path=$(pvesm path "$vol" 2>/dev/null) || return 1
@@ -1388,6 +1388,7 @@ function nullmoth_oc_patch() {
   # shellcheck disable=SC2064
   trap "umount '$mnt' 2>/dev/null; losetup -d '$loop' 2>/dev/null; rmdir '$mnt' 2>/dev/null; exit 130" INT TERM
   if [ -b "${loop}p1" ] && mount "${loop}p1" "$mnt" 2>/dev/null; then
+    nkept=$({ ls "$mnt"/EFI/OC/config.plist.pre-*.kept-* 2>/dev/null || true; } | wc -l)
     if AMFIPASS_ZIP="$zip" AMFIPASS_SHA256="${zip:+$NULLMOTH_AMFIPASS_SHA256}" python3 - "$mnt/EFI/OC" "$action" <<'NULLMOTH_PY'
 """Prepare (or restore) a VM's OpenCore config for the NullMoth NVIDIA driver.
 
@@ -1403,7 +1404,7 @@ attach  Backs up config.plist to config.plist.pre-nullmoth (kept if it already
         MacPro7,1. Environment AMFIPASS_ZIP names the pinned, already
         verified AMFIPass release zip to unpack into Kexts/.
 detach  Puts config.plist.pre-nullmoth back byte for byte and removes it,
-        together with the AMFIPass.kext directory. Refuses (exit 3) when there is
+        together with the AMFIPass.kext directory (unless the restored config still lists it). Refuses (exit 3) when there is
         no backup: a VM that was never attached keeps whatever it has.
 restore Like detach, but succeeds when there is nothing to restore (the attach
         never got that far, or an earlier undo already finished).
@@ -1438,6 +1439,7 @@ BOOT_ARGS = (
     'gfxrst=4',
 )
 REMOVE_ARGS = ('nv_disable=1', '-wegnoegpu')
+AMD_ARGS = ('agdpmod',)
 CSR_REQUIRED = 0x0A43
 IONDRV = 'com.apple.iokit.IONDRVSupport'
 KEXT = 'AMFIPass.kext'
@@ -1546,6 +1548,12 @@ def attach(oc_dir):
     with open(path, 'rb') as f:
         cfg = plistlib.load(f)
     check_preconditions(cfg)
+    args = cfg.get('NVRAM', {}).get('Add', {}).get(NVRAM_GUID, {}).get('boot-args', '')
+    amd = [t for t in args.split() if t.split('=', 1)[0] in AMD_ARGS]
+    if amd:
+        refuse('config.plist still has the AMD GPU boot-args (' + ' '.join(amd) + '). Undo the AMD GPU setup '
+               'first (gpu-setup --undo). If that keeps your config, put back the original from the '
+               'config.plist.pre-gpu.kept-* file on the OpenCore disk, or remove those boot-args by hand.')
     zip_path = os.environ.get('AMFIPASS_ZIP', '')
     if zip_path:
         unpack_kext(zip_path, oc_dir)
@@ -1564,6 +1572,16 @@ def attach(oc_dir):
     with open(os.path.join(oc_dir, PATCHED_SHA), 'w') as f:
         f.write(file_sha(path) + '\n')
     sys.stderr.write('NullMoth OpenCore changes applied (backup: ' + BACKUP + ')\n')
+
+
+def references_kext(path):
+    """Whether config.plist still lists AMFIPass.kext (unreadable counts as yes: keep the kext)."""
+    try:
+        with open(path, 'rb') as f:
+            cfg = plistlib.load(f)
+        return any(k.get('BundlePath') == KEXT for k in cfg.get('Kernel', {}).get('Add', []))
+    except Exception:
+        return True
 
 
 def detach(oc_dir, soft=False):
@@ -1590,7 +1608,8 @@ def detach(oc_dir, soft=False):
     os.replace(backup, path)
     if os.path.exists(stamp):
         os.remove(stamp)
-    shutil.rmtree(os.path.join(oc_dir, 'Kexts', KEXT), ignore_errors=True)
+    if not references_kext(path):
+        shutil.rmtree(os.path.join(oc_dir, 'Kexts', KEXT), ignore_errors=True)
     sys.stderr.write('OpenCore config restored from ' + BACKUP + '\n')
 
 
@@ -1609,6 +1628,7 @@ NULLMOTH_PY
 then
       rc=0
     fi
+    [ "$({ ls "$mnt"/EFI/OC/config.plist.pre-*.kept-* 2>/dev/null || true; } | wc -l)" -le "$nkept" ] || GPU_OC_KEPT=$((${GPU_OC_KEPT:-0} + 1))
     sync
     umount "$mnt" 2>/dev/null || true
   fi
@@ -3043,7 +3063,9 @@ def vm_restore(record, cfg):
         actions.append({"op": "set", "key": "args", "value": orig_args} if orig_args
                        else {"op": "delete", "key": "args"})
     else:
-        stripped = without_global_args(cur_args, after.get("added_args") or [])
+        stripped = cur_args
+        for arg in after.get("added_args") or []:
+            stripped = re.sub(r"\s*(?<!\S)" + re.escape(arg) + r"(?!\S)", "", stripped).strip()
         for new, old in (after.get("replaced_args") or {}).items():
             if new in stripped:
                 stripped = stripped.replace(new, old, 1)
@@ -3052,9 +3074,13 @@ def vm_restore(record, cfg):
                            else {"op": "delete", "key": "args"})
             notes.append("args were edited after the card was attached. Only the arguments this tool added "
                          "were removed; your edits were kept.")
-        else:
+        elif not any(_global_re(a).search(stripped) for a in after.get("added_args") or []):
             notes.append("args were edited after the card was attached. None of the arguments this tool "
                          "added are left in them, so your edits were kept as they are.")
+        for arg in after.get("added_args") or []:
+            now = _global_re(arg).search(stripped)
+            if now:
+                notes.append("%s was changed after the card was attached, so it was left as you set it." % now.group(0))
     if record.get("vga_changed"):
         cur_vga, orig_vga = cfg.get("vga"), record.get("vga")
         if cur_vga == orig_vga:
@@ -4406,8 +4432,9 @@ Standard library only.
 attach  Backs up config.plist to config.plist.pre-gpu (kept if it already
         exists) and appends the boot-args named in the environment variable
         GPU_BOOT_ARGS (space separated; an arg that is already there is
-        replaced, never duplicated). Refuses when config.plist.pre-nullmoth
-        exists: the NVIDIA profile owns the config then.
+        replaced, never duplicated). Refuses when config.plist itself still carries
+        the NVIDIA (NullMoth) changes (AMFIPass kext entry, IONDRVSupport Block entry
+        or the NullMoth boot-args), whatever backup files exist.
 detach  Puts config.plist.pre-gpu back byte for byte and removes it, but only while
         config.plist still has the SHA-256 attach stored next to the backup. When the
         file changed since, the changed config and the backup stay and a KEPT line says
@@ -4426,7 +4453,8 @@ import time
 
 BACKUP = 'config.plist.pre-gpu'
 PATCHED_SHA = BACKUP + '.patched-sha256'
-OTHER_BACKUP = 'config.plist.pre-nullmoth'
+NULLMOTH_ARGS = ('nvfb', 'nvaccel', 'nvfbheads', '-nvkmsnosmooth')
+IONDRV = 'com.apple.iokit.IONDRVSupport'
 NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 
 
@@ -4462,14 +4490,30 @@ def write_plist(cfg, path):
     os.replace(tmp, path)
 
 
+def nullmoth_leftovers(cfg):
+    """What of the NVIDIA (NullMoth) setup config.plist still holds."""
+    found = []
+    if any(k.get('BundlePath') == 'AMFIPass.kext' for k in cfg.get('Kernel', {}).get('Add', [])):
+        found.append('the AMFIPass kext entry')
+    if any(b.get('Identifier') == IONDRV for b in cfg.get('Kernel', {}).get('Block', [])):
+        found.append('the IONDRVSupport Block entry')
+    args = cfg.get('NVRAM', {}).get('Add', {}).get(NVRAM_GUID, {}).get('boot-args', '')
+    if any(t.split('=', 1)[0] in NULLMOTH_ARGS for t in args.split()):
+        found.append('the NullMoth boot-args')
+    return found
+
+
 def attach(oc_dir):
     path = os.path.join(oc_dir, 'config.plist')
     backup = os.path.join(oc_dir, BACKUP)
-    if os.path.exists(os.path.join(oc_dir, OTHER_BACKUP)):
-        refuse('the NVIDIA (NullMoth) setup is active on this disk; run nvidia-detach first.')
     wanted = os.environ.get('GPU_BOOT_ARGS', '').split()
     with open(path, 'rb') as f:
         cfg = plistlib.load(f)
+    left = nullmoth_leftovers(cfg)
+    if left:
+        refuse('config.plist still has the NVIDIA (NullMoth) changes: ' + ', '.join(left) + '. '
+               'Run nvidia-detach first. If that keeps your config, put back the original from the '
+               'config.plist.pre-nullmoth.kept-* file on the OpenCore disk, or remove those entries by hand.')
     if not os.path.exists(backup):
         shutil.copyfile(path, backup)
     nv = cfg.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault(NVRAM_GUID, {})
@@ -4681,7 +4725,7 @@ function gpu_snapshot() {
 # Mount the VM's ide0 (OpenCore) disk, run the boot-args patcher, unmount.
 # $1 vmid, $2 attach|detach|restore, $3 boot-args (attach only).
 function gpu_oc_boot_args() {
-  local vmid="$1" action="$2" args="${3:-}" vol path loop mnt rc=1 _i old_trap
+  local nkept=0 vmid="$1" action="$2" args="${3:-}" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
   path=$(pvesm path "$vol" 2>/dev/null) || return 1
@@ -4696,9 +4740,11 @@ function gpu_oc_boot_args() {
   # shellcheck disable=SC2064
   trap "umount '$mnt' 2>/dev/null; losetup -d '$loop' 2>/dev/null; rmdir '$mnt' 2>/dev/null; exit 130" INT TERM
   if [ -b "${loop}p1" ] && mount "${loop}p1" "$mnt" 2>/dev/null; then
+    nkept=$({ ls "$mnt"/EFI/OC/config.plist.pre-*.kept-* 2>/dev/null || true; } | wc -l)
     if GPU_BOOT_ARGS="$args" python3 - "$mnt/EFI/OC" "$action" <<<"$GPU_EMBED_OC_BOOT_ARGS"; then
       rc=0
     fi
+    [ "$({ ls "$mnt"/EFI/OC/config.plist.pre-*.kept-* 2>/dev/null || true; } | wc -l)" -le "$nkept" ] || GPU_OC_KEPT=$((${GPU_OC_KEPT:-0} + 1))
     sync
     umount "$mnt" 2>/dev/null || true
   fi
@@ -5020,6 +5066,7 @@ function gpu_card_changed() {
 # Nothing to revert (no record, the VM is gone, the attach was refused) counts as done.
 function gpu_undo() {
   local stop="${1:-no}" vmid ok=yes res rc kept=0 target moved
+  GPU_OC_KEPT=0
   if [ "$(gpu_state_get 'd.get("gpu") is not None and bool(d["gpu"].get("identity"))')" == "True" ]; then
     target=$(gpu_chosen_target_raw 2>/dev/null) || target=""
     moved=""
@@ -5047,6 +5094,7 @@ function gpu_undo() {
   done
   res=$(gpu_host undo </dev/null) || ok=no
   [ -z "$res" ] || kept=$(echo "$res" | gpu_json 'len(d.get("kept", []))')
+  kept=$((kept + GPU_OC_KEPT))
   [ -z "$res" ] || echo "$res" | gpu_json '"\n".join(["Restored " + p for p in d["restored"]] + d.get("kept", []) + d["errors"]) + ("\nReboot the host to finish undoing the boot changes." if d["reboot_required"] else "")'
   if [ "$ok" == "yes" ]; then
     gpu_host hint-clear </dev/null

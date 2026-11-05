@@ -328,10 +328,9 @@ def test_patcher_attach_and_detach(patch, tmp_path, monkeypatch):
     assert (oc / "config.plist").read_bytes() == original
 
 
-def test_patcher_refuses_when_the_nullmoth_backup_exists(patch, tmp_path, monkeypatch):
+def test_patcher_refuses_when_the_config_has_the_nullmoth_changes(patch, tmp_path, monkeypatch):
     oc = tmp_path / "OC"
-    write_oc(oc)
-    (oc / "config.plist.pre-nullmoth").write_bytes(b"x")
+    write_oc(oc, boot_args="keepsyms=1 nvfb=1 nvaccel=1")
     monkeypatch.setenv("GPU_BOOT_ARGS", "agdpmod=pikera")
     before = (oc / "config.plist").read_bytes()
     with pytest.raises(SystemExit) as exc:
