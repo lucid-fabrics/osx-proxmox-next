@@ -34,8 +34,10 @@ def stub_lspci(bash):
 def swap_in_nvme(root: Path) -> None:
     for fn in list((root / "sys/bus/pci/devices").glob("0000:06:00.*")):
         shutil.rmtree(fn)
-        for link in (root / "sys/kernel/iommu_groups").glob(f"*/devices/{fn.name}"):
-            link.unlink()
+        # not glob(): before 3.13 it skips dangling links, and the device dir was just removed
+        for link in (root / "sys/kernel/iommu_groups").glob("*/devices/*"):
+            if link.name == fn.name and link.is_symlink():
+                link.unlink()
     add_other(root, "0000:06:00.0", 0x144D, 0xA80A, 0x010802, group=7, driver="nvme")
 
 

@@ -30,7 +30,10 @@ def add_dev(root: Path, bdf: str, vendor: int, device: int, cls: int = 0x030000,
         (dev / "driver").symlink_to(target)
     grp = root / "kernel/iommu_groups" / str(group)
     (grp / "devices").mkdir(parents=True, exist_ok=True)
-    (grp / "devices" / bdf).symlink_to(dev)
+    link = grp / "devices" / bdf
+    if link.is_symlink():  # a left-over, possibly dangling, link from a removed device
+        link.unlink()
+    link.symlink_to(dev)
     (dev / "iommu_group").symlink_to(grp)
 
 
