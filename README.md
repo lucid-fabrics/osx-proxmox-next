@@ -18,6 +18,9 @@
     <img alt="Proxmox" src="https://img.shields.io/badge/Proxmox-9%20Ready-E57000?logo=proxmox&logoColor=white">
   </a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-Ventura%2013%20%7C%20Sonoma%2014%20%7C%20Sequoia%2015%20%7C%20Tahoe%2026-111111?logo=apple&logoColor=white">
+  <a href="#-gpu-passthrough">
+    <img alt="GPU passthrough" src="https://img.shields.io/badge/GPU%20passthrough-AMD%20%7C%20NVIDIA%20(beta)-76B900">
+  </a>
   <a href="https://discord.gg/Ub6TunHYre">
     <img alt="Join Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white">
   </a>
@@ -32,6 +35,15 @@
   </a>
 </p>
 
+<p align="center">
+  <strong>🎮 New in v0.32: guided GPU passthrough.</strong> AMD Radeon with native macOS drivers, and NVIDIA RTX 20 to 50 through the community NullMoth driver (beta).<br>
+  One command walks you through the BIOS, the host and the VM: <code>osx-next-cli gpu-setup</code> · <a href="#-gpu-passthrough">How it works</a>
+</p>
+
+<p align="center">
+  <img src="docs/static/img/demo-gpu.gif" alt="Guided GPU passthrough walkthrough" width="720">
+</p>
+
 ---
 
 ## 🧰 Stop Wasting Afternoons on macOS VMs
@@ -42,6 +54,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 **You get:**
 - A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
+- **Guided GPU passthrough (BETA)**: scan your cards, get a BIOS photo card with a QR code for your board, let the tool set up the host and attach the card, undo it all with one command. AMD Radeon natively, NVIDIA RTX 20 to 50 via the community NullMoth driver
 - **Unattended install (BETA)**: tick one box and walk away - the tool erases the new disk, runs the installer, and answers every reboot until macOS sits at Setup Assistant
 - OpenCore boot image assembled on your host from pinned, checksum-verified upstream releases - no opaque prebuilt blob
 - Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
@@ -62,6 +75,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 | SMBIOS generation | External tool (GenSMBIOS) | Built-in, zero config |
 | Apple Services | Manual identity chain | One flag: `--apple-services` |
 | Tahoe 26 | Community trial & error | Supported |
+| GPU passthrough | Wiki pages, BIOS hunting, kernel flags, reboots | Guided walkthrough with undo, AMD + NVIDIA (beta) |
 | Dry-run preview | Never | Always - see every `qm` command first |
 | Scripting / CI | Never | Full CLI + JSON export |
 | Post-install health check | Never | `osx-next-cli doctor --vmid <id>` |
@@ -82,10 +96,6 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 **Wizard (6 steps: Preflight → OS → Storage → Config → Dry Run → Install), including the Unattended install (BETA) toggle:**
 
 ![osx-proxmox-next TUI wizard demo](docs/static/img/demo-tui.gif)
-
-**Guided GPU passthrough: scan, BIOS card, host setup, attach:**
-
-![osx-proxmox-next GPU passthrough walkthrough demo](docs/static/img/demo-gpu.gif)
 
 **CLI tools (preflight, plan, doctor):**
 
