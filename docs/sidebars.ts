@@ -23,6 +23,7 @@ const sidebars: SidebarsConfig = {
         'guides/troubleshooting',
         'guides/macos-versions',
         'guides/unattended-install',
+        'guides/nvidia-nullmoth',
         'guides/faq',
       ],
     },

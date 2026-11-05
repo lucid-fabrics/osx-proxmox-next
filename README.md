@@ -476,6 +476,41 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 
 📖 Reference: [Proxmox PCI(e) Passthrough Wiki](https://pve.proxmox.com/wiki/PCI(e)_Passthrough)
 
+### NVIDIA (NullMoth, Beta)
+
+> **NVIDIA GPU support (Beta)**
+>
+> This feature prepares your VM for the NullMoth NVIDIA driver, a third-party project that osx-proxmox-next does not make, review or support. You download and install that driver yourself, at your own risk. We are not responsible for the driver, its installation, or any damage, data loss or instability that follows.
+>
+> NullMoth only runs with core macOS security turned off: code-signing checks (AMFI) are bypassed, System Integrity Protection is relaxed and Secure Boot is disabled. This is a real security threat: malware has a much easier time on a VM set up this way. Only enable it on a VM you are prepared to treat as untrusted, and keep personal accounts and sensitive data off it.
+>
+> NullMoth is licensed PolyForm Noncommercial 1.0.0. Driver and docs: https://github.com/nullmoth/nvidia-macos-driver
+
+| Card generation | Supported |
+|---|---|
+| Turing and newer (RTX 20 / 30 / 40 / 50 series) | Yes, on macOS Sequoia 15.5+ and Tahoe 26 |
+| Kepler, Maxwell, Pascal, Volta | No |
+| Ventura 13, Sonoma 14 guests | No |
+
+What it does to an installed, stopped VM: passes every function of the card through as `hostpci0` (conventional PCI, `pcie=0`), adds `-global q35-pcihost.pci-hole64-size=64G` to `args`, and edits the VM's OpenCore disk (AMFIPass.kext, NullMoth boot-args, an `IONDRVSupport` block, SMBIOS `MacPro7,1`). The previous `config.plist` is kept as `config.plist.pre-nullmoth` so `nvidia-detach` restores it exactly. The VM keeps `vga std`: the desktop stays on the emulated display and apps get the NVIDIA GPU. The driver is never downloaded or installed by this tool.
+
+Host setup stays manual. Every function of the card must be bound to `vfio-pci` and alone in its IOMMU group; if it is not, the command prints the exact `/etc/modprobe.d/vfio.conf` lines to use and changes nothing. This tool has not been tested with a GPU attached yet.
+
+```bash
+# Preview: preflight result and plan, nothing changes
+osx-next-cli nvidia-attach 106 --gpu 01:00 --dry-run
+
+# Apply (VM must be stopped; you must accept the notice)
+osx-next-cli nvidia-attach 106 --gpu 01:00 --accept-nullmoth-risk
+
+# Undo: removes hostpci0, the MMIO window and the OpenCore changes
+osx-next-cli nvidia-detach 106
+```
+
+The standalone script has the same two commands (`osx-proxmox-next.sh nvidia-attach <vmid> <pci-address>` and `nvidia-detach <vmid>`). It asks you to type `I accept`, or take `--accept-nullmoth-risk` for non-interactive use. In the TUI, open **Step 2 > NVIDIA GPU (Beta)**: pick the VM and the card, tick the acknowledgement box (unticked by default) and the Apply button unlocks.
+
+After applying, install the driver yourself from the [NullMoth releases](https://github.com/nullmoth/nvidia-macos-driver/releases) (check `SHA256SUMS`, then `sudo ./install.sh` in the guest), approve the extensions, reboot, and verify with `kmutil showloaded --list-only | grep nullmoth`. Run `sudo pmset -a sleep 0`. If the guest will not boot, add `-nvoff` to the boot-args or run `nvidia-detach`. The NullMoth 1401 app edits the OpenCore config itself, and rebuilding the OpenCore disk with this tool later wipes those edits.
+
 ---
 
 ## ⚡ Performance Tips
@@ -716,18 +751,17 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 
 ### Can I pass through an NVIDIA GeForce GPU?
 
-No, not on any modern macOS. Apple dropped NVIDIA support years ago, and it never came back.
+Only Turing and newer (RTX 20 / 30 / 40 / 50), and only with a third-party driver. Apple dropped NVIDIA support years ago, but the community NullMoth driver provides Metal on macOS Sequoia 15.5+ and Tahoe 26. This project can prepare a VM for it (beta, see [NVIDIA (NullMoth, Beta)](#nvidia-nullmoth-beta)), but does not make, ship or support the driver, and it requires turning core macOS security off.
 
-| Architecture | Cards | Last macOS that worked |
+| Architecture | Cards | macOS support |
 |---|---|---|
-| Kepler | GTX 600 / 700 | Big Sur 11 (native drivers) |
-| Maxwell | GTX 900 | High Sierra 10.13.6 (Web Drivers) |
-| Pascal | GTX 10-series, Titan Xp | High Sierra 10.13.6 (Web Drivers) |
-| Turing and newer | RTX 20 / 30 / 40 | Never supported |
+| Kepler | GTX 600 / 700 | Big Sur 11 (native drivers), not supported here |
+| Maxwell | GTX 900 | High Sierra 10.13.6 (Web Drivers), not supported here |
+| Pascal | GTX 10-series, Titan Xp | High Sierra 10.13.6 (Web Drivers), not supported here |
+| Volta | Titan V | Not supported |
+| Turing and newer | RTX 20 / 30 / 40 / 50 | Sequoia 15.5+ and Tahoe 26 via NullMoth (beta) |
 
-The newest GeForce card that ever ran on macOS was a **Pascal GTX 10-series**, and only up to **High Sierra**. NVIDIA's Web Drivers were never approved for Mojave or later, so anything Maxwell or newer is capped there. Kepler lasted longer only because real Macs shipped with it.
-
-For GPU passthrough on a current macOS guest (Ventura, Sonoma, Sequoia, Tahoe), use an **AMD** card instead. Polaris (RX 470/480/580), Vega, and Navi (RX 5000/6000) have native macOS drivers and work with WhateverGreen, which ships in the OpenCore image.
+Ventura and Sonoma guests have no NVIDIA path at all. For a conventional setup on any supported macOS, use an **AMD** card instead: Polaris (RX 470/480/580), Vega, and Navi (RX 5000/6000) have native macOS drivers and work with WhateverGreen, which ships in the OpenCore image.
 
 ### Why does macOS show "Memory Modules Misconfigured"?
 

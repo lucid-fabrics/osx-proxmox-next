@@ -38,6 +38,8 @@ Yes, but host-side setup is manual and must be done before the VM can use a disc
 
 Reference: [Proxmox PCI(e) Passthrough Wiki](https://pve.proxmox.com/wiki/PCI(e)_Passthrough)
 
+NVIDIA Turing and newer cards are supported in beta through the third-party NullMoth driver. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).
+
 </details>
 
 <details>

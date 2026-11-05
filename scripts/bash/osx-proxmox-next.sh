@@ -1151,6 +1151,579 @@ function post_install() {
   return "$rc"
 }
 
+# ── Vendor-neutral GPU helpers begin ──
+# Bash twin of src/osx_proxmox_next/gpu.py (detection, vfio/IOMMU/BAR checks,
+# hostpci and MMIO-window args). Vendor profiles (NullMoth below) sit on top.
+GPU_ISSUES=()
+GPU_WARNS=()
+GPU_HINTS=()
+GPU_MMIO_ARG="-global q35-pcihost.pci-hole64-size=64G"
+
+# domain:bus:slot, lowercase, function dropped. Mirrors nvidia_host.normalize_bdf.
+function gpu_normalize_bdf() {
+  local raw="${1,,}"
+  [[ "$raw" =~ ^(([0-9a-f]{4}):)?([0-9a-f]{2}):([0-9a-f]{2})(\.[0-7])?$ ]] || return 1
+  echo "${BASH_REMATCH[2]:-0000}:${BASH_REMATCH[3]}:${BASH_REMATCH[4]}"
+}
+
+# Read a sysfs hex file (with or without 0x) as a decimal number; empty on failure.
+function gpu_sys_num() {
+  local v
+  v=$(cat "$1" 2>/dev/null) || return 1
+  [[ "$v" =~ ^(0x)?[0-9a-fA-F]+$ ]] || return 1
+  echo $((16#${v#0x}))
+}
+
+# Exact vfio.conf lines for the card's functions. Mirrors nvidia_host.vfio_conf_hint.
+function gpu_vfio_hint() {
+  local sys="$1" bdf="$2" fn v d c ids="" usb_c=no name
+  for fn in "$sys"/bus/pci/devices/"$bdf".*; do
+    [ -e "$fn" ] || continue
+    v=$(gpu_sys_num "$fn/vendor") || continue
+    d=$(gpu_sys_num "$fn/device") || continue
+    ids+="${ids:+,}$(printf '%04x:%04x' "$v" "$d")"
+    c=$(gpu_sys_num "$fn/class") || c=0
+    case $(( c >> 8 )) in 3075|3200) usb_c=yes ;; esac
+  done
+  GPU_HINTS=("Put this in /etc/modprobe.d/vfio.conf:" "  options vfio-pci ids=${ids}")
+  local softdeps=(nouveau nvidia snd_hda_intel)
+  [ "$usb_c" == "yes" ] && softdeps+=(xhci_pci i2c_nvidia_gpu)
+  for name in "${softdeps[@]}"; do GPU_HINTS+=("  softdep ${name} pre: vfio-pci"); done
+  GPU_HINTS+=("Then run: update-initramfs -u -k all" "Then reboot the host.")
+}
+
+# Run every host-side readiness check for one card. $1 = bdf (normalized),
+# $2 = PCI vendor id (decimal), $3 = name of a function that succeeds for a
+# supported device id (decimal), $4 = printf format for the unsupported message.
+# Fills GPU_ISSUES / GPU_WARNS / GPU_HINTS. Mirrors gpu.check_gpu; GPU_SYSFS and
+# GPU_CMDLINE can be overridden for tests.
+function gpu_check() {
+  local bdf="$1" want_vendor="$2" support_fn="$3" unsupported_fmt="$4" sys="${GPU_SYSFS:-/sys}" cmdline="${GPU_CMDLINE:-/proc/cmdline}"
+  local dev="$sys/bus/pci/devices/$bdf.0" vendor device fn driver bad="" grp member c stray=""
+  local -a funcs=()
+  if [ ! -e "$dev" ]; then GPU_ISSUES+=("No PCI device at $bdf.0 on this host."); return; fi
+  vendor=$(gpu_sys_num "$dev/vendor") || vendor=0
+  if (( vendor != want_vendor )); then GPU_ISSUES+=("$bdf.0 is not a vendor $(printf '%04x' "$want_vendor") device."); return; fi
+  device=$(gpu_sys_num "$dev/device") || device=0
+  if ! "$support_fn" "$device"; then
+    # shellcheck disable=SC2059
+    GPU_ISSUES+=("$(printf "$unsupported_fmt" "$(printf '%04x' "$device")")")
+    return
+  fi
+  for fn in "$sys"/bus/pci/devices/"$bdf".*; do funcs+=("$(basename "$fn")"); done
+  for fn in "${funcs[@]}"; do
+    driver=""
+    [ -e "$sys/bus/pci/devices/$fn/driver" ] && driver=$(basename "$(readlink -f "$sys/bus/pci/devices/$fn/driver")")
+    [ "$driver" == "vfio-pci" ] || bad+="${bad:+, }$fn (${driver:-no driver})"
+  done
+  if [ -n "$bad" ]; then
+    GPU_ISSUES+=("Every function of the card must be bound to vfio-pci. Not bound: ${bad}. The host GPU driver must not hold the card.")
+    gpu_vfio_hint "$sys" "$bdf"
+  fi
+  if [ ! -e "$dev/iommu_group" ]; then
+    GPU_ISSUES+=("IOMMU is not active for this card (no iommu_group). Enable VT-d/AMD-Vi in the BIOS and intel_iommu=on iommu=pt (Intel) or iommu=pt (AMD) on the kernel cmdline.")
+  else
+    grp=$(readlink -f "$dev/iommu_group")
+    for member in "$grp"/devices/*; do
+      member=$(basename "$member")
+      [[ " ${funcs[*]} " == *" $member "* ]] && continue
+      c=$(gpu_sys_num "$sys/bus/pci/devices/$member/class") || c=-1
+      case $(( c >> 8 )) in 1540|1536) continue ;; esac
+      stray+="${stray:+, }$member"
+    done
+    [ -z "$stray" ] || GPU_ISSUES+=("IOMMU group $(basename "$grp") also holds non-GPU device(s): ${stray}. Passing the card through would pull them in.")
+  fi
+  if [ "$(gpu_sys_num "$dev/boot_vga" 2>/dev/null || true)" == "1" ] && ! grep -q 'initcall_blacklist=sysfb_init' "$cmdline" 2>/dev/null; then
+    GPU_WARNS+=("This card is the host boot GPU and initcall_blacklist=sysfb_init is not on the kernel cmdline. The host framebuffer may hold its memory and the VM can fail to start.")
+  fi
+  local start end _flags size
+  if read -r start end _flags < <(sed -n 2p "$dev/resource" 2>/dev/null) && [ -n "${end:-}" ]; then
+    size=$(( end - start + 1 ))
+    if (( size > 268435456 )); then
+      GPU_WARNS+=("BAR1 is $(( size / 1048576 )) MiB. Larger than 256 MiB is untested for macOS guests and QEMU may refuse to start. No automatic resize is done.")
+    fi
+  fi
+}
+
+# Mirrors nullmoth.with_mmio_arg / without_mmio_arg.
+function gpu_with_mmio_arg() {
+  local a="$1"
+  if [[ "$a" =~ -global[[:space:]]+q35-pcihost\.pci-hole64-size=[^[:space:]]+ ]]; then
+    echo "${a/"${BASH_REMATCH[0]}"/$GPU_MMIO_ARG}"
+  else
+    echo "$a $GPU_MMIO_ARG" | sed 's/^ *//'
+  fi
+}
+
+function gpu_without_mmio_arg() {
+  local a="$1"
+  if [[ "$a" =~ [[:space:]]*-global[[:space:]]+q35-pcihost\.pci-hole64-size=[^[:space:]]+ ]]; then
+    a="${a/"${BASH_REMATCH[0]}"/}"
+  fi
+  echo "$a" | sed 's/^ *//; s/ *$//'
+}
+
+# Other VMs that already hold the card. Prints "<vmid> running|stopped".
+function gpu_users() {
+  local vmid="$1" bdf="$2" id status
+  while read -r id _ status _; do
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    [ "$id" == "$vmid" ] && continue
+    if qm config "$id" 2>/dev/null | grep -E "^hostpci[0-9]+:" | grep -qE "(^|[ =;,])(0000:)?${bdf#0000:}(\.[0-7])?([,;]|\$)"; then
+      echo "$id $status"
+    fi
+  done < <(qm list 2>/dev/null | tail -n +2)
+}
+
+# ── Vendor-neutral GPU helpers end ──
+
+# ── NullMoth NVIDIA GPU attach (beta) begin ──
+# Bash twin of src/osx_proxmox_next/nullmoth.py and nvidia_host.py. The notice,
+# pins, device allowlist and OpenCore patcher below are diffed against the
+# Python side by tests/test_nullmoth_parity.py; change both together.
+NULLMOTH_URL="https://github.com/nullmoth/nvidia-macos-driver"
+NULLMOTH_NOTICE_TITLE="NVIDIA GPU support (Beta)"
+read -r -d '' NULLMOTH_NOTICE_BODY <<'NULLMOTH_NOTICE' || true
+This feature prepares your VM for the NullMoth NVIDIA driver, a third-party project that osx-proxmox-next does not make, review or support. You download and install that driver yourself, at your own risk. We are not responsible for the driver, its installation, or any damage, data loss or instability that follows.
+
+NullMoth only runs with core macOS security turned off: code-signing checks (AMFI) are bypassed, System Integrity Protection is relaxed and Secure Boot is disabled. This is a real security threat: malware has a much easier time on a VM set up this way. Only enable it on a VM you are prepared to treat as untrusted, and keep personal accounts and sensitive data off it.
+
+NullMoth is licensed PolyForm Noncommercial 1.0.0. Driver and docs: https://github.com/nullmoth/nvidia-macos-driver
+NULLMOTH_NOTICE
+NULLMOTH_ACK_LABEL='I understand the risks and that osx-proxmox-next is not responsible for the NullMoth driver.'
+NULLMOTH_ACK_PHRASE="I accept"
+# AMFIPass is not an Acidanthera release; this is the build OpenCore Legacy
+# Patcher ships, pinned by commit (oc_builder.AMFIPASS).
+NULLMOTH_AMFIPASS_URL="https://github.com/dortania/OpenCore-Legacy-Patcher/raw/76516394fddb7ce4526ccbcc5b806795c30e9a89/payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip"
+NULLMOTH_AMFIPASS_SHA256="07b266145906db41f4b13a7938fbb173ea28888cc1fa65f84417f8820adc961e"
+# Turing and newer device ids (vendor 10de), upstream commit
+# 6b4752c51b0719862fb46471d383317ef7ecc6f0. Every id from 1E00 up also counts.
+NULLMOTH_SUPPORTED_IDS="
+1E02 1E04 1E07 1E30 1E36 1E78 1E81 1E82 1E84 1E87 1E89 1E90 1E91 1E93 1EB0
+1EB1 1EB5 1EB6 1EC2 1EC7 1ED0 1ED1 1ED3 1EF5 1F02 1F03 1F06 1F07 1F08 1F0A
+1F10 1F11 1F12 1F14 1F15 1F36 1F42 1F47 1F50 1F51 1F54 1F55 1F76 1F82 1F83
+1F91 1F95 1F96 1F97 1F98 1F99 1F9C 1F9D 1F9F 1FA0 1FB0 1FB1 1FB2 1FB6 1FB7
+1FB8 1FB9 1FBA 1FBB 1FBC 1FDD 1FF0 1FF2 1FF9 2182 2184 2187 2188 2191 2192
+21C4 21D1 2203 2204 2206 2207 2208 220A 2216 2230 2231 2232 2233 2414 2420
+2438 2460 2482 2484 2486 2487 2488 2489 249C 249D 24A0 24B0 24B1 24B6 24B7
+24B8 24B9 24BA 24BB 24C7 24C9 24DC 24DD 24E0 24FA 2503 2504 2507 2508 2520
+2521 2523 2531 2544 2560 2563 2571 2582 2584 25A0 25A2 25A5 25A6 25A7 25A9
+25AA 25AB 25AC 25AD 25B0 25B2 25B8 25B9 25BA 25BB 25BC 25BD 25E0 25E2 25E5
+25EC 25ED 25F9 25FA 25FB 2684 2685 2689 26B1 26B2 26B3 2702 2704 2705 2709
+2717 2730 2757 2770 2782 2783 2786 2788 27A0 27B0 27B1 27B2 27BA 27BB 27E0
+27FB 2803 2805 2808 2820 2822 2838 2860 2882 28A0 28A1 28A3 28B0 28B8 28B9
+28BA 28BB 28E0 28E1 28E3 28F8 2B85 2B87 2B8C 2BB1 2BB3 2BB4 2BB5 2BB9 2C02
+2C05 2C09 2C18 2C19 2C31 2C33 2C34 2C38 2C39 2C3A 2C58 2C59 2C77 2C79 2D04
+2D05 2D18 2D19 2D30 2D39 2D58 2D59 2D79 2D83 2D98 2DB8 2DB9 2DD8 2DF9 2E03
+2E06 2E12 2F04 2F06 2F18 2F38 2F58
+"
+
+function nullmoth_show_notice() {
+  echo -e "\n${BOLD}${NULLMOTH_NOTICE_TITLE}${CL}\n"
+  echo "$NULLMOTH_NOTICE_BODY"
+  echo ""
+}
+
+# Echo the notice, then succeed only when the user accepted: either the
+# --accept-nullmoth-risk flag ($1 = yes) or typing the phrase on a terminal.
+function nullmoth_acknowledge() {
+  local flag="$1" reply
+  nullmoth_show_notice
+  [ "$flag" == "yes" ] && return 0
+  if [ ! -t 0 ]; then
+    echo "Nothing was changed. Re-run with --accept-nullmoth-risk to accept the notice above."
+    return 1
+  fi
+  echo "$NULLMOTH_ACK_LABEL"
+  read -r -p "Type '${NULLMOTH_ACK_PHRASE}' to continue: " reply
+  [ "$reply" == "$NULLMOTH_ACK_PHRASE" ] || { echo "Nothing was changed."; return 1; }
+}
+
+function nullmoth_supported_device() {
+  local id="$1" hex
+  (( id >= 0x1E00 )) && return 0
+  hex=$(printf '%04X' "$id")
+  [[ " ${NULLMOTH_SUPPORTED_IDS//$'\n'/ } " == *" $hex "* ]]
+}
+
+# macOS release from the description (written by this installer), then the VM name.
+function nullmoth_detect_macos() {
+  local cfg="$1" key hit
+  for key in description name; do
+    hit=$(sed -n "s/^${key}: //p" <<<"$cfg" | sed 's/%20/ /g' | grep -oiE 'ventura|sonoma|sequoia|tahoe' | head -1 || true)
+    [ -n "$hit" ] && { echo "${hit,,}"; return 0; }
+  done
+  return 1
+}
+
+# Mount the VM's ide0 (OpenCore) disk, run the shared patcher, unmount.
+# $1 vmid, $2 attach|detach, $3 AMFIPass zip (attach only).
+function nullmoth_oc_patch() {
+  local vmid="$1" action="$2" zip="${3:-}" vol path loop mnt rc=1 _i
+  vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
+  [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
+  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    partprobe "$loop" 2>/dev/null || true
+    [ -b "${loop}p1" ] && break
+    sleep 1
+  done
+  mnt=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "umount '$mnt' 2>/dev/null; losetup -d '$loop' 2>/dev/null; rmdir '$mnt' 2>/dev/null" INT TERM
+  if [ -b "${loop}p1" ] && mount "${loop}p1" "$mnt" 2>/dev/null; then
+    if AMFIPASS_ZIP="$zip" python3 - "$mnt/EFI/OC" "$action" <<'NULLMOTH_PY'
+"""Prepare (or restore) a VM's OpenCore config for the NullMoth NVIDIA driver.
+
+Usage: oc_patch.py <EFI/OC directory> attach|detach
+
+The Python CLI/TUI and the standalone bash installer run this exact text (the
+bash script embeds it verbatim; tests/test_nullmoth_parity.py diffs the two),
+so both entry points edit the disk identically. Standard library only.
+
+attach  Backs up config.plist to config.plist.pre-nullmoth (kept if it already
+        exists), adds AMFIPass.kext right after Lilu, appends the NullMoth
+        boot-args, blocks IONDRVSupport and makes sure the SMBIOS model is
+        MacPro7,1. Environment AMFIPASS_ZIP names the pinned, already
+        verified AMFIPass release zip to unpack into Kexts/.
+detach  Puts config.plist.pre-nullmoth back byte for byte and removes it,
+        together with the AMFIPass.kext directory.
+
+Exit codes: 0 ok, 2 refused (precondition not met, nothing changed),
+3 nothing to restore.
+"""
+import os
+import plistlib
+import shutil
+import sys
+import zipfile
+
+BACKUP = 'config.plist.pre-nullmoth'
+NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
+BOOT_ARGS = (
+    'nvfb=1', 'nvaccel=1', 'nvfbheads=4', '-nvkmsnosmooth',
+    'amfi_get_out_of_my_way=0x1', 'amfi=0x80', 'ipc_control_port_options=0',
+    'gfxrst=4',
+)
+REMOVE_ARGS = ('nv_disable=1', '-wegnoegpu')
+CSR_REQUIRED = 0x0A43
+IONDRV = 'com.apple.iokit.IONDRVSupport'
+KEXT = 'AMFIPass.kext'
+SMBIOS_MODEL = 'MacPro7,1'
+
+
+def refuse(message, code=2):
+    sys.stderr.write('ERROR: ' + message + '\n')
+    sys.exit(code)
+
+
+def merge_boot_args(current):
+    """Append the NullMoth args, drop the disabling ones, never duplicate."""
+    new_keys = set(a.split('=', 1)[0] for a in BOOT_ARGS)
+    kept = [
+        t for t in current.split()
+        if t not in REMOVE_ARGS and t.split('=', 1)[0] not in new_keys
+    ]
+    return ' '.join(kept + list(BOOT_ARGS))
+
+
+def check_preconditions(cfg):
+    add = cfg.get('NVRAM', {}).get('Add', {}).get(NVRAM_GUID, {})
+    csr = add.get('csr-active-config', b'')
+    value = int.from_bytes(bytes(csr), 'little')
+    if value & CSR_REQUIRED != CSR_REQUIRED:
+        refuse('csr-active-config is 0x%04X but NullMoth needs 0x%04X set. '
+               'This tool\'s default is 0x0F67; was the OpenCore disk edited?'
+               % (value, CSR_REQUIRED))
+    model = cfg.get('Misc', {}).get('Security', {}).get('SecureBootModel')
+    if model != 'Disabled':
+        refuse('SecureBootModel is %r but NullMoth needs Disabled.' % (model,))
+
+
+def add_kext_entry(cfg):
+    kexts = cfg.setdefault('Kernel', {}).setdefault('Add', [])
+    kexts[:] = [k for k in kexts if k.get('BundlePath') != KEXT]
+    pos = 0
+    for i, k in enumerate(kexts):
+        if k.get('BundlePath') == 'Lilu.kext':
+            pos = i + 1
+    kexts.insert(pos, {
+        'Arch': 'Any', 'BundlePath': KEXT,
+        'Comment': 'NullMoth: AMFI bypass', 'Enabled': True,
+        'ExecutablePath': 'Contents/MacOS/AMFIPass', 'MaxKernel': '',
+        'MinKernel': '', 'PlistPath': 'Contents/Info.plist',
+    })
+
+
+def add_block_entry(cfg):
+    block = cfg.setdefault('Kernel', {}).setdefault('Block', [])
+    block[:] = [b for b in block if b.get('Identifier') != IONDRV]
+    block.append({
+        'Arch': 'Any', 'Comment': 'NullMoth: keep IONDRVSupport out',
+        'Enabled': True, 'Identifier': IONDRV, 'MaxKernel': '',
+        'MinKernel': '', 'Strategy': 'Exclude',
+    })
+
+
+def unpack_kext(zip_path, oc_dir):
+    dest = os.path.join(oc_dir, 'Kexts')
+    with zipfile.ZipFile(zip_path) as z:
+        members = [i for i in z.infolist()
+                   if i.filename.startswith(KEXT + '/') and not i.is_dir()]
+        for info in members:
+            if info.filename.startswith('/') or '..' in info.filename.split('/'):
+                refuse('unsafe archive member: ' + info.filename)
+        if not members:
+            refuse('no ' + KEXT + ' inside ' + zip_path)
+        # Validated first: a refused archive must not remove a working kext.
+        shutil.rmtree(os.path.join(dest, KEXT), ignore_errors=True)
+        for info in members:
+            out = os.path.join(dest, info.filename)
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with z.open(info) as src, open(out, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+
+
+def write_plist(cfg, path):
+    with open(path, 'wb') as f:
+        plistlib.dump(cfg, f)
+    # plistlib emits self-closing tags that OpenCore's OcXmlLib rejects
+    with open(path, 'rb') as f:
+        data = f.read()
+    for tag in ('array', 'dict', 'data'):
+        data = data.replace(('<%s/>' % tag).encode(), ('<%s></%s>' % (tag, tag)).encode())
+    with open(path, 'wb') as f:
+        f.write(data)
+
+
+def attach(oc_dir):
+    path = os.path.join(oc_dir, 'config.plist')
+    backup = os.path.join(oc_dir, BACKUP)
+    with open(path, 'rb') as f:
+        cfg = plistlib.load(f)
+    check_preconditions(cfg)
+    zip_path = os.environ.get('AMFIPASS_ZIP', '')
+    if zip_path:
+        unpack_kext(zip_path, oc_dir)
+    elif not os.path.isdir(os.path.join(oc_dir, 'Kexts', KEXT)):
+        refuse('AMFIPASS_ZIP is not set and ' + KEXT + ' is not on the disk.')
+    if not os.path.exists(backup):
+        shutil.copyfile(path, backup)
+    add_kext_entry(cfg)
+    add_block_entry(cfg)
+    nv = cfg.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault(NVRAM_GUID, {})
+    nv['boot-args'] = merge_boot_args(nv.get('boot-args', ''))
+    generic = cfg.setdefault('PlatformInfo', {}).setdefault('Generic', {})
+    if generic.get('SystemProductName') != SMBIOS_MODEL:
+        generic['SystemProductName'] = SMBIOS_MODEL
+    write_plist(cfg, path)
+    sys.stderr.write('NullMoth OpenCore changes applied (backup: ' + BACKUP + ')\n')
+
+
+def detach(oc_dir):
+    path = os.path.join(oc_dir, 'config.plist')
+    backup = os.path.join(oc_dir, BACKUP)
+    if not os.path.exists(backup):
+        refuse('no ' + BACKUP + ' found, nothing to restore.', 3)
+    os.replace(backup, path)
+    shutil.rmtree(os.path.join(oc_dir, 'Kexts', KEXT), ignore_errors=True)
+    sys.stderr.write('OpenCore config restored from ' + BACKUP + '\n')
+
+
+def main(argv):
+    if len(argv) != 3 or argv[2] not in ('attach', 'detach'):
+        refuse('usage: oc_patch.py <EFI/OC dir> attach|detach', 64)
+    (attach if argv[2] == 'attach' else detach)(argv[1])
+
+
+if __name__ == '__main__':
+    main(sys.argv)
+NULLMOTH_PY
+then
+      rc=0
+    fi
+    sync
+    umount "$mnt" 2>/dev/null || true
+  fi
+  losetup -d "$loop" 2>/dev/null || true
+  rmdir "$mnt" 2>/dev/null || true
+  trap - INT TERM
+  return "$rc"
+}
+
+# Download the pinned AMFIPass zip into $1 and verify its SHA-256. A mismatch
+# is the tamper signal: stop. Prints the zip path.
+function nullmoth_fetch_amfipass() {
+  local dir="$1" dest
+  dest="$dir/${NULLMOTH_AMFIPASS_URL##*/}"
+  mkdir -p "$dir" || return 1
+  if ! { [ -f "$dest" ] && echo "$NULLMOTH_AMFIPASS_SHA256  $dest" | sha256sum -c --status 2>/dev/null; }; then
+    rm -f "$dest"
+    curl -fsSL --retry 3 --max-time 600 -o "$dest" "$NULLMOTH_AMFIPASS_URL" || { rm -f "$dest"; return 1; }
+    echo "$NULLMOTH_AMFIPASS_SHA256  $dest" | sha256sum -c --status || {
+      rm -f "$dest"
+      msg_error "Checksum mismatch for AMFIPass. The upstream file changed or the download was tampered with. Aborting."
+      exit 1
+    }
+  fi
+  echo "$dest"
+}
+
+function nullmoth_print_next_steps() {
+  echo -e "\n${INFO}${YW}NullMoth next steps:${CL}"
+  echo "  1. Start the VM. The desktop stays on the emulated display (vga std); apps get the NVIDIA GPU."
+  echo "  2. Download the NullMoth release yourself from ${NULLMOTH_URL}/releases and check it with"
+  echo "     shasum -a 256 -c SHA256SUMS, then run sudo ./install.sh in the guest."
+  echo "  3. Approve the extensions in System Settings > Privacy & Security, then reboot the guest."
+  echo "  4. Verify with: kmutil showloaded --list-only | grep nullmoth"
+  echo "  5. Turn off system sleep in the guest: sudo pmset -a sleep 0"
+  echo "  6. Escape hatch: add -nvoff to the boot-args, or run nvidia-detach on the host."
+  echo "  7. Warning: the NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore"
+  echo "     disk with this tool later (or running nvidia-detach) wipes those edits."
+}
+
+function nullmoth_print_findings() {
+  local line
+  for line in "${GPU_ISSUES[@]}"; do echo -e "${CROSS}${RD}REFUSED: ${line}${CL}"; done
+  for line in "${GPU_HINTS[@]}"; do echo "  $line"; done
+  for line in "${GPU_WARNS[@]}"; do echo -e "${INFO}${YW}WARN: ${line}${CL}"; done
+}
+
+# Shared VM preflight. $1 vmid; sets NM_CFG.
+function nullmoth_vm_check() {
+  local vmid="$1" status
+  NM_CFG=""
+  status=$(qm status "$vmid" 2>/dev/null) || { GPU_ISSUES+=("VM $vmid not found."); return 1; }
+  NM_CFG=$(qm config "$vmid" 2>/dev/null)
+  grep -q '^args:.*isa-applesmc' <<<"$NM_CFG" || \
+    GPU_ISSUES+=("VM $vmid is not a macOS VM made by this tool (no isa-applesmc in its args).")
+  if grep -q 'status: running' <<<"$status"; then
+    GPU_ISSUES+=("VM $vmid is running. Stop it first: qm stop $vmid")
+  fi
+}
+
+# `osx-proxmox-next.sh nvidia-attach <vmid> <bdf> [--accept-nullmoth-risk] [--dry-run] [--macos <release>]`
+function nvidia_attach() {
+  local vmid="${1:-}" gpu="${2:-}" accept=no dry=no macos="" bdf args zip new_args version line
+  shift 2 2>/dev/null || shift $#
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --accept-nullmoth-risk) accept=yes ;;
+      --dry-run) dry=yes ;;
+      --macos) macos="${2:-}"; shift ;;
+      *) msg_error "Unknown option: $1"; return 1 ;;
+    esac
+    shift
+  done
+  [[ "$vmid" =~ ^[0-9]+$ ]] && bdf=$(gpu_normalize_bdf "$gpu") || {
+    msg_error "Usage: osx-proxmox-next.sh nvidia-attach <vmid> <pci-address> [--accept-nullmoth-risk] [--dry-run]"; return 1; }
+  if [ "$dry" == "yes" ]; then nullmoth_show_notice; else nullmoth_acknowledge "$accept" || return 1; fi
+
+  nullmoth_vm_check "$vmid" || true
+  if [ -n "$NM_CFG" ]; then
+    version="${macos,,}"
+    [ -n "$version" ] || version=$(nullmoth_detect_macos "$NM_CFG") || version=""
+    if [ -z "$version" ]; then
+      GPU_ISSUES+=("Cannot tell which macOS this VM runs. Pass the version explicitly (--macos sequoia or tahoe).")
+    elif [ "$version" != "sequoia" ] && [ "$version" != "tahoe" ]; then
+      GPU_ISSUES+=("NullMoth needs macOS 15.5 Sequoia or newer (this VM is ${version}).")
+    elif [ "$version" == "sequoia" ]; then
+      GPU_WARNS+=("The guest must run macOS 15.5 or newer. Older Sequoia builds are not supported.")
+    fi
+    local n_before=${#GPU_ISSUES[@]}
+    gpu_check "$bdf" 4318 nullmoth_supported_device 'Device 10de:%s is older than Turing. NullMoth supports RTX 20 series and newer only.'
+    local w gpu_ok=yes
+    [ ${#GPU_ISSUES[@]} -eq $n_before ] || gpu_ok=no
+    for w in "${!GPU_WARNS[@]}"; do
+      [[ "${GPU_WARNS[$w]}" == BAR1* ]] && GPU_WARNS[$w]+=" NullMoth's one Proxmox report (nullmoth issue #275) ran at 256 MiB."
+    done
+    local hp0
+    hp0=$(sed -n 's/^hostpci0: //p' <<<"$NM_CFG")
+    if [ -n "$hp0" ] && ! grep -qE "^(host=)?(0000:)?${bdf#0000:}(\.[0-7])?(,|;|\$)" <<<"$hp0"; then
+      GPU_ISSUES+=("hostpci0 is already in use on this VM (${hp0}). Remove it first or run nvidia-detach.")
+    fi
+    if [ "$gpu_ok" == "yes" ]; then
+      while read -r line; do
+        [ -z "$line" ] && continue
+        if [ "${line#* }" == "running" ]; then
+          GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
+        else
+          GPU_WARNS+=("VM ${line%% *} also has this card assigned; only one can run at a time.")
+        fi
+      done < <(gpu_users "$vmid" "$bdf")
+    fi
+  fi
+  nullmoth_print_findings
+  args=$(sed -n 's/^args: //p' <<<"$NM_CFG")
+  new_args=$(gpu_with_mmio_arg "$args")
+  if [ "$dry" == "yes" ]; then
+    echo -e "\nDRY RUN - nothing is changed. Plan:"
+    echo "  1. Verify VM $vmid is stopped"
+    echo "  2. Prepare OpenCore for NullMoth on the ide0 disk (backup config.plist.pre-nullmoth, AMFIPass.kext, boot-args, IONDRVSupport block)"
+    echo "  3. qm set $vmid --hostpci0 ${bdf},pcie=0"
+    [ "$new_args" == "$args" ] || echo "  4. qm set $vmid --args '$new_args'"
+    [ ${#GPU_ISSUES[@]} -eq 0 ]; return
+  fi
+  [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
+
+  zip=$(nullmoth_fetch_amfipass "${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/cache}") || { msg_error "Could not download AMFIPass"; return 1; }
+  qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || { msg_error "VM $vmid is no longer stopped"; return 1; }
+  if nullmoth_oc_patch "$vmid" attach "$zip"; then
+    msg_ok "OpenCore prepared for NullMoth (backup: config.plist.pre-nullmoth)"
+  else
+    msg_error "Could not prepare the OpenCore disk; the VM was not changed"; return 1
+  fi
+  qm set "$vmid" --hostpci0 "${bdf},pcie=0" >/dev/null || { msg_error "qm set --hostpci0 failed"; return 1; }
+  msg_ok "Attached ${bdf} (all functions) as hostpci0"
+  if [ "$new_args" != "$args" ]; then
+    qm set "$vmid" --args "$new_args" >/dev/null || { msg_error "qm set --args failed"; return 1; }
+    msg_ok "Added the 64-bit MMIO window to args"
+  fi
+  nullmoth_print_next_steps
+}
+
+# `osx-proxmox-next.sh nvidia-detach <vmid> [--dry-run]`
+function nvidia_detach() {
+  local vmid="${1:-}" dry=no args new_args
+  shift 1 2>/dev/null || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=yes ;;
+      *) msg_error "Unknown option: $1"; return 1 ;;
+    esac
+    shift
+  done
+  [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh nvidia-detach <vmid> [--dry-run]"; return 1; }
+  nullmoth_vm_check "$vmid" || true
+  nullmoth_print_findings
+  [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
+  args=$(sed -n 's/^args: //p' <<<"$NM_CFG")
+  new_args=$(gpu_without_mmio_arg "$args")
+  if [ "$dry" == "yes" ]; then
+    echo -e "\nDRY RUN - nothing is changed. Plan:"
+    echo "  - Restore the previous OpenCore config from config.plist.pre-nullmoth (refuses if it is missing)"
+    grep -q '^hostpci0:' <<<"$NM_CFG" && echo "  - qm set $vmid --delete hostpci0"
+    [ "$new_args" == "$args" ] || echo "  - qm set $vmid --args '$new_args'"
+    return 0
+  fi
+  # OpenCore first: with no backup it refuses and the VM keeps its hostpci0 and args.
+  if nullmoth_oc_patch "$vmid" detach; then
+    msg_ok "Restored the previous OpenCore config"
+  else
+    msg_error "Could not restore the OpenCore config (no config.plist.pre-nullmoth on the ide0 disk?). The VM was not changed."; return 1
+  fi
+  if grep -q '^hostpci0:' <<<"$NM_CFG"; then
+    qm set "$vmid" --delete hostpci0 >/dev/null || { msg_error "qm set --delete hostpci0 failed"; return 1; }
+    msg_ok "Removed hostpci0"
+  fi
+  if [ "$new_args" != "$args" ]; then
+    if [ -n "$new_args" ]; then qm set "$vmid" --args "$new_args" >/dev/null; else qm set "$vmid" --delete args >/dev/null; fi || { msg_error "qm set --args failed"; return 1; }
+    msg_ok "Removed the 64-bit MMIO window from args"
+  fi
+}
+# ── NullMoth NVIDIA GPU attach (beta) end ──
+
 function unattended_install() {
   local vmid="$1" disk_gb="$2" t0 size reboots=0 last_picker last_change digest seen
   t0=$(date +%s)
@@ -1534,6 +2107,17 @@ if [ "${1:-}" == "post-install" ]; then
   check_root
   # In a condition so a failed patch exits 1 instead of tripping the ERR trap.
   if post_install "${2:-}"; then exit 0; else exit 1; fi
+fi
+
+# `osx-proxmox-next.sh nvidia-attach <vmid> <pci-address>` / `nvidia-detach <vmid>`:
+# BETA, NVIDIA GPU for the third-party NullMoth driver on an installed VM.
+if [ "${1:-}" == "nvidia-attach" ]; then
+  check_root
+  if nvidia_attach "${@:2}"; then exit 0; else exit 1; fi
+fi
+if [ "${1:-}" == "nvidia-detach" ]; then
+  check_root
+  if nvidia_detach "${@:2}"; then exit 0; else exit 1; fi
 fi
 
 if whiptail --backtitle "OSX Proxmox Next" --title "macOS VM" --yesno "This will create a new macOS VM on Proxmox.\n\nRequirements:\n  - Intel or AMD CPU with VT-x/AMD-V\n  - 64GB+ free disk space\n  - Internet access (downloads ~1GB)\n\nProceed?" 14 58; then

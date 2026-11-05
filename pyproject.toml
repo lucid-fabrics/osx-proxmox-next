@@ -61,6 +61,7 @@ osx_proxmox_next = [
     "data/opencore/*",
     "data/opencore/ACPI/*",
     "data/opencore/MCEReporterDisabler.kext/Contents/*",
+    "data/nullmoth/*",
 ]
 
 [tool.pytest.ini_options]

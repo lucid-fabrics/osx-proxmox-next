@@ -193,3 +193,26 @@ Input:focus { border: tall #2ec27e; background: #1a2c3f; }
     margin-top: 1;
 }
 .edit_result_fail { border: heavy #d44f4f; }
+
+#nv_notice_title { color: #e6a817; margin-top: 1; }
+#nv_notice { margin-bottom: 1; }
+#nv_vmid_label { color: #9fc6e8; }
+#nv_vmid { width: 30; }
+#nv_gpu_select { width: 60; }
+#nv_macos_select { width: 60; margin-top: 1; }
+
+#nv_log {
+    background: #0d1722;
+    border: tall #1f4f7a;
+    padding: 1;
+    height: 8;
+    overflow: auto;
+}
+
+#nv_result {
+    border: heavy #2ec27e;
+    padding: 1;
+    height: auto;
+    margin-top: 1;
+}
+.nv_result_fail { border: heavy #d44f4f; }

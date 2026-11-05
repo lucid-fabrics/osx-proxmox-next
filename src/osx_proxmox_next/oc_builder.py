@@ -36,8 +36,10 @@ log = logging.getLogger(__name__)
 __all__ = [
     "OC_COMPONENTS",
     "ChecksumError",
+    "AMFIPASS",
     "Component",
     "build_opencore_iso",
+    "ensure_amfipass",
     "ensure_opencore_iso",
 ]
 
@@ -111,6 +113,19 @@ OC_COMPONENTS: dict[str, Component] = {
         "397c676372794bf0b63ac6fa5e3b1924caafad7da28f82d3ecad996eea5842ea",
     ),
 }
+
+# AMFIPass is not part of the base image: only the opt-in NullMoth NVIDIA
+# attach (nullmoth.py) adds it. Acidanthera does not publish it; the build
+# Dortania's OpenCore Legacy Patcher ships is pinned by commit, and the same
+# zip (same SHA-256) is fetched by an independent NullMoth VM setup. Mirrored
+# in the bash installer (NULLMOTH_AMFIPASS_*); tests diff both.
+_OCLP_COMMIT = "76516394fddb7ce4526ccbcc5b806795c30e9a89"
+AMFIPASS = Component(
+    "1.4.1",
+    "https://github.com/dortania/OpenCore-Legacy-Patcher/raw/"
+    f"{_OCLP_COMMIT}/payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip",
+    "07b266145906db41f4b13a7938fbb173ea28888cc1fa65f84417f8820adc961e",
+)
 
 # Kexts extracted straight from their release zip root into EFI/OC/Kexts.
 _ROOT_KEXTS = ("Lilu", "WhateverGreen", "AppleALC", "CryptexFixup", "RestrictEvents")
@@ -364,3 +379,12 @@ def ensure_opencore_iso(
     except (DownloadError, OSError) as exc:
         log.warning("Local OpenCore assembly failed (%s); falling back to prebuilt ISO", exc)
         return download_opencore(macos, dest_dir, on_progress, force=force)
+
+
+def ensure_amfipass(dest_dir: Path, on_progress: ProgressCallback = None) -> Path:
+    """Return the verified AMFIPass release zip, downloading it when missing.
+
+    A checksum mismatch raises ChecksumError and is never retried or
+    downgraded, same as the base image components."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return _fetch_component("AMFIPass", AMFIPASS, dest_dir, on_progress)

@@ -118,17 +118,20 @@ def _check_iommu(cmdline_path: Path | None = None) -> PreflightCheck:
     )
 
 
+def has_initcall_blacklist(cmdline_path: Path | None = None) -> bool:
+    """True when the kernel cmdline carries initcall_blacklist=sysfb_init."""
+    cmdline = cmdline_path or Path("/proc/cmdline")
+    return cmdline.exists() and "initcall_blacklist=sysfb_init" in cmdline.read_text()
+
+
 def _check_initcall_blacklist(cmdline_path: Path | None = None) -> PreflightCheck:
     """Check for initcall_blacklist=sysfb_init - informational (PVE 8+ GPU passthrough)."""
-    cmdline = cmdline_path or Path("/proc/cmdline")
-    if cmdline.exists():
-        content = cmdline.read_text()
-        if "initcall_blacklist=sysfb_init" in content:
-            return PreflightCheck(
-                name="initcall_blacklist",
-                ok=True,
-                details="sysfb_init blacklisted in kernel cmdline (PVE 8+ GPU passthrough)",
-            )
+    if has_initcall_blacklist(cmdline_path):
+        return PreflightCheck(
+            name="initcall_blacklist",
+            ok=True,
+            details="sysfb_init blacklisted in kernel cmdline (PVE 8+ GPU passthrough)",
+        )
     return PreflightCheck(
         name="initcall_blacklist",
         ok=True,

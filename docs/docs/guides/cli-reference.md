@@ -367,3 +367,12 @@ Sample output (with failures):
 | 7 | Edit failed |
 | 8 | Clone failed |
 | 9 | Post-install failed |
+
+## nvidia-attach / nvidia-detach (Beta)
+
+```bash
+osx-next-cli nvidia-attach <vmid> --gpu <pci-address> --accept-nullmoth-risk [--dry-run] [--macos sequoia|tahoe]
+osx-next-cli nvidia-detach <vmid> [--dry-run]
+```
+
+Attach an NVIDIA Turing-or-newer GPU to a stopped macOS VM and prepare OpenCore for the third-party NullMoth driver, or undo it. Without `--accept-nullmoth-risk` nothing changes; `--dry-run` prints the preflight result and the plan without it. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).

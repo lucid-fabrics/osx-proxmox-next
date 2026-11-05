@@ -22,23 +22,18 @@ class ManageModeMixin:
     """Mixin providing the Manage Mode tab methods for NextApp."""
 
     def _toggle_mode(self, mode: str) -> None:
-        is_manage = mode == "manage"
-        self.state.manage_mode = is_manage  # type: ignore[attr-defined]
-        create_btn = self.query_one("#mode_create", Button)
-        manage_btn = self.query_one("#mode_manage", Button)
-        create_panel = self.query_one("#create_panel")
-        manage_panel = self.query_one("#manage_panel")
-        if is_manage:
-            create_panel.add_class("hidden")
-            manage_panel.remove_class("hidden")
-            create_btn.remove_class("mode_active")
-            manage_btn.add_class("mode_active")
+        self.state.manage_mode = mode == "manage"  # type: ignore[attr-defined]
+        for name in ("create", "manage", "nvidia"):
+            panel = self.query_one(f"#{name}_panel")
+            button = self.query_one(f"#mode_{name}", Button)
+            if name == mode:
+                panel.remove_class("hidden")
+                button.add_class("mode_active")
+            else:
+                panel.add_class("hidden")
+                button.remove_class("mode_active")
+        if mode == "manage":
             self._refresh_vm_list()
-        else:
-            manage_panel.add_class("hidden")
-            create_panel.remove_class("hidden")
-            manage_btn.remove_class("mode_active")
-            create_btn.add_class("mode_active")
 
     def _refresh_vm_list(self) -> None:
         Thread(target=self._vm_list_worker, daemon=True).start()

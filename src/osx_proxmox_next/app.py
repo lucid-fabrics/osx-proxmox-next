@@ -10,11 +10,12 @@ log = logging.getLogger(__name__)
 from textual.app import App, ComposeResult
 from textual.containers import Container
 from textual.reactive import reactive
-from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
+from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Select, Static
 
 from . import __version__
 from ._edit_mixin import EditModeMixin
 from ._manage_mixin import ManageModeMixin
+from ._nvidia_mixin import NvidiaModeMixin
 from ._wizard_mixin import WizardStepsMixin
 from .assets import required_assets
 from .defaults import (
@@ -49,7 +50,7 @@ from .services import (
 )
 
 
-class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
+class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, NvidiaModeMixin, App):
     CSS_PATH = Path(__file__).with_suffix(".tcss")
 
     BINDINGS = [
@@ -130,9 +131,13 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
                 "install_btn": self._run_live_install,
                 "mode_create": lambda: self._toggle_mode("create"),
                 "mode_manage": lambda: self._toggle_mode("manage"),
+                "mode_nvidia": lambda: self._toggle_mode("nvidia"),
                 "manage_refresh_btn": self._refresh_vm_list,
                 "manage_destroy_btn": self._run_destroy,
                 "edit_apply_btn": self._run_edit,
+                "nv_detect_btn": self._nv_detect,
+                "nv_apply_btn": self._run_nv_apply,
+                "nv_detach_btn": self._run_nv_detach,
             }
             handler = handlers.get(bid)
             if handler:
@@ -146,8 +151,16 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
             self._validate_manage_vmid()
         if event.input.id in {"edit_vmid", "edit_name", "edit_cores", "edit_memory", "edit_bridge", "edit_disk_add"}:
             self._validate_edit_form()
+        if event.input.id == "nv_vmid":
+            self._validate_nv_form()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "nv_gpu_select":
+            self._validate_nv_form()
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id == "nv_ack_cb":
+            self._validate_nv_form()
         if event.checkbox.id == "manage_purge_cb":
             self._toggle_purge()
         if event.checkbox.id == "edit_start_after_cb":
