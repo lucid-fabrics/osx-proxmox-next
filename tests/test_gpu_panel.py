@@ -13,6 +13,7 @@ from nullmoth_fakes import MAC_CFG
 from osx_proxmox_next import _gpu_mixin, gpu_setup
 from osx_proxmox_next.app import NextApp
 from osx_proxmox_next.executor import ApplyResult, StepResult
+from osx_proxmox_next.gpu_setup import NVIDIA_DISPLAY_NOTE
 from test_app_wizard import _advance_to_step
 from test_gpu_setup import ANSWERS, SEQUOIA, Env, ready  # noqa: F401
 
@@ -241,11 +242,12 @@ def test_nvidia_needs_a_typed_acknowledgement_that_never_carries_over(tmp_path):
             await settle(pilot, lambda: "NullMoth" in text(app, "#gp_body"))
             app.query_one("#gp_gpu_select", Select).value = "0000:01:00"
             await pilot.pause()
-            assert shown(app, "#gp_notice") and shown(app, "#gp_ack_in") and shown(app, "#gp_display_radio")
+            assert shown(app, "#gp_notice") and shown(app, "#gp_ack_in")
+            # NVIDIA has no display choice: no radio set, one note instead
+            assert not shown(app, "#gp_display_radio") and not shown(app, "#gp_display_label")
+            assert shown(app, "#gp_display_note") and text(app, "#gp_display_note") == NVIDIA_DISPLAY_NOTE
+            assert "Proxmox console goes black" in NVIDIA_DISPLAY_NOTE and "dummy plug" in NVIDIA_DISPLAY_NOTE
             assert not any(isinstance(w, Checkbox) and w.id in ("gp_ack_cb", "gp_confirm_cb") for w in app.query(Checkbox))
-            radio = app.query_one("#gp_display_radio", RadioSet)
-            assert app.query_one("#gp_display_0").disabled and not app.query_one("#gp_display_1").disabled
-            assert radio.pressed_button.id == "gp_display_1" and "Not available for NVIDIA" in text(app, "#gp_display_desc_0")
             assert app.query_one("#gp_primary_btn", Button).disabled
             pick_vm(app, "100")
             app.query_one("#gp_ack_in", Input).value = "i accept"  # exact phrase only
@@ -351,10 +353,9 @@ def test_the_display_choice_is_two_full_radio_options(tmp_path):
             assert [str(app.query_one(f"#gp_display_{i}").label) for i in (0, 1)] == [
                 "Monitor on the GPU", "Keep the Proxmox console"]
             assert [text(app, f"#gp_display_desc_{i}").strip() for i in (0, 1)] == [
-                "Best performance. Plug a screen into the card. The Proxmox console goes blank.",
-                "The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: "
-                "the console goes black once the driver loads, so connect a monitor or a dummy plug to the card."]
-            assert not app.query_one("#gp_display_0").disabled
+                "Best performance. Plug a screen into the card; the Proxmox console goes blank.",
+                "The card speeds up apps and you keep using the web console."]
+            assert not app.query_one("#gp_display_0").disabled and not shown(app, "#gp_display_note")
             with pytest.raises(NoMatches):
                 app.query_one("#gp_display_select")  # the truncated dropdown is gone
             app.query_one("#gp_display_1").value = True

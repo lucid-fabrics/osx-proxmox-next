@@ -6,21 +6,21 @@ from collections.abc import Callable
 from typing import Any
 
 from rich.text import Text
-from textual.widgets import Button, Checkbox, Input, OptionList, RadioButton, RadioSet, Select, Static
+from textual.widgets import Button, Checkbox, Input, OptionList, RadioSet, Select, Static
 from textual.widgets.option_list import Option
 
 from . import bios_guide, host_setup
 from .gpu_setup import DISPLAY_OPTIONS, TROUBLESHOOTING, CardChanged, Session, VmOption, card_text
 from . import nullmoth
 from .nullmoth import ACK_PHRASE
-from .screens.gpu_panel import CONFIRM_PHRASE, display_description
+from .screens.gpu_panel import CONFIRM_PHRASE
 
 log = logging.getLogger(__name__)
 
 __all__ = ["GpuSetupMixin", "pack_fields", "qr_spans"]
 
 _ALL_INPUTS = ("gp_gpu_select", "gp_vm_label", "gp_vm_list", "gp_display_label", "gp_display_radio",
-               "gp_notice_title", "gp_notice", "gp_ack_label", "gp_ack_in", "gp_confirm_label", "gp_confirm_in",
+               "gp_display_note", "gp_notice_title", "gp_notice", "gp_ack_label", "gp_ack_in", "gp_confirm_label", "gp_confirm_in",
                "gp_stop_cb")
 _LATER, _CREATE = "later", "create"
 
@@ -58,6 +58,7 @@ class GpuSetupMixin:
     _gp_vm_opts: list[VmOption] = []
     _gp_armed: str | None = None
     _gp_fix = ""
+    _gp_title = ""
 
     # ── helpers ──────────────────────────────────────────────────────
 
@@ -87,6 +88,11 @@ class GpuSetupMixin:
         s = self._gp_session()
         self._gp_armed = None
         q("#gp_rail", Static).update(s.rail())
+        if self._gp_title != title:  # a new screen starts at its top, not where the last one was scrolled to
+            self._gp_title = title
+            panel = q("#gpu_panel")
+            panel.scroll_home(animate=False)
+            self.call_after_refresh(panel.scroll_home, animate=False)  # type: ignore[attr-defined]
         q("#gp_title", Static).update(title)
         q("#gp_body", Static).update(body)
         prim = q("#gp_primary_btn", Button)
@@ -234,19 +240,10 @@ class GpuSetupMixin:
             if card is not None and self._gp_vm_list_vendor != card.vendor:
                 self._gp_fill_vm_list(self._gp_vm_pool[card.vendor], extras=True)
                 self._gp_vm_list_vendor = card.vendor
-            first = self.query_one("#gp_display_0", RadioButton)  # type: ignore[attr-defined]
-            second = self.query_one("#gp_display_1", RadioButton)  # type: ignore[attr-defined]
-            # NVIDIA works with the console display only (the notice says why); the first choice is greyed out.
-            first.disabled = nvidia
-            self.query_one("#gp_display_desc_0", Static).update(display_description(  # type: ignore[attr-defined]
-                "Not available for NVIDIA cards. The Proxmox console goes black once the NullMoth driver loads, so "
-                "turn on Remote Login and Screen Sharing in macOS first and connect a monitor or dummy plug to the card."
-                if nvidia else DISPLAY_OPTIONS[0][2]))
-            if nvidia:
-                second.value = True
-            shown = ["gp_gpu_select", "gp_vm_label", "gp_vm_list", "gp_display_label", "gp_display_radio"]
-            if nvidia:
-                shown += ["gp_notice_title", "gp_notice", "gp_ack_label", "gp_ack_in"]
+            shown = ["gp_gpu_select", "gp_vm_label", "gp_vm_list"]
+            # AMD picks where macOS shows up; NVIDIA has no choice, so it gets a note and the notice instead.
+            shown += ["gp_display_note", "gp_notice_title", "gp_notice", "gp_ack_label", "gp_ack_in"] if nvidia \
+                else ["gp_display_label", "gp_display_radio"]
             self._gp_show(*shown)
             acked = self.query_one("#gp_ack_in", Input).value.strip() == ACK_PHRASE  # type: ignore[attr-defined]
             choice = self._gp_vm_choice()
@@ -324,6 +321,8 @@ class GpuSetupMixin:
         radio = self.query_one("#gp_display_radio", RadioSet)  # type: ignore[attr-defined]
         pressed = radio.pressed_button
         display = DISPLAY_OPTIONS[int(pressed.id.rsplit("_", 1)[1]) if pressed is not None and pressed.id else 0][0]
+        if card.vendor == "nvidia":
+            display = "console"
         ack = self.query_one("#gp_ack_in", Input).value.strip() == ACK_PHRASE  # type: ignore[attr-defined]
         vmid = int(choice) if choice and choice.isdigit() else None
         if card.stopped_users and not self._gp_confirm_click(
@@ -351,9 +350,11 @@ class GpuSetupMixin:
         self._gp_show()
         self._gp_set("Step 3: BIOS", "Checking the BIOS settings...", "Re-check", primary_disabled=True)
 
+        width = self._gp_width()
+
         def work() -> Any:
             items = s.bios_items()
-            return items, s.bios_card(items), s.running_vms(), s.checked_fields(items)
+            return items, s.bios_card(items, max_width=width), s.running_vms(), s.checked_fields(items)
 
         self._gp_async(work, self._gp_bios_done)
 
@@ -361,7 +362,7 @@ class GpuSetupMixin:
         s = self._gp_session()
         items, card, running, checked = result
         if card is None:
-            s.complete(3, skipped=True)
+            s.complete(3)  # checked and fine: done, not skipped ("I'll do it later" is the only skip)
             self._gp_render()
             return
         self._gp_card = card
@@ -402,7 +403,9 @@ class GpuSetupMixin:
         lines = []
         for key, prefix in (("refusals", "Refused: "), ("hard_warnings", "HARD WARNING: "), ("warnings", "Warning: "),
                             ("notes", "Note: "), ("manual", "Manual step: "), ("skipped", "OK: ")):
-            lines += [prefix + t for t in plan[key]]
+            # Typing the phrase overrides the only-display-adapter stop, so that one is "Careful", not "Refused".
+            lines += [("Careful: " if key == "refusals" and "only display adapter" in t else prefix) + t
+                      for t in plan[key]]
         if not s.plan_needs_work(plan) and not plan["refusals"] and s.state.get("verify_retry"):
             s.state["verify_retry"] = False
             s.save()

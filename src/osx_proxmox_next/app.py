@@ -52,6 +52,7 @@ from .services import (
 
 class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, GpuSetupMixin, App):
     CSS_PATH = Path(__file__).with_suffix(".tcss")
+    TITLE = "osx-proxmox-next"
 
     BINDINGS = [
         ("q", "quit", "Quit"),

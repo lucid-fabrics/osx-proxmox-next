@@ -3560,15 +3560,19 @@ def order_note(failing_keys, optional_rebar=False):
     return "Do these in this order: " + ", then ".join(parts) + "." if len(parts) > 1 else ""
 
 
-def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup", optional_rebar=False, qr=None):
+def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup", optional_rebar=False, qr=None,
+               max_width=None):
     """ASCII-safe photo card (plain text). *failing* are the entries from check_items with ok false.
 
-    *qr* (lines of the guide's QR code) goes inside the frame beside the steps, so one photo of the
-    screen holds the steps and the code."""
+    *qr* (lines of the guide's QR code) goes inside the frame, so one photo of the screen holds the steps
+    and the code. It sits beside the steps when the frame fits in *max_width* columns (no limit when
+    None), and under the steps when it does not."""
     qr = list(qr or [])
     qr_w = max((len(q) for q in qr), default=0)
-    text_w = WIDTH - 4
-    inner = text_w + (qr_w + QR_GAP if qr else 0)
+    width = WIDTH if max_width is None else max(48, min(WIDTH, max_width))
+    text_w = width - 4
+    beside = bool(qr) and (max_width is None or text_w + QR_GAP + qr_w + 4 <= max_width)
+    inner = text_w + (qr_w + QR_GAP if beside else 0)
     ven = data["vendors"].get(vendor)
     body = ["BIOS STEPS FOR THIS SERVER", board_title(facts), "",
             "Take a photo of this screen, then reboot into the BIOS.", ""]
@@ -3605,7 +3609,9 @@ def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup"
         body += _wrap(note, text_w, "")
     body += ["", "Back in Proxmox, run:", "   " + resume_cmd, "", "Same steps with pictures on your phone:",
              "   " + re.sub(r"^https?://", "", doc_url(data, vendor))]
-    if qr:
+    if qr and not beside:
+        body += [""] + qr
+    elif qr:
         while len(body) < start + len(qr):
             body.append("")
         for i, q in enumerate(qr):
@@ -3679,7 +3685,7 @@ def main(argv):
         vendor = match_vendor(facts, data)
         rebar = bool(payload.get("target")) and rebar_capable(root, payload["target"]["bdf"])
         text = build_card(failing, facts, data, vendor, payload.get("resume_cmd") or "osx-next-cli gpu-setup", rebar,
-                          payload.get("qr"))
+                          payload.get("qr"), payload.get("max_width"))
         if payload.get("save"):
             save_card(text, root)
         print(text)
@@ -5417,7 +5423,25 @@ function gpu_status() {
 }
 
 function gpu_summary() {
-  gpu_state | gpu_json '"Setup summary\n" + ("  Card: %s at %s\n" % (d["gpu"]["name"], d["gpu"]["bdf"]) if d["gpu"] else "") + "\n".join("  Changed: " + c["path"] for c in d["host_changes"] if not c.get("reverted")) + "\n  Undo everything with: gpu-setup --undo"'
+  local vm vmname=""
+  vm=$(gpu_state_get 'd["vm"] if d["vm"] is not None else ""')
+  [ -z "$vm" ] || vmname=$(qm config "$vm" 2>/dev/null | sed -n 's/^name: //p' | head -n1)
+  gpu_state | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+vm, vmname, doc = sys.argv[1:4]
+out = ["Setup summary"]
+if d["gpu"]:
+    out.append("  Card: %s at %s" % (d["gpu"]["name"], d["gpu"]["bdf"]))
+if vm:
+    out.append("  VM: " + vm + (" " + vmname if vmname else ""))
+out += ["  Changed: " + c["path"] for c in d["host_changes"] if not c.get("reverted")]
+if d["gpu"]:
+    out += ["", "Next, in macOS: install the NullMoth driver yourself (guide: " + doc + "). We do not ship or support it."
+            if d["gpu"]["vendor"] == "nvidia" else "Next: start the VM. macOS uses the card with its own driver.", ""]
+out.append("  Undo everything with: gpu-setup --undo")
+print("\n".join(out))
+' "$vm" "$vmname" "${GPU_DOCS_ROOT}nvidia-nullmoth"
 }
 
 # Steps 1 and 2: scan and choose. $1 vm $2 gpu $3 display $4 accept
@@ -5469,7 +5493,7 @@ function gpu_step_choose() {
     if gpu_use_ui; then
       display=$(whiptail --title "Display" --menu "Where do you want to see macOS?" 14 90 2 \
         gpu "Monitor on the GPU. Best performance. Plug a screen into the card; the Proxmox console goes blank." \
-        console "Keep the Proxmox console. The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: the console goes black once the driver loads, so connect a monitor or a dummy plug to the card." 3>&1 1>&2 2>&3) || return 0
+        console "Keep the Proxmox console. The card speeds up apps and you keep using the web console." 3>&1 1>&2 2>&3) || return 0
     fi
   fi
   if [ -z "$want_vm" ] && gpu_use_ui; then
@@ -5491,6 +5515,7 @@ function gpu_step_choose() {
   fi
   if [ "$vname" == "nvidia" ]; then
     display="console"
+    gpu_say "NVIDIA: the Proxmox console goes black once the driver loads. Turn on Remote Login and Screen Sharing first, and plug a monitor or a dummy plug into the card."
     nullmoth_acknowledge "$accept" || return 2
   fi
   if [ ${#issues[@]} -gt 0 ]; then
@@ -5536,9 +5561,13 @@ GPU_ITEMS_PY
   if command -v qrencode >/dev/null 2>&1; then
     qr=$(qrencode -t UTF8 -m 2 -o - "$url" 2>/dev/null | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))') || qr='[]'
   fi
-  card=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1]), "target": json.loads(sys.argv[2]), "items": json.loads(sys.argv[3]), "save": True, "resume_cmd": sys.argv[4], "qr": json.loads(sys.argv[5])}))' "$facts" "$target" "$items" "$GPU_RESUME_CMD" "$qr" | gpu_bios card) || {
+  # The QR code sits beside the steps only when the frame fits the screen (the dialog box is 100 wide), else under them.
+  local cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  if gpu_use_ui && [ "$cols" -gt 96 ]; then cols=96; fi
+  card=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1]), "target": json.loads(sys.argv[2]), "items": json.loads(sys.argv[3]), "save": True, "resume_cmd": sys.argv[4], "qr": json.loads(sys.argv[5]), "max_width": int(sys.argv[6])}))' "$facts" "$target" "$items" "$GPU_RESUME_CMD" "$qr" "$((cols - 1))" | gpu_bios card) || {
     gpu_say "Nothing to change in the BIOS."
-    gpu_step_complete 3 true
+    gpu_step_complete 3
     return 100
   }
   gpu_ui_text "BIOS steps for this server (take a photo)" "$card"
@@ -5568,7 +5597,7 @@ function gpu_step_host() {
   plan=$(python3 -c 'import json,sys; print(json.dumps({"target": json.loads(sys.argv[1]), "opts": {}}))' "$target" | gpu_host plan) || return 1
   refusals=$(gpu_json '"\n".join(d["refusals"])' <<<"$plan")
   if [ -n "$refusals" ]; then
-    gpu_say "REFUSED: $refusals"
+    if grep -q "only display adapter" <<<"$refusals"; then gpu_say "Careful: $refusals"; else gpu_say "REFUSED: $refusals"; fi
     if grep -q "only display adapter" <<<"$refusals" && gpu_ui_typed "This card is the only display the host has." "I understand"; then
       nc=True
       plan=$(python3 -c 'import json,sys; print(json.dumps({"target": json.loads(sys.argv[1]), "opts": {"allow_no_console": True}}))' "$target" | gpu_host plan) || return 1

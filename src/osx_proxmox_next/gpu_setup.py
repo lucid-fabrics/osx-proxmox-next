@@ -36,14 +36,18 @@ __all__ = [
 RESUME_CMD = "osx-next-cli gpu-setup"
 # (value, label, one-line description) of the AMD display choice, shared by the CLI and the TUI
 DISPLAY_OPTIONS = (
-    ("gpu", "Monitor on the GPU", "Best performance. Plug a screen into the card. The Proxmox console goes blank."),
-    ("console", "Keep the Proxmox console",
-     "The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: "
-     "the console goes black once the driver loads, so connect a monitor or a dummy plug to the card."),
+    ("gpu", "Monitor on the GPU", "Best performance. Plug a screen into the card; the Proxmox console goes blank."),
+    ("console", "Keep the Proxmox console", "The card speeds up apps and you keep using the web console."),
 )
+# NVIDIA has no such choice (the console always goes black), so it gets this note instead
+NVIDIA_DISPLAY_NOTE = ("NVIDIA: the Proxmox console goes black once the driver loads. Turn on Remote Login and Screen "
+                       "Sharing first, and plug a monitor or a dummy plug into the card.")
 DOCS_ROOT = "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/"
 NULLMOTH_DOC = DOCS_ROOT + "nvidia-nullmoth"
 SUPPORTED_DOC = DOCS_ROOT + "gpu-passthrough#supported-cards"
+NEXT_NVIDIA = (f"Next, in macOS: install the NullMoth driver yourself (guide: {NULLMOTH_DOC}). "
+               "We do not ship or support it.")
+NEXT_AMD = "Next: start the VM. macOS uses the card with its own driver."
 _PRE_TURING = ("Older than the RTX 20 series: NVIDIA's macOS drivers stopped at High Sierra and NullMoth "
                "needs Turing or newer.")
 _BLACK_BOX = {
@@ -448,10 +452,11 @@ class Session:
     def checked_line(self, items: list[dict]) -> str:
         return "   ".join(self.checked_fields(items))
 
-    def bios_card(self, items: list[dict], save: bool = True) -> dict | None:
+    def bios_card(self, items: list[dict], save: bool = True, max_width: int | None = None) -> dict | None:
         """The photo card for the failing items, or None when nothing needs the BIOS.
 
-        The QR code of the guide sits inside the card, so one photo holds the steps and the code."""
+        The QR code of the guide sits inside the card, so one photo holds the steps and the code. It goes
+        under the steps when the card is wider than *max_width* columns would allow with the code beside them."""
         failing = [i for i in items if not i["ok"]]
         if not failing:
             return None
@@ -461,7 +466,7 @@ class Session:
         rebar = bios_guide.rebar_capable(self.root, self.state["gpu"]["bdf"])
         url = bios_guide.doc_url(data, vendor)
         qr = bios_guide.qr_lines(url)
-        text = bios_guide.build_card(failing, facts, data, vendor, self.state["resume_cmd"], rebar, qr)
+        text = bios_guide.build_card(failing, facts, data, vendor, self.state["resume_cmd"], rebar, qr, max_width)
         path = bios_guide.save_card(text, self.root) if save else ""
         self.state["bios_saved"] = bool(path)
         return {"text": text, "path": path, "url": url, "qr": qr, "vendor": vendor,
@@ -604,16 +609,30 @@ class Session:
         host_setup.clear_login_hint(self.root)
         self.save()
 
+    def _vm_name_suffix(self, vmid: int) -> str:
+        """" <name>" of VM *vmid* from the macOS VM list, or "" when it is not listed."""
+        try:
+            lines = self.macos_vms()[1:]
+        except Exception:  # noqa: BLE001
+            return ""
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == str(vmid):
+                return " " + parts[1]
+        return ""
+
     def summary(self) -> str:
         lines = ["Setup summary"]
         gpu_info = self.state["gpu"]
         if gpu_info:
             lines.append(f"  Card: {gpu_info['name']} at {gpu_info['bdf']}")
         if self.state["vm"] is not None:
-            lines.append(f"  VM: {self.state['vm']}")
+            lines.append(f"  VM: {self.state['vm']}" + self._vm_name_suffix(self.state["vm"]))
         changes = [c for c in self.state["host_changes"] if not c.get("reverted")]
         for c in changes:
             lines.append(f"  Changed: {c['path']}" + (f" (backup: {c['backup']})" if c["backup"] else " (new file)"))
+        if gpu_info:
+            lines += ["", NEXT_NVIDIA if gpu_info["vendor"] == "nvidia" else NEXT_AMD, ""]
         lines.append("  Undo everything with: gpu-setup --undo")
         return "\n".join(lines)
 

@@ -4,12 +4,20 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Checkbox, Input, OptionList, RadioButton, RadioSet, Select, Static
 
-from ..gpu_setup import DISPLAY_OPTIONS
+from ..gpu_setup import DISPLAY_OPTIONS, NVIDIA_DISPLAY_NOTE
 from ..nullmoth import ACK_LABEL, ACK_PHRASE, NOTICE_BODY, NOTICE_TITLE
 
 __all__ = ["compose_gpu_panel"]
 
 CONFIRM_PHRASE = "I understand"
+
+
+class GpuButton(Button):
+    """A button whose width follows its label: Textual caches the width, so a new label needs a new layout."""
+
+    def watch_label(self, *_args: object) -> None:
+        if self.is_attached:
+            self.refresh(layout=True)
 
 
 def display_description(description: str) -> str:
@@ -34,6 +42,7 @@ def compose_gpu_panel() -> ComposeResult:
             for idx, (_value, label, desc) in enumerate(DISPLAY_OPTIONS):
                 yield RadioButton(label, value=idx == 0, id=f"gp_display_{idx}")
                 yield Static(display_description(desc), id=f"gp_display_desc_{idx}", classes="gp_desc")
+        yield Static(NVIDIA_DISPLAY_NOTE, id="gp_display_note", classes="hidden hint")
         yield Static(NOTICE_TITLE, id="gp_notice_title", classes="hidden")
         yield Static(NOTICE_BODY, id="gp_notice", classes="hidden hint")
         yield Static(f"{ACK_LABEL} Type '{ACK_PHRASE}' to confirm:", id="gp_ack_label", classes="hidden",
@@ -45,9 +54,9 @@ def compose_gpu_panel() -> ComposeResult:
         yield Checkbox("Stop the VM first if it is running", value=False, id="gp_stop_cb", classes="hidden")
         yield Static("", id="gp_result", classes="hidden", markup=False)
         with Horizontal(classes="action_row"):
-            yield Button("Scan", id="gp_primary_btn")
-            yield Button("", id="gp_secondary_btn", classes="hidden gp_secondary")
-            yield Button("", id="gp_tertiary_btn", classes="hidden gp_secondary")
-            yield Button("Back", id="gp_back_btn", classes="hidden gp_secondary")
-            yield Button("Stop VM", id="gp_stop_btn", classes="hidden gp_secondary")
-            yield Button("Undo everything", id="gp_undo_btn", classes="hidden gp_secondary")
+            yield GpuButton("Scan", id="gp_primary_btn")
+            yield GpuButton("", id="gp_secondary_btn", classes="hidden gp_secondary")
+            yield GpuButton("", id="gp_tertiary_btn", classes="hidden gp_secondary")
+            yield GpuButton("Back", id="gp_back_btn", classes="hidden gp_secondary")
+            yield GpuButton("Stop VM", id="gp_stop_btn", classes="hidden gp_secondary")
+            yield GpuButton("Undo everything", id="gp_undo_btn", classes="hidden gp_secondary")

@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Callable
 
 from . import bios_guide, gpu, host_setup, nullmoth
-from .gpu_setup import DISPLAY_OPTIONS, SUPPORTED_DOC, TROUBLESHOOTING, CardChanged, Session, card_text, render_rail
+from .gpu_setup import DISPLAY_OPTIONS, NVIDIA_DISPLAY_NOTE, SUPPORTED_DOC, TROUBLESHOOTING, CardChanged, Session, card_text, render_rail
 
 __all__ = ["add_parser", "run"]
 
@@ -140,6 +140,7 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         display = "console" if io.ask("Choice [1]: ") == "2" else "gpu"
     ack = False
     if chosen.vendor == "nvidia":
+        io.say(NVIDIA_DISPLAY_NOTE)
         io.say(nullmoth.notice_text())
         ack = args.accept_risk or io.typed(nullmoth.ACK_LABEL, nullmoth.ACK_PHRASE)
     issues = s.choose(chosen.bdf, vmid, display, ack, share_ok, confirmed=chosen.stopped_users if share_ok else ())
@@ -158,7 +159,7 @@ def _step_bios(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     card = s.bios_card(items)
     if card is None:
         io.say("Nothing to change in the BIOS.")
-        s.complete(3, skipped=True)
+        s.complete(3)
         return None
     if s.state.get("bios_seen"):
         io.say("These are still off. Here is where they usually hide:")
@@ -189,7 +190,7 @@ def _step_host(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     plan = s.host_plan()
     no_console = False
     if plan["refusals"] and io.interactive and any("only display adapter" in r for r in plan["refusals"]):
-        io.say("REFUSED: " + plan["refusals"][0])
+        io.say("Careful: " + plan["refusals"][0])
         if io.typed("This card is the only display the host has.", "I understand"):
             no_console = True
             plan = s.host_plan(allow_no_console=True)

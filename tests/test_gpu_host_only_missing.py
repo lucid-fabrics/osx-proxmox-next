@@ -290,7 +290,7 @@ def test_nvidia_guidance_says_a_monitor_or_dummy_plug_is_required():
     prep = "\n".join(nullmoth.GUEST_PREP)
     assert "dummy plug" in prep and "stay black" in prep
     assert "dummy plug" in nullmoth.GUEST_PREP_CONFIRM and "monitor" in nullmoth.GUEST_PREP_CONFIRM
-    assert "dummy plug" in gpu_setup.DISPLAY_OPTIONS[1][2]
+    assert "dummy plug" in gpu_setup.NVIDIA_DISPLAY_NOTE
 
 
 def test_nvidia_guidance_is_in_docs_readme_and_bash():

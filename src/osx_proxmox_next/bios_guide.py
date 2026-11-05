@@ -134,15 +134,19 @@ def order_note(failing_keys, optional_rebar=False):
     return "Do these in this order: " + ", then ".join(parts) + "." if len(parts) > 1 else ""
 
 
-def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup", optional_rebar=False, qr=None):
+def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup", optional_rebar=False, qr=None,
+               max_width=None):
     """ASCII-safe photo card (plain text). *failing* are the entries from check_items with ok false.
 
-    *qr* (lines of the guide's QR code) goes inside the frame beside the steps, so one photo of the
-    screen holds the steps and the code."""
+    *qr* (lines of the guide's QR code) goes inside the frame, so one photo of the screen holds the steps
+    and the code. It sits beside the steps when the frame fits in *max_width* columns (no limit when
+    None), and under the steps when it does not."""
     qr = list(qr or [])
     qr_w = max((len(q) for q in qr), default=0)
-    text_w = WIDTH - 4
-    inner = text_w + (qr_w + QR_GAP if qr else 0)
+    width = WIDTH if max_width is None else max(48, min(WIDTH, max_width))
+    text_w = width - 4
+    beside = bool(qr) and (max_width is None or text_w + QR_GAP + qr_w + 4 <= max_width)
+    inner = text_w + (qr_w + QR_GAP if beside else 0)
     ven = data["vendors"].get(vendor)
     body = ["BIOS STEPS FOR THIS SERVER", board_title(facts), "",
             "Take a photo of this screen, then reboot into the BIOS.", ""]
@@ -179,7 +183,9 @@ def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup"
         body += _wrap(note, text_w, "")
     body += ["", "Back in Proxmox, run:", "   " + resume_cmd, "", "Same steps with pictures on your phone:",
              "   " + re.sub(r"^https?://", "", doc_url(data, vendor))]
-    if qr:
+    if qr and not beside:
+        body += [""] + qr
+    elif qr:
         while len(body) < start + len(qr):
             body.append("")
         for i, q in enumerate(qr):
@@ -253,7 +259,7 @@ def main(argv):
         vendor = match_vendor(facts, data)
         rebar = bool(payload.get("target")) and rebar_capable(root, payload["target"]["bdf"])
         text = build_card(failing, facts, data, vendor, payload.get("resume_cmd") or "osx-next-cli gpu-setup", rebar,
-                          payload.get("qr"))
+                          payload.get("qr"), payload.get("max_width"))
         if payload.get("save"):
             save_card(text, root)
         print(text)
