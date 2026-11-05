@@ -86,7 +86,11 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         io.say(card_text(card))
     usable = [c for c in cards if c.selectable]
     if not usable:
-        io.say(f"Nothing here can run macOS graphics. Cards that work: {SUPPORTED_DOC}")
+        if any(c.kind != "unsupported" for c in cards):
+            io.say("No supported card can be used right now. See the 'Can't use' line on each card above, fix "
+                   "that, then run the scan again.")
+        else:
+            io.say(f"Nothing here can run macOS graphics. Cards that work: {SUPPORTED_DOC}")
         return EXIT_REFUSED
     chosen = None
     if args.gpu:
@@ -105,6 +109,15 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     if chosen is None:
         io.say("Pick a card with --gpu <address>.")
         return EXIT_REFUSED
+    share_ok = True
+    if chosen.stopped_users:
+        for note in chosen.notes:
+            io.say("WARN: " + note)
+        share_ok = io.confirm("Use this card anyway?", args.yes)
+        if not share_ok:
+            io.say("Nothing was changed. Run again with --yes (or answer y) to use a card that another stopped VM "
+                   "also lists.")
+            return EXIT_REFUSED
     vmid = args.vm
     if vmid is None and io.interactive:
         options = s.vm_options(chosen.vendor)
@@ -129,7 +142,7 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     if chosen.vendor == "nvidia":
         io.say(nullmoth.notice_text())
         ack = args.accept_risk or io.typed(nullmoth.ACK_LABEL, nullmoth.ACK_PHRASE)
-    issues = s.choose(chosen.bdf, vmid, display, ack)
+    issues = s.choose(chosen.bdf, vmid, display, ack, share_ok)
     for issue in issues:
         io.say("REFUSED: " + issue)
     return EXIT_REFUSED if issues else None
@@ -278,6 +291,13 @@ def _step_vm(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     _print_findings(io, plan)
     if not plan.ok:
         return EXIT_REFUSED
+    if s.state["gpu"]["vendor"] == "nvidia":
+        io.say(nullmoth.GUEST_PREP_TITLE + ":")
+        for idx, line in enumerate(nullmoth.GUEST_PREP, start=1):
+            io.say(f"  {idx}. {line}")
+        if not io.confirm(nullmoth.GUEST_PREP_CONFIRM, args.yes):
+            io.say("Nothing was changed. Turn them on in macOS, then run: " + s.pause())
+            return EXIT_REFUSED
     io.say("This is what will change on VM %s (a snapshot of its config is saved first):" % s.state["vm"])
     for idx, step in enumerate(plan.steps, start=1):
         io.say(f"  {idx:02d}. {step.title}")
@@ -371,7 +391,7 @@ def run(args: argparse.Namespace, session: Session | None = None, ask: Callable[
         elif kept:
             io.say("Done, except for the files listed as kept above. They stay as you left them, so any "
                    "vfio-pci binding in them still applies.")
-        else:
+        elif not getattr(s, "undo_nothing", False):
             io.say("Everything this setup changed is back as it was.")
         return EXIT_OK if ok else EXIT_FAIL
     if s.state["finished"]:

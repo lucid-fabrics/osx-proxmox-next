@@ -1174,6 +1174,28 @@ function gpu_sys_num() {
   echo $((16#${v#0x}))
 }
 
+# 0 when the host really uses the card as its console: boot_vga is set AND a host display driver is bound or a
+# firmware framebuffer (efifb, simplefb) holds one of its BARs in /proc/iomem. Mirrors gpu.is_host_console.
+# $1 = the card's .0 sysfs directory, $2 = iomem file (default: proc/iomem beside the sysfs root).
+function gpu_host_console() {
+  local dev="$1" sys="${GPU_SYSFS:-/sys}" iomem driver rs re _f lo hi name
+  iomem="${2:-$(dirname "$sys")/proc/iomem}"
+  [ "$(gpu_sys_num "$dev/boot_vga" 2>/dev/null || true)" == "1" ] || return 1
+  driver=""
+  [ -e "$dev/driver" ] && driver=$(basename "$(readlink -f "$dev/driver")")
+  if [ -n "$driver" ] && [ "$driver" != "vfio-pci" ]; then return 0; fi
+  [ -r "$iomem" ] || return 1
+  while read -r rs re _f; do
+    [[ "$rs" =~ ^0x[0-9a-fA-F]+$ && "$re" =~ ^0x[0-9a-fA-F]+$ ]] || continue
+    (( re > rs )) || continue
+    while read -r lo hi name; do
+      case "${name,,}" in efifb|simplefb|bootfb|vesafb) ;; *) continue ;; esac
+      (( 16#$lo >= rs && 16#$hi <= re )) && return 0
+    done < <(sed -n 's/^ *\([0-9a-f]\+\)-\([0-9a-f]\+\) *: *\([^ ]\+\).*/\1 \2 \3/p' "$iomem")
+  done < "$dev/resource"
+  return 1
+}
+
 # Exact vfio.conf lines for the card's functions. Mirrors gpu.vfio_conf_hint.
 function gpu_vfio_hint() {
   local sys="$1" bdf="$2" fn v d c ids="" usb_c=no name vendor=""
@@ -1246,7 +1268,7 @@ function gpu_check() {
     done
     [ -z "$stray" ] || GPU_ISSUES+=("IOMMU group $(basename "$grp") also holds non-GPU device(s): ${stray}. Passing the card through would pull them in.")
   fi
-  if [ "$(gpu_sys_num "$dev/boot_vga" 2>/dev/null || true)" == "1" ] && ! grep -q 'initcall_blacklist=sysfb_init' "$cmdline" 2>/dev/null; then
+  if gpu_host_console "$dev" && ! grep -q 'initcall_blacklist=sysfb_init' "$cmdline" 2>/dev/null; then
     GPU_WARNS+=("This card is the host boot GPU and initcall_blacklist=sysfb_init is not on the kernel cmdline. The host framebuffer may hold its memory and the VM can fail to start.")
   fi
   local start end _flags size
@@ -1659,15 +1681,30 @@ function nullmoth_fetch_amfipass() {
 
 function nullmoth_print_next_steps() {
   echo -e "\n${INFO}${YW}NullMoth next steps:${CL}"
-  echo "  1. Start the VM. The desktop stays on the emulated display (vga std); apps get the NVIDIA GPU."
+  echo "  1. Start the VM. Once the NullMoth driver loads, the Proxmox console goes black (the driver takes the display"
+  echo "     even with vga std). Use SSH or Screen Sharing from then on, or plug a monitor into the card."
   echo "  2. Download the NullMoth release yourself from ${NULLMOTH_URL}/releases and check it with"
   echo "     shasum -a 256 -c SHA256SUMS, then run sudo ./install.sh in the guest."
   echo "  3. Approve the extensions in System Settings > Privacy & Security, then reboot the guest."
-  echo "  4. Verify with: kmutil showloaded --list-only | grep nullmoth"
+  echo "  4. Verify with: kmutil showloaded --list-only | grep -i nullmoth. Expect 4 or more lines"
+  echo "     (NVRM, NVAccel, NVRMFB, NVRMAGDC, newer releases add more)."
   echo "  5. Turn off system sleep in the guest: sudo pmset -a sleep 0"
   echo "  6. Escape hatch: add -nvoff to the boot-args, or run gpu-setup --undo on the host."
   echo "  7. Warning: the NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore"
   echo "     disk with this tool later (or running gpu-setup --undo) wipes those edits."
+}
+
+# Required in the guest BEFORE the card is attached: once the driver loads, the Proxmox console goes black.
+NULLMOTH_GUEST_PREP_TITLE="Before you attach (required): get a way into macOS that does not need the Proxmox console"
+NULLMOTH_GUEST_PREP_CONFIRM="Remote Login and Screen Sharing are on, and I can reach the VM over the network."
+function nullmoth_print_guest_prep() {
+  echo "${NULLMOTH_GUEST_PREP_TITLE}:"
+  echo "  1. In macOS open System Settings > General > Sharing and turn on Remote Login and Screen Sharing."
+  echo "  2. Note the VM's IP address (shown in the Sharing pane, or in your router)."
+  echo "  3. You will connect with ssh <user>@<ip>, or with any VNC client pointed at the VM's IP"
+  echo "     (from a Mac: open vnc://<ip>)."
+  echo "  4. If Remote Login will not switch on from the command line (systemsetup needs Full Disk Access), run:"
+  echo "     sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist"
 }
 
 function nullmoth_print_findings() {
@@ -1707,6 +1744,9 @@ function nvidia_attach() {
   [[ "$vmid" =~ ^[0-9]+$ ]] && bdf=$(gpu_normalize_bdf "$gpu") || {
     msg_error "Usage: osx-proxmox-next.sh nvidia-attach <vmid> <pci-address> [--accept-nullmoth-risk] [--dry-run]"; return 1; }
   if [ "$dry" == "yes" ]; then nullmoth_show_notice; else nullmoth_acknowledge "$accept" || return 1; fi
+  echo
+  nullmoth_print_guest_prep
+  echo
 
   nullmoth_vm_check "$vmid" || true
   if [ -n "$NM_CFG" ]; then
@@ -1738,7 +1778,7 @@ function nvidia_attach() {
         if [ "${line#* }" == "running" ]; then
           GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
         else
-          GPU_WARNS+=("VM ${line%% *} also has this card assigned; only one can run at a time.")
+          GPU_WARNS+=("Also assigned to VM ${line%% *} (stopped). Only one of them can run at a time; Proxmox refuses to start the second.")
         fi
       done < <(gpu_users "$vmid" "$bdf")
     fi
@@ -1793,7 +1833,11 @@ function nvidia_detach() {
   nullmoth_print_findings
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
   # Attached by this version: put the VM back exactly as it was (shared with gpu-setup --undo).
-  if gpu_record_load "$vmid"; then gpu_detach_record "$vmid" "$dry" "$stop"; return; fi
+  if gpu_record_load "$vmid"; then
+    gpu_detach_record "$vmid" "$dry" "$stop" || return
+    [ "$dry" == "yes" ] || gpu_forget_vm "$vmid"
+    return 0
+  fi
   args=$(sed -n 's/^args: //p' <<<"$NM_CFG")
   new_args=$(gpu_without_mmio_arg "$args")
   if [ "$dry" == "yes" ]; then
@@ -4798,7 +4842,7 @@ function amd_attach() {
       while read -r line; do
         [ -z "$line" ] && continue
         if [ "${line#* }" == "running" ]; then GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
-        else GPU_WARNS+=("VM ${line%% *} also has this card assigned; only one can run at a time."); fi
+        else GPU_WARNS+=("Also assigned to VM ${line%% *} (stopped). Only one of them can run at a time; Proxmox refuses to start the second."); fi
       done < <(gpu_users "$vmid" "$bdf")
     fi
   fi
@@ -4943,7 +4987,7 @@ function gpu_summary_line() {
 }
 
 # Scan the display adapters. Fills GPU_CARDS with one line per AMD/NVIDIA card:
-# bdf|vendor|device(dec)|name|kind|headline|detail|boot_vga|driver|users(comma list "vmid:state")|risky(comma list)|lxc(comma list "ctid:node")
+# bdf|vendor|device(dec)|name|kind|headline|detail|boot_vga|driver|users(comma list "vmid:state")|risky(comma list)|lxc(comma list "ctid:node")|host_console(0|1)
 # Usable cards come first. A "|" in the card name is replaced so it cannot shift the fields.
 function gpu_scan() {
   local sys="${GPU_SYSFS:-/sys}" dev bdf vendor device cls vname v_kind v_head v_detail boot driver users risky line name seen=" "
@@ -4989,7 +5033,9 @@ function gpu_scan() {
         lxc+="${lxc:+,}${ct}:${node}"
       done < <(gpu_host lxc </dev/null)
     fi
-    GPU_CARDS+=("${bdf}|${vname}|${device}|${name:-${vname^^} GPU}|${v_kind}|${v_head}|${v_detail}|${boot}|${driver}|${users}|${risky}|${lxc}")
+    local console=0
+    gpu_host_console "$sys/bus/pci/devices/$bdf.0" && console=1
+    GPU_CARDS+=("${bdf}|${vname}|${device}|${name:-${vname^^} GPU}|${v_kind}|${v_head}|${v_detail}|${boot}|${driver}|${users}|${risky}|${lxc}|${console}")
   done
   local -a first=() last=()
   local card
@@ -5005,17 +5051,36 @@ function gpu_card_why_not() {
   IFS='|' read -r _ _ _ _ kind _ detail _ _ users risky _ <<<"$1"
   if [ "$kind" == "unsupported" ]; then echo "$detail"
   elif [ -n "$risky" ]; then echo "Its IOMMU group also holds storage or network devices (${risky//,/, }). Passing the card through would take them from the host. Move the card to another slot."
-  elif [ -n "$users" ]; then
-    for u in ${users//,/ }; do out+="${out:+, }VM ${u%%:*} (${u#*:})"; done
-    echo "In use by ${out}"
+  else
+    for u in ${users//,/ }; do [ "${u#*:}" == "running" ] && out+="${out:+, }VM ${u%%:*} (running)"; done
+    [ -z "$out" ] || echo "In use by ${out}"
   fi
+}
+
+# Warnings shown on a card, one per line. Mirrors GpuCard.notes.
+function gpu_card_notes() {
+  local kind boot users console u
+  IFS='|' read -r _ _ _ _ kind _ _ boot _ users _ _ console <<<"$1"
+  [ "$kind" != "unsupported" ] || return 0
+  for u in ${users//,/ }; do
+    [ "${u#*:}" == "running" ] || echo "Also assigned to VM ${u%%:*} (stopped). Only one of them can run at a time; Proxmox refuses to start the second."
+  done
+  if [ "$boot" == "1" ] && [ "$console" != "1" ]; then echo "The firmware shows its boot screen on this card."; fi
+}
+
+# The stopped VMs that also list a GPU_CARDS line (space separated ids).
+function gpu_card_stopped_users() {
+  local users u out=""
+  IFS='|' read -r _ _ _ _ _ _ _ _ _ users _ <<<"$1"
+  for u in ${users//,/ }; do [ "${u#*:}" == "running" ] || out+="${out:+ }${u%%:*}"; done
+  echo "$out"
 }
 
 # Print one card in a full-width plain box. $1 = a GPU_CARDS line. Mirrors gpu_setup.card_text.
 function gpu_card_text() {
-  local bdf vname device name kind head detail boot driver users lxc flags="" u mark rule c why
-  IFS='|' read -r bdf vname device name kind head detail boot driver users _ lxc <<<"$1"
-  [ "$boot" == "1" ] && flags+="host console"
+  local bdf vname device name kind head detail boot driver users lxc console flags="" u mark rule c why note
+  IFS='|' read -r bdf vname device name kind head detail boot driver users _ lxc console <<<"$1"
+  [ "$console" == "1" ] && flags+="host console"
   [ -n "$driver" ] && flags+="${flags:+, }bound to ${driver}"
   for c in ${lxc//,/ }; do flags+="${flags:+, }container ${c%%:*} uses ${c#*:}"; done
   mark="  "; rule="-"
@@ -5025,6 +5090,7 @@ function gpu_card_text() {
   lines="${name}"$'\n'"${ident}"
   [ "$kind" == "unsupported" ] || lines+=$'\n'"${head}"$'\n'"${detail}"
   [ -z "$flags" ] || lines+=$'\n'"Status: ${flags}"
+  while IFS= read -r note; do [ -z "$note" ] || lines+=$'\n'"Note: ${note}"; done < <(gpu_card_notes "$1")
   why=$(gpu_card_why_not "$1")
   [ -z "$why" ] || lines+=$'\n'"Can't use: ${why}"
   python3 -c '
@@ -5040,11 +5106,13 @@ print("\n".join([border] + ["%s | %s |" % (mark, r.ljust(inner)) for r in rows] 
 ' "$mark" "$rule" "$lines"
 }
 
-# 0 when a GPU_CARDS line can be picked (supported and not used by a VM).
+# 0 when a GPU_CARDS line can be picked (supported, no RUNNING VM holds it). A stopped VM only warns.
 function gpu_card_selectable() {
-  local kind users risky
+  local kind users risky u
   IFS='|' read -r _ _ _ _ kind _ _ _ _ users risky _ <<<"$1"
-  [ "$kind" != "unsupported" ] && [ -z "$users" ] && [ -z "$risky" ]
+  [ "$kind" != "unsupported" ] && [ -z "$risky" ] || return 1
+  for u in ${users//,/ }; do [ "${u#*:}" == "running" ] && return 1; done
+  return 0
 }
 
 # Print the host_setup target JSON for $1 bdf, $2 vendor, $3 device (decimal), $4 saved identity JSON (optional).
@@ -5062,10 +5130,27 @@ function gpu_card_changed() {
   gpu_step_goto 1
 }
 
+# nvidia-detach undid this VM: drop it from the walkthrough's list (only when it is listed).
+function gpu_forget_vm() {
+  [ -f "$GPU_STATE_DIR/gpu-setup.json" ] || return 0
+  [ "$(gpu_state_get "$1"' in d["vm_records"]')" == "True" ] || return 0
+  gpu_state_save "$(gpu_state_get 'json.dumps({"vm_records": [v for v in d["vm_records"] if v != '"$1"']})')"
+}
+
+# VM ids that have a GPU attach record on disk (written by gpu-setup and nvidia-attach alike), one per line.
+function gpu_record_vmids() {
+  local f id
+  for f in "$GPU_STATE_DIR"/gpu-attach-*.json; do
+    [ -e "$f" ] || continue
+    id="${f##*/gpu-attach-}"; id="${id%.json}"
+    [[ "$id" =~ ^[0-9]+$ ]] && echo "$id"
+  done
+}
+
 # Undo everything: VMs first, then host files. Mirrors Session.undo. $1 = stop the VMs first (yes|no).
 # Nothing to revert (no record, the VM is gone, the attach was refused) counts as done.
 function gpu_undo() {
-  local stop="${1:-no}" vmid ok=yes res rc kept=0 target moved
+  local stop="${1:-no}" vmid ok=yes res rc kept=0 target moved vmids id nothing=no
   GPU_OC_KEPT=0
   if [ "$(gpu_state_get 'd.get("gpu") is not None and bool(d["gpu"].get("identity"))')" == "True" ]; then
     target=$(gpu_chosen_target_raw 2>/dev/null) || target=""
@@ -5075,7 +5160,10 @@ function gpu_undo() {
       gpu_say "Note: the card at $(gpu_state_get 'd["gpu"]["bdf"]') is now a different device (your PCI layout changed). Undo only removes what this tool wrote, so nothing there is touched."
     fi
   fi
-  for vmid in $(gpu_state_get '" ".join(str(v) for v in d["vm_records"])'); do
+  # One record format for every entry point: a record on disk counts whoever wrote it.
+  vmids=" $(gpu_state_get '" ".join(str(v) for v in d["vm_records"])') "
+  for id in $(gpu_record_vmids); do [[ "$vmids" == *" $id "* ]] || vmids+="$id "; done
+  for vmid in $vmids; do
     rc=0
     if ! gpu_record_load "$vmid"; then
       msg_ok "VM ${vmid}: nothing to revert (the attach did not change it)"
@@ -5096,10 +5184,22 @@ function gpu_undo() {
   [ -z "$res" ] || kept=$(echo "$res" | gpu_json 'len(d.get("kept", []))')
   kept=$((kept + GPU_OC_KEPT))
   [ -z "$res" ] || echo "$res" | gpu_json '"\n".join(["Restored " + p for p in d["restored"]] + d.get("kept", []) + d["errors"]) + ("\nReboot the host to finish undoing the boot changes." if d["reboot_required"] else "")'
+  local rj="${res:-}"; [ -n "$rj" ] || rj='{}'
+  if [ -z "${vmids// /}" ] && [ "$(echo "$rj" | gpu_json 'bool(d.get("restored") or d.get("kept") or d.get("errors") or d.get("reboot_required"))')" != "True" ]; then
+    nothing=yes
+    gpu_say "Nothing to undo: no GPU setup record found."
+    local qid
+    for qid in $(qm list 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}'); do
+      qm config "$qid" 2>/dev/null | grep -q '^hostpci0:' && qm config "$qid" 2>/dev/null | grep -q '^args:.*pci-hole64-size' \
+        && gpu_say "VM $qid has NullMoth settings in its config but no record. Undo it with: nvidia-detach $qid"
+    done
+  fi
   if [ "$ok" == "yes" ]; then
     gpu_host hint-clear </dev/null
     rm -f "$GPU_STATE_DIR/gpu-setup.json"
-    if [ "$kept" == "0" ]; then
+    if [ "$nothing" == "yes" ] && [ "$kept" == "0" ]; then
+      :
+    elif [ "$kept" == "0" ]; then
       gpu_say "Everything this setup changed is back as it was."
     else
       gpu_say "Done, except for the files listed as kept above. They stay as you left them, so any vfio-pci binding in them still applies."
@@ -5187,7 +5287,13 @@ function gpu_step_choose() {
     if gpu_card_selectable "$line"; then usable+=("$line"); fi
   done
   if [ ${#usable[@]} -eq 0 ]; then
-    gpu_say "Nothing here can run macOS graphics. Cards that work: ${GPU_DOCS_ROOT}gpu-passthrough#supported-cards"
+    local supported=no
+    for line in "${GPU_CARDS[@]}"; do IFS='|' read -r _ _ _ _ kind _ <<<"$line"; [ "$kind" == "unsupported" ] || supported=yes; done
+    if [ "$supported" == "yes" ]; then
+      gpu_say "No supported card can be used right now. See the 'Can't use' line on each card above, fix that, then run the scan again."
+    else
+      gpu_say "Nothing here can run macOS graphics. Cards that work: ${GPU_DOCS_ROOT}gpu-passthrough#supported-cards"
+    fi
     return 2
   fi
   local chosen=""
@@ -5206,12 +5312,20 @@ function gpu_step_choose() {
     gpu_say "Pick a card with --gpu <address>."; return 2
   fi
   IFS='|' read -r bdf vname device name kind head detail boot driver users _ <<<"$chosen"
+  if [ -n "$(gpu_card_stopped_users "$chosen")" ]; then
+    local note
+    while IFS= read -r note; do case "$note" in Also*) gpu_say "WARN: $note" ;; esac; done < <(gpu_card_notes "$chosen")
+    if ! gpu_ui_yesno "Use this card anyway?" "Another stopped VM also lists this card. Use it anyway?"; then
+      gpu_say "Nothing was changed. Run again with --yes (or answer y) to use a card that another stopped VM also lists."
+      return 2
+    fi
+  fi
   if [ "$vname" == "amd" ] && [ -z "$display" ]; then
     display="gpu"
     if gpu_use_ui; then
       display=$(whiptail --title "Display" --menu "Where do you want to see macOS?" 14 90 2 \
         gpu "Monitor on the GPU. Best performance. Plug a screen into the card; the Proxmox console goes blank." \
-        console "Keep the Proxmox console. The card accelerates apps; you keep using the web console." 3>&1 1>&2 2>&3) || return 0
+        console "Keep the Proxmox console. The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: the console goes black once the driver loads." 3>&1 1>&2 2>&3) || return 0
     fi
   fi
   if [ -z "$want_vm" ] && gpu_use_ui; then
@@ -5444,6 +5558,10 @@ function gpu_step_vm() {
     gpu_say "REFUSED: The NullMoth notice has not been acknowledged. Run the scan again: $GPU_RESUME_CMD"
     return 2
   fi
+  if [ "$vendor" == "nvidia" ]; then
+    nullmoth_print_guest_prep
+    gpu_ui_yesno "Before you attach" "${NULLMOTH_GUEST_PREP_CONFIRM}" || { gpu_say "Nothing was changed. Turn them on in macOS, then run: $GPU_RESUME_CMD"; return 2; }
+  fi
   gpu_ui_yesno "Attach the card" "Attach the card to VM ${vmid} now? A snapshot of its config is saved first." || { gpu_say "Nothing was changed."; return 0; }
   gpu_chosen_target >/dev/null || return $?   # last check before anything is written
   gpu_state_save "$(gpu_state_get 'json.dumps({"vm_records": d["vm_records"] + ([d["vm"]] if d["vm"] not in d["vm_records"] else [])})')"
@@ -5463,7 +5581,7 @@ function gpu_step_first_boot() {
   vendor=$(gpu_state_get 'd["gpu"]["vendor"]')
   display=$(gpu_state_get 'd["display"]')
   if [ "$vendor" == "nvidia" ]; then
-    echo "Start the VM. The desktop stays on the Proxmox console (vga std); apps get the NVIDIA GPU."
+    echo "Start the VM. Once the NullMoth driver loads, the Proxmox console goes black; use SSH or Screen Sharing from then on."
     echo "Checklist inside macOS:"
     nullmoth_print_next_steps
     echo "Driver releases: ${NULLMOTH_URL}/releases"

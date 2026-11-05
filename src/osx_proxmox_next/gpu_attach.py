@@ -13,7 +13,7 @@ from shlex import quote as shquote
 from . import amd_host, nullmoth
 from .domain import PlanStep
 from .gpu import (
-    AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps, gpu_users, hostpci_bdfs,
+    AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps, gpu_users, hostpci_bdfs, running_user_issue, shared_note,
     hostpci_value, load_record, new_record, parse_config, record_is_stale, record_step, stop_step,
     verify_stopped_step,
 )
@@ -140,9 +140,9 @@ def prepare_attach_amd(
         plan.issues.append(f"hostpci0 is already in use on this VM ({cfg['hostpci0']}). Remove it first or run gpu-setup --undo.")
     for other, other_running in gpu_users(pve, report.bdf, vmid) if report.ok else []:
         if other_running:
-            plan.issues.append(f"The card is in use by running VM {other}.")
+            plan.issues.append(running_user_issue(other))
         else:
-            plan.warnings.append(f"VM {other} also has this card assigned; only one can run at a time.")
+            plan.warnings.append(shared_note(other))
 
     if plan.ok:
         dev_path = sysfs_root / "bus/pci/devices" / f"{report.bdf}.0" / "device"

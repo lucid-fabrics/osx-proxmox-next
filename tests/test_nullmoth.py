@@ -11,7 +11,7 @@ import pytest
 from textual.widgets import Button, Checkbox, Input, Select, Static
 
 from nullmoth_fakes import GUID, MAC_CFG, FakeQm, good_card, oc_config, write_oc
-from osx_proxmox_next import cli, nullmoth
+from osx_proxmox_next import cli, gpu, nullmoth
 from osx_proxmox_next import oc_builder
 from osx_proxmox_next.app import NextApp
 from osx_proxmox_next.domain import PlanStep
@@ -249,7 +249,8 @@ def test_attach_stopped_other_user_warns_and_same_card_reattach_ok(tmp_path):
     vms = {100: ("stopped", MAC_CFG + "hostpci0: 0000:01:00,pcie=0\n"),
            101: ("stopped", "hostpci1: 01:00.0\n")}
     plan = prep(tmp_path, vms=vms)
-    assert plan.ok and "VM 101 also has" in plan.warnings[0]
+    assert plan.ok and plan.warnings[0] == gpu.shared_note(101)
+    assert "Proxmox refuses to start the second" in plan.warnings[0]
 
 
 def test_attach_allow_stop_adds_stop_step(tmp_path):

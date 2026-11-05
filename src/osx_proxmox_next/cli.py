@@ -782,6 +782,10 @@ def _run_nvidia_attach(args: argparse.Namespace) -> int:
         return 2
     print(nullmoth.notice_text())
     print()
+    print(nullmoth.GUEST_PREP_TITLE + ":")
+    for idx, line in enumerate(nullmoth.GUEST_PREP, start=1):
+        print(f"  {idx}. {line}")
+    print()
     if not args.dry_run and not args.accept_risk:
         print("Nothing was changed. Read the notice above, then re-run with --accept-nullmoth-risk to apply.")
         return 2
@@ -825,7 +829,14 @@ def _run_nvidia_detach(args: argparse.Namespace) -> int:
         return 0 if plan.ok else 2
     if not plan.ok:
         return 2
-    return _run_plan(plan, "NVIDIA detach")
+    rc = _run_plan(plan, "NVIDIA detach")
+    if rc == 0:
+        try:
+            from .gpu_setup import Session
+            Session().forget_attached(vmid)
+        except OSError:
+            pass
+    return rc
 
 
 if __name__ == "__main__":

@@ -90,14 +90,49 @@ def test_group_with_foreign_device(tmp_path):
     assert "0000:00:1f.3" in r.issues[0] and "0000:00:01.0" not in r.issues[0]
 
 
+def _iomem(tmp_path, text):
+    (tmp_path / "proc").mkdir(exist_ok=True)
+    (tmp_path / "proc/iomem").write_text(text)
+
+
 def test_warnings_boot_gpu_and_bar(tmp_path):
-    good_card(tmp_path, boot_vga=True, bar1=8 * 1024**3)
+    sysroot = tmp_path / "sys"
+    sysroot.mkdir()
+    good_card(sysroot, boot_vga=True, bar1=8 * 1024**3)
+    _iomem(tmp_path, "  f0000000-f02fffff : efifb\n")  # the firmware framebuffer sits on the card's BAR0
     cmd = tmp_path / "cmdline"
     cmd.write_text("quiet")
-    r = check(tmp_path, cmdline=cmd)
+    r = check(sysroot, cmdline=cmd)
     assert r.ok and len(r.warnings) == 2 and "8192 MiB" in r.warnings[1]
     cmd.write_text("quiet initcall_blacklist=sysfb_init")
-    assert len(check(tmp_path, cmdline=cmd).warnings) == 1
+    assert len(check(sysroot, cmdline=cmd).warnings) == 1
+
+
+def test_boot_vga_card_on_vfio_without_a_framebuffer_is_not_the_host_console(tmp_path):
+    """Live: 06:00 has boot_vga=1 but is bound to vfio-pci and efifb is off. No console label, no sysfb warning."""
+    sysroot = tmp_path / "sys"
+    sysroot.mkdir()
+    good_card(sysroot, boot_vga=True)
+    dev = sysroot / "bus/pci/devices/0000:01:00.0"
+    _iomem(tmp_path, "  f0000000-f0ffffff : 0000:01:00.0\n  e0000000-e0ffffff : efifb\n")  # efifb elsewhere
+    assert not gpu.is_host_console(dev, tmp_path / "proc/iomem")
+    cmd = tmp_path / "cmdline"
+    cmd.write_text("quiet")
+    assert check(sysroot, cmdline=cmd).warnings == []
+    _iomem(tmp_path, "  f0000000-f02fffff : simplefb\n")
+    assert gpu.is_host_console(dev, tmp_path / "proc/iomem")
+    assert not gpu.is_host_console(dev, tmp_path / "missing")
+
+
+def test_boot_vga_card_with_a_host_driver_is_the_host_console(tmp_path):
+    sysroot = tmp_path / "sys"
+    sysroot.mkdir()
+    good_card(sysroot, boot_vga=True, driver="nouveau")
+    assert gpu.is_host_console(sysroot / "bus/pci/devices/0000:01:00.0", tmp_path / "none")
+    other = tmp_path / "other"
+    other.mkdir()
+    good_card(other, boot_vga=False, driver="nouveau")
+    assert not gpu.is_host_console(other / "bus/pci/devices/0000:01:00.0", tmp_path / "none")
 
 
 def test_bad_resource_file_is_ignored(tmp_path):

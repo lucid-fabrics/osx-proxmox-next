@@ -92,6 +92,7 @@ def test_nothing_usable(tmp_path):
     add_card(env.root, device=0x73DF)
     code, out = go(env)
     assert code == 2 and "Can't use: " in out and out.count("Can't use:") == 1 and "Cannot be used" not in out and "gpu-passthrough#supported-cards" in out
+    assert "Nothing here can run macOS graphics" in out  # no card is supported at all
     assert go(Env(tmp_path / "e2"))[0] == 2
 
 

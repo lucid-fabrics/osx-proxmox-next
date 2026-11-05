@@ -37,6 +37,10 @@ __all__ = [
     "detect_gpus",
     "MMIO_ARG",
     "gpu_users",
+    "is_host_console",
+    "record_vmids",
+    "running_user_issue",
+    "shared_note",
     "hostpci_bdfs",
     "parse_config",
     "build_hostpci_attach_steps",
@@ -221,6 +225,7 @@ def check_gpu(
     root: Path = _SYSFS,
     cmdline_path: Path | None = None,
     bar_index: int = 1,
+    iomem_path: Path | None = None,
 ) -> GpuReport:
     """Run every host-side readiness check for one card of *vendor*.
 
@@ -248,12 +253,89 @@ def check_gpu(
     if report.issues:
         report.hints = vfio_conf_hint(root, bdf)
     report.issues += _group_issues(root, dev, functions)
-    _add_warnings(report, dev, cmdline_path, bar_index)
+    _add_warnings(report, dev, cmdline_path, bar_index, iomem_path)
     return report
 
 
-def _add_warnings(report: GpuReport, dev: Path, cmdline_path: Path | None, bar_index: int = 1) -> None:
-    if _read_hex(dev / "boot_vga") == 1 and not has_initcall_blacklist(cmdline_path):
+_FB_NAMES = ("efifb", "simplefb", "bootfb", "vesafb")
+
+
+def _fb_ranges(iomem: Path) -> list[tuple[int, int]]:
+    """Address ranges /proc/iomem gives to a firmware framebuffer driver (efifb, simplefb, ...)."""
+    try:
+        text = iomem.read_text()
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"\s*([0-9a-f]+)-([0-9a-f]+)\s*:\s*(\S+)", line)
+        if m and m.group(3).lower() in _FB_NAMES:
+            out.append((int(m.group(1), 16), int(m.group(2), 16)))
+    return out
+
+
+def _fb_holds_bar(dev: Path, iomem: Path) -> bool:
+    fbs = _fb_ranges(iomem)
+    if not fbs:
+        return False
+    try:
+        rows = (dev / "resource").read_text().splitlines()
+    except OSError:
+        return False
+    for row in rows:
+        parts = row.split()
+        if len(parts) < 2:
+            continue
+        try:
+            start, end = int(parts[0], 16), int(parts[1], 16)
+        except ValueError:
+            continue
+        if end > start and any(start <= lo and hi <= end for lo, hi in fbs):
+            return True
+    return False
+
+
+def is_host_console(dev: Path, iomem: Path | None = None) -> bool:
+    """True when the host really uses this card as its console: boot_vga is set and a host display driver
+    is bound or a firmware framebuffer (efifb, simplefb) holds one of its BARs (per /proc/iomem).
+    A boot_vga card bound to vfio-pci with no framebuffer on it is only where the firmware drew its boot screen."""
+    if _read_hex(dev / "boot_vga") != 1:
+        return False
+    drv = _bound_driver(dev)
+    if drv and drv != "vfio-pci":
+        return True
+    if iomem is None:
+        iomem = dev.parents[3].parent / "proc/iomem"
+    return _fb_holds_bar(dev, iomem)
+
+
+def shared_note(vmid: int) -> str:
+    """The warning for a card that a stopped VM also lists (same wording in every entry point)."""
+    return (f"Also assigned to VM {vmid} (stopped). Only one of them can run at a time; "
+            "Proxmox refuses to start the second.")
+
+
+def running_user_issue(vmid: int) -> str:
+    return f"The card is in use by running VM {vmid}."
+
+
+def record_vmids() -> list[int]:
+    """VM ids that have a GPU attach record on disk (written by gpu-setup and nvidia-attach alike)."""
+    try:
+        names = [p.name for p in STATE_DIR.iterdir()]
+    except OSError:
+        return []
+    ids = []
+    for name in names:
+        m = re.fullmatch(r"gpu-attach-(\d+)\.json", name)
+        if m:
+            ids.append(int(m.group(1)))
+    return sorted(ids)
+
+
+def _add_warnings(report: GpuReport, dev: Path, cmdline_path: Path | None, bar_index: int = 1,
+                  iomem_path: Path | None = None) -> None:
+    if is_host_console(dev, iomem_path) and not has_initcall_blacklist(cmdline_path):
         report.warnings.append(
             "This card is the host boot GPU and initcall_blacklist=sysfb_init is not on the kernel "
             "cmdline. The host framebuffer may hold its memory and the VM can fail to start."

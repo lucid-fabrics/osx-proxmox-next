@@ -11,6 +11,7 @@ from textual.widgets.option_list import Option
 
 from . import bios_guide, host_setup
 from .gpu_setup import DISPLAY_OPTIONS, TROUBLESHOOTING, CardChanged, Session, VmOption, card_text
+from . import nullmoth
 from .nullmoth import ACK_PHRASE
 from .screens.gpu_panel import CONFIRM_PHRASE, display_description
 
@@ -95,7 +96,7 @@ class GpuSetupMixin:
             btn.label = label
             btn.set_class(not label, "hidden")
         q("#gp_back_btn", Button).set_class(not back, "hidden")
-        q("#gp_undo_btn", Button).set_class(not (s.state["host_changes"] or s.state["vm_records"]), "hidden")
+        q("#gp_undo_btn", Button).set_class(not s.has_undo(), "hidden")
 
     def _gp_result(self, text: str, fail: bool = False) -> None:
         box = self.query_one("#gp_result", Static)  # type: ignore[attr-defined]
@@ -238,7 +239,8 @@ class GpuSetupMixin:
             # NVIDIA works with the console display only (the notice says why); the first choice is greyed out.
             first.disabled = nvidia
             self.query_one("#gp_display_desc_0", Static).update(display_description(  # type: ignore[attr-defined]
-                "Not available for NVIDIA cards yet. The card accelerates apps while you keep the web console."
+                "Not available for NVIDIA cards. The Proxmox console goes black once the NullMoth driver loads, so "
+                "turn on Remote Login and Screen Sharing in macOS first."
                 if nvidia else DISPLAY_OPTIONS[0][2]))
             if nvidia:
                 second.value = True
@@ -324,6 +326,10 @@ class GpuSetupMixin:
         display = DISPLAY_OPTIONS[int(pressed.id.rsplit("_", 1)[1]) if pressed is not None and pressed.id else 0][0]
         ack = self.query_one("#gp_ack_in", Input).value.strip() == ACK_PHRASE  # type: ignore[attr-defined]
         vmid = int(choice) if choice and choice.isdigit() else None
+        if card.stopped_users and not self._gp_confirm_click(
+                "share", "Choose this card",
+                " ".join(card.notes) + " Press the button again to use it anyway."):
+            return
 
         def done(issues: list[str]) -> None:
             if issues:
@@ -336,7 +342,7 @@ class GpuSetupMixin:
                             "here for the VM step.")
             self._gp_render()
 
-        self._gp_async(lambda: s.choose(card.bdf, vmid, display, ack), done, "Checking the choices...")
+        self._gp_async(lambda: s.choose(card.bdf, vmid, display, ack, bool(card.stopped_users)), done, "Checking the choices...")
 
     # ── 3 BIOS ───────────────────────────────────────────────────────
 
@@ -526,6 +532,9 @@ class GpuSetupMixin:
             if plan.ok:
                 lines += ["", f"This is what will change on VM {s.state['vm']} (a config snapshot is saved first):"]
                 lines += [f"  {i:02d}. {st.title}" for i, st in enumerate(plan.steps, start=1)]
+                if s.state["gpu"]["vendor"] == "nvidia":
+                    lines += ["", nullmoth.GUEST_PREP_TITLE + ":"]
+                    lines += [f"  {i}. {t}" for i, t in enumerate(nullmoth.GUEST_PREP, start=1)]
             self._gp_set("Step 7: attach the card to the VM", "\n".join(lines), "Attach the card now" if plan.ok else "Preview",
                          back=True)
             self._gp_show("gp_vm_label", "gp_vm_list", "gp_stop_cb")
@@ -537,6 +546,9 @@ class GpuSetupMixin:
         plan = self._gp_vm_plan
         if plan is None or not plan.ok:
             self._gp_vm_preview()
+            return
+        if s.state["gpu"]["vendor"] == "nvidia" and not self._gp_confirm_click(
+                "guest", "Attach the card now", nullmoth.GUEST_PREP_CONFIRM + " Press the button again to attach."):
             return
 
         def work() -> Any:

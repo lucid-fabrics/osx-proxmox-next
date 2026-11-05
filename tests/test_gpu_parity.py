@@ -352,7 +352,7 @@ def test_amd_attach_usage_and_other_vms(bash, vm, tmp_path):
     assert "in use by running VM 101" in bash("amd_attach 100 06:00", env=env, expect=1).stdout
     vm(101, "stopped", "hostpci0: 06:00,pcie=1\n")
     ok = bash("gpu_oc_boot_args() { true; }; amd_attach 100 06:00 --stop-vm", env=env)
-    assert "VM 101 also has this card assigned" in ok.stdout
+    assert "Also assigned to VM 101 (stopped)" in ok.stdout
 
 
 def test_amd_attach_stops_a_running_vm_when_asked(bash, vm, tmp_path):
@@ -486,18 +486,21 @@ def test_scan_and_card_text(bash, tmp_path, vm):
     assert "|unsupported|Not supported by macOS|" in out and "Navi 22" in out
     assert "|nullmoth|Works with NullMoth (beta) on macOS 15.5 to 26|" in out and "120:running" in out
     assert out.count("SELECTABLE") == 1
-    assert "Status: host console, bound to vfio-pci" in out and "Can't use: In use by VM 120 (running)" in out
+    assert "Status: bound to vfio-pci" in out and "host console" not in out  # boot_vga on vfio-pci is not the host console
+    assert "Note: The firmware shows its boot screen on this card." in out
+    assert "Can't use: In use by VM 120 (running)" in out
     assert "AMD 1002:73ff" in out and "NVIDIA 10de:2504" in out
     assert out.splitlines()[0].startswith("0000:06:00|")  # usable cards come first
     # the same cards through the Python renderer, line for line
     cards = []
     for line in out.splitlines():
         parts = line.split("|")
-        if len(parts) < 12 or not parts[2].isdigit():
+        if len(parts) < 13 or not parts[2].isdigit():
             continue
         users = [(int(u.split(":")[0]), u.split(":")[1] == "running") for u in parts[9].split(",") if u]
         cards.append(gpu_setup.GpuCard(parts[0], parts[1], int(parts[2]), parts[3], parts[4], parts[5], parts[6],
-                                       parts[7] == "1", parts[8] or None, users, [], [r for r in parts[10].split(",") if r]))
+                                       parts[7] == "1", parts[12] == "1", parts[8] or None, users, [],
+                                       [r for r in parts[10].split(",") if r]))
     assert len(cards) == 3
     python_text = "\n".join(gpu_setup.card_text(c) for c in cards)
     bash_text = "\n".join(ln for ln in out.splitlines() if ln.startswith((">> ", "   ")) and ("+" in ln or "|" in ln))
@@ -582,7 +585,7 @@ def test_scan_marks_cards_whose_group_holds_storage(bash, tmp_path, vm):
     add_other(root, "0000:07:00.0", 0x144D, 0xA808, 0x010802, 7)
     out = bash('gpu_scan; for l in "${GPU_CARDS[@]}"; do echo "$l"; gpu_card_selectable "$l" && echo SELECTABLE; done; true',
                env={**vm.env, "GPU_SYSFS": str(root / "sys")}).stdout
-    assert out.splitlines()[0].endswith("|0000:07:00.0|") and "SELECTABLE" not in out
+    assert out.splitlines()[0].endswith("|0000:07:00.0||0") and "SELECTABLE" not in out
 
 
 def test_undo_without_a_record_has_nothing_to_revert_and_finishes(bash, vm, tmp_path):

@@ -87,6 +87,8 @@ def test_check_amd_gpu_warnings_and_refusals(tmp_path):
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("quiet")
     add_card(tmp_path, bdf="0000:06:00", device=0x66AF, bar0=8 * 1024**3, boot_vga=True)
+    (tmp_path / "proc").mkdir()
+    (tmp_path / "proc/iomem").write_text("  100000000-1000fffff : efifb\n")  # the firmware framebuffer holds the card
     add_card(tmp_path, bdf="0000:41:00", device=0x687F, group=8)
     add_card(tmp_path, bdf="0000:42:00", device=0x73DF, group=9)
     add_card(tmp_path, bdf="0000:43:00", device=0x67DF, group=10, driver="amdgpu")
@@ -246,7 +248,7 @@ def test_amd_attach_refusals(tmp_path, vms, needle):
 
 def test_amd_attach_other_checks(tmp_path):
     stopped_user = amd_prep(tmp_path, vms={100: ("stopped", AMD_CFG), 101: ("stopped", "hostpci0: 06:00,pcie=1\n")})
-    assert stopped_user.ok and any("VM 101 also has this card" in w for w in stopped_user.warnings)
+    assert stopped_user.ok and any("Also assigned to VM 101 (stopped)" in w for w in stopped_user.warnings)
     same = amd_prep(tmp_path / "s", vms={100: ("stopped", AMD_CFG + "hostpci0: 0000:06:00,pcie=0\n")})
     assert same.ok
     unknown = amd_prep(tmp_path / "u", vms={100: ("stopped", AMD_CFG.replace("macos-sequoia", "vm"))})

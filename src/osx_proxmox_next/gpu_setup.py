@@ -37,7 +37,8 @@ RESUME_CMD = "osx-next-cli gpu-setup"
 DISPLAY_OPTIONS = (
     ("gpu", "Monitor on the GPU", "Best performance. Plug a screen into the card. The Proxmox console goes blank."),
     ("console", "Keep the Proxmox console",
-     "The card accelerates apps; you keep using the web console. Required for NVIDIA today."),
+     "The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: "
+     "the console goes black once the driver loads."),
 )
 DOCS_ROOT = "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/"
 NULLMOTH_DOC = DOCS_ROOT + "nvidia-nullmoth"
@@ -79,6 +80,7 @@ class GpuCard:
     headline: str
     detail: str
     boot_vga: bool = False
+    host_console: bool = False  # boot_vga AND a host display driver or a firmware framebuffer holds the card
     driver: str | None = None
     users: list[tuple[int, bool]] = field(default_factory=list)
     shares: list[str] = field(default_factory=list)
@@ -86,8 +88,25 @@ class GpuCard:
     lxc: list[tuple[int, str]] = field(default_factory=list)  # containers that use the host GPU driver nodes
 
     @property
+    def running_users(self) -> list[int]:
+        return [vmid for vmid, running in self.users if running]
+
+    @property
+    def stopped_users(self) -> list[int]:
+        return [vmid for vmid, running in self.users if not running]
+
+    @property
     def selectable(self) -> bool:
-        return self.kind != "unsupported" and not self.users and not self.risky
+        """A supported card that nothing running holds. A stopped VM that lists it only warns."""
+        return self.kind != "unsupported" and not self.running_users and not self.risky
+
+    @property
+    def notes(self) -> list[str]:
+        """Warnings shown on the card: stopped VMs that also list it, and the firmware boot screen."""
+        out = [gpu.shared_note(vmid) for vmid in self.stopped_users]
+        if self.boot_vga and not self.host_console:
+            out.append("The firmware shows its boot screen on this card.")
+        return out
 
     @property
     def why_not(self) -> str:
@@ -97,9 +116,8 @@ class GpuCard:
         if self.risky:
             reasons.append("Its IOMMU group also holds storage or network devices (" + ", ".join(self.risky)
                            + "). Passing the card through would take them from the host. Move the card to another slot.")
-        if self.users:
-            reasons.append("In use by " + ", ".join(
-                f"VM {vmid} ({'running' if running else 'stopped'})" for vmid, running in self.users))
+        if self.running_users:
+            reasons.append("In use by " + ", ".join(f"VM {vmid} (running)" for vmid in self.running_users))
         return " ".join(reasons)
 
 
@@ -130,7 +148,7 @@ CARD_WIDTH = 76
 def card_lines(card: GpuCard, width: int = CARD_WIDTH) -> list[str]:
     """The text lines inside one scan card. A card that cannot be used ends with ``Can't use: <reason>``."""
     flags = []
-    if card.boot_vga:
+    if card.host_console:
         flags.append("host console")
     if card.driver:
         flags.append(f"bound to {card.driver}")
@@ -144,6 +162,8 @@ def card_lines(card: GpuCard, width: int = CARD_WIDTH) -> list[str]:
         lines.append(card.detail)
     if flags:
         lines.append("Status: " + ", ".join(flags))
+    if card.kind != "unsupported":
+        lines += ["Note: " + n for n in card.notes]
     if not card.selectable:
         lines.append("Can't use: " + card.why_not)
     inner = width - 7
@@ -217,6 +237,7 @@ class Session:
         self.undo_kept = 0  # files and OpenCore configs the last undo left as the user had them
         self.adapter = adapter
         self.sysfs = Path(root) / "sys"
+        self.undo_nothing = False  # the last undo found no record at all
         self.state = host_setup.load_state(root) or host_setup.new_state()
         self.state["resume_cmd"] = resume_cmd
 
@@ -303,6 +324,8 @@ class Session:
             cards.append(GpuCard(
                 bdf=bdf, vendor=vendor, device_id=disp["device"], name=self._lspci_name(bdf) or f"{vendor.upper()} GPU",
                 kind=kind, headline=headline, detail=detail, boot_vga=bool(first["boot_vga"]), driver=first["driver"],
+                host_console=gpu.is_host_console(self.sysfs / "bus/pci/devices" / f"{bdf}.0",
+                                                 Path(self.root) / "proc/iomem"),
                 users=gpu.gpu_users(self.pve, bdf, exclude_vm, self.root) if kind != "unsupported" else [],
                 shares=shares, risky=risky, lxc=containers if kind != "unsupported" else [],
             ))
@@ -354,8 +377,10 @@ class Session:
                               "Pick another VM or create a Sequoia or Tahoe VM first.")
         return issues
 
-    def choose(self, bdf: str, vmid: int | None, display: str, ack: bool = False) -> list[str]:
-        """Validate and store the choices. Returns the reasons it was refused (empty on success)."""
+    def choose(self, bdf: str, vmid: int | None, display: str, ack: bool = False, share_ok: bool = False) -> list[str]:
+        """Validate and store the choices. Returns the reasons it was refused (empty on success).
+
+        A card that a stopped VM also lists needs *share_ok* (the user confirmed the warning)."""
         cards = {c.bdf: c for c in self.scan(exclude_vm=vmid if vmid is not None else -1)}
         card = cards.get(gpu.normalize_bdf(bdf) or bdf)
         if card is None:
@@ -363,6 +388,9 @@ class Session:
         if not card.selectable:
             return [card.why_not]
         issues: list[str] = []
+        if card.stopped_users and not share_ok:
+            issues.append(" ".join(gpu.shared_note(v) for v in card.stopped_users)
+                          + " Confirm that you want to use it anyway.")
         if vmid is not None:
             issues += self.check_vm(vmid, card.vendor)
         if card.vendor == "nvidia":
@@ -550,7 +578,7 @@ class Session:
     def first_boot_text(self) -> str:
         chosen = self.state["gpu"]
         if chosen["vendor"] == "nvidia":
-            lines = ["Start the VM. The desktop stays on the Proxmox console (vga std); apps get the NVIDIA GPU.",
+            lines = [nullmoth.NEXT_STEPS[0],
                      "Checklist inside macOS (take a photo of this or scan the QR code):"]
             lines += [f"  {i}. {s}" for i, s in enumerate(nullmoth.NEXT_STEPS[1:], start=1)]
             lines += [f"Driver releases: {nullmoth.NULLMOTH_URL}/releases", f"Our guide: {NULLMOTH_DOC}"]
@@ -598,9 +626,12 @@ class Session:
         if chosen and host_setup.check_identity(self.root, chosen.get("identity")):
             messages.append(f"Note: the card at {chosen['bdf']} is now a different device (your PCI layout "
                             "changed). Undo only removes what this tool wrote, so nothing there is touched.")
-        for vmid in list(self.state["vm_records"]):
+        # One record format for every entry point: a record on disk counts whoever wrote it
+        # (this walkthrough or nvidia-attach).
+        vmids = list(self.state["vm_records"]) + [v for v in gpu.record_vmids() if v not in self.state["vm_records"]]
+        for vmid in vmids:
             if load_record(vmid) is None:
-                self.state["vm_records"].remove(vmid)
+                self._forget_vm(vmid)
                 messages.append(f"VM {vmid}: nothing to revert (the attach did not change it).")
                 continue
             plan = gpu_attach.prepare_detach(vmid, adapter=self.pve, allow_stop=allow_stop, missing_ok=True)
@@ -610,14 +641,14 @@ class Session:
                 continue
             if not plan.steps:  # the VM is gone
                 gpu.record_path(vmid).unlink(missing_ok=True)
-                self.state["vm_records"].remove(vmid)
+                self._forget_vm(vmid)
                 messages += [f"VM {vmid}: {w}" for w in plan.warnings]
                 continue
             result = apply_plan(plan.steps, execute=True)
             kept = [ln for r in result.results for ln in r.output.splitlines() if ln.startswith("KEPT:")]
             self.undo_kept += len(kept)
             if result.ok:
-                self.state["vm_records"].remove(vmid)
+                self._forget_vm(vmid)
                 messages.append(f"VM {vmid}: GPU settings restored.")
                 messages += [f"VM {vmid}: {w}" for w in plan.warnings]
                 messages += [f"VM {vmid}: {ln}" for ln in kept]
@@ -628,6 +659,11 @@ class Session:
         ok = ok and res["ok"]
         self.undo_kept += len(res["kept"])
         messages += [f"Restored {path}" for path in res["restored"]] + res["kept"] + res["errors"]
+        self.undo_nothing = not vmids and not (res["restored"] or res["kept"] or res["errors"] or res["reboot_required"])
+        if self.undo_nothing:
+            messages.append("Nothing to undo: no GPU setup record found.")
+            messages += [f"VM {v} has NullMoth settings in its config but no record. Undo it with: nvidia-detach {v}"
+                         for v in self.nullmoth_markers()]
         if res["reboot_required"]:
             messages.append("Reboot the host to finish undoing the boot changes.")
         if ok:
@@ -636,6 +672,37 @@ class Session:
         else:
             self.save()
         return ok, messages
+
+    def _forget_vm(self, vmid: int) -> None:
+        if vmid in self.state["vm_records"]:
+            self.state["vm_records"].remove(vmid)
+
+    def forget_attached(self, vmid: int) -> None:
+        """nvidia-detach undid this VM: drop it from the walkthrough's list (only when it is listed)."""
+        if vmid in self.state["vm_records"]:
+            self._forget_vm(vmid)
+            self.save()
+
+    def has_undo(self) -> bool:
+        return bool(self.state["host_changes"] or self.state["vm_records"] or gpu.record_vmids())
+
+    def nullmoth_markers(self) -> list[int]:
+        """VMs whose config carries what a NullMoth attach writes (hostpci0 plus the 64-bit MMIO window)."""
+        found: list[int] = []
+        listing = self.pve.qm("list")
+        if not listing.ok:
+            return found
+        for line in listing.output.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 3 or not parts[0].isdigit():
+                continue
+            cfg = self.pve.qm("config", parts[0])
+            if cfg.ok:
+                parsed = gpu.parse_config(cfg.output)
+                args = parsed.get("args", "")
+                if "hostpci0" in parsed and gpu.without_mmio_arg(args) != args:
+                    found.append(int(parts[0]))
+        return found
 
     def record_for(self, vmid: int) -> AttachRecord | None:
         return load_record(vmid)

@@ -29,7 +29,7 @@ The command checks all of these and refuses with a clear message when one fails.
 
 - IOMMU on (VT-d or AMD-Vi), and the card in its own IOMMU group (bridges are fine, other devices are not).
 - Every function of the card (`01:00.*`) bound to `vfio-pci`. `nvidia` and `nouveau` must not hold it. When it is not bound, the command prints the `options vfio-pci ids=...` and `softdep` lines for `/etc/modprobe.d/vfio.conf`, then you run `update-initramfs -u -k all` and reboot.
-- Warnings, not failures: the card is the host boot GPU without `initcall_blacklist=sysfb_init`, or BAR1 is larger than 256 MiB (the one Proxmox report of NullMoth ran at 256 MiB; there is no automatic resize).
+- Warnings, not failures: the card is the host console GPU (boot GPU with a host driver or `efifb`/`simplefb` on it) without `initcall_blacklist=sysfb_init`, or BAR1 is larger than 256 MiB (the one Proxmox report of NullMoth ran at 256 MiB; there is no automatic resize).
 
 ## Usage
 
@@ -65,15 +65,25 @@ On the OpenCore disk (`ide0`):
 - The SMBIOS model is set to `MacPro7,1` (the OpenCore template ships `iMacPro1,1`, which macOS 26 refuses).
 - `csr-active-config` must already include `0x0A43` and `SecureBootModel` must be `Disabled`; the command stops without changing anything if not.
 
+## Before applying: get a way into macOS
+
+Once the NullMoth driver loads, the Proxmox console goes black. The driver takes the display even with `vga std` and no monitor attached, so the web console shows nothing. Set up remote access in the guest **before** you attach the card:
+
+1. In macOS open System Settings > General > Sharing and turn on **Remote Login** and **Screen Sharing**.
+2. Note the VM's IP address.
+3. Connect with `ssh <user>@<ip>` or any VNC client pointed at the VM's IP (from a Mac: `open vnc://<ip>`).
+
+If `systemsetup -setremotelogin on` is refused because it needs Full Disk Access, run `sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist` instead. The guided flow asks you to confirm this checklist before it attaches the card.
+
 ## After applying
 
-1. Start the VM. The desktop stays on the emulated display; apps get the NVIDIA GPU.
+1. Start the VM. Once the NullMoth driver loads, the Proxmox console goes black; use SSH or Screen Sharing from then on (or plug a monitor into the card).
 2. Download the NullMoth release from https://github.com/nullmoth/nvidia-macos-driver/releases, check it with `shasum -a 256 -c SHA256SUMS`, then run `sudo ./install.sh` in the guest.
 3. Approve the extensions in System Settings > Privacy & Security and reboot the guest.
-4. Verify with `kmutil showloaded --list-only | grep nullmoth`.
+4. Verify with `kmutil showloaded --list-only | grep -i nullmoth`. Expect 4 or more lines (NVRM, NVAccel, NVRMFB, NVRMAGDC; newer releases add more, for example NMXAudio in 2.7.2).
 5. Turn off system sleep: `sudo pmset -a sleep 0`.
 
-Escape hatches: add `-nvoff` to the boot-args, or run `gpu-setup --undo` on the host, which removes `hostpci0`, the MMIO window and restores the saved `config.plist`.
+Escape hatches: add `-nvoff` to the boot-args, or run `gpu-setup --undo` (or `nvidia-detach <vmid>`, the same code path and record) on the host, which removes `hostpci0`, the MMIO window and restores the saved `config.plist`.
 
 :::warning
 The NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore disk with this tool later, or running `gpu-setup --undo`, wipes those edits.

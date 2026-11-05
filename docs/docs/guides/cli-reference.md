@@ -383,4 +383,4 @@ osx-next-cli nvidia-attach <vmid> --gpu <pci-address> --accept-nullmoth-risk [--
 osx-next-cli nvidia-detach <vmid> [--dry-run]
 ```
 
-Attach an NVIDIA Turing-or-newer GPU to a stopped macOS VM and prepare OpenCore for the third-party NullMoth driver, or undo it (`nvidia-detach` is the same code path as `gpu-setup --undo` for one VM and also undoes an AMD attach). Without `--accept-nullmoth-risk` nothing changes; `--dry-run` prints the preflight result and the plan without it. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).
+Attach an NVIDIA Turing-or-newer GPU to a stopped macOS VM and prepare OpenCore for the third-party NullMoth driver, or undo it (`nvidia-detach` is the same code path as `gpu-setup --undo` for one VM and also undoes an AMD attach). `nvidia-attach` writes the same record `gpu-setup` does, so `gpu-setup --undo` undoes it too. Turn on Remote Login and Screen Sharing in macOS first: the Proxmox console goes black once the driver loads. Without `--accept-nullmoth-risk` nothing changes; `--dry-run` prints the preflight result and the plan without it. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).

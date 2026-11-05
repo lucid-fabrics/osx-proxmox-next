@@ -185,7 +185,7 @@ def test_scan_names_the_containers_using_the_card(bash, vm, tmp_path):
     write(root, "/etc/pve/lxc/105.conf", "dev0: /dev/dri/renderD128\n")
     stub_lspci(bash)
     out = bash('gpu_scan; for l in "${GPU_CARDS[@]}"; do echo "$l"; gpu_card_text "$l"; done', env=env).stdout
-    assert out.splitlines()[0].endswith("|105:/dev/dri") and "container 105 uses /dev/dri" in out
+    assert out.splitlines()[0].endswith("|105:/dev/dri|0") and "container 105 uses /dev/dri" in out
 
 
 def test_a_pipe_in_a_card_name_does_not_shift_the_fields(bash, vm, tmp_path):

@@ -19,7 +19,7 @@ from .domain import PlanStep
 from .infrastructure import ProxmoxAdapter
 from .gpu import (
     MMIO_ARG, NVIDIA_PROFILE, AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps,
-    gpu_users, hostpci_bdfs, hostpci_value, load_record, new_record, normalize_bdf, parse_config, record_is_stale,
+    gpu_users, hostpci_bdfs, running_user_issue, shared_note, hostpci_value, load_record, new_record, normalize_bdf, parse_config, record_is_stale,
     record_step,
     stop_step as _stop_step, verify_stopped_step as _verify_stopped_step, with_mmio_arg, without_mmio_arg,
 )
@@ -30,6 +30,9 @@ from .services import fetch_vm_info, get_proxmox_adapter
 __all__ = [
     "ACK_LABEL",
     "ACK_PHRASE",
+    "GUEST_PREP",
+    "GUEST_PREP_CONFIRM",
+    "GUEST_PREP_TITLE",
     "AttachPlan",
     "MMIO_ARG",
     "NEXT_STEPS",
@@ -73,12 +76,26 @@ _PYEOF = "NULLMOTH_PY"
 # The only Proxmox report of NullMoth ran with a 256 MiB BAR1 (nullmoth issue #275).
 _BAR_NOTE = " NullMoth's one Proxmox report (nullmoth issue #275) ran at 256 MiB."
 
+# Required in the guest BEFORE the card is attached: once the driver loads, the Proxmox console goes black.
+GUEST_PREP_TITLE = "Before you attach (required): get a way into macOS that does not need the Proxmox console"
+GUEST_PREP = (
+    "In macOS open System Settings > General > Sharing and turn on Remote Login and Screen Sharing.",
+    "Note the VM's IP address (shown in the Sharing pane, or in your router).",
+    "You will connect with ssh <user>@<ip>, or with any VNC client pointed at the VM's IP "
+    "(from a Mac: open vnc://<ip>).",
+    "If Remote Login will not switch on from the command line (systemsetup needs Full Disk Access), run: "
+    "sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist",
+)
+GUEST_PREP_CONFIRM = "Remote Login and Screen Sharing are on, and I can reach the VM over the network."
+
 NEXT_STEPS = (
-    "Start the VM. The desktop stays on the emulated display (vga std); apps get the NVIDIA GPU.",
+    "Start the VM. Once the NullMoth driver loads, the Proxmox console goes black (the driver takes the display "
+    "even with vga std). Use SSH or Screen Sharing from then on, or plug a monitor into the card.",
     f"Download the NullMoth release yourself from {NULLMOTH_URL}/releases and check it with "
     "shasum -a 256 -c SHA256SUMS, then run sudo ./install.sh in the guest.",
     "Approve the extensions in System Settings > Privacy & Security, then reboot the guest.",
-    "Verify with: kmutil showloaded --list-only | grep nullmoth",
+    "Verify with: kmutil showloaded --list-only | grep -i nullmoth. Expect 4 or more lines "
+    "(NVRM, NVAccel, NVRMFB, NVRMAGDC, newer releases add more).",
     "Turn off system sleep in the guest: sudo pmset -a sleep 0",
     "Escape hatch: add -nvoff to the boot-args, or run gpu-setup --undo on the host.",
     "Warning: the NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore "
@@ -234,9 +251,9 @@ def prepare_attach(
     plan.issues += _slot_issues(cfg, report.bdf)
     for other, other_running in gpu_users(pve, report.bdf, vmid) if report.ok else []:
         if other_running:
-            plan.issues.append(f"The card is in use by running VM {other}.")
+            plan.issues.append(running_user_issue(other))
         else:
-            plan.warnings.append(f"VM {other} also has this card assigned; only one can run at a time.")
+            plan.warnings.append(shared_note(other))
 
     if plan.ok:
         record = new_record(vmid, report.bdf, "nvidia", cfg, NVIDIA_PROFILE,

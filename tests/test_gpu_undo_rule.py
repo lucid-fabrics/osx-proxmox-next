@@ -279,7 +279,7 @@ def test_session_undo_counts_kept_host_files(tmp_path, monkeypatch):
 
 
 def test_bash_undo_counts_opencore_kept_lines(bash):
-    stub = ('gpu_host() { case "$1" in undo) echo \'{"ok": true, "restored": [], "kept": [], "errors": [], '
+    stub = ('gpu_host() { case "$1" in undo) echo \'{"ok": true, "restored": ["/etc/a"], "kept": [], "errors": [], '
             '"reboot_required": false}\' ;; esac; }; GPU_OC_KEPT=0; ')
     out = bash(stub + "gpu_undo no").stdout
     assert "Everything this setup changed is back" in out

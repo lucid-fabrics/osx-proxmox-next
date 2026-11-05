@@ -352,7 +352,8 @@ def test_the_display_choice_is_two_full_radio_options(tmp_path):
                 "Monitor on the GPU", "Keep the Proxmox console"]
             assert [text(app, f"#gp_display_desc_{i}").strip() for i in (0, 1)] == [
                 "Best performance. Plug a screen into the card. The Proxmox console goes blank.",
-                "The card accelerates apps; you keep using the web console. Required for NVIDIA today."]
+                "The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: "
+                "the console goes black once the driver loads."]
             assert not app.query_one("#gp_display_0").disabled
             with pytest.raises(NoMatches):
                 app.query_one("#gp_display_select")  # the truncated dropdown is gone
@@ -597,6 +598,10 @@ def test_nvidia_vm_step_downloads_amfipass(tmp_path, monkeypatch):
             await settle(pilot, lambda: "Step 7" in text(app, "#gp_title"))
             await press(pilot, app, "#gp_primary_btn")
             await settle(pilot, lambda: label(app, "#gp_primary_btn") == "Attach the card now")
+            assert "Remote Login and Screen Sharing" in text(app, "#gp_body")  # the required guest checklist
+            await press(pilot, app, "#gp_primary_btn")  # first click only asks whether the guest is ready
+            await settle(pilot, lambda: "Remote Login" in text(app, "#gp_result"))
+            assert not fetched and "Step 7" in text(app, "#gp_title")
             await press(pilot, app, "#gp_primary_btn")
             await settle(pilot, lambda: "Step 8" in text(app, "#gp_title"))
             assert fetched and "kmutil showloaded" in text(app, "#gp_body") and app._gp.first_boot_qr()
