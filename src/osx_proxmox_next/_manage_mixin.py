@@ -23,7 +23,7 @@ class ManageModeMixin:
 
     def _toggle_mode(self, mode: str) -> None:
         self.state.manage_mode = mode == "manage"  # type: ignore[attr-defined]
-        for name in ("create", "manage", "nvidia", "gpu"):
+        for name in ("create", "manage", "gpu"):
             panel = self.query_one(f"#{name}_panel")
             button = self.query_one(f"#mode_{name}", Button)
             if name == mode:
@@ -32,6 +32,8 @@ class ManageModeMixin:
             else:
                 panel.add_class("hidden")
                 button.remove_class("mode_active")
+        # The Create VM progress rail belongs to that wizard only: the GPU screens carry their own.
+        self.query_one("#step_bar").set_class(mode == "gpu", "hidden")
         if mode == "manage":
             self._refresh_vm_list()
         if mode == "gpu":

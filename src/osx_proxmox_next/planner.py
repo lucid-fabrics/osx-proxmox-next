@@ -44,7 +44,6 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
     (see ``defaults._xeon_hedt_cpu_model``) to avoid an XNU scheduler
     livelock under heavy multithreaded I/O.
 
-    Ref: luchina-gabriel/OSX-PROXMOX (battle-tested on ~5k installs).
     """
     if override:
         return (

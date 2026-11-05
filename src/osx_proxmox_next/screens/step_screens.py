@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
-from textual.widgets import Button, Checkbox, Input, ProgressBar, Select, Static
+from textual.widgets import Button, Checkbox, Input, ProgressBar, Static
 
 from ..defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_MEMORY_MB, DEFAULT_STORAGE, CpuInfo
 from ..domain import DEFAULT_VMID, SUPPORTED_MACOS
-from ..nullmoth import ACK_LABEL, NOTICE_BODY, NOTICE_TITLE
 from .gpu_panel import compose_gpu_panel
 
 __all__ = [
@@ -33,8 +32,7 @@ def compose_step2() -> ComposeResult:
         with Horizontal(classes="action_row"):
             yield Button("Create VM", id="mode_create", classes="mode_btn mode_active")
             yield Button("Manage VMs", id="mode_manage", classes="mode_btn")
-            yield Button("GPU Passthrough (guided)", id="mode_gpu", classes="mode_btn")
-            yield Button("NVIDIA GPU (Beta)", id="mode_nvidia", classes="mode_btn")
+            yield Button("GPU Passthrough", id="mode_gpu", classes="mode_btn")
         # Create panel
         with Vertical(id="create_panel"):
             yield Static("Choose macOS Version")
@@ -95,28 +93,6 @@ def compose_step2() -> ComposeResult:
             yield Static("", id="edit_log", classes="hidden")
             yield Static("", id="edit_result", classes="hidden")
         yield from compose_gpu_panel()
-        # NVIDIA GPU (NullMoth, Beta) panel
-        with Vertical(id="nvidia_panel", classes="hidden"):
-            yield Static("NVIDIA GPU (NullMoth) - Beta")
-            yield Static(NOTICE_TITLE, id="nv_notice_title")
-            yield Static(NOTICE_BODY, id="nv_notice", classes="hint")
-            yield Static("VM ID to attach the GPU to:", id="nv_vmid_label")
-            yield Input(value="", id="nv_vmid", placeholder="e.g. 106")
-            with Horizontal(classes="action_row"):
-                yield Button("Detect GPUs", id="nv_detect_btn")
-                yield Select([], prompt="Select a GPU", id="nv_gpu_select")
-            yield Static("", id="nv_gpu_info")
-            yield Select(
-                [("macOS Sequoia 15.5+", "sequoia"), ("macOS Tahoe 26", "tahoe")],
-                prompt="macOS version (auto-detect)", id="nv_macos_select",
-            )
-            yield Checkbox(ACK_LABEL, value=False, id="nv_ack_cb")
-            yield Checkbox("Stop the VM first if it is running", value=False, id="nv_stop_cb")
-            with Horizontal(classes="action_row"):
-                yield Button("Apply", id="nv_apply_btn", disabled=True)
-                yield Button("Detach GPU", id="nv_detach_btn", disabled=True)
-            yield Static("", id="nv_log", classes="hidden")
-            yield Static("", id="nv_result", classes="hidden")
 
 
 def compose_step3(storage_targets: list[str]) -> ComposeResult:

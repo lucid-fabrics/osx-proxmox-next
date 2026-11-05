@@ -467,7 +467,7 @@ Use `--verbose-boot` flag in CLI: `osx-next-cli apply --verbose-boot ...`. This 
 One guided flow takes a card from "it is in the server" to "macOS uses it": scan, a BIOS photo card with a QR code, host setup with a diff and backups, VM attach, first boot, and a full undo. It resumes across reboots.
 
 ```bash
-osx-next-cli gpu-setup            # or: TUI > GPU Passthrough (guided), or osx-proxmox-next.sh gpu-setup
+osx-next-cli gpu-setup            # or: TUI > GPU Passthrough, or osx-proxmox-next.sh gpu-setup
 osx-next-cli gpu-setup --status   # read only
 osx-next-cli gpu-setup --undo     # put everything back
 ```

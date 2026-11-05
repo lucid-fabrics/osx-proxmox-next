@@ -44,7 +44,7 @@ osx-next-cli nvidia-attach 106 --gpu 01:00 --accept-nullmoth-risk
 osx-next-cli nvidia-detach 106
 ```
 
-The standalone script has the same two commands (`osx-proxmox-next.sh nvidia-attach <vmid> <pci-address>` and `nvidia-detach <vmid>`). It asks you to type `I accept`, or take `--accept-nullmoth-risk` for non-interactive use. In the TUI, open **Step 2 > NVIDIA GPU (Beta)**: pick the VM and the card, tick the acknowledgement box (unticked by default) and the Apply button unlocks.
+The standalone script has the same two commands (`osx-proxmox-next.sh nvidia-attach <vmid> <pci-address>` and `nvidia-detach <vmid>`). It asks you to type `I accept`, or take `--accept-nullmoth-risk` for non-interactive use. In the TUI, open **Step 2 > GPU Passthrough** and pick the NVIDIA card: it goes through the same guided steps as an AMD card. The acknowledgement is typed (`I accept`) every time the screen opens, and the Choose button unlocks only when the phrase matches.
 
 The VM must be stopped and must be a macOS VM made by this tool. The macOS release is read from the VM description or name; pass `--macos sequoia` or `--macos tahoe` when it cannot be read.
 
