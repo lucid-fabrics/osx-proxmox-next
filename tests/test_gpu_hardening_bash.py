@@ -283,3 +283,42 @@ def test_bash_standalone_detach_refuses_a_record_written_for_another_vm(bash, vm
     res = bash("gpu_oc_boot_args() { true; }; gpu_detach_record 100", env=env, expect=1)
     assert "different VM" in res.stdout + res.stderr and vm.calls() == []
     assert (state_dir / "gpu-attach-100.json").exists()
+
+
+def test_bash_detach_checks_the_record_before_stopping_a_running_vm(bash, vm, tmp_path):
+    state_dir, env = _recreated_record(tmp_path, vm, "an-older-vm")
+    vm(100, "running", MAC)
+    res = bash("gpu_oc_boot_args() { true; }; gpu_detach_record 100 no yes", env=env, expect=1)
+    assert "different VM" in res.stdout + res.stderr
+    calls = (tmp_path / "qm/calls.log").read_text()
+    assert "qm stop" not in calls and (tmp_path / "qm/100.status").read_text() == "running"
+    assert (state_dir / "gpu-attach-100.json").exists()
+
+
+BIOS_STUBS = '''gpu_chosen_target() { echo '{}'; }
+gpu_host() { if [ "$1" == facts ]; then echo '{}'; else cat >/dev/null; fi; }
+gpu_say() { echo "SAY $*"; }
+gpu_step_complete() { echo "COMPLETE $*"; }
+gpu_use_ui() { return 1; }
+gpu_ui_text() { :; }
+gpu_bios() {
+  case "$1" in
+    check) cat >/dev/null; echo '[]' ;;
+    url) cat >/dev/null; echo http://x ;;
+    card) cat >/dev/null; return "${CARD_RC:-0}" ;;
+    *) cat >/dev/null ;;
+  esac
+}
+'''
+
+
+def test_bash_bios_step_marks_done_only_when_there_is_nothing_to_change(bash):
+    res = bash(BIOS_STUBS + "gpu_step_bios", env={"CARD_RC": "3"}, expect=100)
+    assert "COMPLETE 3" in res.stdout
+    res = bash(BIOS_STUBS + "gpu_step_bios", env={"CARD_RC": "1"}, expect=1)
+    assert "COMPLETE" not in res.stdout
+
+
+def test_bash_bios_step_survives_a_zero_padded_columns(bash):
+    res = bash(BIOS_STUBS + "gpu_step_bios", env={"CARD_RC": "3", "COLUMNS": "08"}, expect=100)
+    assert "COMPLETE 3" in res.stdout and "value too great" not in res.stderr

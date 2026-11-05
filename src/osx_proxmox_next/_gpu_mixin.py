@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from functools import partial
 from threading import Thread
 from collections.abc import Callable
 from typing import Any
@@ -91,8 +92,11 @@ class GpuSetupMixin:
         if self._gp_title != title:  # a new screen starts at its top, not where the last one was scrolled to
             self._gp_title = title
             panel = q("#gpu_panel")
-            panel.scroll_home(animate=False)
-            self.call_after_refresh(panel.scroll_home, animate=False)  # type: ignore[attr-defined]
+            top = partial(panel.scroll_to, y=0, animate=False, immediate=True, force=True)
+            top()
+            # the new body is laid out and the focused button scrolled into view after this call: reset the scroll
+            # once the layout refresh is done, and again after the focus scroll that follows it
+            self.call_after_refresh(lambda: (top(), self.call_after_refresh(top)))  # type: ignore[attr-defined]
         q("#gp_title", Static).update(title)
         q("#gp_body", Static).update(body)
         prim = q("#gp_primary_btn", Button)

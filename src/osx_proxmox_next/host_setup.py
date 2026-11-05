@@ -586,7 +586,7 @@ def plan_binding(facts, target, root, plan, opts=None):
         # a host driver that can claim the card makes ids alone worthless: vfio-pci must be ordered first
         claimers = _claiming_drivers(root) if target["vendor"] == "nvidia" else ["amdgpu", "radeon"]
         ordered = not claimers or _softdeps_listed(target, root)
-        idwide = has_twin and ordered and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
+        idwide = has_twin and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
         how = "" if idwide else _persistent_binding(facts, target, fns, ids, root, by_id=not has_twin,
                                                     ordered=ordered)
         if how:

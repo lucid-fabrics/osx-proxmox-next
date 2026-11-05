@@ -168,7 +168,7 @@ def test_a_passing_bios_check_shows_done_on_the_rail(tmp_path):
 
 
 def test_bash_marks_a_passing_bios_check_done():
-    assert 'gpu_say "Nothing to change in the BIOS."\n    gpu_step_complete 3\n' in BASH
+    assert 'gpu_say "Nothing to change in the BIOS."\n      gpu_step_complete 3\n' in BASH
 
 
 # ── a new label gets a new width ──

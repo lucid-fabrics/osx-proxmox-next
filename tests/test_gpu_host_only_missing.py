@@ -396,3 +396,14 @@ def test_cli_applies_the_write_without_asking_when_a_driver_could_claim_the_card
     code, out = _step(s, [], yes=True)
     assert "Write the boot-time binding" not in out and "may be lost" not in out
     assert (env.root / hs.MODPROBE_FILE.lstrip("/")).exists() and 4 not in s.state.get("skipped", [])
+
+
+def test_identical_twin_is_refused_for_an_ids_wide_binding_even_without_softdeps(tmp_path):
+    cur = hs._bind_script([("0000:06:00.0", "0x10de", "0x2504", "0x03", "-", "-"),
+                           ("0000:06:00.1", "0x10de", "0x228e", "0x0403", "-", "-")])
+    files = _with({"/etc/modprobe.d/pve-blacklist.conf": "blacklist nvidiafb\n", hs.BIND_SCRIPT: cur,
+                   "/etc/modprobe.d/x.conf": "options vfio-pci ids=10de:2504,10de:228e\n"},
+                  drop=("/etc/modprobe.d/vfio-nvidia.conf",))
+    p = plan(mirna(tmp_path, files))
+    assert p["refusals"]
+    assert not any("already bound" in s for s in p["skipped"])

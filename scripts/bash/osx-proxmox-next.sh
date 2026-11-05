@@ -2478,7 +2478,7 @@ def plan_binding(facts, target, root, plan, opts=None):
         # a host driver that can claim the card makes ids alone worthless: vfio-pci must be ordered first
         claimers = _claiming_drivers(root) if target["vendor"] == "nvidia" else ["amdgpu", "radeon"]
         ordered = not claimers or _softdeps_listed(target, root)
-        idwide = has_twin and ordered and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
+        idwide = has_twin and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
         how = "" if idwide else _persistent_binding(facts, target, fns, ids, root, by_id=not has_twin,
                                                     ordered=ordered)
         if how:
@@ -5031,17 +5031,17 @@ function amd_attach() {
 function gpu_detach_record() {
   local vmid="$1" dry="${2:-no}" stop="${3:-no}" cfg plan line op key value
   cfg=$(qm config "$vmid" 2>/dev/null) || { msg_error "VM $vmid not found."; return 1; }
+  gpu_record_load "$vmid" || return 2
+  if [ -z "${cfg//[[:space:]]/}" ]; then msg_error "Could not read the config of VM $vmid, so nothing was changed. Try again."; return 1; fi
+  if [ "$(python3 -c 'import json,sys; print(json.dumps({"record": json.load(open(sys.argv[1])), "cfg_raw": sys.stdin.read()}))' "$(gpu_record_path "$vmid")" <<<"$cfg" | gpu_host vm-stale)" == "1" ]; then
+    msg_error "The saved attach record for VM $vmid was written for a different VM (it was deleted and created again), so nothing was reverted. Check its hostpci0, args and vga by hand, then remove $(gpu_record_path "$vmid")."; return 1
+  fi
   if ! qm status "$vmid" 2>/dev/null | grep -q 'status: stopped'; then
     if [ "$stop" == "yes" ] && [ "$dry" != "yes" ]; then
       qm stop "$vmid" >/dev/null || { msg_error "Could not stop VM $vmid"; return 1; }
     elif [ "$dry" != "yes" ]; then
       msg_error "VM $vmid is running. Stop it first: qm stop $vmid"; return 1
     fi
-  fi
-  gpu_record_load "$vmid" || return 2
-  if [ -z "${cfg//[[:space:]]/}" ]; then msg_error "Could not read the config of VM $vmid, so nothing was changed. Try again."; return 1; fi
-  if [ "$(python3 -c 'import json,sys; print(json.dumps({"record": json.load(open(sys.argv[1])), "cfg_raw": sys.stdin.read()}))' "$(gpu_record_path "$vmid")" <<<"$cfg" | gpu_host vm-stale)" == "1" ]; then
-    msg_error "The saved attach record for VM $vmid was written for a different VM (it was deleted and created again), so nothing was reverted. Check its hostpci0, args and vga by hand, then remove $(gpu_record_path "$vmid")."; return 1
   fi
   plan=$(python3 -c 'import json,sys; print(json.dumps({"record": json.load(open(sys.argv[1])), "cfg_raw": sys.stdin.read()}))' "$(gpu_record_path "$vmid")" <<<"$cfg" | gpu_host vm-restore) || return 1
   if [ "$dry" == "yes" ]; then
@@ -5564,11 +5564,17 @@ GPU_ITEMS_PY
   # The QR code sits beside the steps only when the frame fits the screen (the dialog box is 100 wide), else under them.
   local cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
   [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  cols=$((10#$cols))
   if gpu_use_ui && [ "$cols" -gt 96 ]; then cols=96; fi
   card=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1]), "target": json.loads(sys.argv[2]), "items": json.loads(sys.argv[3]), "save": True, "resume_cmd": sys.argv[4], "qr": json.loads(sys.argv[5]), "max_width": int(sys.argv[6])}))' "$facts" "$target" "$items" "$GPU_RESUME_CMD" "$qr" "$((cols - 1))" | gpu_bios card) || {
-    gpu_say "Nothing to change in the BIOS."
-    gpu_step_complete 3
-    return 100
+    local card_rc=$?
+    if [ "$card_rc" -eq 3 ]; then
+      gpu_say "Nothing to change in the BIOS."
+      gpu_step_complete 3
+      return 100
+    fi
+    msg_error "Could not build the BIOS steps (exit $card_rc). Nothing was marked done."
+    return 1
   }
   gpu_ui_text "BIOS steps for this server (take a photo)" "$card"
   gpu_say "$card"
