@@ -212,8 +212,9 @@ def test_attach_plan_happy_path(tmp_path):
     assert plan.ok and not plan.warnings
     titles = [s.title for s in plan.steps]
     assert titles[0] == "Verify VM is stopped" and titles[1].startswith("Prepare OpenCore")
-    assert plan.steps[2].argv == ["qm", "set", "100", "--hostpci0", "0000:01:00,pcie=0"]
-    assert plan.steps[3].argv[-1].endswith("pci-hole64-size=64G")
+    assert titles[2].startswith("Record the original VM settings")
+    assert plan.steps[3].argv == ["qm", "set", "100", "--hostpci0", "0000:01:00,pcie=0"]
+    assert plan.steps[4].argv[-1].endswith("pci-hole64-size=64G")
 
 
 def test_attach_sequoia_warns_and_explicit_macos_wins(tmp_path):
@@ -258,7 +259,7 @@ def test_attach_allow_stop_adds_stop_step(tmp_path):
 
 def test_attach_skips_mmio_step_when_present(tmp_path):
     cfg = MAC_CFG.replace("-cpu host\n", "-cpu host " + nullmoth.MMIO_ARG + "\n")
-    assert len(prep(tmp_path, vms={100: ("stopped", cfg)}).steps) == 3
+    assert len(prep(tmp_path, vms={100: ("stopped", cfg)}).steps) == 4
 
 
 def test_detach_plan(tmp_path):
@@ -266,7 +267,7 @@ def test_detach_plan(tmp_path):
     plan = nullmoth.prepare_detach(100, adapter=FakeQm({100: ("stopped", cfg)}))
     assert [s.title for s in plan.steps] == [
         "Verify VM is stopped", "Restore the previous OpenCore config",
-        "Remove GPU (hostpci0)", "Remove 64-bit MMIO window from args"]
+        "Remove GPU (hostpci0)", "Remove the profile's QEMU args"]
     assert not nullmoth.prepare_detach(100, adapter=FakeQm({})).ok
     assert not nullmoth.prepare_detach(100, adapter=FakeQm({100: ("running", cfg)})).ok
     stop = nullmoth.prepare_detach(100, adapter=FakeQm({100: ("running", cfg)}), allow_stop=True)
@@ -343,7 +344,7 @@ def test_cli_dry_run_reports_refusal(monkeypatch, tmp_path, capsys):
 def test_cli_attach_applies(monkeypatch, tmp_path, capsys):
     applied = patch_cli(monkeypatch, tmp_path)
     assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 0
-    assert len(applied[0]) == 4 and "kmutil showloaded" in capsys.readouterr().out
+    assert len(applied[0]) == 5 and "kmutil showloaded" in capsys.readouterr().out
 
 
 def test_cli_attach_failure_and_refusal_and_download_error(monkeypatch, tmp_path, capsys):

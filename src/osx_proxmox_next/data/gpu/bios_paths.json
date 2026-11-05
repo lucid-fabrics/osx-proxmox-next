@@ -1,0 +1,263 @@
+{
+ "version": 1,
+ "docs_base": "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu/bios/",
+ "search_tip": "Cannot find a setting? Use the BIOS search (the footer of the screen shows the key, often F3, F7 or F9) and type the setting name.",
+ "order_note": "Do the settings in this order: CSM off, then Above 4G Decoding, then Resizable BAR if you want it. Virtualization and IOMMU are independent.",
+ "settings": {
+  "vtx": {"label": "Intel virtualization (VT-x)", "why": "Lets the CPU run virtual machines."},
+  "svm": {"label": "AMD virtualization (SVM)", "why": "Lets the CPU run virtual machines."},
+  "vtd": {"label": "Intel VT-d", "why": "Lets the host hand a PCI card to one VM safely (the IOMMU)."},
+  "amd_iommu": {"label": "AMD IOMMU", "why": "Lets the host hand a PCI card to one VM safely."},
+  "above4g": {"label": "Above 4G Decoding", "why": "Lets the GPU's large memory window sit above 4 GB."},
+  "csm": {"label": "CSM (legacy boot support)", "why": "Must be off so the machine boots in pure UEFI mode."},
+  "primary_display": {"label": "Primary display", "why": "The motherboard's own graphics should show the boot screen, not the card you pass through."},
+  "rebar": {"label": "Resizable BAR (optional)", "why": "Optional. If the VM will not start, turn it off."}
+ },
+ "generic": {
+  "virtualization": {"names": "Intel Virtualization Technology, VT-x, VMX, SVM Mode, AMD-V, Secure Virtual Machine", "where": "Usually under Advanced > CPU Configuration, Tweaker > Advanced CPU Settings, Settings > Advanced > CPU Features, or Security > Virtualization."},
+  "iommu": {"names": "VT-d, Intel VT for Directed I/O, AMD IOMMU, IOMMU Support, AMD-Vi", "where": "Usually under Advanced > Chipset, North Bridge, System Agent (SA) Configuration, AMD CBS > NBIO Common Options, Miscellaneous (Gigabyte) or Processor Options (HPE)."},
+  "above4g": {"names": "Above 4G Decoding, Above 4GB MMIO, Memory Mapped I/O above 4GB, PCI 64-bit Resource Handling above 4G, Above 4G memory / Crypto Currency mining (MSI)", "where": "Usually under Advanced > PCI Subsystem Settings, PCIe/PCI/PnP Configuration, North Bridge or IO Ports (Gigabyte)."},
+  "csm": {"names": "CSM Support, Launch CSM, Legacy Support, Boot mode UEFI/Legacy, Legacy Option ROMs", "where": "Usually under Boot."},
+  "primary_display": {"names": "Primary Display, Initial Display Output, Initial Graphics Adapter, Primary Graphics Adapter, VGA Priority, Primary Video Device, Select Active Video", "where": "Set it to IGD, IGFX, Onboard or iGPU. Servers keep the BMC graphics as the console and need no change."},
+  "rebar": {"names": "Re-Size BAR Support, Resizable BAR, Smart Access Memory, Clever Access Memory", "where": "Appears only after Above 4G Decoding is on and CSM is off."}
+ },
+ "vendors": {
+  "asus": {
+   "name": "ASUS",
+   "doc": "asus",
+   "enter": "Del or F2",
+   "mode": "Press F7 for Advanced Mode.",
+   "manual": "https://www.asus.com/support/",
+   "match": ["asustek", "asus"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel (VMX) Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > System Agent (SA) Configuration > VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO Common Options > IOMMU", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Advanced > PCI Subsystem Settings > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Advanced > PCI Subsystem Settings > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > CSM (Compatibility Support Module) > Launch CSM", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Advanced > System Agent (SA) Configuration > Graphics Configuration > Primary Display (AMD boards: Advanced > NB Configuration > Primary Video Device)", "value": "IGFX / iGPU (AMD: IGD Video)", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "msi": {
+   "name": "MSI",
+   "doc": "msi",
+   "enter": "Del",
+   "mode": "Press F7 to switch between EZ and Advanced mode.",
+   "manual": "https://www.msi.com/support",
+   "match": ["micro-star", "msi"],
+   "paths": {
+    "vtx": {"path": "Settings > Advanced > CPU Features > Intel Virtualization Tech", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Settings > Advanced > CPU Features > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Settings > Advanced > Northbridge or System Agent > VT-d (search for VT-d)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "amd_iommu": {"path": "Settings > Advanced > AMD CBS > NBIO Common Options > IOMMU (many AM5 boards: Settings > Advanced > IOMMU Configuration > IOMMU)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Settings > Advanced > PCI Subsystem Settings > Above 4G memory / Crypto Currency mining", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Settings > Advanced > PCI Subsystem Settings > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Settings > Boot > CSM / UEFI-only (Click BIOS 5: Boot > BIOS CSM/UEFI Mode)", "value": "UEFI", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Settings > Advanced > Integrated Graphics Configuration > Initial Graphics Adapter", "value": "IGD (the onboard graphics)", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "gigabyte": {
+   "name": "Gigabyte / Aorus",
+   "doc": "gigabyte",
+   "enter": "Del",
+   "mode": "Press F2 to switch between Easy and Advanced mode.",
+   "manual": "https://www.gigabyte.com/Support",
+   "match": ["gigabyte", "aorus"],
+   "paths": {
+    "vtx": {"path": "Tweaker > Advanced CPU Settings > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Tweaker > Advanced CPU Settings > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Settings > Miscellaneous > VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Settings > Miscellaneous > IOMMU (older boards: Settings > AMD CBS > NBIO Common Options > IOMMU)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Settings > IO Ports > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Settings > IO Ports > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > CSM Support", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Settings > IO Ports > Initial Display Output", "value": "IGFX (the onboard graphics)", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "asrock": {
+   "name": "ASRock",
+   "doc": "asrock",
+   "enter": "F2 or Del",
+   "mode": "",
+   "manual": "https://www.asrock.com/support",
+   "match": ["asrock"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > Chipset Configuration > VT-d (older boards: Advanced > North Bridge Configuration > VT-d)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO Common Options > IOMMU (AM5: Advanced > North Bridge > IOMMU)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Advanced > North Bridge Configuration > Above 4G Decoding (Intel: Advanced > Chipset Configuration > Above 4G Decoding)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Advanced > North Bridge (or Chipset) Configuration > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > CSM > CSM", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Advanced > North Bridge (or Chipset) Configuration > Primary Graphics Adapter", "value": "Onboard", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "asrock-rack": {
+   "name": "ASRock Rack",
+   "doc": "asrock-rack",
+   "enter": "Del or F2",
+   "mode": "Boards with a BMC can be used through the IPMI remote console.",
+   "manual": "https://www.asrockrack.com/support/",
+   "match": ["asrockrack", "asrock rack"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > Chipset Configuration > VT-d (or Advanced > North Bridge > VT-d)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO Common Options > IOMMU", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Advanced > PCI Subsystem Settings > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Advanced > PCI Subsystem Settings > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > CSM Support (or Advanced > CSM Configuration > CSM Support)", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "supermicro": {
+   "name": "Supermicro",
+   "doc": "supermicro",
+   "enter": "Del",
+   "mode": "Boot menu is F11. The IPMI remote console works for all of this.",
+   "manual": "https://www.supermicro.com/en/support/resources/downloadcenter/manual",
+   "match": ["supermicro", "super micro"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > Chipset Configuration > North Bridge > IIO Configuration > Intel VT for Directed I/O (VT-d)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > NB Configuration > IOMMU", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Advanced > PCIe/PCI/PnP Configuration > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Setting name seen in the X13DDW-A manual; menu path from memory"},
+    "rebar": {"path": "Advanced > PCIe/PCI/PnP Configuration > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > Boot mode select", "value": "UEFI", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Advanced > PCIe/PCI/PnP Configuration > VGA Priority", "value": "Onboard", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "dell": {
+   "name": "Dell OptiPlex / Precision",
+   "doc": "dell",
+   "enter": "F2 at the Dell logo",
+   "mode": "F12 opens the boot menu.",
+   "manual": "https://www.dell.com/support",
+   "match": ["dell"],
+   "paths": {
+    "vtx": {"path": "Virtualization Support > Virtualization", "value": "Enabled", "verified": true, "source": "https://www.dell.com/support/kbdoc/en-us/000195978/how-to-enable-or-disable-hardware-virtualization-on-dell-systems"},
+    "svm": {"path": "Virtualization Support > SVM Mode", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "vtd": {"path": "Virtualization Support > VT for Direct I/O", "value": "Enabled", "verified": true, "source": "https://www.dell.com/support/kbdoc/en-us/000195978/how-to-enable-or-disable-hardware-virtualization-on-dell-systems"},
+    "amd_iommu": {"path": "Virtualization Support > IOMMU", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "above4g": {"path": "Settings > System Configuration > Above 4G Decoding (many Dell desktops have no such switch)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "rebar": {"path": "Settings > System Configuration > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Settings > General > Boot Sequence > Boot List Option, and Advanced Boot Options > Enable Legacy Option ROMs", "value": "UEFI, legacy option ROMs off", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Settings > Video > Primary Display", "value": "Intel HD Graphics / Auto", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "dell-poweredge": {
+   "name": "Dell PowerEdge",
+   "doc": "dell",
+   "enter": "F2 (System Setup)",
+   "mode": "iDRAC: Next Boot > BIOS Setup.",
+   "manual": "https://www.dell.com/support",
+   "match": ["poweredge"],
+   "paths": {
+    "vtx": {"path": "System BIOS > Processor Settings > Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "System BIOS > Processor Settings > Virtualization Technology (SVM)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "System BIOS > Processor Settings > Virtualization Technology (VT-d is on by default on 14G and newer)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "amd_iommu": {"path": "System BIOS > Processor Settings > IOMMU Support", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "System BIOS > Integrated Devices > Memory Mapped I/O Above 4GB", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "System BIOS > Boot Settings > Boot Mode", "value": "UEFI", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "hp": {
+   "name": "HP workstations and desktops",
+   "doc": "hp",
+   "enter": "Esc, then F10",
+   "mode": "F9 opens the boot menu.",
+   "manual": "https://support.hp.com",
+   "match": ["hp", "hewlett-packard"],
+   "paths": {
+    "vtx": {"path": "Advanced > System Options > Virtualization Technology (VTx)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > System Options > SVM CPU Virtualization", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > System Options > Virtualization Technology for Directed I/O (VTd)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > System Options > IOMMU (name varies)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "above4g": {"path": "Advanced > Device Options > Above 4G MMIO (name varies)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Advanced > Boot Options > Legacy Support", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Advanced > Built-in Device Options > Video: Integrated Graphics", "value": "Integrated", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "hpe": {
+   "name": "HPE ProLiant",
+   "doc": "hpe",
+   "enter": "F9 (System Utilities)",
+   "mode": "iLO remote console: Server > One-Button Boot > System Utilities.",
+   "manual": "https://www.hpe.com/support",
+   "match": ["hpe", "hewlett packard enterprise", "proliant"],
+   "paths": {
+    "vtx": {"path": "System Configuration > BIOS/Platform Configuration (RBSU) > Processor Options > Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "RBSU > Processor Options > AMD Virtualization Technology (SVM)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "RBSU > Processor Options > Intel(R) VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "RBSU > Processor Options > AMD I/O Virtualization Technology (IOMMU)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "RBSU > Advanced Options > Memory Mapped I/O Above 4GB (also called PCI 64-bit Resource Handling above 4GB; the name differs per generation)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "RBSU > Boot Options > Boot Mode", "value": "UEFI Mode", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "lenovo": {
+   "name": "Lenovo ThinkCentre / ThinkStation",
+   "doc": "lenovo",
+   "enter": "F1 (some models: Enter, then F1)",
+   "mode": "F12 opens the boot menu.",
+   "manual": "https://pubs.lenovo.com",
+   "match": ["lenovo"],
+   "paths": {
+    "vtx": {"path": "Security > Virtualization > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Security > Virtualization > AMD-V (SVM)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Security > Virtualization > Intel VT-d Feature", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO > IOMMU (ThinkStation P620)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "above4g": {"path": "Advanced > PCI Configuration > Above 4G Decoding (ThinkStation; ThinkCentre often has none)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Startup > CSM Support and Startup > Boot Mode", "value": "Disabled / UEFI Only", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Devices > Video Setup > Select Active Video", "value": "Integrated Graphics", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "lenovo-thinksystem": {
+   "name": "Lenovo ThinkSystem",
+   "doc": "lenovo",
+   "enter": "F1",
+   "mode": "F12 opens the boot menu.",
+   "manual": "https://pubs.lenovo.com",
+   "match": ["thinksystem"],
+   "paths": {
+    "vtx": {"path": "System Settings > Processors > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "System Settings > Processors > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "System Settings > Processors > VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "System Settings > Devices and I/O Ports > IOMMU", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "System Settings > Devices and I/O Ports > MM Config (Memory Mapped I/O above 4GB)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot Manager > Boot Modes > System Boot Mode", "value": "UEFI Mode", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "intel-nuc": {
+   "name": "Intel NUC",
+   "doc": "intel-nuc",
+   "enter": "F2",
+   "mode": "F10 opens the boot menu. Newer NUCs (13 and later) are made by ASUS and use the ASUS layout.",
+   "manual": "https://www.intel.com/content/www/us/en/support/products/",
+   "match": ["nuc"],
+   "paths": {
+    "vtx": {"path": "Advanced > Security > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > Security > Intel VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Usually not offered. NUC 12/13 Extreme: Advanced > Devices > PCI > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Advanced > Boot > Boot Configuration > UEFI Boot", "value": "Enabled, legacy boot off", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "mini-pc": {
+   "name": "Minisforum / Beelink and other mini PCs",
+   "doc": "mini-pc",
+   "enter": "Del or F2",
+   "mode": "F7 opens the boot menu on many models. Mini PCs often hide advanced menus.",
+   "manual": "",
+   "match": ["micro computer (hk)", "minisforum", "beelink", "azw", "shenzhen"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "vtd": {"path": "Advanced > System Agent (SA) Configuration > VT-d", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO Common Options > IOMMU (some models: Advanced > IOMMU)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "above4g": {"path": "Advanced > PCI Subsystem Settings > Above 4G Decoding (often hidden)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Boot > CSM Support", "value": "Disabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"}
+   }
+  }
+ }
+}

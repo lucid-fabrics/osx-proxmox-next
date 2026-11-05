@@ -368,6 +368,14 @@ Sample output (with failures):
 | 8 | Clone failed |
 | 9 | Post-install failed |
 
+## gpu-setup (Beta)
+
+```bash
+osx-next-cli gpu-setup [--status] [--undo] [--yes] [--vm <vmid>] [--gpu <pci-address>] [--display gpu|console] [--accept-nullmoth-risk] [--stop-vm]
+```
+
+The guided GPU passthrough walkthrough for AMD and NVIDIA cards: scan, choose, BIOS card, host setup, reboot, verify, VM attach and first boot. State is kept in `/var/lib/osx-proxmox-next/gpu-setup.json`, so running it again resumes. `--status` only reports. `--undo` restores every file and VM setting it changed. `--yes` answers the confirmations but never the BIOS step, the reboot, the typed confirmations or the NullMoth notice (that needs `--accept-nullmoth-risk`). Exit codes: 0 done or paused by choice, 1 failure, 2 refused, 3 paused for the BIOS, 4 paused for a reboot. See [GPU passthrough (guided)](gpu-passthrough.md).
+
 ## nvidia-attach / nvidia-detach (Beta)
 
 ```bash
@@ -375,4 +383,4 @@ osx-next-cli nvidia-attach <vmid> --gpu <pci-address> --accept-nullmoth-risk [--
 osx-next-cli nvidia-detach <vmid> [--dry-run]
 ```
 
-Attach an NVIDIA Turing-or-newer GPU to a stopped macOS VM and prepare OpenCore for the third-party NullMoth driver, or undo it. Without `--accept-nullmoth-risk` nothing changes; `--dry-run` prints the preflight result and the plan without it. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).
+Attach an NVIDIA Turing-or-newer GPU to a stopped macOS VM and prepare OpenCore for the third-party NullMoth driver, or undo it (`nvidia-detach` is the same code path as `gpu-setup --undo` for one VM and also undoes an AMD attach). Without `--accept-nullmoth-risk` nothing changes; `--dry-run` prints the preflight result and the plan without it. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).

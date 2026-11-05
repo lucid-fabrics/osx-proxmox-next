@@ -18,8 +18,8 @@ from urllib.parse import unquote
 from .domain import PlanStep
 from .infrastructure import ProxmoxAdapter
 from .gpu import (
-    MMIO_ARG, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps, gpu_users, hostpci_bdfs,
-    normalize_bdf, parse_config,
+    MMIO_ARG, AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps, gpu_users,
+    hostpci_bdfs, load_record, normalize_bdf, parse_config, record_step,
     stop_step as _stop_step, verify_stopped_step as _verify_stopped_step, with_mmio_arg, without_mmio_arg,
 )
 from .nvidia_host import check_nvidia_gpu
@@ -134,6 +134,7 @@ def oc_patch_script(vid: str, action: str, amfipass_zip: Path | None = None) -> 
 
 def build_attach_steps(
     vmid: int, bdf: str, current_args: str, amfipass_zip: Path, stop_first: bool = False,
+    record: AttachRecord | None = None,
 ) -> list[PlanStep]:
     """Mode H: all functions on hostpci0, MMIO window, NullMoth OpenCore changes.
 
@@ -147,12 +148,15 @@ def build_attach_steps(
         argv=["bash", "-c", oc_patch_script(vid, "attach", amfipass_zip)],
         risk="action",
     ))
+    if record is not None:
+        steps.append(record_step(record))
     steps += build_hostpci_attach_steps(vmid, bdf, current_args)
     return steps
 
 
 def build_detach_steps(
     vmid: int, current_args: str, has_hostpci0: bool, stop_first: bool = False,
+    record: AttachRecord | None = None,
 ) -> list[PlanStep]:
     vid = str(vmid)
     steps = [_stop_step(vid)] if stop_first else []
@@ -164,7 +168,7 @@ def build_detach_steps(
         argv=["bash", "-c", oc_patch_script(vid, "detach")],
         risk="action",
     ))
-    steps += build_hostpci_detach_steps(vmid, current_args, has_hostpci0)
+    steps += build_hostpci_detach_steps(vmid, current_args, has_hostpci0, record=record)
     return steps
 
 
@@ -220,8 +224,10 @@ def prepare_attach(
             plan.warnings.append(f"VM {other} also has this card assigned; only one can run at a time.")
 
     if plan.ok:
+        record = AttachRecord(vmid, report.bdf, "nvidia", hostpci0=cfg.get("hostpci0"), args=cfg.get("args"),
+                              vga=cfg.get("vga"), oc="nullmoth")
         plan.steps = build_attach_steps(
-            vmid, report.bdf, cfg.get("args", ""), amfipass_zip, stop_first=running and allow_stop,
+            vmid, report.bdf, cfg.get("args", ""), amfipass_zip, stop_first=running and allow_stop, record=record,
         )
     return plan
 
@@ -247,6 +253,6 @@ def prepare_detach(
     if plan.ok:
         plan.steps = build_detach_steps(
             vmid, cfg.get("args", ""), "hostpci0" in cfg,
-            stop_first=info.status == "running" and allow_stop,
+            stop_first=info.status == "running" and allow_stop, record=load_record(vmid),
         )
     return plan

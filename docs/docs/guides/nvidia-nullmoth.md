@@ -5,7 +5,7 @@ title: NVIDIA GPU (NullMoth, Beta)
 
 # NVIDIA GPU (NullMoth, Beta)
 
-This guide attaches an NVIDIA Turing-or-newer GPU to an installed macOS VM and prepares OpenCore for the NullMoth driver. This tool never installs the driver in the guest. You do that yourself.
+The easiest way is the guided flow, [GPU passthrough (guided)](gpu-passthrough.md), which also configures the host and checks the BIOS. This page describes what is changed in the VM. This guide attaches an NVIDIA Turing-or-newer GPU to an installed macOS VM and prepares OpenCore for the NullMoth driver. This tool never installs the driver in the guest. You do that yourself.
 
 > **NVIDIA GPU support (Beta)**
 >
@@ -25,7 +25,7 @@ This guide attaches an NVIDIA Turing-or-newer GPU to an installed macOS VM and p
 
 ## Host requirements
 
-The command checks all of these and refuses with a clear message when one fails. It never writes host configuration in this beta.
+The command checks all of these and refuses with a clear message when one fails. `nvidia-attach` itself never writes host configuration; the guided flow does that part, with a preview and a backup.
 
 - IOMMU on (VT-d or AMD-Vi), and the card in its own IOMMU group (bridges are fine, other devices are not).
 - Every function of the card (`01:00.*`) bound to `vfio-pci`. `nvidia` and `nouveau` must not hold it. When it is not bound, the command prints the `options vfio-pci ids=...` and `softdep` lines for `/etc/modprobe.d/vfio.conf`, then you run `update-initramfs -u -k all` and reboot.

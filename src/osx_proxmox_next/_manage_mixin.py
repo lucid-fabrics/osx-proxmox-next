@@ -23,7 +23,7 @@ class ManageModeMixin:
 
     def _toggle_mode(self, mode: str) -> None:
         self.state.manage_mode = mode == "manage"  # type: ignore[attr-defined]
-        for name in ("create", "manage", "nvidia"):
+        for name in ("create", "manage", "nvidia", "gpu"):
             panel = self.query_one(f"#{name}_panel")
             button = self.query_one(f"#mode_{name}", Button)
             if name == mode:
@@ -34,6 +34,8 @@ class ManageModeMixin:
                 button.remove_class("mode_active")
         if mode == "manage":
             self._refresh_vm_list()
+        if mode == "gpu":
+            self._gp_open()  # type: ignore[attr-defined]
 
     def _refresh_vm_list(self) -> None:
         Thread(target=self._vm_list_worker, daemon=True).start()

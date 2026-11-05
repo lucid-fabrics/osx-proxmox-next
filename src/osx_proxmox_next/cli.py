@@ -29,7 +29,7 @@ from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints
 from .support import SUPPORT_LINE, SUPPORT_LINES_POST_INSTALL
-from . import nullmoth
+from . import gpu_attach, gpu_setup_cli, nullmoth
 
 _MB = 1024 * 1024
 
@@ -163,6 +163,7 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
                         help="sequoia or tahoe, when it cannot be read from the VM description or name")
     attach.add_argument("--iso-dir", type=str, default="",
                         help="Directory used to cache the pinned AMFIPass download")
+    gpu_setup_cli.add_parser(sub)
     detach = sub.add_parser(
         "nvidia-detach",
         help="Remove the NVIDIA GPU, the MMIO window and the NullMoth OpenCore changes from a VM",
@@ -342,6 +343,8 @@ def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
         return _run_nvidia_attach(args)
     if args.cmd == "nvidia-detach":
         return _run_nvidia_detach(args)
+    if args.cmd == "gpu-setup":
+        return gpu_setup_cli.run(args)
     return None
 
 
@@ -813,7 +816,7 @@ def _run_nvidia_detach(args: argparse.Namespace) -> int:
     if vmid < MIN_VMID or vmid > MAX_VMID:
         print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
         return 2
-    plan = nullmoth.prepare_detach(vmid)
+    plan = gpu_attach.prepare_detach(vmid)
     _print_plan_result(plan)
     if args.dry_run:
         print("DRY RUN - nothing is changed.")

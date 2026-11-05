@@ -7,8 +7,9 @@ fake tree. Nothing here writes host configuration: when a card is not ready,
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from shlex import quote as shquote
 from collections.abc import Callable
@@ -19,8 +20,18 @@ from .preflight import has_initcall_blacklist
 
 __all__ = [
     "BAR1_WARN_BYTES",
+    "AttachRecord",
     "GpuInfo",
+    "GpuProfile",
     "GpuReport",
+    "NVIDIA_PROFILE",
+    "STATE_DIR",
+    "hostpci_value",
+    "load_record",
+    "record_path",
+    "record_step",
+    "with_global_args",
+    "without_global_args",
     "check_gpu",
     "detect_gpus",
     "MMIO_ARG",
@@ -124,9 +135,9 @@ def _bound_driver(dev: Path) -> str | None:
     return link.resolve().name if link.exists() else None
 
 
-def _bar1_bytes(dev: Path) -> int | None:
+def _bar_bytes(dev: Path, index: int = 1) -> int | None:
     try:
-        line = dev.joinpath("resource").read_text().splitlines()[1]
+        line = dev.joinpath("resource").read_text().splitlines()[index]
         start, end, _flags = line.split()
         size = int(end, 16) - int(start, 16) + 1
     except (OSError, IndexError, ValueError):
@@ -154,19 +165,29 @@ def _group_issues(root: Path, dev: Path, functions: list[str]) -> list[str]:
     return []
 
 
+_SOFTDEPS = {
+    0x10DE: ["nouveau", "nvidia", "snd_hda_intel"],
+    0x1002: ["amdgpu", "radeon", "snd_hda_intel"],
+}
+
+
 def vfio_conf_hint(root: Path, bdf: str) -> list[str]:
     """Exact /etc/modprobe.d/vfio.conf lines plus the commands to apply them."""
     ids: list[str] = []
     usb_c = False
+    vendor_id: int | None = None
     for fn in _functions(root, bdf):
         dev = _devices(root) / fn
         vendor, device = _read_hex(dev / "vendor"), _read_hex(dev / "device")
         if vendor is None or device is None:
             continue
+        vendor_id = vendor if vendor_id is None else vendor_id
         ids.append(f"{vendor:04x}:{device:04x}")
         pci_class = _read_hex(dev / "class")
         usb_c = usb_c or (pci_class is not None and pci_class >> 8 in (0x0C03, 0x0C80))
-    softdeps = ["nouveau", "nvidia", "snd_hda_intel"] + (["xhci_pci", "i2c_nvidia_gpu"] if usb_c else [])
+    softdeps = list(_SOFTDEPS.get(vendor_id or 0x10DE, _SOFTDEPS[0x10DE]))
+    if usb_c:
+        softdeps += ["xhci_pci"] + (["i2c_nvidia_gpu"] if vendor_id == 0x10DE else [])
     return [
         "Put this in /etc/modprobe.d/vfio.conf:",
         f"  options vfio-pci ids={','.join(ids)}",
@@ -192,13 +213,15 @@ def check_gpu(
     bdf_raw: str,
     vendor: int,
     supported: Callable[[int], bool],
-    unsupported_msg: str,
+    unsupported_msg: str | Callable[[int], str],
     root: Path = _SYSFS,
     cmdline_path: Path | None = None,
+    bar_index: int = 1,
 ) -> GpuReport:
     """Run every host-side readiness check for one card of *vendor*.
 
-    *unsupported_msg* may use {device} (4-digit hex id)."""
+    *unsupported_msg* is a format string using {device} (4-digit hex id) or a
+    callable taking the device id. *bar_index* is the BAR whose size is checked."""
     bdf = normalize_bdf(bdf_raw)
     if bdf is None:
         return GpuReport(bdf_raw, issues=[f"'{bdf_raw}' is not a PCI address like 01:00 or 0000:01:00.0."])
@@ -212,33 +235,71 @@ def check_gpu(
         return report
     device_id = _read_hex(dev / "device") or 0
     if not supported(device_id):
-        report.issues.append(unsupported_msg.format(device=f"{device_id:04x}"))
+        report.issues.append(
+            unsupported_msg(device_id) if callable(unsupported_msg)
+            else unsupported_msg.format(device=f"{device_id:04x}"))
         return report
     functions = _functions(root, bdf)
     report.issues += _check_binding(_devices(root), functions)
     if report.issues:
         report.hints = vfio_conf_hint(root, bdf)
     report.issues += _group_issues(root, dev, functions)
-    _add_warnings(report, dev, cmdline_path)
+    _add_warnings(report, dev, cmdline_path, bar_index)
     return report
 
 
-def _add_warnings(report: GpuReport, dev: Path, cmdline_path: Path | None) -> None:
+def _add_warnings(report: GpuReport, dev: Path, cmdline_path: Path | None, bar_index: int = 1) -> None:
     if _read_hex(dev / "boot_vga") == 1 and not has_initcall_blacklist(cmdline_path):
         report.warnings.append(
             "This card is the host boot GPU and initcall_blacklist=sysfb_init is not on the kernel "
             "cmdline. The host framebuffer may hold its memory and the VM can fail to start."
         )
-    bar1 = _bar1_bytes(dev)
+    bar1 = _bar_bytes(dev, bar_index)
     if bar1 is not None and bar1 > BAR1_WARN_BYTES:
         report.warnings.append(
-            f"BAR1 is {bar1 // (1024 * 1024)} MiB. Larger than 256 MiB is untested for "
+            f"BAR{bar_index} is {bar1 // (1024 * 1024)} MiB. Larger than 256 MiB is untested for "
             "macOS guests and QEMU may refuse to start. No automatic resize is done."
         )
 
 
 MMIO_ARG = "-global q35-pcihost.pci-hole64-size=64G"
+HOTPLUG_ARG = "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off"
 _MMIO_RE = re.compile(r"-global\s+q35-pcihost\.pci-hole64-size=\S+")
+STATE_DIR = Path("/var/lib/osx-proxmox-next")
+
+
+@dataclass(frozen=True)
+class GpuProfile:
+    """Vendor-specific VM settings applied when a card is attached."""
+
+    vendor: str
+    pcie: int  # hostpci placement: 0 conventional PCI, 1 PCI Express root port
+    global_args: tuple[str, ...]  # "-global ..." strings merged into the VM args
+    sidecar: str = "gpu"  # OpenCore backup suffix, see data/gpu/oc_boot_args.py
+
+
+NVIDIA_PROFILE = GpuProfile(vendor="nvidia", pcie=0, global_args=(MMIO_ARG,), sidecar="nullmoth")
+
+
+def _global_re(arg: str) -> re.Pattern[str]:
+    key = arg.split("=", 1)[0].replace("-global ", "", 1)
+    return re.compile(r"-global\s+" + re.escape(key) + r"=\S+")
+
+
+def with_global_args(args: str, wanted: tuple[str, ...]) -> str:
+    """Return *args* with each ``-global key=value`` set to the wanted value, never duplicated."""
+    out = args
+    for arg in wanted:
+        rx = _global_re(arg)
+        out = rx.sub(arg, out) if rx.search(out) else f"{out.rstrip()} {arg}"
+    return out.strip()
+
+
+def without_global_args(args: str, wanted: tuple[str, ...]) -> str:
+    out = args
+    for arg in wanted:
+        out = re.sub(r"\s*" + _global_re(arg).pattern, "", out)
+    return out.strip()
 
 
 def with_mmio_arg(args: str) -> str:
@@ -271,33 +332,107 @@ def stop_step(vid: str) -> PlanStep:
     )
 
 
-def build_hostpci_attach_steps(vmid: int, bdf: str, current_args: str) -> list[PlanStep]:
-    """All functions on hostpci0 (conventional PCI) plus the MMIO window."""
+@dataclass
+class AttachRecord:
+    """What a VM looked like before the GPU was attached, so undo restores it exactly."""
+
+    vmid: int
+    bdf: str
+    vendor: str
+    hostpci0: str | None = None  # original value, None when the slot was empty
+    args: str | None = None
+    vga: str | None = None
+    vga_changed: bool = False
+    oc: str = ""  # which patcher edited the OpenCore disk: "nullmoth", "gpu" or "" (none)
+
+
+def record_path(vmid: int) -> Path:
+    return STATE_DIR / f"gpu-attach-{vmid}.json"
+
+
+def load_record(vmid: int) -> AttachRecord | None:
+    try:
+        return AttachRecord(**json.loads(record_path(vmid).read_text()))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def record_step(record: AttachRecord) -> PlanStep:
+    """Plan step that writes the sidecar. It runs before any qm change."""
+    path = record_path(record.vmid)
+    body = json.dumps(asdict(record), sort_keys=True)
+    return PlanStep(
+        title="Record the original VM settings (for undo)",
+        argv=["bash", "-c",
+              f"mkdir -p {shquote(str(path.parent))} && "
+              f"[ -e {shquote(str(path))} ] || printf %s {shquote(body)} > {shquote(str(path))}"],
+    )
+
+
+def hostpci_value(bdf: str, profile: GpuProfile, extra: str = "") -> str:
+    return f"{bdf},pcie={profile.pcie}{extra}"
+
+
+def build_hostpci_attach_steps(
+    vmid: int, bdf: str, current_args: str, profile: GpuProfile = NVIDIA_PROFILE,
+    vga_none: bool = False, extra_hostpci: str = "",
+) -> list[PlanStep]:
+    """All functions on hostpci0 (placement from *profile*) plus the profile's global args."""
     vid = str(vmid)
     steps = [PlanStep(
-        title="Attach GPU (all functions, hostpci0)",
-        argv=["qm", "set", vid, "--hostpci0", f"{bdf},pcie=0"],
+        title=f"Attach GPU (all functions, hostpci0, pcie={profile.pcie})",
+        argv=["qm", "set", vid, "--hostpci0", hostpci_value(bdf, profile, extra_hostpci)],
         risk="action",
     )]
-    new_args = with_mmio_arg(current_args)
+    new_args = with_global_args(current_args, profile.global_args)
     if new_args != current_args:
-        steps.append(PlanStep(
-            title="Add 64-bit MMIO window to args", argv=["qm", "set", vid, "--args", new_args],
-        ))
+        steps.append(PlanStep(title="Add the profile's QEMU args", argv=["qm", "set", vid, "--args", new_args]))
+    if vga_none:
+        steps.append(PlanStep(title="Turn the emulated display off (vga none)",
+                              argv=["qm", "set", vid, "--vga", "none"], risk="warn"))
     return steps
 
 
-def build_hostpci_detach_steps(vmid: int, current_args: str, has_hostpci0: bool) -> list[PlanStep]:
+def _restore_args_step(vid: str, original: str | None) -> PlanStep:
+    if original:
+        return PlanStep(title="Restore the original args", argv=["qm", "set", vid, "--args", original])
+    return PlanStep(title="Remove args (there were none before)", argv=["qm", "set", vid, "--delete", "args"])
+
+
+def build_hostpci_detach_steps(
+    vmid: int, current_args: str, has_hostpci0: bool,
+    record: AttachRecord | None = None, profile: GpuProfile = NVIDIA_PROFILE,
+) -> list[PlanStep]:
+    """Undo an attach. With a record the VM returns to exactly what it was.
+
+    Without one (attached by an older version) only the known additions go away."""
     vid = str(vmid)
     steps: list[PlanStep] = []
+    if record is not None:
+        if record.hostpci0:
+            steps.append(PlanStep(title="Restore the original hostpci0",
+                                  argv=["qm", "set", vid, "--hostpci0", record.hostpci0], risk="action"))
+        elif has_hostpci0:
+            steps.append(PlanStep(title="Remove GPU (hostpci0)",
+                                  argv=["qm", "set", vid, "--delete", "hostpci0"], risk="action"))
+        if current_args != (record.args or ""):
+            steps.append(_restore_args_step(vid, record.args))
+        if record.vga_changed:
+            steps.append(PlanStep(
+                title="Restore the display setting",
+                argv=["qm", "set", vid, "--vga", record.vga] if record.vga else ["qm", "set", vid, "--delete", "vga"],
+            ))
+        steps.append(PlanStep(title="Forget the recorded settings",
+                              argv=["rm", "-f", str(record_path(vmid))]))
+        return steps
     if has_hostpci0:
         steps.append(PlanStep(
             title="Remove GPU (hostpci0)", argv=["qm", "set", vid, "--delete", "hostpci0"], risk="action",
         ))
-    stripped = without_mmio_arg(current_args)
+    stripped = without_global_args(current_args, profile.global_args)
     if stripped != current_args:
         argv = ["qm", "set", vid, "--args", stripped] if stripped else ["qm", "set", vid, "--delete", "args"]
-        steps.append(PlanStep(title="Remove 64-bit MMIO window from args", argv=argv))
+        steps.append(PlanStep(title="Remove the profile's QEMU args", argv=argv))
     return steps
 
 

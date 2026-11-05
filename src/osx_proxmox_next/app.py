@@ -15,6 +15,7 @@ from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Select
 from . import __version__
 from ._edit_mixin import EditModeMixin
 from ._manage_mixin import ManageModeMixin
+from ._gpu_mixin import GpuSetupMixin
 from ._nvidia_mixin import NvidiaModeMixin
 from ._wizard_mixin import WizardStepsMixin
 from .assets import required_assets
@@ -50,7 +51,7 @@ from .services import (
 )
 
 
-class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, NvidiaModeMixin, App):
+class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, NvidiaModeMixin, GpuSetupMixin, App):
     CSS_PATH = Path(__file__).with_suffix(".tcss")
 
     BINDINGS = [
@@ -132,6 +133,11 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, NvidiaModeMixin,
                 "mode_create": lambda: self._toggle_mode("create"),
                 "mode_manage": lambda: self._toggle_mode("manage"),
                 "mode_nvidia": lambda: self._toggle_mode("nvidia"),
+                "mode_gpu": lambda: self._toggle_mode("gpu"),
+                "gp_primary_btn": self._gp_primary,
+                "gp_secondary_btn": self._gp_secondary,
+                "gp_back_btn": self._gp_back,
+                "gp_undo_btn": self._gp_undo,
                 "manage_refresh_btn": self._refresh_vm_list,
                 "manage_destroy_btn": self._run_destroy,
                 "edit_apply_btn": self._run_edit,
@@ -157,10 +163,14 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, NvidiaModeMixin,
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "nv_gpu_select":
             self._validate_nv_form()
+        if event.select.id == "gp_gpu_select":
+            self._gp_validate()
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id == "nv_ack_cb":
             self._validate_nv_form()
+        if event.checkbox.id == "gp_ack_cb":
+            self._gp_validate()
         if event.checkbox.id == "manage_purge_cb":
             self._toggle_purge()
         if event.checkbox.id == "edit_start_after_cb":

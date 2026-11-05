@@ -1174,31 +1174,38 @@ function gpu_sys_num() {
   echo $((16#${v#0x}))
 }
 
-# Exact vfio.conf lines for the card's functions. Mirrors nvidia_host.vfio_conf_hint.
+# Exact vfio.conf lines for the card's functions. Mirrors gpu.vfio_conf_hint.
 function gpu_vfio_hint() {
-  local sys="$1" bdf="$2" fn v d c ids="" usb_c=no name
+  local sys="$1" bdf="$2" fn v d c ids="" usb_c=no name vendor=""
   for fn in "$sys"/bus/pci/devices/"$bdf".*; do
     [ -e "$fn" ] || continue
     v=$(gpu_sys_num "$fn/vendor") || continue
     d=$(gpu_sys_num "$fn/device") || continue
+    [ -n "$vendor" ] || vendor="$v"
     ids+="${ids:+,}$(printf '%04x:%04x' "$v" "$d")"
     c=$(gpu_sys_num "$fn/class") || c=0
     case $(( c >> 8 )) in 3075|3200) usb_c=yes ;; esac
   done
   GPU_HINTS=("Put this in /etc/modprobe.d/vfio.conf:" "  options vfio-pci ids=${ids}")
   local softdeps=(nouveau nvidia snd_hda_intel)
-  [ "$usb_c" == "yes" ] && softdeps+=(xhci_pci i2c_nvidia_gpu)
+  [ "${vendor:-4318}" == "4098" ] && softdeps=(amdgpu radeon snd_hda_intel)
+  if [ "$usb_c" == "yes" ]; then
+    softdeps+=(xhci_pci)
+    [ "${vendor:-4318}" == "4098" ] || softdeps+=(i2c_nvidia_gpu)
+  fi
   for name in "${softdeps[@]}"; do GPU_HINTS+=("  softdep ${name} pre: vfio-pci"); done
   GPU_HINTS+=("Then run: update-initramfs -u -k all" "Then reboot the host.")
 }
 
 # Run every host-side readiness check for one card. $1 = bdf (normalized),
 # $2 = PCI vendor id (decimal), $3 = name of a function that succeeds for a
-# supported device id (decimal), $4 = printf format for the unsupported message.
+# supported device id (decimal), $4 = printf format for the unsupported message,
+# $5 = BAR whose size is checked (default 1), $6 = optional function that prints the
+# unsupported message for a decimal device id (replaces $4).
 # Fills GPU_ISSUES / GPU_WARNS / GPU_HINTS. Mirrors gpu.check_gpu; GPU_SYSFS and
 # GPU_CMDLINE can be overridden for tests.
 function gpu_check() {
-  local bdf="$1" want_vendor="$2" support_fn="$3" unsupported_fmt="$4" sys="${GPU_SYSFS:-/sys}" cmdline="${GPU_CMDLINE:-/proc/cmdline}"
+  local bdf="$1" want_vendor="$2" support_fn="$3" unsupported_fmt="$4" bar="${5:-1}" reason_fn="${6:-}" sys="${GPU_SYSFS:-/sys}" cmdline="${GPU_CMDLINE:-/proc/cmdline}"
   local dev="$sys/bus/pci/devices/$bdf.0" vendor device fn driver bad="" grp member c stray=""
   local -a funcs=()
   if [ ! -e "$dev" ]; then GPU_ISSUES+=("No PCI device at $bdf.0 on this host."); return; fi
@@ -1206,8 +1213,12 @@ function gpu_check() {
   if (( vendor != want_vendor )); then GPU_ISSUES+=("$bdf.0 is not a vendor $(printf '%04x' "$want_vendor") device."); return; fi
   device=$(gpu_sys_num "$dev/device") || device=0
   if ! "$support_fn" "$device"; then
-    # shellcheck disable=SC2059
-    GPU_ISSUES+=("$(printf "$unsupported_fmt" "$(printf '%04x' "$device")")")
+    if [ -n "$reason_fn" ]; then
+      GPU_ISSUES+=("$("$reason_fn" "$device")")
+    else
+      # shellcheck disable=SC2059
+      GPU_ISSUES+=("$(printf "$unsupported_fmt" "$(printf '%04x' "$device")")")
+    fi
     return
   fi
   for fn in "$sys"/bus/pci/devices/"$bdf".*; do funcs+=("$(basename "$fn")"); done
@@ -1237,10 +1248,10 @@ function gpu_check() {
     GPU_WARNS+=("This card is the host boot GPU and initcall_blacklist=sysfb_init is not on the kernel cmdline. The host framebuffer may hold its memory and the VM can fail to start.")
   fi
   local start end _flags size
-  if read -r start end _flags < <(sed -n 2p "$dev/resource" 2>/dev/null) && [ -n "${end:-}" ]; then
+  if read -r start end _flags < <(sed -n "$((bar + 1))p" "$dev/resource" 2>/dev/null) && [ -n "${end:-}" ]; then
     size=$(( end - start + 1 ))
     if (( size > 268435456 )); then
-      GPU_WARNS+=("BAR1 is $(( size / 1048576 )) MiB. Larger than 256 MiB is untested for macOS guests and QEMU may refuse to start. No automatic resize is done.")
+      GPU_WARNS+=("BAR${bar} is $(( size / 1048576 )) MiB. Larger than 256 MiB is untested for macOS guests and QEMU may refuse to start. No automatic resize is done.")
     fi
   fi
 }
@@ -1667,13 +1678,16 @@ function nvidia_attach() {
   fi
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
 
-  zip=$(nullmoth_fetch_amfipass "${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/cache}") || { msg_error "Could not download AMFIPass"; return 1; }
+  zip=$(nullmoth_fetch_amfipass "${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/iso}") || { msg_error "Could not download AMFIPass"; return 1; }
   qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || { msg_error "VM $vmid is no longer stopped"; return 1; }
+  gpu_snapshot "$vmid" >/dev/null || { msg_error "Could not save the VM config snapshot"; return 1; }
   if nullmoth_oc_patch "$vmid" attach "$zip"; then
     msg_ok "OpenCore prepared for NullMoth (backup: config.plist.pre-nullmoth)"
   else
     msg_error "Could not prepare the OpenCore disk; the VM was not changed"; return 1
   fi
+  gpu_record_write "$vmid" "$bdf" nvidia "${hp0:-__NONE__}" "$([ -n "$args" ] && echo "$args" || echo __NONE__)" \
+    "$(sed -n 's/^vga: //p' <<<"$NM_CFG" | grep . || echo __NONE__)" no nullmoth || { msg_error "Could not record the original VM settings"; return 1; }
   qm set "$vmid" --hostpci0 "${bdf},pcie=0" >/dev/null || { msg_error "qm set --hostpci0 failed"; return 1; }
   msg_ok "Attached ${bdf} (all functions) as hostpci0"
   if [ "$new_args" != "$args" ]; then
@@ -1698,6 +1712,8 @@ function nvidia_detach() {
   nullmoth_vm_check "$vmid" || true
   nullmoth_print_findings
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
+  # Attached by this version: put the VM back exactly as it was (shared with gpu-setup --undo).
+  if gpu_record_load "$vmid"; then gpu_detach_record "$vmid" "$dry"; return; fi
   args=$(sed -n 's/^args: //p' <<<"$NM_CFG")
   new_args=$(gpu_without_mmio_arg "$args")
   if [ "$dry" == "yes" ]; then
@@ -1723,6 +1739,2480 @@ function nvidia_detach() {
   fi
 }
 # ── NullMoth NVIDIA GPU attach (beta) end ──
+
+# ── GPU walkthrough begin ──
+# Bash twin of gpu.py, amd_host.py, gpu_attach.py, gpu_setup.py and gpu_setup_cli.py.
+# The standalone engines (host_setup.py, bios_guide.py), their data files and the
+# OpenCore boot-args patcher are embedded verbatim below; tests/test_gpu_parity.py
+# diffs every copy against the file in the Python package, and
+# scripts/embed_gpu_engines.py refreshes them. Change both sides together.
+GPU_STATE_DIR="${GPU_STATE_DIR:-/var/lib/osx-proxmox-next}"
+GPU_DOCS_ROOT="https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/"
+GPU_RESUME_CMD='bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh)" -- gpu-setup'
+GPU_HOTPLUG_ARG="-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off"
+GPU_AMD_GENERIC_REASON="This AMD GPU has no Apple driver (APUs and cards newer than the RX 6000 series are not supported)."
+GPU_AMD_VEGA20_WARNING="Radeon VII / Pro VII: stopping and starting a VM that holds this card without rebooting the host has corrupted host storage on Proxmox 9 with vendor-reset (vendor-reset issue 112). Reboot the host between VM runs and do not rely on automatic restarts."
+GPU_PRE_TURING_REASON="Older than the RTX 20 series: NVIDIA's macOS drivers stopped at High Sierra and NullMoth needs Turing or newer."
+
+# ── GPU embedded: host_setup.py begin ──
+IFS= read -r -d '' GPU_EMBED_HOST_SETUP <<'GPU_EMBED_HOST_SETUP_EOF' || true
+"""Host-side configuration for GPU passthrough: detect, preview, apply, undo, verify.
+
+Standard library only and no imports from this package: the bash installer embeds
+this file verbatim (tests/test_gpu_parity.py diffs the two) and runs it with
+``python3 - <command>``. Everything that touches the host takes a ``root``
+(default ``/``) and a ``run`` callable so tests can use a fake tree.
+
+Rules this module keeps:
+  * the boot loader is read from what booted (efibootmgr, /proc/cmdline), never
+    from which files exist;
+  * every write is previewed as a diff, backed up with a timestamp, recorded in
+    the state file and rolled back on error;
+  * ``pcie_acs_override`` and ``amd_iommu=on`` are never written;
+  * the host is never rebooted from here.
+"""
+from __future__ import annotations
+
+import difflib
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+STATE_DIR = "/var/lib/osx-proxmox-next"
+STATE_FILE = STATE_DIR + "/gpu-setup.json"
+BACKUP_ROOT = STATE_DIR + "/backups"
+LOGIN_HINT = "/etc/profile.d/osx-proxmox-next-gpu.sh"
+GRUB_DROPIN = "/etc/default/grub.d/osx-proxmox-next.cfg"
+KERNEL_CMDLINE = "/etc/kernel/cmdline"
+MODULES_FILE = "/etc/modules-load.d/osx-proxmox-next-vfio.conf"
+MODPROBE_FILE = "/etc/modprobe.d/osx-proxmox-next-vfio.conf"
+BIND_SCRIPT = "/etc/initramfs-tools/scripts/init-top/a-osx-proxmox-next-gpu-bind"
+VR_MODULES_FILE = "/etc/modules-load.d/osx-proxmox-next-vendor-reset.conf"
+VR_UDEV_FILE = "/etc/udev/rules.d/99-osx-proxmox-next-vendor-reset.rules"
+INITRAMFS_MODULES = "/etc/initramfs-tools/modules"
+VR_REPO = "https://github.com/gnif/vendor-reset"
+VR_SHA = "cbb4dd50926337e0f9fe1dd1e8a74aa5cb3448a7"
+VR_VERSION = "0.1.1"
+VR_SRC = "/usr/src/vendor-reset-" + VR_VERSION
+VFIO_MODULES = ("vfio", "vfio_iommu_type1", "vfio_pci")
+STEPS = ("Scan", "Choose", "BIOS", "Host", "Reboot", "Verify", "VM", "First boot")
+BAR_WARN_BYTES = 256 * 1024 * 1024
+LONG_TIMEOUT = 1800  # boot image and boot loader rebuilds take minutes
+SECURE_BOOT_VAR = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+OWN_FILES = (GRUB_DROPIN, MODULES_FILE, MODPROBE_FILE, BIND_SCRIPT, VR_MODULES_FILE, VR_UDEV_FILE)
+HEADER = "# Written by osx-proxmox-next (GPU passthrough setup). Undo with: gpu-setup --undo\n"
+
+
+# ── small helpers ────────────────────────────────────────────────────
+
+def default_run(argv, timeout=20):
+    """Run a command and return (exit code, stdout+stderr). (127, '') when it cannot start."""
+    try:
+        res = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return 127, ""
+    return res.returncode, (res.stdout or "") + (res.stderr or "")
+
+
+def _p(root, path):
+    return Path(root) / path.lstrip("/")
+
+
+def _read(path):
+    try:
+        return Path(path).read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _hex(path):
+    text = _read(path)
+    try:
+        return int(text.strip(), 16) if text is not None else None
+    except ValueError:
+        return None
+
+
+def _sha(text):
+    return hashlib.sha256((text or "").encode()).hexdigest()
+
+
+def _now():
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def _tokens(text):
+    return (text or "").split()
+
+
+# ── facts ────────────────────────────────────────────────────────────
+
+def pci_devices(root="/"):
+    """Every PCI device: bdf, vendor, device, class, boot_vga, driver, group."""
+    base = _p(root, "/sys/bus/pci/devices")
+    out = []
+    if not base.is_dir():
+        return out
+    for dev in sorted(base.iterdir()):
+        link = dev / "driver"
+        group = dev / "iommu_group"
+        out.append({
+            "bdf": dev.name,
+            "vendor": _hex(dev / "vendor"),
+            "device": _hex(dev / "device"),
+            "class": _hex(dev / "class"),
+            "boot_vga": _hex(dev / "boot_vga") == 1,
+            "driver": link.resolve().name if link.exists() else None,
+            "group": group.resolve().name if group.exists() else None,
+        })
+    return out
+
+
+def detect_bootloader(root="/", run=default_run):
+    """'grub', 'systemd-boot' or 'unknown', from what booted."""
+    if not _p(root, "/sys/firmware/efi").exists():
+        return "grub"
+    code, out = run(["efibootmgr", "-v"])
+    if code == 0:
+        current = re.search(r"BootCurrent:\s*([0-9A-Fa-f]{4})", out)
+        lines = [ln for ln in out.splitlines() if re.match(r"Boot[0-9A-Fa-f]{4}", ln)]
+        if current:
+            lines = [ln for ln in lines if ln.startswith("Boot" + current.group(1).upper())] or lines
+        for ln in lines:
+            low = ln.lower()
+            if "systemd-boot" in low:
+                return "systemd-boot"
+            if "grubx64" in low or "shimx64" in low:
+                return "grub"
+    cmdline = _read(_p(root, "/proc/cmdline")) or ""
+    if cmdline.startswith("BOOT_IMAGE="):
+        return "grub"
+    code, out = run(["proxmox-boot-tool", "status"])
+    if code == 0:
+        m = re.search(r"configured with:\s*(\S+)", out)
+        if m:
+            return "systemd-boot" if m.group(1).lower().startswith("uefi") else "grub"
+    return "unknown"
+
+
+def _dmi(root, name):
+    return (_read(_p(root, "/sys/class/dmi/id/" + name)) or "").strip()
+
+
+def _secure_boot(root, code, mokutil_out):
+    """Secure Boot state. When it cannot be read it counts as ON: the safe answer for vendor-reset."""
+    if code == 0:
+        return "SecureBoot enabled" in mokutil_out
+    try:
+        raw = _p(root, SECURE_BOOT_VAR).read_bytes()
+    except OSError:
+        return _p(root, "/sys/firmware/efi").exists()
+    return len(raw) < 5 or raw[4] == 1
+
+
+def detect_facts(root="/", run=default_run, env=None):
+    env = os.environ if env is None else env
+    cpuinfo = _read(_p(root, "/proc/cpuinfo")) or ""
+    vendor_id = re.search(r"^vendor_id\s*:\s*(\S+)", cpuinfo, re.M)
+    cpu = "unknown"
+    if vendor_id:
+        cpu = "amd" if "AuthenticAMD" in vendor_id.group(1) else "intel" if "GenuineIntel" in vendor_id.group(1) else "unknown"
+    flags = re.search(r"^flags\s*:\s*(.*)$", cpuinfo, re.M)
+    devices = pci_devices(root)
+    groups = _p(root, "/sys/kernel/iommu_groups")
+    tables = _p(root, "/sys/firmware/acpi/tables")
+    code, mok = run(["mokutil", "--sb-state"])
+    secure = _secure_boot(root, code, mok)
+    _, pve = run(["pveversion"])
+    _, dmesg = run(["dmesg"])
+    bar_errors = sorted({m.group(1) for m in re.finditer(
+        r"pci (\S+): BAR \d+(?: \[[^\]]*\])?: (?:no space for|failed to assign)", dmesg)})
+    return {
+        "cpu_vendor": cpu,
+        "virtualization": bool(flags and re.search(r"\b(vmx|svm)\b", flags.group(1))),
+        "board_vendor": _dmi(root, "board_vendor") or _dmi(root, "sys_vendor"),
+        "sys_vendor": _dmi(root, "sys_vendor"),
+        "board_name": _dmi(root, "board_name") or _dmi(root, "product_name"),
+        "product_name": _dmi(root, "product_name"),
+        "bios_vendor": _dmi(root, "bios_vendor"),
+        "efi": _p(root, "/sys/firmware/efi").exists(),
+        "bootloader": detect_bootloader(root, run),
+        "kernel": (run(["uname", "-r"])[1].strip() if root == "/" else "") or os.uname().release,
+        "pve": pve.strip().splitlines()[0] if pve.strip() else "",
+        "cmdline": (_read(_p(root, "/proc/cmdline")) or "").strip(),
+        "secure_boot": secure,
+        "bar_errors": bar_errors,
+        "iommu_groups": len(list(groups.iterdir())) if groups.is_dir() else 0,
+        "dmar": (tables / "DMAR").exists(),
+        "ivrs": (tables / "IVRS").exists(),
+        "ssh": bool(env.get("SSH_CONNECTION")),
+        "displays": [d for d in devices if d["class"] is not None and d["class"] >> 16 == 0x03],
+        "pci": devices,
+    }
+
+
+# ── kernel command line ──────────────────────────────────────────────
+
+_GRUB_RE = re.compile(r"""^\s*(GRUB_CMDLINE_LINUX(?:_DEFAULT)?)=(?:"([^"]*)"|'([^']*)'|(\S*))""", re.M)
+
+
+def _grub_apply(values, text):
+    """Evaluate the assignments in order: a self-reference appends, anything else replaces."""
+    for m in _GRUB_RE.finditer(text):
+        name = m.group(1)
+        tokens = _tokens(m.group(2) or m.group(3) or m.group(4))
+        keeps = any(t in ("$" + name, "${" + name + "}") for t in tokens)
+        fresh = [t for t in tokens if not t.startswith("$")]
+        values[name] = values.get(name, []) + fresh if keeps else fresh
+
+
+def _grub_tokens(text):
+    values = {}
+    _grub_apply(values, text)
+    return values.get("GRUB_CMDLINE_LINUX_DEFAULT", []) + values.get("GRUB_CMDLINE_LINUX", [])
+
+
+def configured_cmdline(bootloader, root="/"):
+    """Kernel arguments the boot loader is configured to pass on the next boot."""
+    if bootloader == "systemd-boot":
+        return _tokens(_read(_p(root, KERNEL_CMDLINE)))
+    if bootloader != "grub":
+        return []
+    files = [_p(root, "/etc/default/grub")]
+    dropins = _p(root, "/etc/default/grub.d")
+    if dropins.is_dir():
+        files += sorted(dropins.glob("*.cfg"))
+    values = {}
+    for path in files:
+        _grub_apply(values, _read(path) or "")
+    return values.get("GRUB_CMDLINE_LINUX_DEFAULT", []) + values.get("GRUB_CMDLINE_LINUX", [])
+
+
+def wanted_kernel_args(facts, target):
+    args = []
+    if facts["cpu_vendor"] == "intel":
+        args.append("intel_iommu=on")
+    args.append("iommu=pt")
+    if target.get("boot_vga"):
+        args.append("initcall_blacklist=sysfb_init")
+    return args
+
+
+def _has_arg(tokens, wanted):
+    key = wanted.split("=", 1)[0]
+    if key == "iommu" or key == "intel_iommu":
+        return any(t.split("=", 1)[0] == key and t != key + "=off" for t in tokens)
+    return wanted in tokens
+
+
+def plan_kernel_args(facts, target, root, plan):
+    wanted = wanted_kernel_args(facts, target)
+    configured = configured_cmdline(facts["bootloader"], root)
+    live = _tokens(facts["cmdline"])
+    missing = [a for a in wanted if not _has_arg(configured, a) and not _has_arg(live, a)]
+    pending = [a for a in wanted if _has_arg(configured, a) and not _has_arg(live, a)]
+    if pending:
+        plan["notes"].append("Already configured but not active until you reboot: " + " ".join(pending))
+        plan["reboot_required"] = True
+    for bad in ("amd_iommu=on", "pcie_acs_override"):
+        if any(t.startswith(bad) for t in configured + live):
+            plan["notes"].append(
+                f"'{bad}' is on the kernel command line. It is not written or removed by this tool "
+                + ("(amd_iommu=on is not a valid value and does nothing)." if bad == "amd_iommu=on" else
+                   "(it weakens isolation; see the docs for the risk)."))
+    if not missing:
+        plan["skipped"].append("Kernel arguments are already set")
+        return
+    if facts["bootloader"] == "grub":
+        path = _p(root, GRUB_DROPIN)
+        own = _grub_tokens(_read(path) or "")
+        tokens = own + [m for m in missing if m not in own]
+        content = HEADER + 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT ' + " ".join(tokens) + '"\n'
+        _add_change(plan, root, GRUB_DROPIN, content, "Kernel arguments for passthrough: " + " ".join(missing))
+        plan["commands"].append({"argv": ["update-grub"], "reason": "Rebuild the GRUB menu"})
+        plan["refresh"].append("grub")
+    elif facts["bootloader"] == "systemd-boot":
+        old = _read(_p(root, KERNEL_CMDLINE))
+        if old is None:
+            plan["refusals"].append(f"{KERNEL_CMDLINE} is missing, so the kernel arguments cannot be set safely.")
+            return
+        content = old.rstrip("\n") + " " + " ".join(missing) + "\n"
+        _add_change(plan, root, KERNEL_CMDLINE, content, "Kernel arguments for passthrough: " + " ".join(missing))
+        plan["commands"].append({"argv": ["proxmox-boot-tool", "refresh"], "reason": "Copy the command line to the boot partition"})
+        plan["refresh"].append("systemd-boot")
+    else:
+        plan["manual"].append(
+            "Could not tell which boot loader this host uses. Add these arguments to the kernel command line "
+            "yourself: " + " ".join(missing))
+    plan["reboot_required"] = True
+    if "initcall_blacklist=sysfb_init" in missing:
+        plan["warnings"].append(
+            "The chosen card is the host console GPU. After the next reboot the screen plugged into the host goes "
+            "dark once the boot loader hands over. SSH and the web UI keep working.")
+
+
+# ── plan helpers ─────────────────────────────────────────────────────
+
+def _add_change(plan, root, path, content, reason, mode=0o644):
+    old = _read(_p(root, path))
+    if old == content:
+        return
+    plan["changes"].append({"path": path, "old": old, "new": content, "reason": reason, "mode": mode})
+
+
+def new_plan():
+    return {"changes": [], "commands": [], "notes": [], "warnings": [], "hard_warnings": [], "refusals": [],
+            "manual": [], "skipped": [], "refresh": [], "reboot_required": False, "binding": "", "initramfs": False}
+
+
+def _modules_present(root):
+    found = set()
+    files = [_p(root, "/etc/modules")]
+    d = _p(root, "/etc/modules-load.d")
+    if d.is_dir():
+        files += [f for f in sorted(d.glob("*.conf")) if "/" + f.relative_to(Path(root)).as_posix() != MODULES_FILE]
+    for f in files:
+        for line in (_read(f) or "").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                found.add(line.replace("-", "_"))
+    return found
+
+
+def plan_modules(root, plan):
+    present = _modules_present(root)
+    if "vfio_virqfd" in present:
+        plan["notes"].append("/etc/modules lists vfio_virqfd. It no longer exists (merged into vfio in kernel 6.2) "
+                             "and only logs a harmless error at boot. Left alone.")
+    missing = [m for m in VFIO_MODULES if m not in present]
+    if not missing:
+        plan["skipped"].append("VFIO modules are already listed")
+        return
+    content = HEADER + "".join(m + "\n" for m in VFIO_MODULES)
+    _add_change(plan, root, MODULES_FILE, content, "Load the VFIO modules at boot")
+
+
+def _softdeps(target):
+    names = ["amdgpu", "radeon"] if target["vendor"] == "amd" else ["nouveau", "nvidia"]
+    names.append("snd_hda_intel")
+    if any((f.get("class") or 0) >> 8 in (0x0C03, 0x0C80) for f in target["functions"]):
+        names.append("xhci_pci")
+        if target["vendor"] == "nvidia":
+            names.append("i2c_nvidia_gpu")
+    return names
+
+
+_IDS_RE = re.compile(r"\bids=([0-9A-Fa-f:,]+)")
+
+
+_OPT_RE = re.compile(r"^\s*options\s+vfio[-_]pci\b")
+
+
+def _live_ids(text):
+    """Ids of the active (not commented) `options vfio-pci ids=` lines, in order."""
+    found = []
+    for line in text.splitlines():
+        m = _IDS_RE.search(line) if _OPT_RE.match(line) else None
+        if m:
+            found += [i.lower() for i in m.group(1).split(",") if i and i.lower() not in found]
+    return found
+
+
+def _merge_ids(text, ids):
+    """Add *ids* to every active vfio-pci ids line; comments and other lines stay as they are."""
+    have = _live_ids(text)
+    union = have + [i for i in ids if i not in have]
+    lines = text.splitlines(keepends=True)
+    for idx, line in enumerate(lines):
+        if _OPT_RE.match(line) and _IDS_RE.search(line):
+            lines[idx] = _IDS_RE.sub("ids=" + ",".join(union), line, count=1)
+    return "".join(lines)
+
+
+def _existing_ids_lines(root):
+    d = _p(root, "/etc/modprobe.d")
+    out = []
+    if not d.is_dir():
+        return out
+    for f in sorted(d.glob("*.conf")):
+        posix = "/" + f.relative_to(Path(root)).as_posix()
+        text = _read(f) or ""
+        if posix != MODPROBE_FILE and _live_ids(text):
+            out.append((posix, text))
+    return out
+
+
+def plan_binding(facts, target, root, plan):
+    ids = []
+    for fn in target["functions"]:
+        ident = "%04x:%04x" % (fn["vendor"], fn["device"])
+        if ident not in ids:
+            ids.append(ident)
+    mine = {fn["bdf"] for fn in target["functions"]}
+    twins = sorted(d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d["vendor"] is not None
+                   and "%04x:%04x" % (d["vendor"], d["device"]) in ids)
+    existing = _existing_ids_lines(root)
+    softdep = "".join("softdep %s pre: vfio-pci\n" % n for n in _softdeps(target))
+    if twins:
+        plan["binding"] = "per-device"
+        plan["notes"].append(
+            "Another device on this host has the same PCI id (%s). Binding by id would take it too, so this "
+            "card is bound by address instead." % ", ".join(twins))
+        covered = [p for p, text in existing if any(i in _live_ids(text) for i in ids)]
+        if covered:
+            plan["refusals"].append(
+                "%s already binds the id %s to vfio-pci for every device with that id, including the other "
+                "card. Remove that id from the file first." % (covered[0], ", ".join(ids)))
+            return
+        _add_change(plan, root, MODPROBE_FILE, HEADER + softdep, "Load vfio-pci before the GPU drivers")
+        _add_change(plan, root, BIND_SCRIPT, _bind_script([f["bdf"] for f in target["functions"]]),
+                    "Bind this card by PCI address early in boot", mode=0o755)
+    else:
+        plan["binding"] = "ids"
+        merged_all = True
+        for path, text in existing:
+            new = _merge_ids(text, ids)
+            if new != text:
+                merged_all = False
+                _add_change(plan, root, path, new, "Add the card's ids to your existing vfio-pci line")
+        body = HEADER + softdep
+        if not existing:
+            body = HEADER + "options vfio-pci ids=%s disable_vga=1\n" % ",".join(ids) + softdep
+        elif merged_all:
+            plan["notes"].append("The card's ids are already in your vfio-pci options.")
+        _add_change(plan, root, MODPROBE_FILE, body, "Bind the card to vfio-pci before its driver loads")
+
+
+def _bind_script(bdfs):
+    lines = "\n".join('  echo vfio-pci > /sys/bus/pci/devices/%s/driver_override 2>/dev/null || true' % shlex.quote(b)
+                      for b in bdfs)
+    return (
+        "#!/bin/sh\n" + HEADER +
+        'PREREQ=""\nprereqs() { echo "$PREREQ"; }\ncase "$1" in prereqs) prereqs; exit 0 ;; esac\n'
+        "# Mark this card's functions for vfio-pci before any GPU driver can claim them.\n"
+        + lines + "\n/sbin/modprobe -q vfio-pci || true\nexit 0\n")
+
+
+def _reset_ids(target):
+    fn0 = [f for f in target["functions"] if f["bdf"].endswith(".0")] or target["functions"][:1]
+    return ["%04x" % f["device"] for f in fn0]
+
+
+def plan_vendor_reset(facts, target, root, run, plan):
+    reset = target.get("reset", "none")
+    if not reset.startswith("vendor-reset"):
+        return
+    if reset == "vendor-reset-warn":
+        plan["hard_warnings"].append(
+            "Radeon VII / Pro VII with vendor-reset: stopping and starting a VM that holds this card without "
+            "rebooting the host has corrupted host storage on Proxmox 9 (vendor-reset issue 112, IOMMU timeouts, "
+            "then NVMe errors and a read-only root filesystem). Reboot the host between VM runs.")
+    if facts["secure_boot"]:
+        plan["manual"].append(
+            "Secure Boot is on, so the unsigned vendor-reset module would be rejected and it was NOT installed. "
+            "Either turn Secure Boot off in the BIOS, or enroll the DKMS key: run 'mokutil --import "
+            "/var/lib/dkms/mok.pub', reboot, finish the blue MokManager screen, then run gpu-setup again. "
+            "Without vendor-reset this card may only work once per host boot.")
+        return
+    code, out = run(["dkms", "status"])
+    built = any(re.search(r"vendor-reset/[^,]+,\s*" + re.escape(facts["kernel"]) + r"[^:]*:\s*installed", ln)
+                for ln in out.splitlines()) if code == 0 else False
+    if built:
+        plan["skipped"].append("vendor-reset is already built for this kernel")
+    else:
+        kernel = facts["kernel"]
+        plan["commands"].append({"argv": ["apt-get", "install", "-y", "dkms", "git", "proxmox-default-headers",
+                                          "proxmox-headers-" + kernel], "reason": "Packages needed to build vendor-reset"})
+        plan["commands"].append({"argv": ["bash", "-c",
+            "[ -d %s/.git ] || git clone %s %s; git -C %s checkout %s" % (VR_SRC, VR_REPO, VR_SRC, VR_SRC, VR_SHA)],
+            "reason": "Fetch vendor-reset at the pinned commit " + VR_SHA[:12]})
+        plan["commands"].append({"argv": ["bash", "-c",
+            "dkms status -m vendor-reset -v %s | grep -q . || dkms add -m vendor-reset -v %s; "
+            "dkms install -m vendor-reset -v %s" % (VR_VERSION, VR_VERSION, VR_VERSION)],
+            "reason": "Build and install the vendor-reset module", "tag": "vendor-reset"})
+    _add_change(plan, root, VR_MODULES_FILE, HEADER + "vendor-reset\n", "Load vendor-reset at boot")
+    existing = _read(_p(root, INITRAMFS_MODULES)) or ""
+    if not re.search(r"^\s*vendor-reset\s*$", existing, re.M):
+        _add_change(plan, root, INITRAMFS_MODULES, existing.rstrip("\n") + ("\n" if existing else "") + "vendor-reset\n",
+                    "Load vendor-reset before vfio-pci binds the card")
+    rules = HEADER + "".join(
+        'ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x%04x", ATTR{device}=="0x%s", RUN+="/bin/sh -c '
+        "'/sbin/modprobe vendor-reset; echo device_specific > /sys$env{DEVPATH}/reset_method'\"\n"
+        % (target["functions"][0]["vendor"], dev) for dev in _reset_ids(target))
+    _add_change(plan, root, VR_UDEV_FILE, rules, "Use the vendor-reset method to reset the card")
+
+
+def plan_console(facts, target, opts, plan):
+    others = [d for d in facts["displays"] if not d["bdf"].startswith(target["bdf"] + ".")]
+    if not target.get("boot_vga"):
+        return
+    if not others:
+        if not opts.get("allow_no_console"):
+            plan["refusals"].append(
+                "This card is the only display adapter in the host. Binding it to a VM leaves the host with no "
+                "screen. Type the confirmation to continue, and make sure you can reach this host over SSH.")
+        elif not facts["ssh"]:
+            plan["warnings"].append("You are not on an SSH session. Make sure you can log in over the network "
+                                    "before you reboot.")
+        plan["warnings"].append("Rescue if the host will not boot: in the GRUB menu press 'e', delete the arguments "
+                                "added by this tool from the linux line, press Ctrl-X, then run gpu-setup --undo.")
+    else:
+        plan["notes"].append("The chosen card is the console GPU. Another display adapter exists, so the host keeps "
+                             "a screen only if the BIOS uses it as the primary display (see the BIOS step).")
+
+
+def plan_host(facts, target, opts=None, root="/", run=default_run):
+    """Everything this host still needs for *target* (see module doc for the shape)."""
+    opts = opts or {}
+    plan = new_plan()
+    plan_console(facts, target, opts, plan)
+    plan_kernel_args(facts, target, root, plan)
+    plan_modules(root, plan)
+    plan_binding(facts, target, root, plan)
+    plan_vendor_reset(facts, target, root, run, plan)
+    boot_files = (GRUB_DROPIN, KERNEL_CMDLINE)
+    plan["initramfs"] = any(c["path"] not in boot_files for c in plan["changes"]) or \
+        any(c.get("tag") == "vendor-reset" for c in plan["commands"])
+    plan["reboot_required"] = plan["reboot_required"] or bool(plan["changes"])
+    if plan["initramfs"]:
+        plan["commands"].append({"argv": ["update-initramfs", "-u", "-k", "all"], "reason": "Rebuild the boot image"})
+        plan["refresh"].append("initramfs")
+    return plan
+
+
+def render_preview(plan):
+    """Plain-text preview: a unified diff per file, then the commands."""
+    out = []
+    for ch in plan["changes"]:
+        out.append("--- %s  (%s)" % (ch["path"], ch["reason"]))
+        old = (ch["old"] or "").splitlines(keepends=True)
+        new = ch["new"].splitlines(keepends=True)
+        out += [ln.rstrip("\n") for ln in difflib.unified_diff(
+            old, new, fromfile=ch["path"] if ch["old"] is not None else "(new file)", tofile=ch["path"], n=1)]
+    for cmd in plan["commands"]:
+        out.append("run: %s  (%s)" % (" ".join(shlex.quote(a) for a in cmd["argv"]), cmd["reason"]))
+    return "\n".join(out)
+
+
+# ── state ────────────────────────────────────────────────────────────
+
+def boot_id(root="/"):
+    return (_read(_p(root, "/proc/sys/kernel/random/boot_id")) or "").strip()
+
+
+def reboot_pending(state, root="/"):
+    """True while a reboot is needed and this boot is still the one the changes were made in."""
+    return bool(state.get("reboot_needed")) and state.get("boot_id", "") == boot_id(root)
+
+
+def rebooted_since_apply(state, root="/"):
+    return bool(state.get("boot_id")) and state["boot_id"] != boot_id(root)
+
+
+def new_state():
+    return {"version": 1, "step": 1, "done": [], "skipped": [], "gpu": None, "vm": None, "display": "console",
+            "ack_nullmoth": False, "verify_retry": False, "host_changes": [], "vm_records": [], "bios_saved": False,
+            "resume_cmd": "osx-next-cli gpu-setup", "vendor_reset_installed": False, "finished": False,
+            "started": _now(), "updated": _now()}
+
+
+def load_state(root="/"):
+    text = _read(_p(root, STATE_FILE))
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return {**new_state(), **data} if isinstance(data, dict) else None
+
+
+def save_state(state, root="/"):
+    state["updated"] = _now()
+    path = _p(root, STATE_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+
+
+def delete_state(root="/"):
+    try:
+        _p(root, STATE_FILE).unlink()
+    except OSError:
+        pass
+
+
+def complete_step(state, step, skipped=False):
+    """Mark *step* done (or skipped) and move to the next one."""
+    keep, drop = ("skipped", "done") if skipped else ("done", "skipped")
+    state[drop] = [n for n in state[drop] if n != step]
+    if step not in state[keep]:
+        state[keep].append(step)
+    state["step"] = min(step + 1, len(STEPS))
+
+
+def goto_step(state, step):
+    """Go back (or forward) to *step*: later steps are no longer done."""
+    state["step"] = step
+    for name in ("done", "skipped"):
+        state[name] = [n for n in state[name] if n < step]
+
+
+def build_target(root, bdf, vendor, reset="none"):
+    """The chosen card in the shape plan_host and verify_host want."""
+    funcs = [{"bdf": d["bdf"], "vendor": d["vendor"], "device": d["device"], "class": d["class"]}
+             for d in pci_devices(root) if d["bdf"].startswith(bdf + ".")]
+    boot = any(d["boot_vga"] for d in pci_devices(root) if d["bdf"].startswith(bdf + "."))
+    return {"vendor": vendor, "bdf": bdf, "boot_vga": boot, "reset": reset, "functions": funcs}
+
+
+def hint_text(state):
+    name = STEPS[min(max(state["step"], 1), len(STEPS)) - 1]
+    return "GPU setup paused at step %d of %d (%s). Continue with: %s" % (
+        state["step"], len(STEPS), name, state.get("resume_cmd") or "osx-next-cli gpu-setup")
+
+
+def set_login_hint(state, root="/"):
+    path = _p(root, LOGIN_HINT)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Written by osx-proxmox-next. Removed when the GPU setup finishes or is undone.\n"
+                    "[ -t 1 ] && echo %s\n" % shlex.quote(hint_text(state)))
+
+
+def clear_login_hint(root="/"):
+    try:
+        _p(root, LOGIN_HINT).unlink()
+    except OSError:
+        pass
+
+
+# ── apply / undo ─────────────────────────────────────────────────────
+
+def _backup_path(root, stamp, path):
+    return _p(root, BACKUP_ROOT) / stamp / path.lstrip("/").replace("/", "__")
+
+
+def _safe_path(path):
+    """Only absolute paths under /etc, without `..`: nothing this tool writes lives elsewhere."""
+    return isinstance(path, str) and path.startswith("/etc/") and ".." not in path.split("/")
+
+
+def _write_file(root, path, content, mode):
+    target = _p(root, path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".osx-tmp")
+    try:
+        tmp.write_text(content)
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _restore(root, entry, check_drift=False):
+    """Put one file back. Returns "" or the reason it was left alone."""
+    target = _p(root, entry["path"])
+    if not _safe_path(entry["path"]):
+        return "%s is not a path this tool manages" % entry["path"]
+    if check_drift and target.exists() and _sha(_read(target)) != entry.get("sha_after"):
+        return "%s was changed after this tool wrote it, so it was left alone (backup: %s)" % (
+            entry["path"], entry.get("backup") or "none")
+    try:
+        if entry["existed"]:
+            if not Path(entry["backup"]).exists():
+                return "the backup of %s is missing (%s)" % (entry["path"], entry["backup"])
+            shutil.copy2(entry["backup"], target)
+        else:
+            target.unlink(missing_ok=True)
+    except OSError as exc:
+        return "could not restore %s: %s" % (entry["path"], exc)
+    entry["reverted"] = True
+    return ""
+
+
+_REFRESH = {"grub": ["update-grub"], "systemd-boot": ["proxmox-boot-tool", "refresh"],
+            "initramfs": ["update-initramfs", "-u", "-k", "all"]}
+
+
+def _refresh_commands(kinds):
+    return [_REFRESH[k] for k in ("grub", "systemd-boot", "initramfs") if k in kinds]
+
+
+def _run_refreshes(kinds, state, run):
+    """Rebuild boot config for *kinds*. Failures stay in state["pending_refresh"] so a later undo retries them."""
+    errors = []
+    pending = []
+    for kind in ("grub", "systemd-boot", "initramfs"):
+        if kind not in kinds:
+            continue
+        code, out = run(_REFRESH[kind], timeout=LONG_TIMEOUT)
+        if code != 0:
+            pending.append(kind)
+            errors.append("%s failed: %s" % (" ".join(_REFRESH[kind]), out.strip()[-200:]))
+    state["pending_refresh"] = pending
+    return errors
+
+
+def apply_plan(plan, state, root="/", run=default_run, confirmed=False):
+    """Write the plan. Returns {ok, error, rolled_back, reboot_required, backup_dir}."""
+    if plan["refusals"]:
+        return {"ok": False, "error": plan["refusals"][0], "rolled_back": False}
+    if plan["hard_warnings"] and not confirmed:
+        return {"ok": False, "error": "A hard warning needs a typed confirmation first.", "rolled_back": False}
+    bad = [c["path"] for c in plan["changes"] if not _safe_path(c["path"])]
+    if bad:
+        return {"ok": False, "error": "Refusing to write outside /etc: " + ", ".join(bad), "rolled_back": False}
+    stamp = _now()
+    n = 1
+    while _p(root, BACKUP_ROOT).joinpath(stamp).exists():
+        n += 1
+        stamp = "%s-%d" % (_now(), n)
+    done = []
+    try:
+        for ch in plan["changes"]:
+            target = _p(root, ch["path"])
+            existed = target.exists()
+            backup = ""
+            if existed:
+                bp = _backup_path(root, stamp, ch["path"])
+                bp.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, bp)
+                backup = str(bp)
+            entry = {"path": ch["path"], "existed": existed, "backup": backup, "stamp": stamp,
+                     "sha_before": _sha(_read(target)) if existed else "", "sha_after": _sha(ch["new"]),
+                     "reverted": False}
+            state["host_changes"].append(entry)
+            done.append(entry)
+            save_state(state, root)
+            _write_file(root, ch["path"], ch["new"], ch.get("mode", 0o644))
+        for cmd in plan["commands"]:
+            code, out = run(cmd["argv"], timeout=LONG_TIMEOUT)
+            if code != 0:
+                raise RuntimeError("%s failed: %s" % (" ".join(cmd["argv"]), out.strip()[-400:]))
+            if cmd.get("tag") == "vendor-reset":
+                state["vendor_reset_installed"] = True
+        if plan["reboot_required"]:
+            state["reboot_needed"] = True
+            state["boot_id"] = boot_id(root)
+        save_state(state, root)
+    except BaseException as exc:  # noqa: BLE001  (Ctrl-C included: never leave half-applied files)
+        for entry in reversed(done):
+            _restore(root, entry)
+        errors = _run_refreshes(set(plan["refresh"]), state, run)
+        save_state(state, root)
+        if not isinstance(exc, (OSError, RuntimeError)):
+            raise
+        extra = [e for e in errors if e not in str(exc)]
+        return {"ok": False, "error": str(exc) + "".join(" " + e for e in extra), "rolled_back": True}
+    return {"ok": True, "error": "", "rolled_back": False, "reboot_required": plan["reboot_required"],
+            "backup_dir": str(_p(root, BACKUP_ROOT) / stamp)}
+
+
+def undo_host(state, root="/", run=default_run):
+    """Restore every file this tool changed, newest first. Safe to run twice; a failed rebuild is retried."""
+    kinds = set(state.get("pending_refresh", []))
+    restored = []
+    errors = []
+    for entry in reversed(state["host_changes"]):
+        if entry.get("reverted"):
+            continue
+        problem = _restore(root, entry, check_drift=True)
+        if problem:
+            errors.append(problem)
+            continue
+        restored.append(entry["path"])
+        if entry["path"] == GRUB_DROPIN:
+            kinds.add("grub")
+        elif entry["path"] == KERNEL_CMDLINE:
+            kinds.add("systemd-boot")
+        else:
+            kinds.add("initramfs")
+    if state.get("vendor_reset_installed"):
+        code, out = run(["dkms", "remove", "vendor-reset/" + VR_VERSION, "--all"], timeout=600)
+        if code == 0:
+            state["vendor_reset_installed"] = False
+        else:
+            errors.append("dkms remove failed: " + out.strip()[-200:])
+    errors += _run_refreshes(kinds, state, run)
+    save_state(state, root)
+    return {"ok": not errors, "restored": restored, "errors": errors, "reboot_required": bool(restored)}
+
+
+# ── verify ───────────────────────────────────────────────────────────
+
+def _check(cid, label, status, detail="", fix=""):
+    return {"id": cid, "label": label, "status": status, "detail": detail, "fix": fix}
+
+
+def verify_host(target, root="/", run=default_run):
+    """Post-reboot checks. status is ok, fail, warn or info; fix says where to go on a failure."""
+    facts = detect_facts(root, run)
+    out = []
+    configured = configured_cmdline(facts["bootloader"], root)
+    live = _tokens(facts["cmdline"])
+    wanted = wanted_kernel_args(facts, target)
+    not_live = [a for a in wanted if _has_arg(configured, a) and not _has_arg(live, a)]
+    absent = [a for a in wanted if not _has_arg(live, a)]
+    out.append(_check("cmdline", "Kernel arguments are active",
+                      "ok" if not absent else "fail",
+                      "Reboot the host: configured but not active: " + " ".join(not_live) if not_live else
+                      "Missing: " + " ".join(absent) if absent else "", "host" if absent else ""))
+    active = facts["iommu_groups"] > 0
+    out.append(_check("iommu", "IOMMU is on", "ok" if active else "fail",
+                      "" if active else ("The firmware table is there but the kernel did not enable it: check the "
+                                         "kernel arguments." if facts["dmar"] or facts["ivrs"] else
+                                         "The motherboard hides the IOMMU from the OS: turn on VT-d / AMD IOMMU in the BIOS."),
+                      "" if active else ("host" if facts["dmar"] or facts["ivrs"] else "bios")))
+    _, dmesg = run(["dmesg"])
+    if dmesg:
+        remap = re.search(r"Interrupt remapping enabled|Enabled IRQ remapping", dmesg, re.I)
+        out.append(_check("irq", "Interrupt remapping", "ok" if remap else "warn",
+                          "" if remap else "Not reported in dmesg. Passthrough still works but is less isolated."))
+    mine = {f["bdf"] for f in target["functions"]}
+    devs = {d["bdf"]: d for d in facts["pci"]}
+    wrong = [f["bdf"] + " (" + (devs.get(f["bdf"], {}).get("driver") or "no driver") + ")"
+             for f in target["functions"] if devs.get(f["bdf"], {}).get("driver") != "vfio-pci"]
+    out.append(_check("driver", "The card is held by vfio-pci", "ok" if not wrong else "fail",
+                      "" if not wrong else "Not bound: " + ", ".join(wrong), "" if not wrong else "host"))
+    group = (devs.get(target["bdf"] + ".0") or {}).get("group")
+    stray = []
+    storage_net = []
+    for d in facts["pci"]:
+        if group and d["group"] == group and d["bdf"] not in mine:
+            cls = (d["class"] or 0) >> 8
+            if cls in (0x0604, 0x0600):
+                continue
+            stray.append(d["bdf"])
+            if (cls >> 8) in (0x01, 0x02):
+                storage_net.append(d["bdf"])
+    if group is None:
+        out.append(_check("group", "IOMMU group holds only the card", "fail", "The card has no IOMMU group.", "bios"))
+    else:
+        detail = ""
+        if stray:
+            detail = ("Also in the group: " + ", ".join(stray) + ". Move the card to another slot first. "
+                      "pcie_acs_override can split groups but it makes the isolation a pretence, so this tool never "
+                      "applies it.")
+            if storage_net:
+                detail += " The group holds storage or network devices (" + ", ".join(storage_net) + ")."
+        out.append(_check("group", "IOMMU group holds only the card", "fail" if stray else "ok", detail,
+                          "acs" if stray else ""))
+    mods = _read(_p(root, "/proc/modules")) or ""
+    loaded = {ln.split()[0] for ln in mods.splitlines() if ln.strip()}
+    missing_mods = [m for m in VFIO_MODULES if m not in loaded]
+    out.append(_check("modules", "VFIO modules are loaded", "ok" if not missing_mods else "fail",
+                      "Not loaded: " + ", ".join(missing_mods) if missing_mods else "", "host" if missing_mods else ""))
+    unsafe = (_read(_p(root, "/sys/module/vfio_iommu_type1/parameters/allow_unsafe_interrupts")) or "").strip()
+    if unsafe == "Y":
+        out.append(_check("unsafe", "Interrupt isolation", "warn",
+                          "allow_unsafe_interrupts is on (weakened isolation). This tool does not change it."))
+    if target.get("reset", "none").startswith("vendor-reset"):
+        method = (_read(_p(root, "/sys/bus/pci/devices/%s.0/reset_method" % target["bdf"])) or "").split()
+        ok = "device_specific" in method
+        out.append(_check("reset", "Reset method (AMD reset bug)", "ok" if ok else "warn",
+                          "" if ok else "vendor-reset is not active for this card, so it may only work once per host boot.",
+                          "" if ok else "host"))
+    bar = _bar_size(_p(root, "/sys/bus/pci/devices/%s.0/resource" % target["bdf"]), 0 if target["vendor"] == "amd" else 1)
+    if bar is not None:
+        label = "BAR size"
+        if bar > BAR_WARN_BYTES:
+            out.append(_check("bar", label, "warn", "%d MiB. Larger than 256 MiB is untested for macOS guests; "
+                              "turn Resizable BAR off in the BIOS if the VM will not start." % (bar // 1048576)))
+        else:
+            out.append(_check("bar", label, "info", "%d MiB" % (bar // 1048576)))
+    return out
+
+
+def _bar_size(path, index):
+    lines = (_read(path) or "").splitlines()
+    try:
+        start, end, _ = lines[index].split()
+        size = int(end, 16) - int(start, 16) + 1
+    except (IndexError, ValueError):
+        return None
+    return size if size > 1 else None
+
+
+# ── command line (used by the bash installer) ────────────────────────
+
+def _emit(obj):
+    sys.stdout.write(json.dumps(obj, indent=2, sort_keys=True) + "\n")
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    root = os.environ.get("GPU_ROOT", "/")
+    payload = json.loads(sys.stdin.read() or "{}") if cmd not in ("facts", "state", "hint-clear", "undo", "reboot-pending", "mark-reboot", "rebooted") else {}
+    if cmd == "facts":
+        _emit(detect_facts(root))
+    elif cmd == "target":
+        _emit(build_target(root, payload["bdf"], payload["vendor"], payload.get("reset", "none")))
+    elif cmd == "step":
+        state = load_state(root) or new_state()
+        (goto_step(state, payload["step"]) if payload.get("goto")
+         else complete_step(state, payload["step"], bool(payload.get("skipped"))))
+        save_state(state, root)
+    elif cmd == "plan":
+        _emit(plan_host(detect_facts(root), payload["target"], payload.get("opts"), root))
+    elif cmd == "preview":
+        sys.stdout.write(render_preview(payload) + "\n")
+    elif cmd == "apply":
+        state = load_state(root) or new_state()
+        res = apply_plan(payload["plan"], state, root, confirmed=bool(payload.get("confirmed")))
+        _emit(res)
+        return 0 if res["ok"] else 1
+    elif cmd == "undo":
+        state = load_state(root)
+        if state is None:
+            _emit({"ok": True, "restored": [], "errors": [], "reboot_required": False})
+            return 0
+        res = undo_host(state, root)
+        _emit(res)
+        return 0 if res["ok"] else 1
+    elif cmd == "verify":
+        _emit(verify_host(payload["target"], root))
+    elif cmd == "mark-reboot":
+        state = load_state(root) or new_state()
+        goto_step(state, 5)
+        state["reboot_needed"] = True
+        state["boot_id"] = boot_id(root)
+        save_state(state, root)
+    elif cmd == "rebooted":
+        print("yes" if rebooted_since_apply(load_state(root) or new_state(), root) else "no")
+    elif cmd == "reboot-pending":
+        print("yes" if reboot_pending(load_state(root) or new_state(), root) else "no")
+    elif cmd == "state":
+        _emit(load_state(root) or new_state())
+    elif cmd == "state-save":
+        state = {**(load_state(root) or new_state()), **payload}
+        save_state(state, root)
+    elif cmd == "hint-set":
+        set_login_hint(load_state(root) or new_state(), root)
+    elif cmd == "hint-clear":
+        clear_login_hint(root)
+    else:
+        sys.stderr.write("usage: host_setup.py facts|target|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
+        return 64
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+GPU_EMBED_HOST_SETUP_EOF
+# ── GPU embedded: host_setup.py end ──
+# ── GPU embedded: bios_guide.py begin ──
+IFS= read -r -d '' GPU_EMBED_BIOS_GUIDE <<'GPU_EMBED_BIOS_GUIDE_EOF' || true
+"""BIOS step of the GPU walkthrough: what is missing, and a card to photograph.
+
+Standard library only (segno is optional, for QR codes) and no imports from this
+package: the bash installer embeds this file verbatim (tests/test_gpu_parity.py
+diffs the two) together with data/gpu/bios_paths.json, and runs it with
+``python3 - <command>``.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import textwrap
+from pathlib import Path
+
+CARD_FILE = "/root/osx-proxmox-next-bios-steps.txt"
+WIDTH = 76
+OS_INDICATIONS = "/sys/firmware/efi/efivars/OsIndicationsSupported-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+# Longest names first: ASRock Rack before ASRock, PowerEdge before Dell, and so on.
+_ORDER = ("asrock-rack", "asrock", "asus", "msi", "gigabyte", "supermicro", "dell-poweredge", "dell", "hpe",
+          "hp", "lenovo-thinksystem", "lenovo", "intel-nuc", "mini-pc")
+
+
+def _p(root, path):
+    return Path(root) / path.lstrip("/")
+
+
+def _read(path):
+    try:
+        return Path(path).read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def load_data(path=None):
+    path = path or os.environ.get("BIOS_DATA") or str(Path(__file__).with_name("data") / "gpu" / "bios_paths.json")
+    return json.loads(Path(path).read_text())
+
+
+def match_vendor(facts, data):
+    """Key of the BIOS vendor in *data*, or 'generic' when nothing matches."""
+    hay = " ".join(str(facts.get(k, "")) for k in ("board_vendor", "sys_vendor", "bios_vendor", "product_name",
+                                                    "board_name")).lower()
+    for key in _ORDER:
+        for token in data["vendors"].get(key, {}).get("match", []):
+            if re.search(r"\b" + re.escape(token), hay):
+                return key
+    return "generic"
+
+
+def doc_url(data, key):
+    slug = data["vendors"][key]["doc"] if key in data["vendors"] else "generic"
+    return data["docs_base"] + slug
+
+
+# ── what is missing ──────────────────────────────────────────────────
+
+def above4g_off(facts, bdf):
+    """True when the kernel could not place one of the card's BARs ("no space for" in dmesg).
+
+    A card with a 256 MiB window works without Above 4G Decoding, so only this kernel message counts."""
+    return any(b.startswith(bdf + ".") for b in facts.get("bar_errors", []))
+
+
+def _driver(root, bdf):
+    link = _p(root, "/sys/bus/pci/devices/%s.0/driver" % bdf)
+    return link.resolve().name if link.exists() else None
+
+
+def rebar_capable(root, bdf):
+    base = _p(root, "/sys/bus/pci/devices/%s.0" % bdf)
+    return any((base / ("resource%d_resize" % i)).exists() for i in range(6))
+
+
+def check_items(facts, target, root="/"):
+    """One entry per BIOS item: key, label, ok, detail. Only failing ones need the card."""
+    intel = facts.get("cpu_vendor") == "intel"
+    items = [
+        {"key": "vtx" if intel else "svm", "ok": bool(facts.get("virtualization")),
+         "detail": "The CPU does not report virtualization (vmx or svm)."},
+        {"key": "vtd" if intel else "amd_iommu", "ok": bool(facts.get("dmar") or facts.get("ivrs") or facts.get("iommu_groups")),
+         "detail": "The firmware does not publish the IOMMU table (DMAR or IVRS)."},
+        {"key": "csm", "ok": bool(facts.get("efi")),
+         "detail": "This host did not boot in UEFI mode (no /sys/firmware/efi)."},
+    ]
+    if target:
+        bdf = target["bdf"]
+        items.append({"key": "above4g", "ok": not above4g_off(facts, bdf),
+                      "detail": "The kernel could not find room for the card's memory window."})
+        others = [d for d in facts.get("displays", []) if not d["bdf"].startswith(bdf + ".")]
+        held = _driver(root, bdf) == "vfio-pci"  # already handed to VMs: the host is not using it as its screen
+        items.append({"key": "primary_display", "ok": not (target.get("boot_vga") and others and not held),
+                      "detail": "The firmware uses the chosen card as the boot display."})
+    return items
+
+
+# ── the card ─────────────────────────────────────────────────────────
+
+def _entry(data, vendor, key):
+    ven = data["vendors"].get(vendor, {})
+    return ven.get("paths", {}).get(key)
+
+
+def _generic_hint(data, key):
+    group = {"vtx": "virtualization", "svm": "virtualization", "vtd": "iommu", "amd_iommu": "iommu"}.get(key, key)
+    return data["generic"].get(group, {"names": "", "where": ""})
+
+
+def _line(width, left, value):
+    dots = width - len(left) - len(value) - 2
+    if dots < 3:
+        return [left, "   = " + value]
+    return [left + " " + "." * dots + " " + value]
+
+
+def _wrap(text, width, indent):
+    return textwrap.wrap(text, width=width, initial_indent=indent, subsequent_indent=indent) or [indent]
+
+
+def board_title(facts):
+    name = " ".join(x for x in (facts.get("board_vendor", ""), facts.get("board_name", "")) if x).strip()
+    return ((name or "this server") + " (%s)" % ("Intel" if facts.get("cpu_vendor") == "intel" else "AMD")).upper()
+
+
+def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup", optional_rebar=False):
+    """ASCII-safe photo card (plain text). *failing* are the entries from check_items with ok false."""
+    inner = WIDTH - 4
+    ven = data["vendors"].get(vendor)
+    body = ["BIOS STEPS FOR THIS SERVER", board_title(facts), "",
+            "Take a photo of this screen, then reboot into the BIOS.", ""]
+    if ven:
+        body.append("Open the BIOS with: %s. %s" % (ven["enter"], ven.get("mode", "")))
+        body.append("")
+    n = 0
+    for item in failing:
+        n += 1
+        entry = _entry(data, vendor, item["key"])
+        label = data["settings"][item["key"]]["label"]
+        value = entry["value"] if entry else "Enabled"
+        body += _line(inner, "%d. %s" % (n, label), value)
+        if entry:
+            lead = "Path: " if entry["verified"] else "Usually under: "
+            body += _wrap(lead + entry["path"], inner, "   ")
+        else:
+            hint = _generic_hint(data, item["key"])
+            body += _wrap("Look for: " + hint["names"], inner, "   ")
+            body += _wrap(hint["where"], inner, "   ")
+    if optional_rebar:
+        n += 1
+        body += _line(inner, "%d. Resizable BAR (optional)" % n, "Auto")
+        body += _wrap("Leave it on Auto. If the VM will not start, set it to Disabled.", inner, "   ")
+    n += 1
+    body.append("%d. Save and exit (usually F10)" % n)
+    body.append("")
+    body += _wrap(data["search_tip"], inner, "")
+    body += _wrap(data["order_note"], inner, "")
+    body += ["", "Back in Proxmox, run:", "   " + resume_cmd, "", "Same steps with pictures on your phone:",
+             "   " + re.sub(r"^https?://", "", doc_url(data, vendor))]
+    border = "+" + "=" * (WIDTH - 2) + "+"
+    rows = [border] + ["| " + ln.ljust(inner) + " |" for ln in body] + [border]
+    return "\n".join(rows)
+
+
+def save_card(text, root="/"):
+    path = _p(root, CARD_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text + "\n")
+    return CARD_FILE
+
+
+# ── QR ───────────────────────────────────────────────────────────────
+
+def qr_lines(url, ascii_only=False):
+    """QR code as text lines (dark module = block). Empty list when segno is not installed."""
+    try:
+        import segno  # type: ignore
+    except ImportError:
+        return []
+    rows = [list(r) for r in segno.make(url, error="m", micro=False).matrix_iter(border=2)]
+    if ascii_only:
+        return ["".join("##" if c else "  " for c in r) for r in rows]
+    if len(rows) % 2:
+        rows.append([0] * len(rows[0]))
+    glyph = {(0, 0): " ", (1, 0): "▀", (0, 1): "▄", (1, 1): "█"}
+    return ["".join(glyph[(top, bot)] for top, bot in zip(a, b)) for a, b in zip(rows[0::2], rows[1::2])]
+
+
+# ── reboot into the firmware setup ───────────────────────────────────
+
+def firmware_setup_supported(root="/"):
+    """True when the firmware allows 'reboot into setup' (OsIndicationsSupported bit 0)."""
+    try:
+        raw = _p(root, OS_INDICATIONS).read_bytes()
+    except OSError:
+        return False
+    return len(raw) >= 5 and bool(raw[4] & 1)
+
+
+def parse_running_vms(qm_list):
+    out = []
+    for line in qm_list.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].isdigit() and parts[2] == "running":
+            out.append((int(parts[0]), parts[1]))
+    return out
+
+
+REBOOT_ARGV = ["systemctl", "reboot", "--firmware-setup"]
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    root = os.environ.get("GPU_ROOT", "/")
+    data = load_data()
+    payload = json.loads(sys.stdin.read() or "{}")
+    if cmd == "vendor":
+        print(match_vendor(payload["facts"], data))
+    elif cmd == "check":
+        print(json.dumps(check_items(payload["facts"], payload.get("target"), root)))
+    elif cmd == "card":
+        facts = payload["facts"]
+        failing = [i for i in payload["items"] if not i["ok"]]
+        if not failing:
+            return 3
+        vendor = match_vendor(facts, data)
+        rebar = bool(payload.get("target")) and rebar_capable(root, payload["target"]["bdf"])
+        text = build_card(failing, facts, data, vendor, payload.get("resume_cmd") or "osx-next-cli gpu-setup", rebar)
+        if payload.get("save"):
+            save_card(text, root)
+        print(text)
+    elif cmd == "url":
+        print(doc_url(data, payload.get("vendor") or match_vendor(payload["facts"], data)))
+    elif cmd == "firmware":
+        print("yes" if firmware_setup_supported(root) else "no")
+    elif cmd == "running":
+        for vmid, name in parse_running_vms(payload.get("qm_list", "")):
+            print("%d %s" % (vmid, name))
+    else:
+        sys.stderr.write("usage: bios_guide.py vendor|check|card|url|firmware|running\n")
+        return 64
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+GPU_EMBED_BIOS_GUIDE_EOF
+# ── GPU embedded: bios_guide.py end ──
+# ── GPU embedded: bios_paths.json begin ──
+IFS= read -r -d '' GPU_EMBED_BIOS_PATHS <<'GPU_EMBED_BIOS_PATHS_EOF' || true
+{
+ "version": 1,
+ "docs_base": "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu/bios/",
+ "search_tip": "Cannot find a setting? Use the BIOS search (the footer of the screen shows the key, often F3, F7 or F9) and type the setting name.",
+ "order_note": "Do the settings in this order: CSM off, then Above 4G Decoding, then Resizable BAR if you want it. Virtualization and IOMMU are independent.",
+ "settings": {
+  "vtx": {"label": "Intel virtualization (VT-x)", "why": "Lets the CPU run virtual machines."},
+  "svm": {"label": "AMD virtualization (SVM)", "why": "Lets the CPU run virtual machines."},
+  "vtd": {"label": "Intel VT-d", "why": "Lets the host hand a PCI card to one VM safely (the IOMMU)."},
+  "amd_iommu": {"label": "AMD IOMMU", "why": "Lets the host hand a PCI card to one VM safely."},
+  "above4g": {"label": "Above 4G Decoding", "why": "Lets the GPU's large memory window sit above 4 GB."},
+  "csm": {"label": "CSM (legacy boot support)", "why": "Must be off so the machine boots in pure UEFI mode."},
+  "primary_display": {"label": "Primary display", "why": "The motherboard's own graphics should show the boot screen, not the card you pass through."},
+  "rebar": {"label": "Resizable BAR (optional)", "why": "Optional. If the VM will not start, turn it off."}
+ },
+ "generic": {
+  "virtualization": {"names": "Intel Virtualization Technology, VT-x, VMX, SVM Mode, AMD-V, Secure Virtual Machine", "where": "Usually under Advanced > CPU Configuration, Tweaker > Advanced CPU Settings, Settings > Advanced > CPU Features, or Security > Virtualization."},
+  "iommu": {"names": "VT-d, Intel VT for Directed I/O, AMD IOMMU, IOMMU Support, AMD-Vi", "where": "Usually under Advanced > Chipset, North Bridge, System Agent (SA) Configuration, AMD CBS > NBIO Common Options, Miscellaneous (Gigabyte) or Processor Options (HPE)."},
+  "above4g": {"names": "Above 4G Decoding, Above 4GB MMIO, Memory Mapped I/O above 4GB, PCI 64-bit Resource Handling above 4G, Above 4G memory / Crypto Currency mining (MSI)", "where": "Usually under Advanced > PCI Subsystem Settings, PCIe/PCI/PnP Configuration, North Bridge or IO Ports (Gigabyte)."},
+  "csm": {"names": "CSM Support, Launch CSM, Legacy Support, Boot mode UEFI/Legacy, Legacy Option ROMs", "where": "Usually under Boot."},
+  "primary_display": {"names": "Primary Display, Initial Display Output, Initial Graphics Adapter, Primary Graphics Adapter, VGA Priority, Primary Video Device, Select Active Video", "where": "Set it to IGD, IGFX, Onboard or iGPU. Servers keep the BMC graphics as the console and need no change."},
+  "rebar": {"names": "Re-Size BAR Support, Resizable BAR, Smart Access Memory, Clever Access Memory", "where": "Appears only after Above 4G Decoding is on and CSM is off."}
+ },
+ "vendors": {
+  "asus": {
+   "name": "ASUS",
+   "doc": "asus",
+   "enter": "Del or F2",
+   "mode": "Press F7 for Advanced Mode.",
+   "manual": "https://www.asus.com/support/",
+   "match": ["asustek", "asus"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel (VMX) Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > System Agent (SA) Configuration > VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO Common Options > IOMMU", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Advanced > PCI Subsystem Settings > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Advanced > PCI Subsystem Settings > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > CSM (Compatibility Support Module) > Launch CSM", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Advanced > System Agent (SA) Configuration > Graphics Configuration > Primary Display (AMD boards: Advanced > NB Configuration > Primary Video Device)", "value": "IGFX / iGPU (AMD: IGD Video)", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "msi": {
+   "name": "MSI",
+   "doc": "msi",
+   "enter": "Del",
+   "mode": "Press F7 to switch between EZ and Advanced mode.",
+   "manual": "https://www.msi.com/support",
+   "match": ["micro-star", "msi"],
+   "paths": {
+    "vtx": {"path": "Settings > Advanced > CPU Features > Intel Virtualization Tech", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Settings > Advanced > CPU Features > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Settings > Advanced > Northbridge or System Agent > VT-d (search for VT-d)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "amd_iommu": {"path": "Settings > Advanced > AMD CBS > NBIO Common Options > IOMMU (many AM5 boards: Settings > Advanced > IOMMU Configuration > IOMMU)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Settings > Advanced > PCI Subsystem Settings > Above 4G memory / Crypto Currency mining", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Settings > Advanced > PCI Subsystem Settings > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Settings > Boot > CSM / UEFI-only (Click BIOS 5: Boot > BIOS CSM/UEFI Mode)", "value": "UEFI", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Settings > Advanced > Integrated Graphics Configuration > Initial Graphics Adapter", "value": "IGD (the onboard graphics)", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "gigabyte": {
+   "name": "Gigabyte / Aorus",
+   "doc": "gigabyte",
+   "enter": "Del",
+   "mode": "Press F2 to switch between Easy and Advanced mode.",
+   "manual": "https://www.gigabyte.com/Support",
+   "match": ["gigabyte", "aorus"],
+   "paths": {
+    "vtx": {"path": "Tweaker > Advanced CPU Settings > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Tweaker > Advanced CPU Settings > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Settings > Miscellaneous > VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Settings > Miscellaneous > IOMMU (older boards: Settings > AMD CBS > NBIO Common Options > IOMMU)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Settings > IO Ports > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Settings > IO Ports > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > CSM Support", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Settings > IO Ports > Initial Display Output", "value": "IGFX (the onboard graphics)", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "asrock": {
+   "name": "ASRock",
+   "doc": "asrock",
+   "enter": "F2 or Del",
+   "mode": "",
+   "manual": "https://www.asrock.com/support",
+   "match": ["asrock"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > Chipset Configuration > VT-d (older boards: Advanced > North Bridge Configuration > VT-d)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO Common Options > IOMMU (AM5: Advanced > North Bridge > IOMMU)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Advanced > North Bridge Configuration > Above 4G Decoding (Intel: Advanced > Chipset Configuration > Above 4G Decoding)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Advanced > North Bridge (or Chipset) Configuration > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > CSM > CSM", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Advanced > North Bridge (or Chipset) Configuration > Primary Graphics Adapter", "value": "Onboard", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "asrock-rack": {
+   "name": "ASRock Rack",
+   "doc": "asrock-rack",
+   "enter": "Del or F2",
+   "mode": "Boards with a BMC can be used through the IPMI remote console.",
+   "manual": "https://www.asrockrack.com/support/",
+   "match": ["asrockrack", "asrock rack"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > Chipset Configuration > VT-d (or Advanced > North Bridge > VT-d)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO Common Options > IOMMU", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Advanced > PCI Subsystem Settings > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "rebar": {"path": "Advanced > PCI Subsystem Settings > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > CSM Support (or Advanced > CSM Configuration > CSM Support)", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "supermicro": {
+   "name": "Supermicro",
+   "doc": "supermicro",
+   "enter": "Del",
+   "mode": "Boot menu is F11. The IPMI remote console works for all of this.",
+   "manual": "https://www.supermicro.com/en/support/resources/downloadcenter/manual",
+   "match": ["supermicro", "super micro"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > Chipset Configuration > North Bridge > IIO Configuration > Intel VT for Directed I/O (VT-d)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > NB Configuration > IOMMU", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Advanced > PCIe/PCI/PnP Configuration > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Setting name seen in the X13DDW-A manual; menu path from memory"},
+    "rebar": {"path": "Advanced > PCIe/PCI/PnP Configuration > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot > Boot mode select", "value": "UEFI", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Advanced > PCIe/PCI/PnP Configuration > VGA Priority", "value": "Onboard", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "dell": {
+   "name": "Dell OptiPlex / Precision",
+   "doc": "dell",
+   "enter": "F2 at the Dell logo",
+   "mode": "F12 opens the boot menu.",
+   "manual": "https://www.dell.com/support",
+   "match": ["dell"],
+   "paths": {
+    "vtx": {"path": "Virtualization Support > Virtualization", "value": "Enabled", "verified": true, "source": "https://www.dell.com/support/kbdoc/en-us/000195978/how-to-enable-or-disable-hardware-virtualization-on-dell-systems"},
+    "svm": {"path": "Virtualization Support > SVM Mode", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "vtd": {"path": "Virtualization Support > VT for Direct I/O", "value": "Enabled", "verified": true, "source": "https://www.dell.com/support/kbdoc/en-us/000195978/how-to-enable-or-disable-hardware-virtualization-on-dell-systems"},
+    "amd_iommu": {"path": "Virtualization Support > IOMMU", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "above4g": {"path": "Settings > System Configuration > Above 4G Decoding (many Dell desktops have no such switch)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "rebar": {"path": "Settings > System Configuration > Re-Size BAR Support", "value": "Disabled if the VM will not start", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Settings > General > Boot Sequence > Boot List Option, and Advanced Boot Options > Enable Legacy Option ROMs", "value": "UEFI, legacy option ROMs off", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Settings > Video > Primary Display", "value": "Intel HD Graphics / Auto", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "dell-poweredge": {
+   "name": "Dell PowerEdge",
+   "doc": "dell",
+   "enter": "F2 (System Setup)",
+   "mode": "iDRAC: Next Boot > BIOS Setup.",
+   "manual": "https://www.dell.com/support",
+   "match": ["poweredge"],
+   "paths": {
+    "vtx": {"path": "System BIOS > Processor Settings > Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "System BIOS > Processor Settings > Virtualization Technology (SVM)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "System BIOS > Processor Settings > Virtualization Technology (VT-d is on by default on 14G and newer)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "amd_iommu": {"path": "System BIOS > Processor Settings > IOMMU Support", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "System BIOS > Integrated Devices > Memory Mapped I/O Above 4GB", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "System BIOS > Boot Settings > Boot Mode", "value": "UEFI", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "hp": {
+   "name": "HP workstations and desktops",
+   "doc": "hp",
+   "enter": "Esc, then F10",
+   "mode": "F9 opens the boot menu.",
+   "manual": "https://support.hp.com",
+   "match": ["hp", "hewlett-packard"],
+   "paths": {
+    "vtx": {"path": "Advanced > System Options > Virtualization Technology (VTx)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Advanced > System Options > SVM CPU Virtualization", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > System Options > Virtualization Technology for Directed I/O (VTd)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > System Options > IOMMU (name varies)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "above4g": {"path": "Advanced > Device Options > Above 4G MMIO (name varies)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Advanced > Boot Options > Legacy Support", "value": "Disabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Advanced > Built-in Device Options > Video: Integrated Graphics", "value": "Integrated", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "hpe": {
+   "name": "HPE ProLiant",
+   "doc": "hpe",
+   "enter": "F9 (System Utilities)",
+   "mode": "iLO remote console: Server > One-Button Boot > System Utilities.",
+   "manual": "https://www.hpe.com/support",
+   "match": ["hpe", "hewlett packard enterprise", "proliant"],
+   "paths": {
+    "vtx": {"path": "System Configuration > BIOS/Platform Configuration (RBSU) > Processor Options > Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "RBSU > Processor Options > AMD Virtualization Technology (SVM)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "RBSU > Processor Options > Intel(R) VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "RBSU > Processor Options > AMD I/O Virtualization Technology (IOMMU)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "RBSU > Advanced Options > Memory Mapped I/O Above 4GB (also called PCI 64-bit Resource Handling above 4GB; the name differs per generation)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "RBSU > Boot Options > Boot Mode", "value": "UEFI Mode", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "lenovo": {
+   "name": "Lenovo ThinkCentre / ThinkStation",
+   "doc": "lenovo",
+   "enter": "F1 (some models: Enter, then F1)",
+   "mode": "F12 opens the boot menu.",
+   "manual": "https://pubs.lenovo.com",
+   "match": ["lenovo"],
+   "paths": {
+    "vtx": {"path": "Security > Virtualization > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "Security > Virtualization > AMD-V (SVM)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Security > Virtualization > Intel VT-d Feature", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO > IOMMU (ThinkStation P620)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "above4g": {"path": "Advanced > PCI Configuration > Above 4G Decoding (ThinkStation; ThinkCentre often has none)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Startup > CSM Support and Startup > Boot Mode", "value": "Disabled / UEFI Only", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "primary_display": {"path": "Devices > Video Setup > Select Active Video", "value": "Integrated Graphics", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "lenovo-thinksystem": {
+   "name": "Lenovo ThinkSystem",
+   "doc": "lenovo",
+   "enter": "F1",
+   "mode": "F12 opens the boot menu.",
+   "manual": "https://pubs.lenovo.com",
+   "match": ["thinksystem"],
+   "paths": {
+    "vtx": {"path": "System Settings > Processors > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "svm": {"path": "System Settings > Processors > SVM Mode", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "System Settings > Processors > VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "amd_iommu": {"path": "System Settings > Devices and I/O Ports > IOMMU", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "System Settings > Devices and I/O Ports > MM Config (Memory Mapped I/O above 4GB)", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "csm": {"path": "Boot Manager > Boot Modes > System Boot Mode", "value": "UEFI Mode", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "intel-nuc": {
+   "name": "Intel NUC",
+   "doc": "intel-nuc",
+   "enter": "F2",
+   "mode": "F10 opens the boot menu. Newer NUCs (13 and later) are made by ASUS and use the ASUS layout.",
+   "manual": "https://www.intel.com/content/www/us/en/support/products/",
+   "match": ["nuc"],
+   "paths": {
+    "vtx": {"path": "Advanced > Security > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "vtd": {"path": "Advanced > Security > Intel VT-d", "value": "Enabled", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"},
+    "above4g": {"path": "Usually not offered. NUC 12/13 Extreme: Advanced > Devices > PCI > Above 4G Decoding", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Advanced > Boot > Boot Configuration > UEFI Boot", "value": "Enabled, legacy boot off", "verified": false, "source": "Vendor manual wording from memory, not re-checked against a current manual"}
+   }
+  },
+  "mini-pc": {
+   "name": "Minisforum / Beelink and other mini PCs",
+   "doc": "mini-pc",
+   "enter": "Del or F2",
+   "mode": "F7 opens the boot menu on many models. Mini PCs often hide advanced menus.",
+   "manual": "",
+   "match": ["micro computer (hk)", "minisforum", "beelink", "azw", "shenzhen"],
+   "paths": {
+    "vtx": {"path": "Advanced > CPU Configuration > Intel Virtualization Technology", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "svm": {"path": "Advanced > CPU Configuration > SVM Mode", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "vtd": {"path": "Advanced > System Agent (SA) Configuration > VT-d", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "amd_iommu": {"path": "Advanced > AMD CBS > NBIO Common Options > IOMMU (some models: Advanced > IOMMU)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "above4g": {"path": "Advanced > PCI Subsystem Settings > Above 4G Decoding (often hidden)", "value": "Enabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"},
+    "csm": {"path": "Boot > CSM Support", "value": "Disabled", "verified": false, "source": "Inferred from the same vendor's other models, not checked"}
+   }
+  }
+ }
+}
+GPU_EMBED_BIOS_PATHS_EOF
+# ── GPU embedded: bios_paths.json end ──
+# ── GPU embedded: amd_devices.txt begin ──
+IFS= read -r -d '' GPU_EMBED_AMD_DEVICES <<'GPU_EMBED_AMD_DEVICES_EOF' || true
+# AMD GPU allowlist for macOS guests (PCI vendor 1002).
+# The Python package (amd_host.py) reads this file and the bash installer embeds it
+# verbatim; tests/test_gpu_parity.py diffs the two. Change the file, then refresh the
+# bash copy.
+#
+# Sources: Apple kext IOPCIMatch lists dumped on macOS 12.2.1 (github.com/cmsj/macOSrecon,
+# data/GPU_AMD); Dortania GPU Buyers Guide (AMD page); OpenCore Legacy Patcher 3.0.0 AMD
+# patchsets (these families are native on CPUs with AVX2, on macOS 13 to 26). The 13 to 26
+# lists are assumed equal to the 12.2.1 dump (Apple only adds ids) and are not re-verified.
+# Vendor-reset table: github.com/gnif/vendor-reset src/device-db.h.
+#
+# family|label|reset|boot_args|tahoe|ids
+#   reset  : vendor-reset (card has the reset bug, install vendor-reset)
+#            vendor-reset-warn (same, plus a hard warning: host storage corruption reports)
+#            early-bind (not covered by vendor-reset, bind to vfio-pci before amdgpu loads)
+#   tahoe  : ok (a Mac that Tahoe supports ships this family) or unverified (no Tahoe report)
+#   ids    : hex device ids, ranges as A-B
+polaris10|Polaris 10/20/30 (RX 470/480/570/580/590, WX 5100/7100)|vendor-reset||ok|67C0 67C1 67C2 67C4 67C7 67C8 67C9 67CA 67CC 67CF 67D0 67DF
+polaris11|Polaris 11/21 (RX 460/560, WX 4100, Pro 560X)|vendor-reset||unverified|67E0 67E1 67E3 67E7 67E8 67E9 67EB 67EF 67FF
+vega10|Vega 10 (RX Vega 56/64, Vega Frontier, WX 8200/9100)|vendor-reset||unverified|6860-686F 687F
+vega20|Vega 20 (Radeon VII, Radeon Pro VII, Pro Vega II)|vendor-reset-warn||ok|66A0 66A1 66A2 66A3 66A7 66AF
+navi10|Navi 10 (RX 5600 XT/5700/5700 XT, W5700)|vendor-reset|agdpmod=pikera|ok|7310 7312 7318 7319 731A 731B 731F
+navi14|Navi 14 (RX 5300/5500 XT, W5500)|vendor-reset|agdpmod=pikera|ok|7340 7341 7343 7347 734F
+navi21|Navi 21 (RX 6800/6800 XT/6900 XT, W6800)|early-bind|agdpmod=pikera|ok|73A2 73A3 73AB 73BF
+navi23|Navi 23 (RX 6600/6600 XT, W6600)|early-bind|agdpmod=pikera|ok|73E3 73FF
+# Cards that work when the device id is spoofed at the VM level (hostpci device-id option).
+# spoof|real id|id the guest sees|family
+spoof|73AF|73BF|navi21
+spoof|73A5|73BF|navi21
+spoof|73EF|73FF|navi23
+# Never offered. deny|label|ids|one-line reason
+deny|RX 6700 series (Navi 22)|73C0 73C1 73C3 73DF|RX 6700 series (Navi 22): Apple never shipped an accelerator for it.
+deny|RX 6300/6400/6500 XT (Navi 24)|7420-743F|RX 6300/6400/6500 XT (Navi 24): macOS has no driver for it.
+deny|RX 580 2048SP / RX 590 GME|6FDF|RX 580 2048SP and RX 590 GME: Apple's driver does not match this variant.
+deny|RX 540/550 (Polaris 12)|6980-699F|RX 540/550 (Polaris 12): needs a device-id spoof and extra patches, not supported here.
+deny|RX 7000 series (RDNA3)|7440-747F 7480-749F|RX 7000 series: Apple never shipped a driver.
+deny|RX 9000 series (RDNA4)|7550-755F|RX 9000 series: Apple never shipped a driver.
+GPU_EMBED_AMD_DEVICES_EOF
+# ── GPU embedded: amd_devices.txt end ──
+# ── GPU embedded: oc_boot_args.py begin ──
+IFS= read -r -d '' GPU_EMBED_OC_BOOT_ARGS <<'GPU_EMBED_OC_BOOT_ARGS_EOF' || true
+"""Add boot-args to (or restore) a VM's OpenCore config for a passed-through GPU.
+
+Usage: oc_boot_args.py <EFI/OC directory> attach|detach
+
+The Python CLI/TUI and the standalone bash installer run this exact text (the
+bash script embeds it verbatim; tests/test_gpu_parity.py diffs the two).
+Standard library only.
+
+attach  Backs up config.plist to config.plist.pre-gpu (kept if it already
+        exists) and appends the boot-args named in the environment variable
+        GPU_BOOT_ARGS (space separated; an arg that is already there is
+        replaced, never duplicated). Refuses when config.plist.pre-nullmoth
+        exists: the NVIDIA profile owns the config then.
+detach  Puts config.plist.pre-gpu back byte for byte and removes it. With no backup
+        it does nothing and succeeds, so an interrupted undo can be repeated.
+
+Exit codes: 0 ok, 2 refused (nothing changed).
+"""
+import os
+import plistlib
+import shutil
+import sys
+
+BACKUP = 'config.plist.pre-gpu'
+OTHER_BACKUP = 'config.plist.pre-nullmoth'
+NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
+
+
+def refuse(message, code=2):
+    sys.stderr.write('ERROR: ' + message + '\n')
+    sys.exit(code)
+
+
+def merge_boot_args(current, wanted):
+    keys = set(a.split('=', 1)[0] for a in wanted)
+    kept = [t for t in current.split() if t.split('=', 1)[0] not in keys]
+    return ' '.join(kept + list(wanted))
+
+
+def write_plist(cfg, path):
+    with open(path, 'wb') as f:
+        plistlib.dump(cfg, f)
+    # plistlib emits self-closing tags that OpenCore's OcXmlLib rejects
+    with open(path, 'rb') as f:
+        data = f.read()
+    for tag in ('array', 'dict', 'data'):
+        data = data.replace(('<%s/>' % tag).encode(), ('<%s></%s>' % (tag, tag)).encode())
+    with open(path, 'wb') as f:
+        f.write(data)
+
+
+def attach(oc_dir):
+    path = os.path.join(oc_dir, 'config.plist')
+    backup = os.path.join(oc_dir, BACKUP)
+    if os.path.exists(os.path.join(oc_dir, OTHER_BACKUP)):
+        refuse('the NVIDIA (NullMoth) setup is active on this disk; run nvidia-detach first.')
+    wanted = os.environ.get('GPU_BOOT_ARGS', '').split()
+    with open(path, 'rb') as f:
+        cfg = plistlib.load(f)
+    if not os.path.exists(backup):
+        shutil.copyfile(path, backup)
+    nv = cfg.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault(NVRAM_GUID, {})
+    nv['boot-args'] = merge_boot_args(nv.get('boot-args', ''), wanted)
+    write_plist(cfg, path)
+    sys.stderr.write('GPU boot-args applied (backup: ' + BACKUP + ')\n')
+
+
+def detach(oc_dir):
+    path = os.path.join(oc_dir, 'config.plist')
+    backup = os.path.join(oc_dir, BACKUP)
+    if not os.path.exists(backup):
+        # already restored (an earlier undo got this far): nothing left to do
+        sys.stderr.write('no ' + BACKUP + ' found, nothing to restore\n')
+        return
+    os.replace(backup, path)
+    sys.stderr.write('OpenCore config restored from ' + BACKUP + '\n')
+
+
+def main(argv):
+    if len(argv) != 3 or argv[2] not in ('attach', 'detach'):
+        refuse('usage: oc_boot_args.py <EFI/OC dir> attach|detach', 64)
+    (attach if argv[2] == 'attach' else detach)(argv[1])
+
+
+if __name__ == '__main__':
+    main(sys.argv)
+GPU_EMBED_OC_BOOT_ARGS_EOF
+# ── GPU embedded: oc_boot_args.py end ──
+
+# Write the embedded engines to a temp dir once.
+function gpu_engine_init() {
+  [ -n "${GPU_ENGINE_DIR:-}" ] && [ -d "$GPU_ENGINE_DIR" ] && return 0
+  GPU_ENGINE_DIR=$(mktemp -d "${TEMP_DIR:-${TMPDIR:-/tmp}}/gpuengine.XXXXXX") || return 1
+  printf '%s' "$GPU_EMBED_HOST_SETUP" >"$GPU_ENGINE_DIR/host_setup.py"
+  printf '%s' "$GPU_EMBED_BIOS_GUIDE" >"$GPU_ENGINE_DIR/bios_guide.py"
+  printf '%s' "$GPU_EMBED_BIOS_PATHS" >"$GPU_ENGINE_DIR/bios_paths.json"
+}
+
+# host_setup.py <command>; JSON on stdin, JSON on stdout. GPU_ROOT redirects it for tests.
+function gpu_host() { gpu_engine_init && python3 "$GPU_ENGINE_DIR/host_setup.py" "$@"; }
+function gpu_bios() { gpu_engine_init && BIOS_DATA="$GPU_ENGINE_DIR/bios_paths.json" python3 "$GPU_ENGINE_DIR/bios_guide.py" "$@"; }
+
+# JSON helper: gpu_json '<expr using d>' reads JSON on stdin and prints the expression.
+function gpu_json() { python3 -c 'import json,sys; d=json.load(sys.stdin); print('"$1"')'; }
+
+
+# Mirrors gpu.with_global_args for one "-global key=value" argument.
+function gpu_with_global_arg() {
+  local a="$1" arg="$2" key re
+  key="${arg%%=*}"; key="${key#-global }"
+  re="-global[[:space:]]+${key//./\\.}=[^[:space:]]+"
+  if [[ "$a" =~ $re ]]; then a="${a/"${BASH_REMATCH[0]}"/$arg}"; else a="$a $arg"; fi
+  echo "$a" | sed 's/^ *//; s/ *$//'
+}
+
+function gpu_without_global_arg() {
+  local a="$1" arg="$2" key re
+  key="${arg%%=*}"; key="${key#-global }"
+  re="[[:space:]]*-global[[:space:]]+${key//./\\.}=[^[:space:]]+"
+  if [[ "$a" =~ $re ]]; then a="${a/"${BASH_REMATCH[0]}"/}"; fi
+  echo "$a" | sed 's/^ *//; s/ *$//'
+}
+
+# ── AMD allowlist (data embedded above; mirrors amd_host.py) ──
+
+# Prints "key|label|reset|boot_args|tahoe" for a supported device id (decimal); rc 1 otherwise.
+function amd_family_for() {
+  local dev="$1" key label reset args tahoe ids tok lo hi kind real fake fam target=""
+  while IFS='|' read -r kind real fake fam; do
+    [ "$kind" == "spoof" ] || continue
+    (( 16#$real == dev )) && target="$fam"
+  done <<<"$GPU_EMBED_AMD_DEVICES"
+  while IFS='|' read -r key label reset args tahoe ids; do
+    case "$key" in ''|'#'*|spoof|deny) continue ;; esac
+    if [ -n "$target" ] && [ "$key" == "$target" ]; then echo "${key}|${label}|${reset}|${args}|${tahoe}"; return 0; fi
+    for tok in $ids; do
+      lo="${tok%-*}"; hi="${tok#*-}"
+      if (( dev >= 16#$lo && dev <= 16#$hi )); then echo "${key}|${label}|${reset}|${args}|${tahoe}"; return 0; fi
+    done
+  done <<<"$GPU_EMBED_AMD_DEVICES"
+  return 1
+}
+
+function amd_supported_device() { amd_family_for "$1" >/dev/null; }
+
+function amd_unsupported_reason() {
+  local dev="$1" kind label ids reason tok lo hi
+  while IFS='|' read -r kind label ids reason; do
+    [ "$kind" == "deny" ] || continue
+    for tok in $ids; do
+      lo="${tok%-*}"; hi="${tok#*-}"
+      if (( dev >= 16#$lo && dev <= 16#$hi )); then echo "$reason"; return 0; fi
+    done
+  done <<<"$GPU_EMBED_AMD_DEVICES"
+  echo "$GPU_AMD_GENERIC_REASON"
+}
+
+# Extra hostpci option that makes the guest see a supported id, e.g. ",device-id=0x73bf".
+function amd_hostpci_extra() {
+  local dev="$1" kind real fake fam
+  while IFS='|' read -r kind real fake fam; do
+    [ "$kind" == "spoof" ] || continue
+    (( 16#$real == dev )) && { printf ',device-id=0x%s' "${fake,,}"; return 0; }
+  done <<<"$GPU_EMBED_AMD_DEVICES"
+  return 0
+}
+
+# kind|headline|detail for one card (vendor: amd|nvidia, device id decimal). Mirrors gpu_setup.verdict.
+function gpu_verdict() {
+  local vendor="$1" dev="$2" fam key label reset args tahoe tail
+  if [ "$vendor" == "amd" ]; then
+    if ! fam=$(amd_family_for "$dev"); then
+      echo "unsupported|Not supported by macOS|$(amd_unsupported_reason "$dev")"; return 0
+    fi
+    IFS='|' read -r key label reset args tahoe <<<"$fam"
+    tail="macOS Ventura 13 to Tahoe 26"
+    [ "$tahoe" == "ok" ] || tail="macOS Ventura 13 to Sequoia 15 (Tahoe 26 not confirmed)"
+    echo "native|Works natively|${label}. ${tail}."
+  elif nullmoth_supported_device "$dev"; then
+    echo "nullmoth|Works with NullMoth (beta)|macOS Sequoia 15.5+ and Tahoe 26 only. Needs the third-party NullMoth driver."
+  else
+    echo "unsupported|Not supported by macOS|${GPU_PRE_TURING_REASON}"
+  fi
+}
+
+# Warnings for an AMD card that passed the generic checks. Mirrors amd_host.check_amd_gpu.
+function amd_extra_warnings() {
+  local dev="$1" fam key label reset args tahoe
+  fam=$(amd_family_for "$dev") || return 0
+  IFS='|' read -r key label reset args tahoe <<<"$fam"
+  [ "$key" == "vega20" ] && GPU_WARNS+=("$GPU_AMD_VEGA20_WARNING")
+  [ "$tahoe" == "unverified" ] && GPU_WARNS+=("${label}: no report of this family on macOS Tahoe 26 yet. Ventura to Sequoia are fine.")
+  return 0
+}
+
+# Preflight for one AMD card. $1 = bdf (normalized). Fills GPU_ISSUES / GPU_WARNS / GPU_HINTS.
+function amd_check() {
+  local bdf="$1" sys="${GPU_SYSFS:-/sys}" dev n_before=${#GPU_ISSUES[@]}
+  gpu_check "$bdf" 4098 amd_supported_device "" 0 amd_unsupported_reason
+  [ ${#GPU_ISSUES[@]} -eq "$n_before" ] || return 0
+  dev=$(gpu_sys_num "$sys/bus/pci/devices/$bdf.0/device") || return 0
+  amd_extra_warnings "$dev"
+}
+
+# ── VM bookkeeping: what the VM looked like before the attach ──
+
+function gpu_record_path() { echo "$GPU_STATE_DIR/gpu-attach-$1.json"; }
+
+# $1 vmid $2 bdf $3 vendor $4 hostpci0 $5 args $6 vga (use __NONE__ for "not set") $7 vga_changed yes|no $8 oc
+# An existing record is kept: it holds the true originals.
+function gpu_record_write() {
+  local path
+  path=$(gpu_record_path "$1")
+  [ -e "$path" ] && return 0
+  mkdir -p "$GPU_STATE_DIR" || return 1
+  python3 - "$path" "$@" <<'GPU_RECORD_PY'
+import json, sys
+path, vmid, bdf, vendor, hostpci0, args, vga, vga_changed, oc = sys.argv[1:10]
+def v(x):
+    return None if x == "__NONE__" else x
+rec = {"vmid": int(vmid), "bdf": bdf, "vendor": vendor, "hostpci0": v(hostpci0), "args": v(args),
+       "vga": v(vga), "vga_changed": vga_changed == "yes", "oc": oc}
+open(path, "w").write(json.dumps(rec, sort_keys=True))
+GPU_RECORD_PY
+}
+
+# Load the record into REC_* variables (REC_<NAME>_SET says whether the original existed). rc 1 when none.
+function gpu_record_load() {
+  local out
+  # shellcheck disable=SC2034  # read by the callers
+  REC_FOUND=no; REC_BDF=""; REC_VENDOR=""; REC_OC=""; REC_VGA_CHANGED=no
+  # shellcheck disable=SC2034  # read by the callers
+  REC_HOSTPCI0=""; REC_HOSTPCI0_SET=no; REC_ARGS=""; REC_ARGS_SET=no; REC_VGA=""; REC_VGA_SET=no
+  out=$(python3 - "$(gpu_record_path "$1")" <<'GPU_RECORD_PY'
+import json, shlex, sys
+try:
+    r = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(1)
+def put(name, value):
+    print("REC_%s=%s" % (name, shlex.quote(value)))
+put("FOUND", "yes")
+put("BDF", str(r.get("bdf", "")))
+put("VENDOR", str(r.get("vendor", "")))
+put("OC", str(r.get("oc", "")))
+put("VGA_CHANGED", "yes" if r.get("vga_changed") else "no")
+for key in ("hostpci0", "args", "vga"):
+    put(key.upper(), "" if r.get(key) is None else str(r[key]))
+    put(key.upper() + "_SET", "no" if r.get(key) is None else "yes")
+GPU_RECORD_PY
+  ) || return 1
+  eval "$out"
+}
+
+# Same file as rollback.create_snapshot: the VM config before any change.
+function gpu_snapshot() {
+  local vmid="$1" dir file cfg
+  dir="${GPU_SNAPSHOT_BASE:-${ORIG_PWD:-$PWD}}/generated/snapshots"
+  mkdir -p "$dir" || return 1
+  file="$dir/vm-${vmid}-$(date -u +%Y%m%dT%H%M%SZ).conf"
+  if cfg=$(qm config "$vmid" 2>/dev/null); then printf '%s' "$cfg" >"$file"; else printf '# No existing VM config captured\n' >"$file"; fi
+  echo "$file"
+}
+
+# Mount the VM's ide0 (OpenCore) disk, run the boot-args patcher, unmount.
+# $1 vmid, $2 attach|detach, $3 boot-args (attach only).
+function gpu_oc_boot_args() {
+  local vmid="$1" action="$2" args="${3:-}" vol path loop mnt rc=1 _i
+  vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
+  [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
+  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    partprobe "$loop" 2>/dev/null || true
+    [ -b "${loop}p1" ] && break
+    sleep 1
+  done
+  mnt=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "umount '$mnt' 2>/dev/null; losetup -d '$loop' 2>/dev/null; rmdir '$mnt' 2>/dev/null" INT TERM
+  if [ -b "${loop}p1" ] && mount "${loop}p1" "$mnt" 2>/dev/null; then
+    if GPU_BOOT_ARGS="$args" python3 - "$mnt/EFI/OC" "$action" <<<"$GPU_EMBED_OC_BOOT_ARGS"; then
+      rc=0
+    fi
+    sync
+    umount "$mnt" 2>/dev/null || true
+  fi
+  losetup -d "$loop" 2>/dev/null || true
+  rmdir "$mnt" 2>/dev/null || true
+  trap - INT TERM
+  return "$rc"
+}
+
+# ── AMD attach and the generic undo ──
+
+# `qm set` with a readable failure. Prints nothing on success.
+function gpu_qm_set() {
+  local vmid="$1" what="$2"
+  shift 2
+  qm set "$vmid" "$@" >/dev/null || { msg_error "qm set ${what} failed"; return 1; }
+}
+
+# Attach an AMD card. $1 vmid $2 bdf, then --display gpu|console, --dry-run, --stop-vm.
+# Mirrors gpu_attach.prepare_attach_amd.
+function amd_attach() {
+  local vmid="${1:-}" gpu="${2:-}" display="gpu" dry=no stop=no bdf cfg status args new_args dev hp0 line extra boot_args vga
+  shift 2 2>/dev/null || shift $#
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --display) display="${2:-gpu}"; shift ;;
+      --dry-run) dry=yes ;;
+      --stop-vm) stop=yes ;;
+      *) msg_error "Unknown option: $1"; return 1 ;;
+    esac
+    shift
+  done
+  [[ "$vmid" =~ ^[0-9]+$ ]] && bdf=$(gpu_normalize_bdf "$gpu") || { msg_error "Usage: amd_attach <vmid> <pci-address> [--display gpu|console]"; return 1; }
+  GPU_ISSUES=(); GPU_WARNS=(); GPU_HINTS=()
+  if ! status=$(qm status "$vmid" 2>/dev/null); then
+    GPU_ISSUES+=("VM $vmid not found.")
+  else
+    cfg=$(qm config "$vmid" 2>/dev/null)
+    grep -q '^args:.*isa-applesmc' <<<"$cfg" || GPU_ISSUES+=("VM $vmid is not a macOS VM made by this tool (no isa-applesmc in its args).")
+    grep -q '^ide2:' <<<"$cfg" && GPU_ISSUES+=("VM $vmid still has the recovery disk attached, so the install is not finished. Finish it, run post-install, then attach the card.")
+    if grep -q 'status: running' <<<"$status" && [ "$stop" != "yes" ]; then
+      GPU_ISSUES+=("VM $vmid is running. Stop it first: qm stop $vmid")
+    fi
+    amd_check "$bdf"
+    hp0=$(sed -n 's/^hostpci0: //p' <<<"$cfg")
+    if [ -n "$hp0" ] && ! grep -qE "^(host=)?(0000:)?${bdf#0000:}(\.[0-7])?(,|;|\$)" <<<"$hp0"; then
+      GPU_ISSUES+=("hostpci0 is already in use on this VM (${hp0}). Remove it first or run gpu-setup --undo.")
+    fi
+    if [ ${#GPU_ISSUES[@]} -eq 0 ]; then
+      while read -r line; do
+        [ -z "$line" ] && continue
+        if [ "${line#* }" == "running" ]; then GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
+        else GPU_WARNS+=("VM ${line%% *} also has this card assigned; only one can run at a time."); fi
+      done < <(gpu_users "$vmid" "$bdf")
+    fi
+  fi
+  nullmoth_print_findings
+  [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
+  dev=$(gpu_sys_num "${GPU_SYSFS:-/sys}/bus/pci/devices/$bdf.0/device") || return 1
+  args=$(sed -n 's/^args: //p' <<<"$cfg")
+  new_args=$(gpu_with_global_arg "$args" "$GPU_HOTPLUG_ARG")
+  extra=$(amd_hostpci_extra "$dev")
+  boot_args=$(amd_family_for "$dev" | cut -d'|' -f4)
+  vga=$(sed -n 's/^vga: //p' <<<"$cfg")
+  if [ "$dry" == "yes" ]; then
+    echo -e "\nDRY RUN - nothing is changed. Plan:"
+    [ "$stop" == "yes" ] && echo "  - Stop VM $vmid if it is running"
+    [ -z "$boot_args" ] || echo "  - Add the boot-args '${boot_args}' to the OpenCore config (backup config.plist.pre-gpu)"
+    echo "  - qm set $vmid --hostpci0 ${bdf},pcie=1${extra}"
+    [ "$new_args" == "$args" ] || echo "  - qm set $vmid --args '$new_args'"
+    [ "$display" != "gpu" ] || echo "  - qm set $vmid --vga none"
+    return 0
+  fi
+  if grep -q 'status: running' <<<"$status"; then
+    qm stop "$vmid" >/dev/null || { msg_error "Could not stop VM $vmid"; return 1; }
+  fi
+  qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || { msg_error "VM $vmid is no longer stopped"; return 1; }
+  gpu_snapshot "$vmid" >/dev/null || { msg_error "Could not save the VM config snapshot"; return 1; }
+  local oc=""
+  if [ -n "$boot_args" ]; then
+    gpu_oc_boot_args "$vmid" attach "$boot_args" || { msg_error "Could not patch the OpenCore disk; the VM was not changed"; return 1; }
+    oc="gpu"
+    msg_ok "OpenCore boot-args added (backup: config.plist.pre-gpu)"
+  fi
+  gpu_record_write "$vmid" "$bdf" amd "${hp0:-__NONE__}" "$([ -n "$args" ] && echo "$args" || echo __NONE__)" \
+    "${vga:-__NONE__}" "$([ "$display" == "gpu" ] && echo yes || echo no)" "$oc" || { msg_error "Could not record the original VM settings"; return 1; }
+  gpu_qm_set "$vmid" "--hostpci0" --hostpci0 "${bdf},pcie=1${extra}" || return 1
+  msg_ok "Attached ${bdf} (all functions) as hostpci0"
+  if [ "$new_args" != "$args" ]; then
+    gpu_qm_set "$vmid" "--args" --args "$new_args" || return 1
+    msg_ok "Added the ACPI hotplug flag to args"
+  fi
+  if [ "$display" == "gpu" ]; then
+    gpu_qm_set "$vmid" "--vga" --vga none || return 1
+    msg_ok "Turned the emulated display off (vga none): use the monitor on the card"
+  fi
+}
+
+# Undo any GPU attach from its record: hostpci0, args and vga go back exactly; the OpenCore
+# backup is restored by the patcher that made it. $1 vmid, then --dry-run.
+# Mirrors gpu.build_hostpci_detach_steps (with a record) and gpu_attach.prepare_detach.
+function gpu_detach_record() {
+  local vmid="$1" dry="${2:-no}" cfg args hp0
+  cfg=$(qm config "$vmid" 2>/dev/null) || { msg_error "VM $vmid not found."; return 1; }
+  qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || { msg_error "VM $vmid is running. Stop it first: qm stop $vmid"; return 1; }
+  gpu_record_load "$vmid" || return 2
+  args=$(sed -n 's/^args: //p' <<<"$cfg")
+  hp0=$(sed -n 's/^hostpci0: //p' <<<"$cfg")
+  if [ "$dry" == "yes" ]; then
+    echo -e "\nDRY RUN - nothing is changed. Plan:"
+    case "$REC_OC" in nullmoth) echo "  - Restore the previous OpenCore config from config.plist.pre-nullmoth" ;; gpu) echo "  - Restore the previous OpenCore config from config.plist.pre-gpu" ;; esac
+    if [ "$REC_HOSTPCI0_SET" == "yes" ]; then echo "  - qm set $vmid --hostpci0 '$REC_HOSTPCI0'"; elif [ -n "$hp0" ]; then echo "  - qm set $vmid --delete hostpci0"; fi
+    [ "$args" == "$REC_ARGS" ] || { if [ -n "$REC_ARGS" ]; then echo "  - qm set $vmid --args '$REC_ARGS'"; else echo "  - qm set $vmid --delete args"; fi; }
+    [ "$REC_VGA_CHANGED" != "yes" ] || { if [ -n "$REC_VGA" ]; then echo "  - qm set $vmid --vga '$REC_VGA'"; else echo "  - qm set $vmid --delete vga"; fi; }
+    return 0
+  fi
+  case "$REC_OC" in
+    nullmoth) nullmoth_oc_patch "$vmid" detach || { msg_error "Could not restore the OpenCore config. The VM was not changed."; return 1; } ;;
+    gpu) gpu_oc_boot_args "$vmid" detach || { msg_error "Could not restore the OpenCore config. The VM was not changed."; return 1; } ;;
+  esac
+  [ -z "$REC_OC" ] || msg_ok "Restored the previous OpenCore config"
+  if [ "$REC_HOSTPCI0_SET" == "yes" ]; then
+    gpu_qm_set "$vmid" "--hostpci0" --hostpci0 "$REC_HOSTPCI0" || return 1
+  elif [ -n "$hp0" ]; then
+    gpu_qm_set "$vmid" "--delete hostpci0" --delete hostpci0 || return 1
+    msg_ok "Removed hostpci0"
+  fi
+  if [ "$args" != "$REC_ARGS" ]; then
+    if [ -n "$REC_ARGS" ]; then gpu_qm_set "$vmid" "--args" --args "$REC_ARGS" || return 1
+    else gpu_qm_set "$vmid" "--delete args" --delete args || return 1; fi
+    msg_ok "Restored the original args"
+  fi
+  if [ "$REC_VGA_CHANGED" == "yes" ]; then
+    if [ -n "$REC_VGA" ]; then gpu_qm_set "$vmid" "--vga" --vga "$REC_VGA" || return 1
+    else gpu_qm_set "$vmid" "--delete vga" --delete vga || return 1; fi
+    msg_ok "Restored the display setting"
+  fi
+  rm -f "$(gpu_record_path "$vmid")"
+}
+
+# ── The walkthrough ──
+
+function gpu_say() { echo -e "$*"; }
+
+# Whether to use whiptail screens: a terminal, whiptail installed, and not --yes.
+function gpu_use_ui() { [ "${GPU_YES:-no}" != "yes" ] && [ -t 0 ] && [ -t 1 ] && command -v whiptail >/dev/null 2>&1; }
+
+function gpu_ui_text() {
+  local title="$1" text="$2"
+  if gpu_use_ui; then whiptail --backtitle "OSX Proxmox Next - GPU passthrough" --title "$title" --scrolltext --msgbox "$text" 24 100
+  else gpu_say "\n${BOLD}${title}${CL}\n${text}"; fi
+}
+
+# Yes/no. With --yes the answer is yes; with no terminal it is no.
+function gpu_ui_yesno() {
+  local title="$1" text="$2"
+  [ "${GPU_YES:-no}" == "yes" ] && return 0
+  if gpu_use_ui; then whiptail --backtitle "OSX Proxmox Next - GPU passthrough" --title "$title" --yesno "$text" 20 90
+  elif [ -t 0 ]; then local reply; read -r -p "$text [y/N] " reply; [[ "$reply" =~ ^[Yy] ]]
+  else return 1; fi
+}
+
+# Typed confirmation; never answered by --yes.
+function gpu_ui_typed() {
+  local text="$1" phrase="$2" reply
+  [ -t 0 ] || return 1
+  read -r -p "${text} Type '${phrase}' to continue: " reply
+  [ "$reply" == "$phrase" ]
+}
+
+# Progress rail text for the current state. $1 = state JSON.
+function gpu_rail() {
+  python3 - "$1" <<'GPU_RAIL_PY'
+import json, sys
+st = json.loads(sys.argv[1])
+steps = ["Scan", "Choose", "BIOS", "Host", "Reboot", "Verify", "VM", "First boot"]
+names, marks = [], []
+for i, n in enumerate(steps, 1):
+    label = "[%d %s]" % (i, n)
+    mark = "skipped" if i in st["skipped"] else "done" if i in st["done"] else "<now>" if i == st["step"] else ""
+    names.append(label)
+    marks.append(mark.center(len(label)))
+print(" GPU passthrough   " + " ".join(names))
+print(" " * 19 + " ".join(marks).rstrip())
+GPU_RAIL_PY
+}
+
+function gpu_state() { gpu_host state </dev/null; }
+function gpu_state_get() { gpu_state | gpu_json "$1"; }
+function gpu_state_save() { printf '%s' "$1" | gpu_host state-save; }
+function gpu_step_complete() { printf '{"step": %s, "skipped": %s}' "$1" "${2:-false}" | gpu_host step; }
+function gpu_step_goto() { printf '{"step": %s, "goto": true}' "$1" | gpu_host step; }
+
+# One line about the host. Mirrors Session.summary_line.
+function gpu_summary_line() {
+  gpu_host facts </dev/null | gpu_json '"CPU: %s   Board: %s   Boot loader: %s   %s   IOMMU: %s   Boot: %s" % (d["cpu_vendor"].upper(), (" ".join(x for x in (d["board_vendor"], d["board_name"]) if x) or "unknown board"), d["bootloader"], d["pve"] or "PVE version unknown", "on" if d["iommu_groups"] else "off", "UEFI" if d["efi"] else "CSM/legacy")'
+}
+
+# Scan the display adapters. Fills GPU_CARDS with one line per AMD/NVIDIA card:
+# bdf|vendor|device(dec)|name|kind|headline|detail|boot_vga|driver|users(comma list "vmid:state")|risky(comma list)
+function gpu_scan() {
+  local sys="${GPU_SYSFS:-/sys}" dev bdf vendor device cls vname v_kind v_head v_detail boot driver users risky line name seen=" "
+  GPU_CARDS=()
+  for dev in "$sys"/bus/pci/devices/*; do
+    [ -e "$dev" ] || continue
+    cls=$(gpu_sys_num "$dev/class") || continue
+    (( cls >> 16 == 3 )) || continue
+    vendor=$(gpu_sys_num "$dev/vendor") || continue
+    bdf=$(basename "$dev"); bdf="${bdf%.*}"
+    [[ "$seen" == *" $bdf "* ]] && continue
+    case "$vendor" in 4098) vname=amd ;; 4318) vname=nvidia ;; *) continue ;; esac
+    seen+="$bdf "
+    device=$(gpu_sys_num "$sys/bus/pci/devices/$bdf.0/device" 2>/dev/null || gpu_sys_num "$dev/device") || continue
+    IFS='|' read -r v_kind v_head v_detail <<<"$(gpu_verdict "$vname" "$device")"
+    boot=$(gpu_sys_num "$sys/bus/pci/devices/$bdf.0/boot_vga" 2>/dev/null || echo 0)
+    driver=""
+    [ -e "$sys/bus/pci/devices/$bdf.0/driver" ] && driver=$(basename "$(readlink -f "$sys/bus/pci/devices/$bdf.0/driver")")
+    users=""
+    if [ "$v_kind" != "unsupported" ]; then
+      while read -r line; do
+        [ -z "$line" ] && continue
+        users+="${users:+,}${line%% *}:${line#* }"
+      done < <(gpu_users "${1:--1}" "$bdf")
+    fi
+    risky=""
+    if [ -e "$sys/bus/pci/devices/$bdf.0/iommu_group" ]; then
+      local member mc
+      for member in "$sys/bus/pci/devices/$bdf.0/iommu_group"/devices/*; do
+        member=$(basename "$member")
+        [[ "$member" == "$bdf."* ]] && continue
+        mc=$(gpu_sys_num "$sys/bus/pci/devices/$member/class") || continue
+        case $(( mc >> 16 )) in 1|2) risky+="${risky:+,}$member" ;; esac
+      done
+    fi
+    name=$(lspci -nn -s "$bdf.0" 2>/dev/null | sed -n 's/^[^[]*\[[0-9a-f]\{4\}\]: *\(.*\) \[[0-9a-f]\{4\}:[0-9a-f]\{4\}\].*/\1/p' | head -1)
+    GPU_CARDS+=("${bdf}|${vname}|${device}|${name:-${vname^^} GPU}|${v_kind}|${v_head}|${v_detail}|${boot}|${driver}|${users}|${risky}")
+  done
+}
+
+# Print one card in a plain box. $1 = a GPU_CARDS line. Mirrors gpu_setup.card_text.
+function gpu_card_text() {
+  local bdf vname device name kind head detail boot driver users flags="" u
+  IFS='|' read -r bdf vname device name kind head detail boot driver users _ <<<"$1"
+  [ "$boot" == "1" ] && flags+="host console"
+  [ -n "$driver" ] && flags+="${flags:+, }bound to ${driver}"
+  for u in ${users//,/ }; do flags+="${flags:+, }in use by VM ${u%%:*} (${u#*:})"; done
+  local ident
+  ident=$(printf '%s   %s %04x:%04x' "$bdf" "$([ "$vname" == nvidia ] && echo NVIDIA || echo AMD)" "$([ "$vname" == nvidia ] && echo $((0x10DE)) || echo $((0x1002)))" "$device")
+  echo "+-- $name"
+  echo "|   $ident"
+  echo "|   ${head}. ${detail}"
+  [ -z "$flags" ] || echo "|   Status: $flags"
+  echo "+--"
+}
+
+# 0 when a GPU_CARDS line can be picked (supported and not used by a VM).
+function gpu_card_selectable() {
+  local kind users risky
+  IFS='|' read -r _ _ _ _ kind _ _ _ _ users risky <<<"$1"
+  [ "$kind" != "unsupported" ] && [ -z "$users" ] && [ -z "$risky" ]
+}
+
+# Print the host_setup target JSON for $1 bdf, $2 vendor, $3 device (decimal).
+function gpu_target() {
+  local reset=none fam
+  if [ "$2" == "amd" ] && fam=$(amd_family_for "$3"); then reset=$(cut -d'|' -f3 <<<"$fam"); fi
+  printf '{"bdf": "%s", "vendor": "%s", "reset": "%s"}' "$1" "$2" "$reset" | gpu_host target
+}
+
+# Undo everything: VMs first, then host files. Mirrors Session.undo.
+function gpu_undo() {
+  local vmid ok=yes res
+  for vmid in $(gpu_state_get '" ".join(str(v) for v in d["vm_records"])'); do
+    local rc=0
+    gpu_detach_record "$vmid" || rc=$?
+    # no record (attached by an older version): the NVIDIA path restores what it knows about
+    if [ "$rc" == "2" ]; then rc=0; nvidia_detach "$vmid" || rc=$?; fi
+    if [ "$rc" == "0" ]; then
+      msg_ok "VM ${vmid}: GPU settings restored"
+      gpu_state_save "$(gpu_state_get 'json.dumps({"vm_records": [v for v in d["vm_records"] if v != '"$vmid"']})')"
+    else
+      ok=no
+    fi
+  done
+  res=$(gpu_host undo </dev/null) || ok=no
+  [ -z "$res" ] || echo "$res" | gpu_json '"\n".join(["Restored " + p for p in d["restored"]] + d["errors"]) + ("\nReboot the host to finish undoing the boot changes." if d["reboot_required"] else "")'
+  if [ "$ok" == "yes" ]; then
+    gpu_host hint-clear </dev/null
+    rm -f "$GPU_STATE_DIR/gpu-setup.json"
+    gpu_say "Everything this setup changed is back as it was."
+  else
+    gpu_say "Some parts could not be undone; run gpu-setup --undo again after fixing the above."
+    return 1
+  fi
+}
+
+# `osx-proxmox-next.sh gpu-setup [--status] [--undo] [--yes] [--vm N] [--gpu BDF] [--display gpu|console]
+#                               [--accept-nullmoth-risk] [--stop-vm]`
+function gpu_setup() {
+  local status=no undo=no vmid="" gpu="" display="" accept=no stop=no
+  GPU_YES=no
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --status) status=yes ;;
+      --undo) undo=yes ;;
+      --yes) GPU_YES=yes ;;
+      --vm) vmid="${2:-}"; shift ;;
+      --gpu) gpu="${2:-}"; shift ;;
+      --display) display="${2:-}"; shift ;;
+      --accept-nullmoth-risk) accept=yes ;;
+      --stop-vm) stop=yes ;;
+      *) msg_error "Unknown option: $1"; return 2 ;;
+    esac
+    shift
+  done
+  [ -z "$vmid" ] || [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "--vm needs a number"; return 2; }
+  if [ "$status" == "yes" ]; then gpu_status; return; fi
+  if [ "$undo" == "yes" ]; then gpu_undo; return; fi
+  gpu_host state-save <<<"{\"resume_cmd\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$GPU_RESUME_CMD")}" || return 1
+  local fin
+  fin=$(gpu_state_get 'd["finished"]')
+  if [ "$fin" == "True" ]; then
+    if ! gpu_ui_yesno "Setup finished" "Setup is finished. Start a new one?"; then gpu_summary; return 0; fi
+    gpu_state_save '{"step": 1, "done": [], "skipped": [], "finished": false, "gpu": null, "vm": null, "reboot_needed": false}'
+  fi
+  local step rc
+  while true; do
+    gpu_rail "$(gpu_state)"
+    step=$(gpu_state_get 'd["step"]')
+    rc=0
+    case "$step" in
+      1|2) gpu_step_choose "$vmid" "$gpu" "$display" "$accept" || rc=$? ;;
+      3) gpu_step_bios || rc=$? ;;
+      4) gpu_step_host || rc=$? ;;
+      5) gpu_step_reboot || rc=$? ;;
+      6) gpu_step_verify || rc=$? ;;
+      7) gpu_step_vm "$stop" || rc=$? ;;
+      8) gpu_step_first_boot || rc=$? ;;
+    esac
+    [ "$rc" == "100" ] && continue   # a step moved the state: render the next one
+    return "$rc"
+  done
+}
+
+function gpu_status() {
+  local line chosen
+  gpu_rail "$(gpu_state)"
+  gpu_summary_line
+  gpu_scan
+  for line in "${GPU_CARDS[@]}"; do gpu_card_text "$line"; done
+  [ ${#GPU_CARDS[@]} -gt 0 ] || echo "No AMD or NVIDIA graphics card found."
+  chosen=$(gpu_state_get 'd["gpu"] and d["gpu"]["bdf"] or ""')
+  [ -n "$chosen" ] || { echo "No setup in progress."; return 0; }
+  echo "Chosen card: $(gpu_state_get 'd["gpu"]["name"]') ($chosen), VM: $(gpu_state_get 'd["vm"]')"
+}
+
+function gpu_summary() {
+  gpu_state | gpu_json '"Setup summary\n" + ("  Card: %s at %s\n" % (d["gpu"]["name"], d["gpu"]["bdf"]) if d["gpu"] else "") + "\n".join("  Changed: " + c["path"] for c in d["host_changes"] if not c.get("reverted")) + "\n  Undo everything with: gpu-setup --undo"'
+}
+
+# Steps 1 and 2: scan and choose. $1 vm $2 gpu $3 display $4 accept
+function gpu_step_choose() {
+  local want_vm="$1" want_gpu="$2" display="$3" accept="$4" line bdf vname device name kind head detail boot driver users
+  local -a usable=()
+  gpu_summary_line
+  gpu_scan "${want_vm:--1}"
+  for line in "${GPU_CARDS[@]}"; do
+    gpu_card_text "$line"
+    local risky
+    IFS='|' read -r bdf vname device name kind head detail boot driver users risky <<<"$line"
+    if gpu_card_selectable "$line"; then usable+=("$line")
+    elif [ -n "$risky" ] && [ "$kind" != "unsupported" ]; then echo "  Cannot be used: its IOMMU group also holds storage or network devices (${risky//,/, }). Move the card to another slot."
+    else echo "  Cannot be used: ${users:+in use by a VM}${users:-$detail}"; fi
+  done
+  if [ ${#usable[@]} -eq 0 ]; then
+    gpu_say "Nothing here can run macOS graphics. Cards that work: ${GPU_DOCS_ROOT}gpu-passthrough#supported-cards"
+    return 2
+  fi
+  local chosen=""
+  if [ -n "$want_gpu" ]; then
+    local want; want=$(gpu_normalize_bdf "$want_gpu") || { msg_error "'$want_gpu' is not a PCI address"; return 2; }
+    for line in "${usable[@]}"; do [ "${line%%|*}" == "$want" ] && chosen="$line"; done
+    [ -n "$chosen" ] || { gpu_say "$want_gpu is not one of the usable cards above."; return 2; }
+  elif [ ${#usable[@]} -eq 1 ]; then
+    chosen="${usable[0]}"
+  elif gpu_use_ui; then
+    local -a menu=()
+    for line in "${usable[@]}"; do IFS='|' read -r bdf vname device name _ <<<"$line"; menu+=("$bdf" "$name"); done
+    bdf=$(whiptail --title "Choose the card" --menu "Which card goes to macOS?" 20 90 8 "${menu[@]}" 3>&1 1>&2 2>&3) || return 0
+    for line in "${usable[@]}"; do [ "${line%%|*}" == "$bdf" ] && chosen="$line"; done
+  else
+    gpu_say "Pick a card with --gpu <address>."; return 2
+  fi
+  IFS='|' read -r bdf vname device name kind head detail boot driver users _ <<<"$chosen"
+  if [ "$vname" == "amd" ] && [ -z "$display" ]; then
+    display="gpu"
+    if gpu_use_ui; then
+      display=$(whiptail --title "Display" --menu "Where do you want to see macOS?" 14 90 2 \
+        gpu "Monitor on the GPU (best performance, the Proxmox console goes blank)" \
+        console "Keep the Proxmox console (the card only accelerates)" 3>&1 1>&2 2>&3) || return 0
+    fi
+  fi
+  if [ -z "$want_vm" ] && gpu_use_ui; then
+    want_vm=$(whiptail --title "Which VM?" --inputbox "VM ID of the macOS VM that gets the card.\nLeave empty to set up the host first and pick the VM later." 11 80 "" 3>&1 1>&2 2>&3) || return 0
+    [ -z "$want_vm" ] || [[ "$want_vm" =~ ^[0-9]+$ ]] || { gpu_say "REFUSED: '$want_vm' is not a VM ID."; return 2; }
+  fi
+  # The VM
+  local issues=() cfg ver
+  if [ -n "$want_vm" ]; then
+    if ! cfg=$(qm config "$want_vm" 2>/dev/null); then issues+=("VM $want_vm not found.")
+    else
+      grep -q '^args:.*isa-applesmc' <<<"$cfg" || issues+=("VM $want_vm is not a macOS VM made by this tool.")
+      if [ "$vname" == "nvidia" ]; then
+        ver=$(nullmoth_detect_macos "$cfg") || ver=""
+        if [ -z "$ver" ]; then issues+=("Cannot tell which macOS this VM runs. NVIDIA cards need Sequoia 15.5+ or Tahoe.")
+        elif [ "$ver" != "sequoia" ] && [ "$ver" != "tahoe" ]; then issues+=("NVIDIA cards need macOS Sequoia 15.5+ or Tahoe, this VM is ${ver}. Pick another VM or create a Sequoia or Tahoe VM first."); fi
+      fi
+    fi
+  fi
+  if [ "$vname" == "nvidia" ]; then
+    display="console"
+    nullmoth_acknowledge "$accept" || return 2
+  fi
+  if [ ${#issues[@]} -gt 0 ]; then
+    local i; for i in "${issues[@]}"; do gpu_say "REFUSED: $i"; done
+    return 2
+  fi
+  local ack_json=false; [ "$vname" == "nvidia" ] && ack_json=true
+  gpu_state_save "$(python3 -c 'import json,sys; a=sys.argv; print(json.dumps({"gpu": {"bdf": a[1], "vendor": a[2], "device": int(a[3]), "boot_vga": a[4] == "1", "name": a[5]}, "vm": int(a[6]) if a[6] else None, "display": a[7], "ack_nullmoth": a[8] == "true"}))' "$bdf" "$vname" "$device" "$boot" "$name" "$want_vm" "$display" "$ack_json")"
+  gpu_step_complete 1; gpu_step_complete 2
+  return 100
+}
+
+function gpu_chosen_target() {
+  gpu_target "$(gpu_state_get 'd["gpu"]["bdf"]')" "$(gpu_state_get 'd["gpu"]["vendor"]')" "$(gpu_state_get 'd["gpu"]["device"]')"
+}
+
+# Step 3: BIOS. Returns 100 to continue, 3 when paused for the BIOS.
+function gpu_step_bios() {
+  local target facts items card running reply
+  target=$(gpu_chosen_target) || return 1
+  facts=$(gpu_host facts </dev/null) || return 1
+  items=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1]), "target": json.loads(sys.argv[2])}))' "$facts" "$target" | gpu_bios check) || return 1
+  python3 - "$items" <<'GPU_ITEMS_PY'
+import json, sys
+for i in json.loads(sys.argv[1]):
+    print("  [%s] %s%s" % ("ok" if i["ok"] else "!!", i["key"], "" if i["ok"] else " - " + i["detail"]))
+GPU_ITEMS_PY
+  card=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1]), "target": json.loads(sys.argv[2]), "items": json.loads(sys.argv[3]), "save": True, "resume_cmd": sys.argv[4]}))' "$facts" "$target" "$items" "$GPU_RESUME_CMD" | gpu_bios card) || {
+    gpu_say "Nothing to change in the BIOS."
+    gpu_step_complete 3 true
+    return 100
+  }
+  gpu_ui_text "BIOS steps for this server (take a photo)" "$card"
+  gpu_say "$card"
+  local url; url=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1])}))' "$facts" | gpu_bios url)
+  if command -v qrencode >/dev/null 2>&1; then qrencode -t ANSIUTF8 "$url"; else gpu_say "Same steps with pictures: $url"; fi
+  gpu_say "Saved to /root/osx-proxmox-next-bios-steps.txt (print it or cat it from another machine)."
+  running=$(qm list 2>/dev/null | python3 -c 'import json,sys; print(json.dumps({"qm_list": sys.stdin.read()}))' | gpu_bios running)
+  if [ "${GPU_YES:-no}" != "yes" ] && [ -t 0 ]; then
+    if [ "$(gpu_bios firmware <<<'{}')" == "yes" ]; then
+      [ -z "$running" ] || gpu_say "These VMs will be shut down by the reboot:\n$running"
+      if gpu_ui_yesno "Reboot into the BIOS" "Reboot into the BIOS now?"; then
+        gpu_host hint-set </dev/null
+        systemctl reboot --firmware-setup
+        return 0
+      fi
+    fi
+  fi
+  gpu_host hint-set </dev/null
+  gpu_say "When you are back in Proxmox, run: $GPU_RESUME_CMD"
+  return 3
+}
+
+# Step 4: host configuration. Returns 100 to continue.
+function gpu_step_host() {
+  local target plan preview refusals confirmed=false
+  target=$(gpu_chosen_target) || return 1
+  plan=$(python3 -c 'import json,sys; print(json.dumps({"target": json.loads(sys.argv[1]), "opts": {}}))' "$target" | gpu_host plan) || return 1
+  refusals=$(gpu_json '"\n".join(d["refusals"])' <<<"$plan")
+  if [ -n "$refusals" ]; then
+    gpu_say "REFUSED: $refusals"
+    if grep -q "only display adapter" <<<"$refusals" && gpu_ui_typed "This card is the only display the host has." "I understand"; then
+      plan=$(python3 -c 'import json,sys; print(json.dumps({"target": json.loads(sys.argv[1]), "opts": {"allow_no_console": True}}))' "$target" | gpu_host plan) || return 1
+      refusals=$(gpu_json '"\n".join(d["refusals"])' <<<"$plan")
+    fi
+    [ -z "$refusals" ] || return 2
+  fi
+  gpu_json '"\n".join(["Note: " + x for x in d["notes"]] + ["WARN: " + x for x in d["warnings"]] + ["Manual step: " + x for x in d["manual"]] + ["OK: " + x for x in d["skipped"]])' <<<"$plan"
+  if [ "$(gpu_json 'len(d["changes"]) + len(d["commands"]) + len(d["manual"])' <<<"$plan")" == "0" ]; then
+    if [ "$(gpu_state_get 'd["verify_retry"]')" == "True" ]; then
+      gpu_state_save '{"verify_retry": false}'
+      gpu_host hint-set </dev/null
+      gpu_say "The verify step found a problem, but there is nothing left for this tool to change. Fix the item(s) marked !! in the verify list (see the docs), then run: $GPU_RESUME_CMD"
+      return 2
+    fi
+    gpu_step_complete 4 true; gpu_step_complete 5 true
+    return 100
+  fi
+  if [ "$(gpu_json 'len(d["changes"]) + len(d["commands"])' <<<"$plan")" == "0" ]; then
+    gpu_say "Nothing to write; follow the manual step above, then run: $GPU_RESUME_CMD"
+    return 2
+  fi
+  preview=$(gpu_host preview <<<"$plan")
+  gpu_ui_text "This is exactly what will change" "$preview"
+  local hard
+  while IFS= read -r hard; do
+    [ -z "$hard" ] && continue
+    gpu_say "HARD WARNING: $hard"
+    gpu_ui_typed "" "I understand" || { gpu_say "Nothing was changed."; return 2; }
+    confirmed=true
+  done < <(gpu_json '"\n".join(d["hard_warnings"])' <<<"$plan")
+  gpu_ui_yesno "Apply" "Apply these changes? Each file is backed up first." || { gpu_say "Nothing was changed."; return 0; }
+  local res
+  res=$(python3 -c 'import json,sys; print(json.dumps({"plan": json.loads(sys.argv[1]), "confirmed": sys.argv[2] == "true"}))' "$plan" "$confirmed" | gpu_host apply) || {
+    gpu_say "FAILED: $(gpu_json 'd["error"] + (" The files were put back." if d["rolled_back"] else "")' <<<"$res")"
+    return 1
+  }
+  gpu_say "Done. Backups are in $(gpu_json 'd["backup_dir"]' <<<"$res"). Undo everything with: gpu-setup --undo"
+  gpu_state_save '{"verify_retry": false}'
+  gpu_step_complete 4
+  [ "$(gpu_state_get 'd["reboot_needed"]')" == "True" ] || gpu_step_complete 5 true
+  return 100
+}
+
+# Step 5: reboot. Never reboots on its own with --yes.
+function gpu_step_reboot() {
+  local running
+  if [ "$(gpu_state_get 'd["reboot_needed"]')" != "True" ]; then gpu_step_complete 5 true; return 100; fi
+  if [ "$(gpu_host reboot-pending </dev/null)" != "yes" ]; then
+    gpu_say "The host has rebooted since the changes were made."
+    gpu_state_save '{"reboot_needed": false}'
+    gpu_step_complete 5
+    return 100
+  fi
+  running=$(qm list 2>/dev/null | python3 -c 'import json,sys; print(json.dumps({"qm_list": sys.stdin.read()}))' | gpu_bios running)
+  gpu_say "The host must reboot so the new kernel arguments and the early card binding take effect."
+  [ -z "$running" ] || gpu_say "These VMs will be shut down:\n$running"
+  gpu_host hint-set </dev/null
+  if [ "${GPU_YES:-no}" != "yes" ] && gpu_ui_yesno "Reboot" "Reboot now?"; then
+    systemctl reboot
+    return 0
+  fi
+  gpu_say "Reboot when it suits you, then run: $GPU_RESUME_CMD"
+  return 4
+}
+
+# Step 6: verify.
+function gpu_step_verify() {
+  local target checks fails fix
+  target=$(gpu_chosen_target) || return 1
+  checks=$(printf '{"target": %s}' "$target" | gpu_host verify) || return 1
+  gpu_json '"\n".join("  [%s] %s%s" % ({"ok": "ok", "fail": "!!", "warn": "??", "info": ".."}[c["status"]], c["label"], (" - " + c["detail"]) if c["detail"] else "") for c in d)' <<<"$checks"
+  fails=$(gpu_json 'len([c for c in d if c["status"] == "fail"])' <<<"$checks")
+  if [ "$fails" == "0" ]; then
+    gpu_state_save '{"reboot_needed": false}'
+    gpu_step_complete 5 true; gpu_step_complete 6
+    return 100
+  fi
+  if [ "$(gpu_json 'any("Reboot the host" in c["detail"] for c in d if c["status"] == "fail")' <<<"$checks")" == "True" ]; then
+    if [ "$(gpu_host rebooted </dev/null)" == "yes" ]; then
+      gpu_say "The host has rebooted but the kernel arguments are still not active. Check that the boot loader picked them up (GRUB: /boot/grub/grub.cfg, systemd-boot: proxmox-boot-tool refresh), then run: $GPU_RESUME_CMD"
+      gpu_host hint-set </dev/null
+      return 2
+    fi
+    gpu_host mark-reboot </dev/null
+    gpu_say "The change is saved but not active yet. Reboot, then run: $GPU_RESUME_CMD"
+    gpu_host hint-set </dev/null
+    return 4
+  fi
+  fix=$(gpu_json '[c for c in d if c["status"] == "fail"][0]["fix"]' <<<"$checks")
+  case "$fix" in
+    bios) gpu_step_goto 3; gpu_state_save '{"verify_retry": true}'; return 100 ;;
+    host) gpu_step_goto 4; gpu_state_save '{"verify_retry": true}'; return 100 ;;
+  esac
+  gpu_say "Fix the item(s) marked !! above and run: $GPU_RESUME_CMD"
+  gpu_host hint-set </dev/null
+  return 2
+}
+
+# Step 7: attach the card to the VM. $1 = stop (yes|no)
+function gpu_step_vm() {
+  local stop="$1" vmid vendor bdf display zip flags=()
+  vmid=$(gpu_state_get 'd["vm"] if d["vm"] is not None else ""')
+  if [ -z "$vmid" ]; then
+    gpu_say "The host is ready. Pick or create the macOS VM, then run: $GPU_RESUME_CMD --vm <vmid>"
+    gpu_host hint-set </dev/null
+    return 0
+  fi
+  vendor=$(gpu_state_get 'd["gpu"]["vendor"]')
+  bdf=$(gpu_state_get 'd["gpu"]["bdf"]')
+  display=$(gpu_state_get 'd["display"]')
+  [ "$stop" != "yes" ] || flags+=(--stop-vm)
+  gpu_ui_yesno "Attach the card" "Attach the card to VM ${vmid} now? A snapshot of its config is saved first." || { gpu_say "Nothing was changed."; return 0; }
+  gpu_state_save "$(gpu_state_get 'json.dumps({"vm_records": d["vm_records"] + ([d["vm"]] if d["vm"] not in d["vm_records"] else [])})')"
+  if [ "$vendor" == "nvidia" ]; then
+    nvidia_attach "$vmid" "$bdf" --accept-nullmoth-risk || return 1
+  else
+    amd_attach "$vmid" "$bdf" --display "$display" "${flags[@]}" || return 1
+  fi
+  gpu_state_save "$(gpu_state_get 'json.dumps({"vm_records": d["vm_records"] + ([d["vm"]] if d["vm"] not in d["vm_records"] else [])})')"
+  gpu_step_complete 7
+  return 100
+}
+
+# Step 8: first boot.
+function gpu_step_first_boot() {
+  local vendor display
+  vendor=$(gpu_state_get 'd["gpu"]["vendor"]')
+  display=$(gpu_state_get 'd["display"]')
+  if [ "$vendor" == "nvidia" ]; then
+    echo "Start the VM. The desktop stays on the Proxmox console (vga std); apps get the NVIDIA GPU."
+    echo "Checklist inside macOS:"
+    nullmoth_print_next_steps
+    echo "Driver releases: ${NULLMOTH_URL}/releases"
+    echo "Our guide: ${GPU_DOCS_ROOT}nvidia-nullmoth"
+    command -v qrencode >/dev/null 2>&1 && qrencode -t ANSIUTF8 "${GPU_DOCS_ROOT}nvidia-nullmoth"
+  else
+    local where="in the Proxmox console (the card does the acceleration)"
+    [ "$display" == "gpu" ] && where="on the monitor plugged into the card"
+    echo "Start the VM. You should see the OpenCore picker and then the macOS desktop ${where}."
+    if [ "${GPU_YES:-no}" != "yes" ] && [ -t 0 ]; then
+      while ! gpu_ui_yesno "First boot" "Do you see the macOS desktop on your monitor?"; do
+        gpu_troubleshoot_menu || break
+      done
+    fi
+  fi
+  gpu_state_save '{"finished": true}'
+  gpu_step_complete 8
+  gpu_host hint-clear </dev/null
+  gpu_summary
+  return 0
+}
+
+function gpu_troubleshoot_menu() {
+  local pick
+  echo "1) No signal  2) Black screen after the Apple logo  3) Works once, then fails after a VM restart  4) Stop"
+  read -r -p "Which? " pick
+  case "$pick" in
+    1) echo "No signal on the monitor:"
+       echo "  1. Use an HDMI cable first. DisplayPort outputs have stayed black on several cards."
+       echo "  2. Plug the monitor into the card, not the motherboard, and power it on before the VM starts."
+       echo "  3. The VM must have 'vga none' (the display setting in the VM step) and the card must be on the"
+       echo "     PCI Express port. Run gpu-setup again and pick 'Monitor on the GPU'."
+       echo "  4. Reset the OpenCore NVRAM from the picker (Reset NVRAM entry) and start the VM again." ;;
+    2) echo "Black screen after the Apple logo:"
+       echo "  1. Check that the VM is not using the emulated display: gpu-setup shows 'vga none' for it."
+       echo "  2. Navi cards need agdpmod=pikera in the boot-args. This tool adds it; check the VM's OpenCore"
+       echo "     disk was patched (gpu-setup --status)."
+       echo "  3. Turn Resizable BAR off in the BIOS (some RX 6600 cards stay black with it on)."
+       echo "  4. Try HDMI instead of DisplayPort." ;;
+    3) echo "Works once, then fails until the host reboots (the AMD reset bug):"
+       echo "  1. Polaris, Vega and Navi 10/14 need the vendor-reset module. Run gpu-setup and let the Host step"
+       echo "     install it. With Secure Boot on it cannot be installed automatically (the Host step explains why)."
+       echo "  2. Shut the VM down from inside macOS (Apple menu > Shut Down), not with 'qm stop'."
+       echo "  3. If it still fails, reboot the host between VM runs." ;;
+    *) gpu_host hint-set </dev/null; echo "Come back with: $GPU_RESUME_CMD"; return 1 ;;
+  esac
+}
+# ── GPU walkthrough end ──
 
 function unattended_install() {
   local vmid="$1" disk_gb="$2" t0 size reboots=0 last_picker last_change digest seen
@@ -2096,6 +4586,7 @@ with open(path, 'wb') as f:
 # shell is sitting in a directory that got removed from under it (e.g. by a
 # prior install script deleting its own repo checkout), getcwd() fails and
 # pushd aborts. Land somewhere known-good first so that can't happen here.
+ORIG_PWD="$PWD"
 cd "${HOME:-/root}" 2>/dev/null || cd /
 
 TEMP_DIR=$(mktemp -d)
@@ -2118,6 +4609,15 @@ fi
 if [ "${1:-}" == "nvidia-detach" ]; then
   check_root
   if nvidia_detach "${@:2}"; then exit 0; else exit 1; fi
+fi
+
+# `osx-proxmox-next.sh gpu-setup [--status|--undo|--yes|--vm N|--gpu BDF|--display gpu|console]`:
+# the guided GPU passthrough walkthrough for AMD and NVIDIA cards.
+if [ "${1:-}" == "gpu-setup" ]; then
+  check_root
+  GPU_RC=0
+  gpu_setup "${@:2}" || GPU_RC=$?
+  exit "$GPU_RC"
 fi
 
 if whiptail --backtitle "OSX Proxmox Next" --title "macOS VM" --yesno "This will create a new macOS VM on Proxmox.\n\nRequirements:\n  - Intel or AMD CPU with VT-x/AMD-V\n  - 64GB+ free disk space\n  - Internet access (downloads ~1GB)\n\nProceed?" 14 58; then

@@ -37,3 +37,9 @@ def _reset_event_loop_policy():
             asyncio.set_event_loop(asyncio.new_event_loop())
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+@pytest.fixture(autouse=True)
+def _private_gpu_state_dir(monkeypatch, tmp_path_factory):
+    """Keep the GPU attach records of a real host (or another test) out of every test."""
+    monkeypatch.setattr("osx_proxmox_next.gpu.STATE_DIR", tmp_path_factory.mktemp("gpu-state"))

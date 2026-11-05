@@ -464,52 +464,18 @@ Use `--verbose-boot` flag in CLI: `osx-next-cli apply --verbose-boot ...`. This 
 
 ## 🎮 GPU Passthrough
 
-Host-side setup is manual and required before the VM can use a discrete GPU.
-
-1. Enable **VT-d / IOMMU** in BIOS/UEFI
-2. Add to kernel cmdline:
-   - Intel: `intel_iommu=on iommu=pt`
-   - AMD: `amd_iommu=on iommu=pt`
-3. Bind GPU + GPU audio to `vfio-pci`
-4. Reboot host
-5. Attach both PCI functions to VM (`hostpci0`, `hostpci1`)
-
-📖 Reference: [Proxmox PCI(e) Passthrough Wiki](https://pve.proxmox.com/wiki/PCI(e)_Passthrough)
-
-### NVIDIA (NullMoth, Beta)
-
-> **NVIDIA GPU support (Beta)**
->
-> This feature prepares your VM for the NullMoth NVIDIA driver, a third-party project that osx-proxmox-next does not make, review or support. You download and install that driver yourself, at your own risk. We are not responsible for the driver, its installation, or any damage, data loss or instability that follows.
->
-> NullMoth only runs with core macOS security turned off: code-signing checks (AMFI) are bypassed, System Integrity Protection is relaxed and Secure Boot is disabled. This is a real security threat: malware has a much easier time on a VM set up this way. Only enable it on a VM you are prepared to treat as untrusted, and keep personal accounts and sensitive data off it.
->
-> NullMoth is licensed PolyForm Noncommercial 1.0.0. Driver and docs: https://github.com/nullmoth/nvidia-macos-driver
-
-| Card generation | Supported |
-|---|---|
-| Turing and newer (RTX 20 / 30 / 40 / 50 series) | Yes, on macOS Sequoia 15.5+ and Tahoe 26 |
-| Kepler, Maxwell, Pascal, Volta | No |
-| Ventura 13, Sonoma 14 guests | No |
-
-What it does to an installed, stopped VM: passes every function of the card through as `hostpci0` (conventional PCI, `pcie=0`), adds `-global q35-pcihost.pci-hole64-size=64G` to `args`, and edits the VM's OpenCore disk (AMFIPass.kext, NullMoth boot-args, an `IONDRVSupport` block, SMBIOS `MacPro7,1`). The previous `config.plist` is kept as `config.plist.pre-nullmoth` so `nvidia-detach` restores it exactly. The VM keeps `vga std`: the desktop stays on the emulated display and apps get the NVIDIA GPU. The driver is never downloaded or installed by this tool.
-
-Host setup stays manual. Every function of the card must be bound to `vfio-pci` and alone in its IOMMU group; if it is not, the command prints the exact `/etc/modprobe.d/vfio.conf` lines to use and changes nothing. This tool has not been tested with a GPU attached yet.
+One guided flow takes a card from "it is in the server" to "macOS uses it": scan, a BIOS photo card with a QR code, host setup with a diff and backups, VM attach, first boot, and a full undo. It resumes across reboots.
 
 ```bash
-# Preview: preflight result and plan, nothing changes
-osx-next-cli nvidia-attach 106 --gpu 01:00 --dry-run
-
-# Apply (VM must be stopped; you must accept the notice)
-osx-next-cli nvidia-attach 106 --gpu 01:00 --accept-nullmoth-risk
-
-# Undo: removes hostpci0, the MMIO window and the OpenCore changes
-osx-next-cli nvidia-detach 106
+osx-next-cli gpu-setup            # or: TUI > GPU Passthrough (guided), or osx-proxmox-next.sh gpu-setup
+osx-next-cli gpu-setup --status   # read only
+osx-next-cli gpu-setup --undo     # put everything back
 ```
 
-The standalone script has the same two commands (`osx-proxmox-next.sh nvidia-attach <vmid> <pci-address>` and `nvidia-detach <vmid>`). It asks you to type `I accept`, or take `--accept-nullmoth-risk` for non-interactive use. In the TUI, open **Step 2 > NVIDIA GPU (Beta)**: pick the VM and the card, tick the acknowledgement box (unticked by default) and the Apply button unlocks.
+- **AMD** Polaris, Vega, Navi 10/14/21/23 (RX 400/500, Vega 56/64, Radeon VII, RX 5000, RX 6600/6800/6900): native macOS drivers, no extra software. RX 6700, RX 7000 and RX 9000 series and APUs are not supported.
+- **NVIDIA** Turing and newer (RTX 20 to 50): beta, through the third-party NullMoth driver on Sequoia 15.5+ and Tahoe 26, with core macOS security turned off. The guided flow shows the NullMoth notice and asks you to acknowledge it.
 
-After applying, install the driver yourself from the [NullMoth releases](https://github.com/nullmoth/nvidia-macos-driver/releases) (check `SHA256SUMS`, then `sudo ./install.sh` in the guest), approve the extensions, reboot, and verify with `kmutil showloaded --list-only | grep nullmoth`. Run `sudo pmset -a sleep 0`. If the guest will not boot, add `-nvoff` to the boot-args or run `nvidia-detach`. The NullMoth 1401 app edits the OpenCore config itself, and rebuilding the OpenCore disk with this tool later wipes those edits.
+The host setup and the GPU attach have not been tested on hardware yet. Full guide with the supported-cards matrix and a page per BIOS vendor: [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough).
 
 ---
 
@@ -751,7 +717,7 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 
 ### Can I pass through an NVIDIA GeForce GPU?
 
-Only Turing and newer (RTX 20 / 30 / 40 / 50), and only with a third-party driver. Apple dropped NVIDIA support years ago, but the community NullMoth driver provides Metal on macOS Sequoia 15.5+ and Tahoe 26. This project can prepare a VM for it (beta, see [NVIDIA (NullMoth, Beta)](#nvidia-nullmoth-beta)), but does not make, ship or support the driver, and it requires turning core macOS security off.
+Only Turing and newer (RTX 20 / 30 / 40 / 50), and only with a third-party driver. Apple dropped NVIDIA support years ago, but the community NullMoth driver provides Metal on macOS Sequoia 15.5+ and Tahoe 26. This project can prepare a VM for it (beta, see [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough)), but does not make, ship or support the driver, and it requires turning core macOS security off.
 
 | Architecture | Cards | macOS support |
 |---|---|---|
@@ -761,7 +727,7 @@ Only Turing and newer (RTX 20 / 30 / 40 / 50), and only with a third-party drive
 | Volta | Titan V | Not supported |
 | Turing and newer | RTX 20 / 30 / 40 / 50 | Sequoia 15.5+ and Tahoe 26 via NullMoth (beta) |
 
-Ventura and Sonoma guests have no NVIDIA path at all. For a conventional setup on any supported macOS, use an **AMD** card instead: Polaris (RX 470/480/580), Vega, and Navi (RX 5000/6000) have native macOS drivers and work with WhateverGreen, which ships in the OpenCore image.
+Ventura and Sonoma guests have no NVIDIA path at all. For a conventional setup on any supported macOS, use an **AMD** card instead: Polaris (RX 470/480/570/580), Vega, and Navi 10, 14, 21 and 23 (RX 5000, RX 6600, RX 6800/6900) have native macOS drivers and work with WhateverGreen, which ships in the OpenCore image. RX 6700, RX 7000 and RX 9000 cards have no macOS driver.
 
 ### Why does macOS show "Memory Modules Misconfigured"?
 
@@ -801,7 +767,7 @@ In the TUI, tick **Force fresh download (ignore cached ISO)** on the Review step
 
 - 🧩 **Multi-VM templates** - save and reuse configurations across VMs
 - 🔄 **Auto-update OpenCore** - detect and pull latest OpenCore releases
-- 🎮 **GPU passthrough wizard** - guided IOMMU + VFIO setup *(unlocks at $1000 raised - see badge above)*. Fund goal: pay the workforce to build automated GPU compatibility detection and passthrough setup for macOS.
+- 🎮 **GPU passthrough walkthrough** - guided IOMMU + VFIO setup, now in beta (`osx-next-cli gpu-setup`). Fund goal: pay the workforce to test it across more cards and boards.
 
 ---
 
@@ -852,7 +818,7 @@ Yes. AMD hosts are auto-detected and run with Cascadelake-Server CPU emulation. 
 About 5 minutes of setup with the wizard, then the macOS installer runs unattended. Download time depends on your connection (recovery image is ~0.9 GB, downloaded once and cached).
 
 **Is GPU passthrough supported?**
-Yes, with manual host-side IOMMU setup. See [GPU Passthrough](#-gpu-passthrough).
+Yes. `osx-next-cli gpu-setup` walks you through it, including the BIOS and the host setup. See [GPU Passthrough](#-gpu-passthrough).
 
 **Is running macOS in a VM legal?**
 This project is for testing, lab use, and learning. Apple's license terms govern where macOS may run; you are responsible for compliance in your region.

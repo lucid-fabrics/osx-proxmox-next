@@ -216,3 +216,18 @@ Input:focus { border: tall #2ec27e; background: #1a2c3f; }
     margin-top: 1;
 }
 .nv_result_fail { border: heavy #d44f4f; }
+
+#gp_rail { color: #9fc6e8; margin-bottom: 1; }
+#gp_title { color: #e6a817; }
+#gp_body { margin: 1 0; height: auto; }
+#gp_qr { background: white; color: black; width: auto; height: auto; padding: 0 1; margin-bottom: 1; }
+#gp_gpu_select { width: 70; }
+#gp_display_select { width: 70; margin-top: 1; }
+#gp_vmid { width: 30; }
+#gp_notice_title { color: #e6a817; margin-top: 1; }
+#gp_result {
+    border: heavy #2ec27e;
+    padding: 1;
+    height: auto;
+    margin-top: 1;
+}
