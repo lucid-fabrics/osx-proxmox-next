@@ -25,7 +25,16 @@ Enter the BIOS with **Del or F2**. F7 opens the boot menu on many models. Mini P
 | Above 4G Decoding | usually under `Advanced > PCI Subsystem Settings > Above 4G Decoding (often hidden)` | Enabled | no |
 | CSM (legacy boot support) | usually under `Boot > CSM Support` | Disabled | no |
 
-No path is recorded for: Primary display, Resizable BAR (optional). See the generic names at the bottom of this page.
+Not checked against a manual:
+
+- Intel virtualization (VT-x): Not verified: Minisforum and Beelink publish no BIOS menu documentation. Forum posts suggest Advanced > CPU Configuration > SVM Mode and Advanced > AMD CBS > NBIO Common Options > IOMMU on AMD models, but forums are not accepted sources.
+- AMD virtualization (SVM): Not verified: Minisforum and Beelink publish no BIOS menu documentation. Forum posts suggest Advanced > CPU Configuration > SVM Mode and Advanced > AMD CBS > NBIO Common Options > IOMMU on AMD models, but forums are not accepted sources.
+- Intel VT-d: Not verified: Minisforum and Beelink publish no BIOS menu documentation. Forum posts suggest Advanced > CPU Configuration > SVM Mode and Advanced > AMD CBS > NBIO Common Options > IOMMU on AMD models, but forums are not accepted sources.
+- AMD IOMMU: Not verified: Minisforum and Beelink publish no BIOS menu documentation. Forum posts suggest Advanced > CPU Configuration > SVM Mode and Advanced > AMD CBS > NBIO Common Options > IOMMU on AMD models, but forums are not accepted sources.
+- Above 4G Decoding: Not verified: Minisforum and Beelink publish no BIOS menu documentation. Forum posts suggest Advanced > CPU Configuration > SVM Mode and Advanced > AMD CBS > NBIO Common Options > IOMMU on AMD models, but forums are not accepted sources.
+- CSM (legacy boot support): Not verified: Minisforum and Beelink publish no BIOS menu documentation. Forum posts suggest Advanced > CPU Configuration > SVM Mode and Advanced > AMD CBS > NBIO Common Options > IOMMU on AMD models, but forums are not accepted sources.
+
+No path is recorded for: Primary display, Resizable BAR (optional). See the generic names on the [generic page](generic.md).
 
 ## Official manual
 

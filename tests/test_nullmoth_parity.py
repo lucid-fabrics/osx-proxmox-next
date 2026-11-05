@@ -63,6 +63,12 @@ def test_next_steps_match():
         assert " ".join(words) in BLOCK, step
 
 
+def test_first_boot_checklist_points_at_undo_not_the_alias():
+    text = "\n".join(nullmoth.NEXT_STEPS)
+    assert "gpu-setup --undo" in nullmoth.NEXT_STEPS[5] and "nvidia-detach" not in text
+    assert "gpu-setup --undo on the host" in BLOCK and "run nvidia-detach on the host" not in BLOCK
+
+
 def test_bar_note_matches_in_both():
     assert nullmoth._BAR_NOTE.strip() in BLOCK
 

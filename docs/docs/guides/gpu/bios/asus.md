@@ -14,22 +14,27 @@ Do the settings in this order: CSM off, then Above 4G Decoding, then Resizable B
 
 ## ASUS
 
-Enter the BIOS with **Del or F2**. Press F7 for Advanced Mode.
+Enter the BIOS with **Del or F2**. Press F7 to switch between EZ Mode and Advanced Mode.
 
 | Setting | Where to look | Set it to | Checked against a source |
 |---------|---------------|-----------|--------------------------|
-| Intel virtualization (VT-x) | usually under `Advanced > CPU Configuration > Intel (VMX) Virtualization Technology` | Enabled | no |
-| AMD virtualization (SVM) | usually under `Advanced > CPU Configuration > SVM Mode` | Enabled | no |
-| Intel VT-d | usually under `Advanced > System Agent (SA) Configuration > VT-d` | Enabled | no |
-| AMD IOMMU | usually under `Advanced > AMD CBS > NBIO Common Options > IOMMU` | Enabled | no |
-| Above 4G Decoding | usually under `Advanced > PCI Subsystem Settings > Above 4G Decoding` | Enabled | no |
-| CSM (legacy boot support) | usually under `Boot > CSM (Compatibility Support Module) > Launch CSM` | Disabled | no |
-| Primary display | usually under `Advanced > System Agent (SA) Configuration > Graphics Configuration > Primary Display (AMD boards: Advanced > NB Configuration > Primary Video Device)` | IGFX / iGPU (AMD: IGD Video) | no |
-| Resizable BAR (optional) | usually under `Advanced > PCI Subsystem Settings > Re-Size BAR Support` | Disabled if the VM will not start | no |
+| Intel virtualization (VT-x) | `Advanced > CPU Configuration > Intel (VMX) Virtualization Technology` | Enabled | yes ([source](https://dlcdnets.asus.com/pub/ASUS/mb/LGA1700/ROG_STRIX_Z790-E_GAMING_WIFI/E23863_ROG_STRIX_Z790_Series_BIOS_Manual_Intel_14th_EM_V2_WEB.pdf)) |
+| AMD virtualization (SVM) | `Advanced > CPU Configuration > SVM Mode` | Enabled | yes ([source](https://dlcdnets.asus.com/pub/ASUS/mb/Socket%20AM5/ROG_STRIX_X670E-E_GAMING_WIFI/E20544_ROG_STRIX_X670E_Series_BIOS_manual_EM_WEB.pdf)) |
+| Intel VT-d | `Advanced > System Agent (SA) Configuration > VT-d` | Enabled | yes ([source](https://dlcdnets.asus.com/pub/ASUS/mb/LGA1700/ROG_STRIX_Z790-E_GAMING_WIFI/E23863_ROG_STRIX_Z790_Series_BIOS_Manual_Intel_14th_EM_V2_WEB.pdf)) |
+| AMD IOMMU | `Advanced > AMD CBS > IOMMU (if it is not listed there, look inside AMD CBS > NBIO Common Options)` | Enabled | yes ([source](https://dlcdnets.asus.com/pub/ASUS/mb/Socket%20AM5/ROG_STRIX_X670E-E_GAMING_WIFI/E20544_ROG_STRIX_X670E_Series_BIOS_manual_EM_WEB.pdf)) |
+| Above 4G Decoding | `Advanced > PCI Subsystem Settings > Above 4G Decoding` | Enabled | yes ([source 1](https://dlcdnets.asus.com/pub/ASUS/mb/LGA1700/ROG_STRIX_Z790-E_GAMING_WIFI/E23863_ROG_STRIX_Z790_Series_BIOS_Manual_Intel_14th_EM_V2_WEB.pdf), [source 2](https://dlcdnets.asus.com/pub/ASUS/mb/Socket%20AM5/ROG_STRIX_X670E-E_GAMING_WIFI/E20544_ROG_STRIX_X670E_Series_BIOS_manual_EM_WEB.pdf)) |
+| CSM (legacy boot support) | `Boot > CSM (Compatibility Support Module) > Launch CSM` | Disabled | yes ([source](https://dlcdnets.asus.com/pub/ASUS/mb/LGA1700/ROG_STRIX_Z790-E_GAMING_WIFI/E23863_ROG_STRIX_Z790_Series_BIOS_Manual_Intel_14th_EM_V2_WEB.pdf)) |
+| Primary display | `Advanced > System Agent (SA) Configuration > Graphics Configuration > Primary Display (AMD boards: Advanced > NB Configuration > Primary Video Device)` | CPU Graphics (AMD: IGFX Video) | yes ([source 1](https://dlcdnets.asus.com/pub/ASUS/mb/LGA1700/ROG_STRIX_Z790-E_GAMING_WIFI/E23863_ROG_STRIX_Z790_Series_BIOS_Manual_Intel_14th_EM_V2_WEB.pdf), [source 2](https://dlcdnets.asus.com/pub/ASUS/mb/Socket%20AM5/ROG_STRIX_X670E-E_GAMING_WIFI/E20544_ROG_STRIX_X670E_Series_BIOS_manual_EM_WEB.pdf)) |
+| Resizable BAR (optional) | `Advanced > PCI Subsystem Settings > Re-Size BAR Support (appears only after Above 4G Decoding is Enabled)` | Disabled if the VM will not start | yes ([source](https://dlcdnets.asus.com/pub/ASUS/mb/LGA1700/ROG_STRIX_Z790-E_GAMING_WIFI/E23863_ROG_STRIX_Z790_Series_BIOS_Manual_Intel_14th_EM_V2_WEB.pdf)) |
 
 ## Official manual
 
 The vendor's manuals and support pages: [https://www.asus.com/support/](https://www.asus.com/support/).
+
+Manuals the verified paths above were checked against:
+
+- [https://dlcdnets.asus.com/pub/ASUS/mb/LGA1700/ROG_STRIX_Z790-E_GAMING_WIFI/E23863_ROG_STRIX_Z790_Series_BIOS_Manual_Intel_14th_EM_V2_WEB.pdf](https://dlcdnets.asus.com/pub/ASUS/mb/LGA1700/ROG_STRIX_Z790-E_GAMING_WIFI/E23863_ROG_STRIX_Z790_Series_BIOS_Manual_Intel_14th_EM_V2_WEB.pdf)
+- [https://dlcdnets.asus.com/pub/ASUS/mb/Socket%20AM5/ROG_STRIX_X670E-E_GAMING_WIFI/E20544_ROG_STRIX_X670E_Series_BIOS_manual_EM_WEB.pdf](https://dlcdnets.asus.com/pub/ASUS/mb/Socket%20AM5/ROG_STRIX_X670E-E_GAMING_WIFI/E20544_ROG_STRIX_X670E_Series_BIOS_manual_EM_WEB.pdf)
 
 ## Back to the walkthrough
 

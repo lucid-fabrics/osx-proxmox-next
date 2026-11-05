@@ -108,7 +108,7 @@ def test_rail():
     host_setup.complete_step(state, 2)
     host_setup.complete_step(state, 3, skipped=True)
     rail = gpu_setup.render_rail(state)
-    assert rail.splitlines()[0].startswith(" GPU passthrough   [1 Scan] [2 Choose] [3 BIOS] [4 Host]")
+    assert rail.splitlines()[0].startswith(" [1 Scan] [2 Choose] [3 BIOS] [4 Host]")
     marks = rail.splitlines()[1]
     assert "done" in marks and "skipped" in marks and "<now>" in marks
     assert gpu_setup.docs_url("x") == "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/x"

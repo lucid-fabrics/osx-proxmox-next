@@ -80,9 +80,9 @@ NEXT_STEPS = (
     "Approve the extensions in System Settings > Privacy & Security, then reboot the guest.",
     "Verify with: kmutil showloaded --list-only | grep nullmoth",
     "Turn off system sleep in the guest: sudo pmset -a sleep 0",
-    "Escape hatch: add -nvoff to the boot-args, or run nvidia-detach on the host.",
+    "Escape hatch: add -nvoff to the boot-args, or run gpu-setup --undo on the host.",
     "Warning: the NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore "
-    "disk with this tool later (or running nvidia-detach) wipes those edits.",
+    "disk with this tool later (or running gpu-setup --undo) wipes those edits.",
 )
 
 

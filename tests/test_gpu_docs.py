@@ -30,10 +30,19 @@ def test_pages_carry_every_path_and_flag_unverified_ones(key):
         assert entry["path"] in page, (key, setting)
         row = next(ln for ln in page.splitlines() if entry["path"] in ln)
         if entry["verified"]:
-            assert entry["source"] in row and "usually under" not in row
+            urls = re.findall(r"https?://[^\s;,)]+", entry["source"])
+            assert urls and "| yes (" in row and "usually under" not in row
+            assert all(u.rstrip(".:") in page for u in urls), (key, setting)
         else:
             assert "usually under" in row and "| no |" in row
     assert ven["enter"] in page
+
+
+def test_the_keys_added_by_the_manual_check_are_rendered():
+    for key, setting in (("asrock-rack", "primary_display"), ("hp", "rebar"), ("lenovo", "rebar")):
+        entry = DATA["vendors"][key]["paths"][setting]
+        assert entry["verified"] and entry["path"] in PAGES[DATA["vendors"][key]["doc"]]
+        assert bios_guide._entry(DATA, key, setting) == entry
 
 
 def test_pages_link_the_official_manual_and_the_guide():

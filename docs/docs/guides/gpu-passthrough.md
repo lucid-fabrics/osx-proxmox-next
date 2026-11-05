@@ -26,7 +26,7 @@ Run it again at any time: it resumes where it stopped. While a setup is paused, 
 ## The eight steps
 
 ```
- GPU passthrough   [1 Scan] [2 Choose] [3 BIOS] [4 Host] [5 Reboot] [6 Verify] [7 VM] [8 First boot]
+ [1 Scan] [2 Choose] [3 BIOS] [4 Host] [5 Reboot] [6 Verify] [7 VM] [8 First boot]
                       done      done     <now>
 ```
 
@@ -116,7 +116,7 @@ Rules it keeps:
 - The boot loader comes from what booted (`efibootmgr`, `/proc/cmdline`), never from which files exist.
 - `intel_iommu=on` is written for Intel CPUs, `iommu=pt` for all. `amd_iommu=on` is never written: it is not a valid value.
 - `initcall_blacklist=sysfb_init` is added only when the chosen card is the host console GPU. If it is the only display adapter in the host, you must type a confirmation first.
-- `pcie_acs_override` is never applied. If the card shares its IOMMU group with other devices, move it to another slot.
+- `pcie_acs_override` is never applied. Some guides suggest it to split the group, but it only hides the problem and can let the VM reach those devices. If the card shares its IOMMU group with other devices, move it to another slot.
 - With Secure Boot on, an unsigned `vendor-reset` module is rejected, so the tool does not install it and prints the key enrollment steps instead.
 - The Radeon VII with `vendor-reset` gets a hard warning that you must confirm by typing: stopping and starting a VM that holds it without rebooting the host has corrupted host storage on Proxmox 9.
 

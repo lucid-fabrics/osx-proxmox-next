@@ -417,6 +417,7 @@ def test_verify_failures_point_to_a_fix(tmp_path):
     assert by["cmdline"]["status"] == "fail" and "Reboot the host" in by["cmdline"]["detail"]
     assert by["iommu"]["status"] == "fail" and by["iommu"]["fix"] == "host"  # DMAR table is there
     assert by["driver"]["status"] == "fail" and "amdgpu" in by["driver"]["detail"]
+    assert by["driver"]["detail"].endswith("Go back to the host step and reboot after applying.")
     assert by["modules"]["status"] == "fail" and by["irq"]["status"] == "warn"
     (Path(root) / "sys/firmware/acpi/tables/DMAR").unlink()
     assert {c["id"]: c for c in hs.verify_host(tgt, root, FakeRun())}["iommu"]["fix"] == "bios"
@@ -432,7 +433,9 @@ def test_verify_group_and_extras(tmp_path):
     by = {c["id"]: c for c in hs.verify_host(tgt, root, FakeRun())}
     assert by["group"]["status"] == "fail" and by["group"]["fix"] == "acs"
     assert "0000:07:00.0" in by["group"]["detail"] and "storage or network" in by["group"]["detail"]
-    assert "never applies it" in by["group"]["detail"]
+    assert ("Some guides suggest the pcie_acs_override kernel option to split the group. It only hides the problem "
+            "and can let the VM reach those devices, so this tool never uses it.") in by["group"]["detail"]
+    assert "pretence" not in by["group"]["detail"]
     assert by["unsafe"]["status"] == "warn" and by["reset"]["status"] == "warn" and by["bar"]["status"] == "warn"
     write(Path(root), "/sys/bus/pci/devices/0000:06:00.0/reset_method", "device_specific bus\n")
     assert {c["id"]: c for c in hs.verify_host(tgt, root, FakeRun())}["reset"]["status"] == "ok"

@@ -180,7 +180,7 @@ def render_rail(state: dict) -> str:
             mark = ""
         names.append(label)
         marks.append(mark.center(len(label)))
-    return " GPU passthrough   " + " ".join(names) + "\n" + " " * 19 + " ".join(marks).rstrip()
+    return " " + " ".join(names) + "\n" + " " + " ".join(marks).rstrip()
 
 
 class CardChanged(Exception):

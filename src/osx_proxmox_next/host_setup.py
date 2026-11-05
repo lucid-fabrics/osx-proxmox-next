@@ -1046,7 +1046,8 @@ def verify_host(target, root="/", run=default_run):
              for f in target["functions"]
              if bindable(f, target["vendor"]) and devs.get(f["bdf"], {}).get("driver") != "vfio-pci"]
     out.append(_check("driver", "The card is held by vfio-pci", "ok" if not wrong else "fail",
-                      "" if not wrong else "Not bound: " + ", ".join(wrong), "" if not wrong else "host"))
+                      "" if not wrong else "Not bound: " + ", ".join(wrong) + ". Go back to the host step and reboot after applying.",
+                      "" if not wrong else "host"))
     group = (devs.get(target["bdf"] + ".0") or {}).get("group")
     stray = []
     storage_net = []
@@ -1064,8 +1065,8 @@ def verify_host(target, root="/", run=default_run):
         detail = ""
         if stray:
             detail = ("Also in the group: " + ", ".join(stray) + ". Move the card to another slot first. "
-                      "pcie_acs_override can split groups but it makes the isolation a pretence, so this tool never "
-                      "applies it.")
+                      "Some guides suggest the pcie_acs_override kernel option to split the group. It only hides the "
+                      "problem and can let the VM reach those devices, so this tool never uses it.")
             if storage_net:
                 detail += " The group holds storage or network devices (" + ", ".join(storage_net) + ")."
         out.append(_check("group", "IOMMU group holds only the card", "fail" if stray else "ok", detail,

@@ -18,18 +18,23 @@ Enter the BIOS with **Del**. Boot menu is F11. The IPMI remote console works for
 
 | Setting | Where to look | Set it to | Checked against a source |
 |---------|---------------|-----------|--------------------------|
-| Intel virtualization (VT-x) | usually under `Advanced > CPU Configuration > Intel Virtualization Technology` | Enabled | no |
-| AMD virtualization (SVM) | usually under `Advanced > CPU Configuration > SVM Mode` | Enabled | no |
-| Intel VT-d | usually under `Advanced > Chipset Configuration > North Bridge > IIO Configuration > Intel VT for Directed I/O (VT-d)` | Enabled | no |
-| AMD IOMMU | usually under `Advanced > NB Configuration > IOMMU` | Enabled | no |
-| Above 4G Decoding | usually under `Advanced > PCIe/PCI/PnP Configuration > Above 4G Decoding` | Enabled | no |
-| CSM (legacy boot support) | usually under `Boot > Boot mode select` | UEFI | no |
-| Primary display | usually under `Advanced > PCIe/PCI/PnP Configuration > VGA Priority` | Onboard | no |
-| Resizable BAR (optional) | usually under `Advanced > PCIe/PCI/PnP Configuration > Re-Size BAR Support` | Disabled if the VM will not start | no |
+| Intel virtualization (VT-x) | `Advanced > CPU Configuration > Intel (VMX) Virtualization Technology` | Enabled | yes ([source](https://www.supermicro.com/manuals/motherboard/X12/MNL-2353.pdf)) |
+| AMD virtualization (SVM) | `Advanced > CPU Configuration > SVM Mode` | Enabled | yes ([source](https://www.supermicro.com/manuals/motherboard/H13/MNL-2564.pdf)) |
+| Intel VT-d | `Advanced > Chipset > System Agent (SA) Configuration > VT-d (Xeon Scalable boards may use Chipset Configuration > North Bridge > IIO Configuration > Intel VT for Directed I/O (VT-d))` | Enabled | yes ([source](https://www.supermicro.com/manuals/motherboard/X12/MNL-2353.pdf)) |
+| AMD IOMMU | `Advanced > NB Configuration > IOMMU` | Enabled | yes ([source](https://www.supermicro.com/manuals/motherboard/H13/MNL-2564.pdf)) |
+| Above 4G Decoding | `Advanced > PCIe/PCI/PnP Configuration > Above 4G Decoding (Intel Xeon E boards: Above 4GB MMIO BIOS Assignment)` | Enabled | yes ([source 1](https://www.supermicro.com/manuals/motherboard/H13/MNL-2564.pdf), [source 2](https://www.supermicro.com/manuals/motherboard/X12/MNL-2353.pdf)) |
+| CSM (legacy boot support) | `Security > Secure Boot > CSM Support. Also Boot > Boot Mode Select (Legacy, UEFI, Dual)` | Disabled / UEFI | yes ([source 1](https://www.supermicro.com/manuals/motherboard/H13/MNL-2564.pdf), [source 2](https://www.supermicro.com/manuals/motherboard/X12/MNL-2353.pdf)) |
+| Primary display | `Advanced > PCIe/PCI/PnP Configuration > VGA Priority` | Onboard | yes ([source](https://www.supermicro.com/manuals/motherboard/H13/MNL-2564.pdf)) |
+| Resizable BAR (optional) | `Advanced > PCIe/PCI/PnP Configuration > Re-Size BAR Support (not present on the X12STL-F)` | Disabled if the VM will not start | yes ([source](https://www.supermicro.com/manuals/motherboard/H13/MNL-2564.pdf)) |
 
 ## Official manual
 
 The vendor's manuals and support pages: [https://www.supermicro.com/en/support/resources/downloadcenter/manual](https://www.supermicro.com/en/support/resources/downloadcenter/manual).
+
+Manuals the verified paths above were checked against:
+
+- [https://www.supermicro.com/manuals/motherboard/X12/MNL-2353.pdf](https://www.supermicro.com/manuals/motherboard/X12/MNL-2353.pdf)
+- [https://www.supermicro.com/manuals/motherboard/H13/MNL-2564.pdf](https://www.supermicro.com/manuals/motherboard/H13/MNL-2564.pdf)
 
 ## Back to the walkthrough
 

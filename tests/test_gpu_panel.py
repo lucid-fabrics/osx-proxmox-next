@@ -56,7 +56,7 @@ async def open_panel(pilot, app, env: Env):
     app._gp = env.session()
     await _advance_to_step(pilot, app, 2)
     await pilot.click("#mode_gpu")
-    await settle(pilot, lambda: "GPU passthrough" in text(app, "#gp_rail"))
+    await settle(pilot, lambda: "[1 Scan]" in text(app, "#gp_rail"))
 
 
 def pick_vm(app, key: str) -> None:

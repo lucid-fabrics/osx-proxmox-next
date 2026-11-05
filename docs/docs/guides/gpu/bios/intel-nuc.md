@@ -18,16 +18,24 @@ Enter the BIOS with **F2**. F10 opens the boot menu. Newer NUCs (13 and later) a
 
 | Setting | Where to look | Set it to | Checked against a source |
 |---------|---------------|-----------|--------------------------|
-| Intel virtualization (VT-x) | usually under `Advanced > Security > Intel Virtualization Technology` | Enabled | no |
-| Intel VT-d | usually under `Advanced > Security > Intel VT-d` | Enabled | no |
+| Intel virtualization (VT-x) | `Security > Security Features > Intel Virtualization Technology` | Enabled | yes ([source](https://www.intel.com/content/dam/support/us/en/documents/intel-nuc/NUC-AptioV-BIOS-Glossary.pdf)) |
+| Intel VT-d | `Security > Security Features > Intel VT for Directed I/O (VT-d)` | Enabled | yes ([source](https://www.intel.com/content/dam/support/us/en/documents/intel-nuc/NUC-AptioV-BIOS-Glossary.pdf)) |
 | Above 4G Decoding | usually under `Usually not offered. NUC 12/13 Extreme: Advanced > Devices > PCI > Above 4G Decoding` | Enabled | no |
-| CSM (legacy boot support) | usually under `Advanced > Boot > Boot Configuration > UEFI Boot` | Enabled, legacy boot off | no |
+| CSM (legacy boot support) | `Boot > Boot Priority > UEFI Boot (enabled) and Legacy Boot (disabled)` | UEFI Boot on, Legacy Boot off | yes ([source](https://www.intel.com/content/dam/support/us/en/documents/intel-nuc/NUC-AptioV-BIOS-Glossary.pdf)) |
 
-No path is recorded for: AMD virtualization (SVM), AMD IOMMU, Primary display, Resizable BAR (optional). See the generic names at the bottom of this page.
+Not checked against a manual:
+
+- Above 4G Decoding: Not verified: the Aptio V glossary has no Above 4G item.
+
+No path is recorded for: AMD virtualization (SVM), AMD IOMMU, Primary display, Resizable BAR (optional). See the generic names on the [generic page](generic.md).
 
 ## Official manual
 
 The vendor's manuals and support pages: [https://www.intel.com/content/www/us/en/support/products/](https://www.intel.com/content/www/us/en/support/products/).
+
+Manuals the verified paths above were checked against:
+
+- [https://www.intel.com/content/dam/support/us/en/documents/intel-nuc/NUC-AptioV-BIOS-Glossary.pdf](https://www.intel.com/content/dam/support/us/en/documents/intel-nuc/NUC-AptioV-BIOS-Glossary.pdf)
 
 ## Back to the walkthrough
 

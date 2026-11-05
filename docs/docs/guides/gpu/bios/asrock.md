@@ -14,22 +14,28 @@ Do the settings in this order: CSM off, then Above 4G Decoding, then Resizable B
 
 ## ASRock
 
-Enter the BIOS with **F2 or Del**.
+Enter the BIOS with **F2 or Del**. Press F6 to switch between EZ Mode and Advanced Mode.
 
 | Setting | Where to look | Set it to | Checked against a source |
 |---------|---------------|-----------|--------------------------|
-| Intel virtualization (VT-x) | usually under `Advanced > CPU Configuration > Intel Virtualization Technology` | Enabled | no |
-| AMD virtualization (SVM) | usually under `Advanced > CPU Configuration > SVM Mode` | Enabled | no |
-| Intel VT-d | usually under `Advanced > Chipset Configuration > VT-d (older boards: Advanced > North Bridge Configuration > VT-d)` | Enabled | no |
-| AMD IOMMU | usually under `Advanced > AMD CBS > NBIO Common Options > IOMMU (AM5: Advanced > North Bridge > IOMMU)` | Enabled | no |
-| Above 4G Decoding | usually under `Advanced > North Bridge Configuration > Above 4G Decoding (Intel: Advanced > Chipset Configuration > Above 4G Decoding)` | Enabled | no |
-| CSM (legacy boot support) | usually under `Boot > CSM > CSM` | Disabled | no |
-| Primary display | usually under `Advanced > North Bridge (or Chipset) Configuration > Primary Graphics Adapter` | Onboard | no |
-| Resizable BAR (optional) | usually under `Advanced > North Bridge (or Chipset) Configuration > Re-Size BAR Support` | Disabled if the VM will not start | no |
+| Intel virtualization (VT-x) | `Advanced > CPU Configuration > Intel Virtualization Technology` | Enabled | yes ([source](https://download.asrock.com/Manual/Software/Intel%20Z790/Software_BIOS%20Setup%20Guide_English.pdf)) |
+| AMD virtualization (SVM) | `Advanced > CPU Configuration > SVM Mode` | Enabled | yes ([source 1](https://download.asrock.com/Manual/Software/AMD%20X670/Software_BIOS%20Setup%20Guide_English.pdf), [source 2](https://download.asrock.com/Manual/Software/AMD%20X870/Software_BIOS%20Setup%20Guide_English.pdf)) |
+| Intel VT-d | `Advanced > Chipset Configuration > VT-d` | Enabled | yes ([source](https://download.asrock.com/Manual/Software/Intel%20Z790/Software_BIOS%20Setup%20Guide_English.pdf)) |
+| AMD IOMMU | `Advanced > AMD CBS > NBIO Common Options > IOMMU` | Enabled | yes ([source 1](https://download.asrock.com/Manual/Software/AMD%20X670/Software_BIOS%20Setup%20Guide_English.pdf), [source 2](https://download.asrock.com/Manual/Software/AMD%20X870/Software_BIOS%20Setup%20Guide_English.pdf)) |
+| Above 4G Decoding | `Advanced > Chipset Configuration > Above 4G Decoding (AMD boards: Advanced > PCI Configuration > Above 4G Decoding)` | Enabled | yes ([source 1](https://download.asrock.com/Manual/Software/Intel%20Z790/Software_BIOS%20Setup%20Guide_English.pdf), [source 2](https://download.asrock.com/Manual/Software/AMD%20X870/Software_BIOS%20Setup%20Guide_English.pdf)) |
+| CSM (legacy boot support) | `Boot > CSM (Compatibility Support Module) > CSM (AMD boards: Boot > CSM)` | Disabled | yes ([source 1](https://download.asrock.com/Manual/Software/Intel%20Z790/Software_BIOS%20Setup%20Guide_English.pdf), [source 2](https://download.asrock.com/Manual/Software/AMD%20X870/Software_BIOS%20Setup%20Guide_English.pdf)) |
+| Primary display | `Advanced > Chipset Configuration > Primary Graphics Adapter (Intel boards). AMD boards: Advanced > Onboard Devices Configuration > Integrated Graphics Controller` | Onboard | yes ([source 1](https://download.asrock.com/Manual/Software/Intel%20Z790/Software_BIOS%20Setup%20Guide_English.pdf), [source 2](https://download.asrock.com/Manual/Software/AMD%20X670/Software_BIOS%20Setup%20Guide_English.pdf)) |
+| Resizable BAR (optional) | `Advanced > Chipset Configuration > C.A.M (Clever Access Memory) (AMD boards: Advanced > PCI Configuration > Re-Size BAR Support)` | Disabled if the VM will not start | yes ([source 1](https://download.asrock.com/Manual/Software/Intel%20Z790/Software_BIOS%20Setup%20Guide_English.pdf), [source 2](https://download.asrock.com/Manual/Software/AMD%20X870/Software_BIOS%20Setup%20Guide_English.pdf)) |
 
 ## Official manual
 
 The vendor's manuals and support pages: [https://www.asrock.com/support](https://www.asrock.com/support).
+
+Manuals the verified paths above were checked against:
+
+- [https://download.asrock.com/Manual/Software/Intel%20Z790/Software_BIOS%20Setup%20Guide_English.pdf](https://download.asrock.com/Manual/Software/Intel%20Z790/Software_BIOS%20Setup%20Guide_English.pdf)
+- [https://download.asrock.com/Manual/Software/AMD%20X670/Software_BIOS%20Setup%20Guide_English.pdf](https://download.asrock.com/Manual/Software/AMD%20X670/Software_BIOS%20Setup%20Guide_English.pdf)
+- [https://download.asrock.com/Manual/Software/AMD%20X870/Software_BIOS%20Setup%20Guide_English.pdf](https://download.asrock.com/Manual/Software/AMD%20X870/Software_BIOS%20Setup%20Guide_English.pdf)
 
 ## Back to the walkthrough
 

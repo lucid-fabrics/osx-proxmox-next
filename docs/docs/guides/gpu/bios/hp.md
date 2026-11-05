@@ -14,23 +14,32 @@ Do the settings in this order: CSM off, then Above 4G Decoding, then Resizable B
 
 ## HP workstations and desktops
 
-Enter the BIOS with **Esc, then F10**. F9 opens the boot menu.
+Enter the BIOS with **F10 (press repeatedly as soon as the power light turns white)**. F9 opens the boot menu.
 
 | Setting | Where to look | Set it to | Checked against a source |
 |---------|---------------|-----------|--------------------------|
-| Intel virtualization (VT-x) | usually under `Advanced > System Options > Virtualization Technology (VTx)` | Enabled | no |
-| AMD virtualization (SVM) | usually under `Advanced > System Options > SVM CPU Virtualization` | Enabled | no |
-| Intel VT-d | usually under `Advanced > System Options > Virtualization Technology for Directed I/O (VTd)` | Enabled | no |
-| AMD IOMMU | usually under `Advanced > System Options > IOMMU (name varies)` | Enabled | no |
+| Intel virtualization (VT-x) | `Advanced > System Options > Virtualization Technology (VTx)` | Enabled | yes ([source 1](https://kaas.hpcloud.hp.com/pdf-public/pdf_7905584_en-US-1.pdf), [source 2](https://kaas.hpcloud.hp.com/pdf-public/pdf_5451169_en-US-1.pdf), [source 3](https://kaas.hpcloud.hp.com/pdf-public/pdf_7582484_en-US-1.pdf)) |
+| AMD virtualization (SVM) | `Advanced > System Options > SVM CPU Virtualization` | Enabled | yes ([source](https://kaas.hpcloud.hp.com/pdf-public/pdf_7905584_en-US-1.pdf)) |
+| Intel VT-d | `Advanced > System Options > Virtualization Technology for Directed I/O (VTd)` | Enabled | yes ([source 1](https://kaas.hpcloud.hp.com/pdf-public/pdf_7905584_en-US-1.pdf), [source 2](https://kaas.hpcloud.hp.com/pdf-public/pdf_7582484_en-US-1.pdf)) |
+| AMD IOMMU | `Advanced > System Options > SVM CPU Virtualization (it enables AMD-V and AMD-Vi, there is no separate IOMMU switch)` | Enabled | yes ([source](https://kaas.hpcloud.hp.com/pdf-public/pdf_7905584_en-US-1.pdf)) |
 | Above 4G Decoding | usually under `Advanced > Device Options > Above 4G MMIO (name varies)` | Enabled | no |
-| CSM (legacy boot support) | usually under `Advanced > Boot Options > Legacy Support` | Disabled | no |
-| Primary display | usually under `Advanced > Built-in Device Options > Video: Integrated Graphics` | Integrated | no |
+| CSM (legacy boot support) | `Advanced > Boot Options (the current guides show UEFI Boot Order and no Legacy Support or CSM item)` | UEFI | yes ([source 1](https://kaas.hpcloud.hp.com/pdf-public/pdf_5451169_en-US-1.pdf), [source 2](https://kaas.hpcloud.hp.com/pdf-public/pdf_7582484_en-US-1.pdf), [source 3](https://kaas.hpcloud.hp.com/pdf-public/pdf_7905584_en-US-1.pdf)) |
+| Primary display | `Advanced > Built-In Device Options > VGA Boot Device (models with discrete graphics)` | Integrated graphics | yes ([source](https://kaas.hpcloud.hp.com/pdf-public/pdf_7582484_en-US-1.pdf)) |
+| Resizable BAR (optional) | `Advanced > Slot Settings > Resizable BARs` | Enabled | yes ([source](https://kaas.hpcloud.hp.com/pdf-public/pdf_7582484_en-US-1.pdf)) |
 
-No path is recorded for: Resizable BAR (optional). See the generic names at the bottom of this page.
+Not checked against a manual:
+
+- Above 4G Decoding: Not verified: the Z2 G9, Z4 G5 and Elite 800 G9 guides list no Above 4G or MMIO item.
 
 ## Official manual
 
 The vendor's manuals and support pages: [https://support.hp.com](https://support.hp.com).
+
+Manuals the verified paths above were checked against:
+
+- [https://kaas.hpcloud.hp.com/pdf-public/pdf_7905584_en-US-1.pdf](https://kaas.hpcloud.hp.com/pdf-public/pdf_7905584_en-US-1.pdf)
+- [https://kaas.hpcloud.hp.com/pdf-public/pdf_5451169_en-US-1.pdf](https://kaas.hpcloud.hp.com/pdf-public/pdf_5451169_en-US-1.pdf)
+- [https://kaas.hpcloud.hp.com/pdf-public/pdf_7582484_en-US-1.pdf](https://kaas.hpcloud.hp.com/pdf-public/pdf_7582484_en-US-1.pdf)
 
 ## Back to the walkthrough
 

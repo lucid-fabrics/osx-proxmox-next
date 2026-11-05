@@ -14,22 +14,27 @@ Do the settings in this order: CSM off, then Above 4G Decoding, then Resizable B
 
 ## Gigabyte / Aorus
 
-Enter the BIOS with **Del**. Press F2 to switch between Easy and Advanced mode.
+Enter the BIOS with **Del**. Press F2 to switch between Easy Mode and Advanced Mode.
 
 | Setting | Where to look | Set it to | Checked against a source |
 |---------|---------------|-----------|--------------------------|
-| Intel virtualization (VT-x) | usually under `Tweaker > Advanced CPU Settings > Intel Virtualization Technology` | Enabled | no |
-| AMD virtualization (SVM) | usually under `Tweaker > Advanced CPU Settings > SVM Mode` | Enabled | no |
-| Intel VT-d | usually under `Settings > Miscellaneous > VT-d` | Enabled | no |
-| AMD IOMMU | usually under `Settings > Miscellaneous > IOMMU (older boards: Settings > AMD CBS > NBIO Common Options > IOMMU)` | Enabled | no |
-| Above 4G Decoding | usually under `Settings > IO Ports > Above 4G Decoding` | Enabled | no |
-| CSM (legacy boot support) | usually under `Boot > CSM Support` | Disabled | no |
-| Primary display | usually under `Settings > IO Ports > Initial Display Output` | IGFX (the onboard graphics) | no |
-| Resizable BAR (optional) | usually under `Settings > IO Ports > Re-Size BAR Support` | Disabled if the VM will not start | no |
+| Intel virtualization (VT-x) | `Tweaker > Advanced CPU Settings > Intel (VMX) Virtualization Technology` | Enabled | yes ([source](https://download.gigabyte.com/FileList/Manual/mb_manual_Z790-AORUS-XTREME-X-ICE_BIOS_e.pdf)) |
+| AMD virtualization (SVM) | `Tweaker > Advanced CPU Settings > SVM Mode` | Enabled | yes ([source](https://download.gigabyte.com/FileList/Manual/mb_manual_b550-aorus-elite-ax_e.pdf)) |
+| Intel VT-d | `Settings > Miscellaneous > VT-d` | Enabled | yes ([source](https://download.gigabyte.com/FileList/Manual/mb_manual_Z790-AORUS-XTREME-X-ICE_BIOS_e.pdf)) |
+| AMD IOMMU | `Settings > Miscellaneous > IOMMU` | Enabled | yes ([source](https://download.gigabyte.com/FileList/Manual/mb_manual_b550-aorus-elite-ax_e.pdf)) |
+| Above 4G Decoding | `Settings > IO Ports > Above 4G Decoding` | Enabled | yes ([source 1](https://download.gigabyte.com/FileList/Manual/mb_manual_Z790-AORUS-XTREME-X-ICE_BIOS_e.pdf), [source 2](https://download.gigabyte.com/FileList/Manual/mb_manual_b550-aorus-elite-ax_e.pdf)) |
+| CSM (legacy boot support) | `Boot > CSM Support` | Disabled | yes ([source 1](https://download.gigabyte.com/FileList/Manual/mb_manual_Z790-AORUS-XTREME-X-ICE_BIOS_e.pdf), [source 2](https://download.gigabyte.com/FileList/Manual/mb_manual_b550-aorus-elite-ax_e.pdf)) |
+| Primary display | `Settings > IO Ports > Initial Display Output` | IGFX (the onboard graphics) | yes ([source 1](https://download.gigabyte.com/FileList/Manual/mb_manual_Z790-AORUS-XTREME-X-ICE_BIOS_e.pdf), [source 2](https://download.gigabyte.com/FileList/Manual/mb_manual_b550-aorus-elite-ax_e.pdf)) |
+| Resizable BAR (optional) | `Settings > IO Ports > Re-Size BAR Support` | Disabled if the VM will not start | yes ([source](https://download.gigabyte.com/FileList/Manual/mb_manual_Z790-AORUS-XTREME-X-ICE_BIOS_e.pdf)) |
 
 ## Official manual
 
 The vendor's manuals and support pages: [https://www.gigabyte.com/Support](https://www.gigabyte.com/Support).
+
+Manuals the verified paths above were checked against:
+
+- [https://download.gigabyte.com/FileList/Manual/mb_manual_Z790-AORUS-XTREME-X-ICE_BIOS_e.pdf](https://download.gigabyte.com/FileList/Manual/mb_manual_Z790-AORUS-XTREME-X-ICE_BIOS_e.pdf)
+- [https://download.gigabyte.com/FileList/Manual/mb_manual_b550-aorus-elite-ax_e.pdf](https://download.gigabyte.com/FileList/Manual/mb_manual_b550-aorus-elite-ax_e.pdf)
 
 ## Back to the walkthrough
 

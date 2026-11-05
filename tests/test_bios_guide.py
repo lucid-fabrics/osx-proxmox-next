@@ -31,7 +31,10 @@ def test_every_vendor_entry_is_complete_and_honest_about_confidence():
             if entry["verified"]:
                 assert entry["source"].startswith("https://"), (key, setting)
     verified = [(k, s) for k, v in DATA["vendors"].items() for s, e in v["paths"].items() if e["verified"]]
-    assert verified and all(k == "dell" for k, _ in verified)  # only Dell's wording was checked against a source
+    assert len(verified) >= 70  # the paths were checked against vendor manuals
+    assert not any(k == "mini-pc" for k, _ in verified)  # no official BIOS manual exists for these
+    for key, setting in (("asrock-rack", "primary_display"), ("hp", "rebar"), ("lenovo", "rebar")):
+        assert DATA["vendors"][key]["paths"][setting]["verified"]
     for group in ("virtualization", "iommu", "above4g", "csm", "primary_display", "rebar"):
         assert DATA["generic"][group]["names"] and DATA["generic"][group]["where"]
 
@@ -129,13 +132,14 @@ def test_card_is_ascii_boxed_and_fits_the_terminal():
 
 
 def test_unverified_paths_are_hedged_and_verified_ones_are_not():
-    assert "Usually under:" in card(["svm"], "asus")
+    assert "Usually under:" in card(["svm"], "mini-pc")
+    assert "Path: " in card(["svm"], "asus") and "Usually under:" not in card(["svm"], "asus")
     dell = bg.build_card([{"key": "vtd", "ok": False, "detail": ""}], FACTS, DATA, "dell")
     assert "Path: Virtualization Support > VT for Direct I/O" in dell and "Usually under: Virtualization" not in dell
 
 
 def test_vendor_without_an_entry_falls_back_to_generic_names():
-    text = bg.build_card([{"key": "primary_display", "ok": False, "detail": ""}], FACTS, DATA, "asrock-rack")
+    text = bg.build_card([{"key": "primary_display", "ok": False, "detail": ""}], FACTS, DATA, "hpe")
     assert "Look for: Primary Display, Initial Display Output" in text.replace("|", " ").replace("  ", " ") or "Look for:" in text
     generic = bg.build_card([{"key": "csm", "ok": False, "detail": ""}], FACTS, DATA, "generic", resume_cmd="X")
     assert "Look for:" in generic and "Open the BIOS with" not in generic and "bios/generic" in generic
