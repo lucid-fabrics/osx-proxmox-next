@@ -19,7 +19,12 @@ FILES = {
     "/etc/modprobe.d/kvm.conf": "options kvm ignore_msrs=Y report_ignored_msrs=0\n",
     "/etc/modules": "vfio\nvfio_iommu_type1\nvfio_pci\nvfio_virqfd\n",
     "/etc/default/grub": GRUB,
+    # pve-mirna: nouveau is shipped with the kernel, the proprietary nvidia module is not installed
+    "/lib/modules/7.0.14-25-pve/modules.dep": ("kernel/drivers/gpu/drm/nouveau/nouveau.ko: kernel/drivers/gpu/drm/drm.ko\n"
+                                               "kernel/drivers/video/fbdev/nvidia/nvidiafb.ko:\n"),
 }
+# pve-mirna's vfio.conf ids (10de:2489,10de:228b) are stale: the cards are 10de:2503 and 10de:2504, audio 10de:228e.
+# Nothing binds them at boot; vfio_pci is loaded from /etc/modules and no host driver can claim them.
 
 
 def mirna(tmp_path: Path, files: dict | None = None, driver: str | None = "vfio-pci") -> str:
@@ -40,7 +45,9 @@ def plan(root: str, **opts) -> dict:
 def test_mirna_host_already_passes_the_card_through_so_nothing_is_planned(tmp_path):
     p = plan(mirna(tmp_path))
     assert p["changes"] == [] and p["commands"] == [] and not p["optional"] and p["refusals"] == []
-    assert any("already bound to vfio-pci and set to bind at boot" in s for s in p["skipped"])
+    assert any("already bound to vfio-pci and no host driver claims it at boot" in s for s in p["skipped"])
+    assert any("Proxmox hands the card to vfio-pci when the VM starts; no host driver claims it at boot." in n
+               for n in p["notes"])
     assert any("Kernel arguments are already set" in s for s in p["skipped"])
     assert any("VFIO modules are already listed" in s for s in p["skipped"])
     assert not hs.new_plan()["optional"] and p["reboot_required"] is False
@@ -65,6 +72,63 @@ def test_bound_now_but_nothing_persistent_is_a_warning_and_an_optional_write(tmp
     wanted = plan(root, write_optional=True)
     paths = {c["path"] for c in wanted["changes"]}
     assert hs.MODPROBE_FILE in paths and hs.BIND_SCRIPT in paths
+
+
+def _with(extra, drop=()):
+    files = {k: v for k, v in FILES.items() if k not in drop}
+    files.update(extra)
+    return files
+
+
+def test_softdeps_alone_warn_when_a_host_driver_could_claim_the_card(tmp_path):
+    # nouveau is installed and not blacklisted: the softdeps only order loading, nothing binds the card
+    open_nouveau = _with({"/etc/modprobe.d/pve-blacklist.conf": "blacklist nvidiafb\n",
+                          "/etc/modprobe.d/vfio-nvidia.conf": FILES["/etc/modprobe.d/vfio-nvidia.conf"].replace(
+                              "blacklist nouveau\n", "")})
+    p = plan(mirna(tmp_path / "a", open_nouveau))
+    assert p["optional"] is True and any("may be lost after a reboot" in w for w in p["warnings"])
+    assert not p["notes"] or not any("Proxmox hands" in n for n in p["notes"])
+    # the proprietary driver is installed and not blacklisted
+    nv = _with({"/lib/modules/7.0.14-25-pve/modules.dep": "updates/dkms/nvidia.ko.zst: \n"},
+               drop=())
+    nv["/etc/modprobe.d/pve-blacklist.conf"] = "blacklist nouveau\n"
+    assert plan(mirna(tmp_path / "b", nv))["optional"] is True
+    # no modules.dep to read: unknown counts as claimable
+    unknown = {k: v for k, v in _with({"/etc/modprobe.d/pve-blacklist.conf": "blacklist nvidiafb\n"}).items()
+               if "modules.dep" not in k}
+    assert plan(mirna(tmp_path / "c", unknown))["optional"] is True
+
+
+def test_softdeps_with_every_claimant_blocked_is_already_ok(tmp_path):
+    # nvidia not installed (no module), nouveau blacklisted
+    p = plan(mirna(tmp_path))
+    assert not p["optional"] and p["changes"] == []
+    # nouveau absent from the kernel and nothing blacklisted is just as safe
+    none = _with({"/lib/modules/7.0.14-25-pve/modules.dep": "kernel/fs/ext4.ko:\n",
+                  "/etc/modprobe.d/pve-blacklist.conf": "# empty\n",
+                  "/etc/modprobe.d/vfio-nvidia.conf": FILES["/etc/modprobe.d/vfio-nvidia.conf"].replace(
+                      "blacklist nouveau\n", "")})
+    assert not plan(mirna(tmp_path / "x", none))["optional"]
+
+
+def test_stale_ids_in_modprobe_do_not_count_as_a_binding(tmp_path):
+    # pve-mirna's vfio.conf names 10de:2489 and 10de:228b, not the installed cards
+    nosoft = {k: v for k, v in FILES.items() if "vfio-nvidia" not in k}
+    assert plan(mirna(tmp_path, nosoft))["optional"] is True
+
+
+def test_amd_softdeps_alone_always_plan_the_binding(tmp_path):
+    root = make_host(tmp_path, cmdline=CMDLINE)
+    for path, text in FILES.items():
+        write(root, path, text)
+    write(root, "/etc/modprobe.d/vfio-amd.conf", "softdep amdgpu pre: vfio-pci\nsoftdep radeon pre: vfio-pci\n"
+          "softdep snd_hda_intel pre: vfio-pci\n")
+    add_card(root, bdf="0000:06:00", group=2, boot_vga=True)  # AMD defaults, bound to vfio-pci now
+    run = FakeRun({"efibootmgr -v": (0, "BootCurrent: 0000\n")})
+    p = hs.plan_host(hs.detect_facts(str(root), run, env={}), hs.build_target(str(root), "0000:06:00", "amd", "none"),
+                     {}, str(root), run)
+    assert not p["optional"] and hs.MODPROBE_FILE in {c["path"] for c in p["changes"]}
+    assert not any("already bound" in s for s in p["skipped"])
 
 
 def test_not_bound_now_still_plans_the_binding(tmp_path):
@@ -105,12 +169,16 @@ def test_missing_kernel_arg_is_still_planned_on_an_otherwise_ready_host(tmp_path
 
 def _cli_host(tmp_path):
     from test_gpu_setup import Env, ready
-    from test_gpu_setup_cli import at_step
     env = Env(tmp_path, cpu="intel")
-    add_card(env.root)  # bound to vfio-pci now, nothing persistent on disk
+    add_card(env.root, vendor=0x10DE, device=0x2504, audio=0x228E)  # bound to vfio-pci now, nothing persistent
     ready(env)
     write(env.root, "/etc/modules", "vfio\nvfio_iommu_type1\nvfio_pci\n")
-    return env, at_step(env, 4)
+    s = env.session()
+    assert s.choose("06:00", 100, "gpu", ack=True) == []
+    s.goto(4)
+    s.state["done"] = [1, 2, 3]
+    s.save()
+    return env, s
 
 
 def _step(s, answers, yes=False):
@@ -187,27 +255,52 @@ def test_nvidia_guidance_is_in_docs_readme_and_bash():
 
 # ── bash parity ──
 
-def _bash_host(bash, vm, tmp_path):
-    from test_gpu_hardening_bash import chosen_state
-    root, state_dir, env, _state = chosen_state(bash, vm, tmp_path)
+def _bash_host(bash, vm, tmp_path, nvidia=False):
+    from test_gpu_hardening_bash import chosen_state, walkthrough_env
+    if nvidia:
+        import json
+        root, state_dir, env = walkthrough_env(tmp_path, vm)
+        import shutil
+        shutil.rmtree(root / "sys/bus/pci/devices/0000:06:00.0")
+        shutil.rmtree(root / "sys/bus/pci/devices/0000:06:00.1")
+        for link in (root / "sys/kernel/iommu_groups").glob("*/devices/0000:06:00.*"):
+            link.unlink()
+        add_card(root, vendor=0x10DE, device=0x2504, audio=0x228E)
+        stub = bash.stub_bin / "lspci"
+        stub.write_text('#!/bin/sh\necho "06:00.0 VGA compatible controller [0300]: Test Card [10de:2504]"\n')
+        stub.chmod(0o755)
+        bash("gpu_setup --yes --vm 100 --gpu 06:00 --accept-nullmoth-risk", env=env, expect=None)
+        assert json.loads((state_dir / "gpu-setup.json").read_text())["gpu"]["identity"]["vendor"] == 0x10DE
+    else:
+        root, _state_dir, env, _state = chosen_state(bash, vm, tmp_path)
     write(root, "/proc/cmdline", "BOOT_IMAGE=/x ro intel_iommu=on iommu=pt\n")
     write(root, "/etc/modules", "vfio\nvfio_iommu_type1\nvfio_pci\n")
     write(root, "/etc/default/grub", 'GRUB_CMDLINE_LINUX_DEFAULT="quiet intel_iommu=on iommu=pt"\n')
     return root, env
 
 
-def test_bash_host_step_proposes_nothing_when_the_binding_is_already_persistent(bash, vm, tmp_path):
+def test_bash_host_step_amd_softdeps_alone_still_plan_the_binding(bash, vm, tmp_path):
     root, env = _bash_host(bash, vm, tmp_path)
     write(root, "/etc/modprobe.d/vfio-gpu.conf", "softdep amdgpu pre: vfio-pci\nsoftdep radeon pre: vfio-pci\n"
                                                    "softdep snd_hda_intel pre: vfio-pci\n")
+    res = bash("gpu_step_host", env={**env, "GPU_YES": "yes"}, expect=None)
+    assert "already bound to vfio-pci" not in res.stdout and "may be lost after a reboot" not in res.stdout
+    assert "This is exactly what will change" in res.stdout and hs.MODPROBE_FILE in res.stdout
+
+
+def test_bash_host_step_nvidia_with_no_claiming_driver_is_already_ok(bash, vm, tmp_path):
+    root, env = _bash_host(bash, vm, tmp_path, nvidia=True)
+    write(root, "/etc/modprobe.d/vfio-nvidia.conf", "softdep nouveau pre: vfio-pci\nsoftdep nvidia pre: vfio-pci\n"
+                                                      "softdep snd_hda_intel pre: vfio-pci\nblacklist nouveau\n")
+    write(root, "/etc/modprobe.d/pve-blacklist.conf", "blacklist nvidia\n")
+    write(root, "/lib/modules/7.0.14-25-pve/modules.dep", "kernel/drivers/gpu/drm/nouveau/nouveau.ko:\n")
     res = bash("gpu_step_host", env=env, expect=None)
-    assert "already bound to vfio-pci and set to bind at boot" in res.stdout
-    assert "This is exactly what will change" not in res.stdout and "Apply these changes" not in res.stdout
-    assert not (root / hs.MODPROBE_FILE.lstrip("/")).exists()
+    assert "no host driver claims it at boot" in res.stdout
+    assert "This is exactly what will change" not in res.stdout and not (root / hs.MODPROBE_FILE.lstrip("/")).exists()
 
 
 def test_bash_host_step_warns_and_skips_the_optional_write_by_default(bash, vm, tmp_path):
-    root, env = _bash_host(bash, vm, tmp_path)
+    root, env = _bash_host(bash, vm, tmp_path, nvidia=True)  # bound now, nothing persistent, nothing blocks nouveau
     res = bash("gpu_step_host", env={**env, "GPU_YES": "yes"}, expect=None)
     assert "may be lost after a reboot" in res.stdout and "This is exactly what will change" not in res.stdout
     assert not (root / hs.MODPROBE_FILE.lstrip("/")).exists()

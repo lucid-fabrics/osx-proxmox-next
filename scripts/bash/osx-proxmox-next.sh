@@ -2385,7 +2385,7 @@ def _persistent_binding(facts, target, fns, ids, root, by_id=True, ids_only=Fals
     """What already binds this card to vfio-pci at boot, as a short phrase, or "" when nothing we can find does.
     Looks at: modprobe.d `options vfio-pci ids=` covering every id, a driver_override in an initramfs script or
     udev rule that names the card, `vfio-pci.ids=` on the live or configured kernel command line, and
-    Proxmox-style `softdep <driver> pre: vfio-pci` lines for every driver that could claim the card."""
+    Softdep lines only order module loading; they bind nothing, so they are handled apart (_softdeps_listed)."""
     d = _p(root, "/etc/modprobe.d")
     confs = sorted(d.glob("*.conf")) if d.is_dir() else []
     have = set()
@@ -2414,15 +2414,44 @@ def _persistent_binding(facts, target, fns, ids, root, by_id=True, ids_only=Fals
         text = (_read(f) or "").lower()
         if "driver_override" in text and "vfio-pci" in text and any(n in text for n in needles):
             return "a driver_override script (%s)" % f.name
+    return ""
+
+
+_BL_RE = re.compile(r"^\s*blacklist\s+(\S+)")
+
+
+def _softdeps_listed(target, root):
+    """True when modprobe.d carries `softdep <driver> pre: vfio-pci` for every driver that could claim the card."""
+    d = _p(root, "/etc/modprobe.d")
     softdeps = set()
-    for f in confs:
+    for f in (sorted(d.glob("*.conf")) if d.is_dir() else []):
         for line in (_read(f) or "").splitlines():
             m = _SOFTDEP_RE.match(line.split("#", 1)[0])
             if m and "vfio-pci" in m.group(2).replace("_", "-").split():
                 softdeps.add(m.group(1).replace("-", "_"))
-    if all(n.replace("-", "_") in softdeps for n in _softdeps(target)):
-        return "vfio-pci softdep lines in /etc/modprobe.d"
-    return ""
+    return all(n.replace("-", "_") in softdeps for n in _softdeps(target))
+
+
+def _claiming_drivers(root):
+    """NVIDIA host drivers that are installed and not blacklisted, so could take the card at boot.
+    A kernel without a readable modules.dep counts as "installed" (unknown is not safe)."""
+    d = _p(root, "/etc/modprobe.d")
+    blocked = set()
+    for f in (sorted(d.glob("*.conf")) if d.is_dir() else []):
+        for line in (_read(f) or "").splitlines():
+            m = _BL_RE.match(line.split("#", 1)[0])
+            if m:
+                blocked.add(m.group(1).replace("-", "_"))
+    deps = sorted(_p(root, "/lib/modules").glob("*/modules.dep")) if _p(root, "/lib/modules").is_dir() else []
+    text = "".join(_read(f) or "" for f in deps)
+    found = []
+    for name in ("nouveau", "nvidia"):
+        if name in blocked:
+            continue
+        if deps and not re.search(r"(^|/)%s\.ko[^:/]*:" % name, text, re.M):
+            continue
+        found.append(name)
+    return found
 
 
 def plan_binding(facts, target, root, plan, opts=None):
@@ -2444,7 +2473,14 @@ def plan_binding(facts, target, root, plan, opts=None):
         if how:
             plan["skipped"].append("The card is already bound to vfio-pci and set to bind at boot (%s)" % how)
             return
-        if not idwide and not opts.get("write_optional"):
+        if not how and not idwide and target["vendor"] == "nvidia" and _softdeps_listed(target, root) \
+                and not _claiming_drivers(root):
+            plan["skipped"].append("The card is already bound to vfio-pci and no host driver claims it at boot")
+            plan["notes"].append("Proxmox hands the card to vfio-pci when the VM starts; no host driver claims it "
+                                 "at boot.")
+            return
+        # AMD cards need an early binding (reset bug): no optional skip, fall through to the write
+        if not idwide and target["vendor"] != "amd" and not opts.get("write_optional"):
             plan["optional"] = True
             plan["warnings"].append(
                 "The card is bound to vfio-pci now, but nothing we can find binds it at boot; it may be lost "
