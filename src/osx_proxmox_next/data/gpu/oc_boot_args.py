@@ -25,6 +25,7 @@ import os
 import plistlib
 import shutil
 import sys
+import time
 
 BACKUP = 'config.plist.pre-gpu'
 PATCHED_SHA = BACKUP + '.patched-sha256'
@@ -94,9 +95,12 @@ def detach(oc_dir):
         with open(stamp) as f:
             wrote = f.read().strip()
         if os.path.exists(path) and file_sha(path) != wrote:
+            kept = backup + '.kept-' + time.strftime('%Y%m%d%H%M%S')
+            os.replace(backup, kept)
+            os.remove(stamp)
             sys.stderr.write(
                 'KEPT: config.plist was changed after the boot-args were added, so your version stays. '
-                'The original is still on the disk as ' + BACKUP + '.\n')
+                'The original is on the disk as ' + os.path.basename(kept) + '.\n')
             return
         os.remove(stamp)
     os.replace(backup, path)

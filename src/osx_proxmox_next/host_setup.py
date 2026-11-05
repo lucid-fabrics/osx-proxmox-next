@@ -163,6 +163,8 @@ def pci_devices(root="/"):
             "bdf": dev.name,
             "vendor": _hex(dev / "vendor"),
             "device": _hex(dev / "device"),
+            "subsys_vendor": _hex(dev / "subsystem_vendor"),
+            "subsys_device": _hex(dev / "subsystem_device"),
             "class": _hex(dev / "class"),
             "boot_vga": _hex(dev / "boot_vga") == 1,
             "driver": link.resolve().name if link.exists() else None,
@@ -471,9 +473,16 @@ def _guard_target(target, plan):
 
 
 def _bind_entries(text):
-    """(bdf, vendor, device, class prefix) rows of an existing bind script written by this tool."""
-    return [tuple(m.groups()) for m in re.finditer(
-        r"^bind (\S+) (0x[0-9a-f]{4}) (0x[0-9a-f]{4}) (0x[0-9a-f]+)$", text or "", re.M)]
+    """(bdf, vendor, device, class prefix, subsystem vendor, subsystem device) rows of an existing bind
+    script written by this tool. "-" means the subsystem ids were not recorded (an older script)."""
+    return [(m.group(1), m.group(2), m.group(3), m.group(4), m.group(5) or "-", m.group(6) or "-")
+            for m in re.finditer(
+                r"^bind (\S+) (0x[0-9a-f]{4}) (0x[0-9a-f]{4}) (0x[0-9a-f]+)(?: (0x[0-9a-f]{4}|-) (0x[0-9a-f]{4}|-))?$",
+                text or "", re.M)]
+
+
+def _subsys(value):
+    return "0x%04x" % value if value is not None else "-"
 
 
 def plan_binding(facts, target, root, plan):
@@ -505,9 +514,17 @@ def plan_binding(facts, target, root, plan):
         _add_change(plan, root, MODPROBE_FILE, head + softdep, "Load vfio-pci before the GPU drivers")
         rows = _bind_entries(_read(_p(root, BIND_SCRIPT)))
         for fn in fns:
-            row = (fn["bdf"], "0x%04x" % fn["vendor"], "0x%04x" % fn["device"], _class_prefix(fn))
-            if row not in rows:
-                rows.append(row)
+            row = (fn["bdf"], "0x%04x" % fn["vendor"], "0x%04x" % fn["device"], _class_prefix(fn),
+                   _subsys(fn.get("subsys_vendor")), _subsys(fn.get("subsys_device")))
+            rows = [r for r in rows if r[:3] != row[:3]]
+            rows.append(row)
+            same = [d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d.get("vendor") == fn["vendor"]
+                    and d.get("device") == fn["device"] and d.get("subsys_vendor") == fn.get("subsys_vendor")
+                    and d.get("subsys_device") == fn.get("subsys_device")]
+            if same and fn["bdf"].endswith(".0"):
+                plan["warnings"].append(
+                    "%s has the same ids as %s, even the subsystem ids, so the card is told apart by its slot "
+                    "only. Do not move either card to another slot." % (fn["bdf"][:-2], ", ".join(same)))
         _add_change(plan, root, BIND_SCRIPT, _bind_script(rows),
                     "Bind this card by PCI address early in boot", mode=0o755)
     else:
@@ -536,20 +553,25 @@ def _class_prefix(fn):
 
 
 def _bind_script(rows):
-    """Initramfs script. Each line re-checks vendor, device and class at boot: an address that now
+    """Initramfs script. Each line re-checks vendor, device, class and subsystem ids at boot: an address that now
     holds a different device (a card moved, an NVMe added) is skipped, never bound."""
-    lines = "\n".join("bind %s %s %s %s" % row for row in rows)
+    lines = "\n".join("bind %s %s %s %s %s %s" % tuple(row) for row in rows)
     return (
         "#!/bin/sh\n" + HEADER +
         'PREREQ=""\nprereqs() { echo "$PREREQ"; }\ncase "$1" in prereqs) prereqs; exit 0 ;; esac\n'
         "# Mark this card's functions for vfio-pci before any GPU driver can claim them, but only when the\n"
-        "# device at that address still has the vendor, device id and class recorded at setup time.\n"
+        "# device at that address still has the vendor, device id, class and subsystem ids recorded at setup time.\n"
         "bind() {\n"
         '  d="${OSX_NEXT_SYSFS:-/sys}/bus/pci/devices/$1"\n'
         '  [ -r "$d/vendor" ] || return 0\n'
         '  read -r v < "$d/vendor"; read -r dev < "$d/device"; read -r c < "$d/class"\n'
         '  [ "$v" = "$2" ] && [ "$dev" = "$3" ] || return 0\n'
         '  case "$c" in "$4"*) ;; *) return 0 ;; esac\n'
+        '  sv=""; sd=""\n'
+        '  [ -r "$d/subsystem_vendor" ] && read -r sv < "$d/subsystem_vendor"\n'
+        '  [ -r "$d/subsystem_device" ] && read -r sd < "$d/subsystem_device"\n'
+        '  [ "$5" = "-" ] || [ "$sv" = "$5" ] || return 0\n'
+        '  [ "$6" = "-" ] || [ "$sd" = "$6" ] || return 0\n'
         '  echo vfio-pci > "$d/driver_override" 2>/dev/null || true\n'
         "}\n"
         + lines + "\n/sbin/modprobe -q vfio-pci || true\nexit 0\n")
@@ -770,7 +792,8 @@ def build_target(root, bdf, vendor, reset="none", identity=None):
     *identity* is the saved selection (see check_identity). When the device at *bdf* no longer
     matches it the target carries ``mismatch`` and every step refuses to act on it."""
     devices = pci_devices(root)
-    funcs = [{"bdf": d["bdf"], "vendor": d["vendor"], "device": d["device"], "class": d["class"]}
+    funcs = [{"bdf": d["bdf"], "vendor": d["vendor"], "device": d["device"], "class": d["class"],
+              "subsys_vendor": d["subsys_vendor"], "subsys_device": d["subsys_device"]}
              for d in devices if d["bdf"].startswith(bdf + ".")]
     boot = any(d["boot_vga"] for d in devices if d["bdf"].startswith(bdf + "."))
     return {"vendor": vendor, "bdf": bdf, "boot_vga": boot, "reset": reset, "functions": funcs,
@@ -1164,10 +1187,17 @@ def hostpci_key(value):
 def make_record(vmid, bdf, vendor, cfg, hostpci, global_args, vga_none, oc):
     """What undo needs: the VM before the attach, and what the attach wrote."""
     args = cfg.get("args")
+    added, replaced = [], {}
+    for arg in global_args:
+        old = _global_re(arg).search(args or "")
+        if old is None:
+            added.append(arg)
+        elif old.group(0) != arg:
+            replaced[arg] = old.group(0)
     return {"vmid": int(vmid), "bdf": bdf, "vendor": vendor, "hostpci0": cfg.get("hostpci0"), "args": args,
             "vga": cfg.get("vga"), "vga_changed": bool(vga_none), "oc": oc, "fp": vm_fingerprint(cfg),
             "after": {"hostpci0": hostpci, "args": with_global_args(args or "", global_args),
-                      "vga": "none" if vga_none else None, "added_args": list(global_args)}}
+                      "vga": "none" if vga_none else None, "added_args": added, "replaced_args": replaced}}
 
 
 def vm_restore(record, cfg):
@@ -1178,7 +1208,9 @@ def vm_restore(record, cfg):
     actions, notes = [], []
     after = record.get("after")
     cur_hp, orig_hp = cfg.get("hostpci0"), record.get("hostpci0")
-    if after is None or (cur_hp is not None and hostpci_key(cur_hp) == hostpci_key(after.get("hostpci0"))):
+    if cur_hp == orig_hp:
+        pass  # untouched (a refused or partial attach): nothing to undo, nothing to claim
+    elif after is None or (cur_hp is not None and hostpci_key(cur_hp) == hostpci_key(after.get("hostpci0"))):
         if orig_hp:
             if cur_hp != orig_hp:
                 actions.append({"op": "set", "key": "hostpci0", "value": orig_hp})
@@ -1187,23 +1219,31 @@ def vm_restore(record, cfg):
     elif cur_hp is not None:
         notes.append("hostpci0 was changed after the card was attached (%s). Your value was kept." % cur_hp)
     cur_args, orig_args = cfg.get("args", ""), record.get("args") or ""
-    if after is None or cur_args == after.get("args"):
-        if cur_args != orig_args:
-            actions.append({"op": "set", "key": "args", "value": orig_args} if orig_args
-                           else {"op": "delete", "key": "args"})
+    if cur_args == orig_args:
+        pass
+    elif after is None or cur_args == after.get("args"):
+        actions.append({"op": "set", "key": "args", "value": orig_args} if orig_args
+                       else {"op": "delete", "key": "args"})
     else:
         stripped = without_global_args(cur_args, after.get("added_args") or [])
+        for new, old in (after.get("replaced_args") or {}).items():
+            if new in stripped:
+                stripped = stripped.replace(new, old, 1)
         if stripped != cur_args:
             actions.append({"op": "set", "key": "args", "value": stripped} if stripped
                            else {"op": "delete", "key": "args"})
-        notes.append("args were edited after the card was attached. Only the arguments this tool added were "
-                     "removed; your edits were kept.")
+            notes.append("args were edited after the card was attached. Only the arguments this tool added "
+                         "were removed; your edits were kept.")
+        else:
+            notes.append("args were edited after the card was attached. None of the arguments this tool "
+                         "added are left in them, so your edits were kept as they are.")
     if record.get("vga_changed"):
         cur_vga, orig_vga = cfg.get("vga"), record.get("vga")
-        if after is None or cur_vga == after.get("vga"):
-            if cur_vga != orig_vga:
-                actions.append({"op": "set", "key": "vga", "value": orig_vga} if orig_vga
-                               else {"op": "delete", "key": "vga"})
+        if cur_vga == orig_vga:
+            pass
+        elif after is None or cur_vga == after.get("vga"):
+            actions.append({"op": "set", "key": "vga", "value": orig_vga} if orig_vga
+                           else {"op": "delete", "key": "vga"})
         else:
             notes.append("The display setting (vga) was changed after the card was attached (%s). Your value "
                          "was kept." % (cur_vga or "unset"))
@@ -1250,9 +1290,10 @@ def load_mappings(root="/", run=default_run):
     out = {}
 
     def add(name, path):
-        bdf = norm_bdf(path)
-        if name and bdf:
-            out.setdefault(name, set()).add(bdf)
+        for one in (path or "").split(";"):
+            bdf = norm_bdf(one)
+            if name and bdf:
+                out.setdefault(name, set()).add(bdf)
 
     text = _read(_p(root, "/etc/pve/mapping/pci.cfg"))
     if text is not None:

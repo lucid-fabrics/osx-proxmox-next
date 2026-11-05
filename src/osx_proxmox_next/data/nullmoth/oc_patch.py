@@ -29,11 +29,13 @@ it is unpacked.
 Exit codes: 0 ok, 2 refused (precondition not met, nothing changed),
 3 nothing to restore.
 """
+import glob
 import hashlib
 import os
 import plistlib
 import shutil
 import sys
+import time
 import zipfile
 
 BACKUP = 'config.plist.pre-nullmoth'
@@ -178,7 +180,8 @@ def detach(oc_dir, soft=False):
     backup = os.path.join(oc_dir, BACKUP)
     stamp = os.path.join(oc_dir, PATCHED_SHA)
     if not os.path.exists(backup):
-        if soft and not os.path.isdir(os.path.join(oc_dir, 'Kexts', KEXT)):
+        if soft and (not os.path.isdir(os.path.join(oc_dir, 'Kexts', KEXT))
+                     or glob.glob(backup + '.kept-*')):
             sys.stderr.write('no ' + BACKUP + ' found, nothing to restore\n')
             return
         refuse('no ' + BACKUP + ' found, nothing to restore.', 3)
@@ -186,9 +189,12 @@ def detach(oc_dir, soft=False):
         with open(stamp) as f:
             wrote = f.read().strip()
         if os.path.exists(path) and file_sha(path) != wrote:
+            kept = backup + '.kept-' + time.strftime('%Y%m%d%H%M%S')
+            os.replace(backup, kept)
+            os.remove(stamp)
             sys.stderr.write(
                 'KEPT: config.plist was changed after NullMoth was prepared, so your version stays (and so does '
-                + KEXT + ', which it may use). The original is still on the disk as ' + BACKUP + '.\n')
+                + KEXT + ', which it may use). The original is on the disk as ' + os.path.basename(kept) + '.\n')
             return
     os.replace(backup, path)
     if os.path.exists(stamp):

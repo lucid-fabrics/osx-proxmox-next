@@ -213,7 +213,7 @@ def test_record_bytes_match_python(bash, vm, tmp_path, monkeypatch):
         assert (tmp_path / "py" / f"gpu-attach-{vmid}.json").read_bytes() == (tmp_path / "state" / f"gpu-attach-{vmid}.json").read_bytes()
     saved = json.loads((tmp_path / "state/gpu-attach-100.json").read_text())
     assert saved["after"] == {"hostpci0": "0000:06:00,pcie=1", "args": f'-device isa-applesmc,osk="x" -cpu host {gpu.HOTPLUG_ARG}',
-                              "vga": "none", "added_args": [gpu.HOTPLUG_ARG]}
+                              "vga": "none", "added_args": [gpu.HOTPLUG_ARG], "replaced_args": {}}
 
 
 def put_record(tmp_path, vmid, bdf, vendor, hostpci0, args, vga, vga_changed, oc, after=None):

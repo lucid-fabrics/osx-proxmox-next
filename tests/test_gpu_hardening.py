@@ -436,7 +436,8 @@ def test_opencore_undo_restores_byte_for_byte_unless_the_config_changed_since(tm
     (oc2 / "config.plist").write_bytes(mine)
     res = run_patcher(script, oc2, "detach")
     assert res.returncode == 0 and "KEPT:" in res.stderr
-    assert (oc2 / "config.plist").read_bytes() == mine and (oc2 / backup).read_bytes() == original
+    assert (oc2 / "config.plist").read_bytes() == mine and not (oc2 / backup).exists()
+    assert [p.read_bytes() for p in oc2.glob(backup + ".kept-*")] == [original]  # the original, set aside
     if env:
         assert (oc2 / "Kexts/AMFIPass.kext").is_dir()  # the kept config may still load it
 
