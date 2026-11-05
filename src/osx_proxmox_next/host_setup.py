@@ -372,7 +372,7 @@ def _add_change(plan, root, path, content, reason, mode=0o644):
 def new_plan():
     return {"changes": [], "commands": [], "notes": [], "warnings": [], "hard_warnings": [], "refusals": [],
             "manual": [], "skipped": [], "refresh": [], "reboot_required": False, "binding": "", "initramfs": False,
-            "identity": None}
+            "identity": None, "optional": False}
 
 
 def _modules_present(root):
@@ -485,13 +485,79 @@ def _subsys(value):
     return "0x%04x" % value if value is not None else "-"
 
 
-def plan_binding(facts, target, root, plan):
+_CMD_IDS_RE = re.compile(r"^vfio[-_]pci\.ids=([0-9A-Fa-f:,]+)$")
+_SOFTDEP_RE = re.compile(r"^\s*softdep\s+(\S+)\s+pre:(.*)$")
+
+
+def _persistent_binding(facts, target, fns, ids, root, by_id=True, ids_only=False):
+    """What already binds this card to vfio-pci at boot, as a short phrase, or "" when nothing we can find does.
+    Looks at: modprobe.d `options vfio-pci ids=` covering every id, a driver_override in an initramfs script or
+    udev rule that names the card, `vfio-pci.ids=` on the live or configured kernel command line, and
+    Proxmox-style `softdep <driver> pre: vfio-pci` lines for every driver that could claim the card."""
+    d = _p(root, "/etc/modprobe.d")
+    confs = sorted(d.glob("*.conf")) if d.is_dir() else []
+    have = set()
+    for f in confs:
+        have.update(_live_ids(_read(f) or ""))
+    if by_id and ids and all(i in have for i in ids):
+        return "vfio-pci ids in /etc/modprobe.d"
+    cmd_ids = set()
+    # what the boot loader will pass next time; the live command line only when that cannot be read
+    nxt = configured_cmdline(facts.get("bootloader"), root) + _tokens(_read(_p(root, KERNEL_CMDLINE)))
+    for tok in nxt or _tokens(facts.get("cmdline")):
+        m = _CMD_IDS_RE.match(tok)
+        if m:
+            cmd_ids.update(i.lower() for i in m.group(1).split(","))
+    if by_id and ids and all(i in cmd_ids for i in ids):
+        return "vfio-pci.ids on the kernel command line"
+    if ids_only:
+        return ""
+    needles = [f["bdf"].lower() for f in fns] + [target["bdf"].lower() + "."]
+    scripts = []
+    for sub in ("/etc/initramfs-tools/scripts", "/etc/udev/rules.d"):
+        top = _p(root, sub)
+        if top.is_dir():
+            scripts += [f for f in sorted(top.rglob("*")) if f.is_file()]
+    for f in scripts:
+        text = (_read(f) or "").lower()
+        if "driver_override" in text and "vfio-pci" in text and any(n in text for n in needles):
+            return "a driver_override script (%s)" % f.name
+    softdeps = set()
+    for f in confs:
+        for line in (_read(f) or "").splitlines():
+            m = _SOFTDEP_RE.match(line.split("#", 1)[0])
+            if m and "vfio-pci" in m.group(2).replace("_", "-").split():
+                softdeps.add(m.group(1).replace("-", "_"))
+    if all(n.replace("-", "_") in softdeps for n in _softdeps(target)):
+        return "vfio-pci softdep lines in /etc/modprobe.d"
+    return ""
+
+
+def plan_binding(facts, target, root, plan, opts=None):
+    opts = opts or {}
     fns = [f for f in target["functions"] if bindable(f, target["vendor"])]
     ids = []
     for fn in fns:
         ident = "%04x:%04x" % (fn["vendor"], fn["device"])
         if ident not in ids:
             ids.append(ident)
+    drivers = {d["bdf"]: d.get("driver") for d in facts["pci"]}
+    if fns and all(drivers.get(f["bdf"]) == "vfio-pci" for f in fns):
+        mine_bdfs = {fn["bdf"] for fn in target["functions"]}
+        has_twin = any(d["bdf"] not in mine_bdfs and d["vendor"] is not None
+                       and "%04x:%04x" % (d["vendor"], d["device"]) in ids for d in facts["pci"])
+        # an id-wide binding also takes an identical second card: that is the refusal further down, not "already OK"
+        idwide = has_twin and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
+        how = "" if idwide else _persistent_binding(facts, target, fns, ids, root, by_id=not has_twin)
+        if how:
+            plan["skipped"].append("The card is already bound to vfio-pci and set to bind at boot (%s)" % how)
+            return
+        if not idwide and not opts.get("write_optional"):
+            plan["optional"] = True
+            plan["warnings"].append(
+                "The card is bound to vfio-pci now, but nothing we can find binds it at boot; it may be lost "
+                "after a reboot. Writing a boot-time binding is optional and skipped unless you ask for it.")
+            return
     mine = {fn["bdf"] for fn in target["functions"]}
     twins = sorted(d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d["vendor"] is not None
                    and "%04x:%04x" % (d["vendor"], d["device"]) in ids)
@@ -694,7 +760,7 @@ def plan_host(facts, target, opts=None, root="/", run=default_run):
     plan_console(facts, target, opts, plan)
     plan_kernel_args(facts, target, root, plan)
     plan_modules(root, plan)
-    plan_binding(facts, target, root, plan)
+    plan_binding(facts, target, root, plan, opts)
     plan_vendor_reset(facts, target, root, run, plan)
     plan_containers(target, root, plan)
     boot_files = (GRUB_DROPIN, KERNEL_CMDLINE)

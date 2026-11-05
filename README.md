@@ -473,7 +473,7 @@ osx-next-cli gpu-setup --undo     # put everything back
 ```
 
 - **AMD** Polaris, Vega, Navi 10/14/21/23 (RX 400/500, Vega 56/64, Radeon VII, RX 5000, RX 6600/6800/6900): native macOS drivers, no extra software. RX 6700, RX 7000 and RX 9000 series and APUs are not supported.
-- **NVIDIA** Turing and newer (RTX 20 to 50): beta, through the third-party NullMoth driver on Sequoia 15.5+ and Tahoe 26, with core macOS security turned off. The guided flow shows the NullMoth notice and asks you to acknowledge it. Once the driver loads, the Proxmox console goes black, so turn on Remote Login and Screen Sharing in macOS before you attach the card.
+- **NVIDIA** Turing and newer (RTX 20 to 50): beta, through the third-party NullMoth driver on Sequoia 15.5+ and Tahoe 26, with core macOS security turned off. The guided flow shows the NullMoth notice and asks you to acknowledge it. Once the driver loads, the Proxmox console goes black, so turn on Remote Login and Screen Sharing in macOS before you attach the card and connect a monitor or an HDMI/DisplayPort dummy plug to the card (without one there is no desktop; Screen Sharing mirrors that display and SSH always works).
 
 The host setup and the GPU attach have not been tested on hardware yet. Full guide with the supported-cards matrix and a page per BIOS vendor: [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough).
 
@@ -717,7 +717,7 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 
 ### Can I pass through an NVIDIA GeForce GPU?
 
-Only Turing and newer (RTX 20 / 30 / 40 / 50), and only with a third-party driver. Apple dropped NVIDIA support years ago, but the community NullMoth driver provides Metal on macOS Sequoia 15.5+ and Tahoe 26. This project can prepare a VM for it (beta, see [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough)), but does not make, ship or support the driver, and it requires turning core macOS security off. After the driver loads the Proxmox console goes black, so enable Remote Login and Screen Sharing in macOS (System Settings > General > Sharing) before attaching and connect by SSH or VNC afterwards.
+Only Turing and newer (RTX 20 / 30 / 40 / 50), and only with a third-party driver. Apple dropped NVIDIA support years ago, but the community NullMoth driver provides Metal on macOS Sequoia 15.5+ and Tahoe 26. This project can prepare a VM for it (beta, see [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough)), but does not make, ship or support the driver, and it requires turning core macOS security off. After the driver loads the Proxmox console goes black, so enable Remote Login and Screen Sharing in macOS (System Settings > General > Sharing) before attaching and connect a monitor or an HDMI/DisplayPort dummy plug to the card to get a desktop (Screen Sharing then mirrors it; SSH always works).
 
 | Architecture | Cards | macOS support |
 |---|---|---|

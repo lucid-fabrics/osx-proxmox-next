@@ -240,7 +240,7 @@ class GpuSetupMixin:
             first.disabled = nvidia
             self.query_one("#gp_display_desc_0", Static).update(display_description(  # type: ignore[attr-defined]
                 "Not available for NVIDIA cards. The Proxmox console goes black once the NullMoth driver loads, so "
-                "turn on Remote Login and Screen Sharing in macOS first."
+                "turn on Remote Login and Screen Sharing in macOS first and connect a monitor or dummy plug to the card."
                 if nvidia else DISPLAY_OPTIONS[0][2]))
             if nvidia:
                 second.value = True
@@ -383,12 +383,14 @@ class GpuSetupMixin:
 
     # ── 4 host ───────────────────────────────────────────────────────
 
-    def _gp_host(self, allow_no_console: bool = False) -> None:
+    def _gp_host(self, allow_no_console: bool = False, write_optional: bool = False) -> None:
         s = self._gp_session()
+        self._gp_wo, self._gp_anc = write_optional, allow_no_console
         self._gp_show()
         self._gp_reset_confirmations()  # a new plan never inherits an earlier "I understand"
         self._gp_set("Step 4: host configuration", "Working out what this host needs...", "Apply", primary_disabled=True)
-        self._gp_async(lambda: s.host_plan(allow_no_console=allow_no_console), self._gp_host_done)
+        self._gp_async(lambda: s.host_plan(allow_no_console=allow_no_console, write_optional=write_optional),
+                      self._gp_host_done)
 
     @staticmethod
     def _gp_needs_typed(plan: dict) -> bool:
@@ -407,6 +409,9 @@ class GpuSetupMixin:
             self._gp_set("Step 4: host configuration", "The verify step found a problem, but there is nothing left for this "
                          "tool to change. Fix the failing item in the verify list (see the docs), then check again.",
                          "Check again", back=True)
+            return
+        if plan.get("optional") and not s.plan_needs_work(plan) and not plan["refusals"]:
+            self._gp_set("Step 4: host configuration", "\n".join(lines), "Continue", "Write it anyway", back=True)
             return
         if not s.plan_needs_work(plan) and not plan["refusals"]:
             s.complete(4, skipped=True)
@@ -429,8 +434,14 @@ class GpuSetupMixin:
         typed = self.query_one("#gp_confirm_in", Input).value.strip() == CONFIRM_PHRASE  # type: ignore[attr-defined]
         if self._gp_needs_typed(plan) and not typed:
             return
+        if plan.get("optional") and not s.plan_needs_work(plan) and not plan["refusals"]:
+            s.complete(4, skipped=True)  # the optional write is skipped by default
+            if 5 not in s.state["done"]:
+                s.complete(5, skipped=True)
+            self._gp_render()
+            return
         if plan["refusals"]:
-            self._gp_host(allow_no_console=True)  # re-plan once with the typed confirmation; it is not kept
+            self._gp_host(allow_no_console=True, write_optional=getattr(self, "_gp_wo", False))  # re-plan once with the typed confirmation; it is not kept
             return
         self._gp_async(lambda: s.host_apply(plan, typed), self._gp_apply_done, "Applying...")
 
@@ -676,6 +687,8 @@ class GpuSetupMixin:
                 self._gp_bios()  # "Re-check" is secondary when the reboot button is the primary action
             else:
                 self._gp_result("When you are back in Proxmox, run: " + s.pause())
+        elif step == 4:
+            self._gp_host(allow_no_console=getattr(self, "_gp_anc", False), write_optional=True)
         elif step == 5:
             self._gp_result("Reboot when it suits you, then run: " + s.pause())
         elif step == 8:

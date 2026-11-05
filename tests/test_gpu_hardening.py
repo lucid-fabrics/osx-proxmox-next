@@ -82,7 +82,7 @@ def test_a_storage_function_next_to_the_card_is_never_bound(tmp_path):
 
 def test_only_display_audio_usb_and_ucsi_functions_of_the_vendor_are_bound(tmp_path):
     root = make_host(tmp_path)
-    add_card(root)
+    add_card(root, driver=None)
     add_dev(root / "sys", "0000:06:00.2", 0x1002, 0x1111, cls=0x0C0330, driver="vfio-pci", group=7)
     add_dev(root / "sys", "0000:06:00.3", 0x1002, 0x2222, cls=0x0C8000, driver="vfio-pci", group=7)
     add_dev(root / "sys", "0000:06:00.4", 0x8086, 0x3333, cls=0x040300, driver="vfio-pci", group=7)  # other vendor
@@ -156,8 +156,8 @@ def test_status_reports_a_moved_card_without_changing_the_state(tmp_path):
 
 def test_bind_script_checks_vendor_device_and_class_at_boot(tmp_path):
     root = make_host(tmp_path)
-    add_card(root, bdf="0000:06:00", group=7)
-    add_card(root, bdf="0000:41:00", group=9)  # the identical twin makes the plan per-device
+    add_card(root, bdf="0000:06:00", group=7, driver=None)
+    add_card(root, bdf="0000:41:00", group=9, driver=None)  # the identical twin makes the plan per-device
     tgt = hs.build_target(str(root), "0000:06:00", "amd")
     plan = hs.plan_host(hs.detect_facts(str(root), FakeRun(), env={}), tgt, {}, str(root), FakeRun())
     script = next(c["new"] for c in plan["changes"] if c["path"] == hs.BIND_SCRIPT)
@@ -187,8 +187,8 @@ def test_bind_script_checks_vendor_device_and_class_at_boot(tmp_path):
 
 def test_second_card_keeps_the_first_cards_binding(tmp_path):
     root = make_host(tmp_path)
-    add_card(root, bdf="0000:06:00", group=7)
-    add_card(root, bdf="0000:0a:00", device=0x73DF, audio=0xAAAA, group=9)
+    add_card(root, bdf="0000:06:00", group=7, driver=None)
+    add_card(root, bdf="0000:0a:00", device=0x73DF, audio=0xAAAA, group=9, driver=None)
     write(root, hs.MODPROBE_FILE, hs.HEADER + "options vfio-pci ids=10de:2504,10de:228e disable_vga=1\n")
     tgt = hs.build_target(str(root), "0000:06:00", "amd")
     plan = hs.plan_host(hs.detect_facts(str(root), FakeRun(), env={}), tgt, {}, str(root), FakeRun())
@@ -201,7 +201,7 @@ def test_second_card_keeps_the_first_cards_binding(tmp_path):
 
 def test_apply_refuses_when_a_file_changed_after_the_preview(tmp_path):
     root = make_host(tmp_path)
-    add_card(root)
+    add_card(root, driver=None)
     write(root, "/etc/default/grub", 'GRUB_CMDLINE_LINUX_DEFAULT="quiet"\n')
     run = FakeRun({"efibootmgr -v": (0, EFI_GRUB)})
     tgt = hs.build_target(str(root), "0000:06:00", "amd")
@@ -238,7 +238,7 @@ def test_pending_refresh_is_saved_before_the_rollback_starts(tmp_path, monkeypat
 
 def test_a_symlinked_config_is_written_through_and_restored_through(tmp_path):
     root = make_host(tmp_path)
-    add_card(root)
+    add_card(root, driver=None)
     run = FakeRun({"efibootmgr -v": (0, EFI_GRUB)}, default=(0, ""))
     real = tmp_path / "elsewhere/vfio.conf"
     real.parent.mkdir()
@@ -274,7 +274,7 @@ def test_a_files_mode_is_kept(tmp_path):
 
 def test_undo_keeps_a_file_edited_since_and_still_succeeds(tmp_path):
     root = make_host(tmp_path)
-    add_card(root)
+    add_card(root, driver=None)
     run = FakeRun({"efibootmgr -v": (0, EFI_GRUB)}, default=(0, ""))
     tgt = hs.build_target(str(root), "0000:06:00", "amd")
     plan = hs.plan_host(hs.detect_facts(str(root), run, env={}), tgt, {}, str(root), run)

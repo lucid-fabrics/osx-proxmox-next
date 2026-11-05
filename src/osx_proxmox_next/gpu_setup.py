@@ -39,7 +39,7 @@ DISPLAY_OPTIONS = (
     ("gpu", "Monitor on the GPU", "Best performance. Plug a screen into the card. The Proxmox console goes blank."),
     ("console", "Keep the Proxmox console",
      "The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: "
-     "the console goes black once the driver loads."),
+     "the console goes black once the driver loads, so connect a monitor or a dummy plug to the card."),
 )
 DOCS_ROOT = "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/"
 NULLMOTH_DOC = DOCS_ROOT + "nvidia-nullmoth"
@@ -481,8 +481,9 @@ class Session:
 
     # ── 4. host ──────────────────────────────────────────────────────
 
-    def host_plan(self, allow_no_console: bool = False) -> dict:
-        return host_setup.plan_host(self.facts(), self.target(), {"allow_no_console": allow_no_console},
+    def host_plan(self, allow_no_console: bool = False, write_optional: bool = False) -> dict:
+        return host_setup.plan_host(self.facts(), self.target(),
+                                    {"allow_no_console": allow_no_console, "write_optional": write_optional},
                                     self.root, self.run)
 
     @staticmethod
@@ -673,13 +674,15 @@ class Session:
             else:
                 ok = False
                 messages.append(f"VM {vmid}: restoring failed. Log: {result.log_path}")
+        had_record = host_setup._p(self.root, host_setup.STATE_FILE).exists()
         res = host_setup.undo_host(self.state, self.root, self.run)
         ok = ok and res["ok"]
         self.undo_kept += len(res["kept"])
         messages += [f"Restored {path}" for path in res["restored"]] + res["kept"] + res["errors"]
         self.undo_nothing = not vmids and not (res["restored"] or res["kept"] or res["errors"] or res["reboot_required"])
         if self.undo_nothing:
-            messages.append("Nothing to undo: no GPU setup record found.")
+            messages.append("Removed an empty setup record; nothing else to undo." if had_record else
+                            "Nothing to undo: no GPU setup record found.")
             messages += [f"VM {v} has NullMoth settings in its config but no record. Undo it with: nvidia-detach {v}"
                          for v in self.nullmoth_markers()]
         if res["reboot_required"]:

@@ -180,7 +180,7 @@ def test_vfio_modules(tmp_path):
 
 def test_binding_by_id_writes_ids_softdeps_and_initramfs(tmp_path):
     root = host(tmp_path)
-    add_card(Path(root))
+    add_card(Path(root), driver=None)
     plan = plan_for(root)
     body = next(c for c in plan["changes"] if c["path"] == hs.MODPROBE_FILE)["new"]
     assert "options vfio-pci ids=1002:73ff,1002:ab28 disable_vga=1" in body
@@ -191,7 +191,7 @@ def test_binding_by_id_writes_ids_softdeps_and_initramfs(tmp_path):
 
 def test_binding_merges_into_the_existing_ids_line(tmp_path):
     root = host(tmp_path)
-    add_card(Path(root))
+    add_card(Path(root), driver=None)
     write(Path(root), "/etc/modprobe.d/vfio.conf", "options vfio-pci ids=10de:2504,10de:228e disable_vga=1\n")
     plan = plan_for(root)
     merged = next(c for c in plan["changes"] if c["path"] == "/etc/modprobe.d/vfio.conf")["new"]
@@ -206,8 +206,8 @@ def test_binding_merges_into_the_existing_ids_line(tmp_path):
 
 def test_identical_card_switches_to_per_device_binding(tmp_path):
     root = host(tmp_path)
-    add_card(Path(root), bdf="0000:06:00", group=7)
-    add_card(Path(root), bdf="0000:41:00", group=9)
+    add_card(Path(root), bdf="0000:06:00", group=7, driver=None)
+    add_card(Path(root), bdf="0000:41:00", group=9, driver=None)
     plan = plan_for(root)
     assert plan["binding"] == "per-device" and any("0000:41:00.0" in n for n in plan["notes"])
     script = next(c for c in plan["changes"] if c["path"] == hs.BIND_SCRIPT)
@@ -221,7 +221,7 @@ def test_identical_card_switches_to_per_device_binding(tmp_path):
 
 def test_usb_c_function_adds_xhci_softdep_and_nvidia_names(tmp_path):
     root = host(tmp_path)
-    add_card(Path(root), vendor=0x10DE, device=0x2504, audio=0x228E)
+    add_card(Path(root), vendor=0x10DE, device=0x2504, audio=0x228E, driver=None)
     add_other(Path(root), "0000:06:00.2", 0x10DE, 0x1AD8, 0x0C0330, 7, driver="vfio-pci")
     body = next(c for c in plan_for(root, tgt=target(root, "none", "nvidia"))["changes"] if c["path"] == hs.MODPROBE_FILE)["new"]
     assert "softdep nouveau pre: vfio-pci" in body and "softdep xhci_pci pre: vfio-pci" in body
@@ -285,7 +285,7 @@ def test_early_bind_family_skips_vendor_reset(tmp_path):
 
 def test_apply_writes_backs_up_and_records(tmp_path):
     root = host(tmp_path)
-    add_card(Path(root))
+    add_card(Path(root), driver=None)
     write(Path(root), "/etc/modprobe.d/vfio.conf", "options vfio-pci ids=10de:2504\n")
     plan = plan_for(root)
     state, run = hs.new_state(), FakeRun(default=(0, ""))
@@ -304,8 +304,8 @@ def test_apply_writes_backs_up_and_records(tmp_path):
 
 def test_per_device_script_is_executable(tmp_path):
     root = host(tmp_path)
-    add_card(Path(root), bdf="0000:06:00", group=7)
-    add_card(Path(root), bdf="0000:41:00", group=9)
+    add_card(Path(root), bdf="0000:06:00", group=7, driver=None)
+    add_card(Path(root), bdf="0000:41:00", group=9, driver=None)
     assert hs.apply_plan(plan_for(root), hs.new_state(), root, FakeRun(default=(0, "")))["ok"]
     script = Path(root) / hs.BIND_SCRIPT.lstrip("/")
     assert script.stat().st_mode & 0o111 and script.read_text().startswith("#!/bin/sh")
@@ -601,7 +601,7 @@ def test_boot_commands_get_a_long_timeout(tmp_path):
 
 def test_a_commented_ids_line_is_never_touched(tmp_path):
     root = host(tmp_path)
-    add_card(Path(root))
+    add_card(Path(root), driver=None)
     write(Path(root), "/etc/modprobe.d/vfio.conf",
           "# options vfio-pci ids=10de:1234 disable_vga=1\noptions vfio-pci ids=10de:2504\n")
     plan = plan_for(root)
@@ -642,7 +642,7 @@ def test_failed_refresh_is_retried_by_the_next_undo(tmp_path):
 
 def test_undo_survives_a_missing_backup_and_edits_made_since(tmp_path):
     root = host(tmp_path)
-    add_card(Path(root))
+    add_card(Path(root), driver=None)
     write(Path(root), "/etc/modprobe.d/vfio.conf", "options vfio-pci ids=10de:2504\n")
     state = hs.new_state()
     assert hs.apply_plan(plan_for(root), state, root, FakeRun(default=(0, "")))["ok"]
@@ -670,7 +670,7 @@ def test_paths_outside_etc_are_refused(tmp_path):
 
 def test_two_applies_in_one_second_keep_separate_backups(tmp_path, monkeypatch):
     root = host(tmp_path)
-    add_card(Path(root))
+    add_card(Path(root), driver=None)
     monkeypatch.setattr(hs, "_now", lambda: "20260101-000000")
     write(Path(root), "/etc/modprobe.d/vfio.conf", "options vfio-pci ids=10de:2504\n")
     s1, s2 = hs.new_state(), hs.new_state()

@@ -85,12 +85,16 @@ GUEST_PREP = (
     "(from a Mac: open vnc://<ip>).",
     "If Remote Login will not switch on from the command line (systemsetup needs Full Disk Access), run: "
     "sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist",
+    "Connect a monitor or an HDMI/DisplayPort dummy plug to the card. Without one the card has no display, so the "
+    "Proxmox console and Screen Sharing both stay black. Screen Sharing mirrors the display on the card; SSH always works.",
 )
-GUEST_PREP_CONFIRM = "Remote Login and Screen Sharing are on, and I can reach the VM over the network."
+GUEST_PREP_CONFIRM = ("Remote Login and Screen Sharing are on, I can reach the VM over the network, and a monitor "
+                      "or dummy plug is connected to the card.")
 
 NEXT_STEPS = (
     "Start the VM. Once the NullMoth driver loads, the Proxmox console goes black (the driver takes the display "
-    "even with vga std). Use SSH or Screen Sharing from then on, or plug a monitor into the card.",
+    "even with vga std). To get a desktop, connect a monitor or an HDMI/DisplayPort dummy plug to the card; "
+    "Screen Sharing then mirrors that display. SSH always works.",
     f"Download the NullMoth release yourself from {NULLMOTH_URL}/releases and check it with "
     "shasum -a 256 -c SHA256SUMS, then run sudo ./install.sh in the guest.",
     "Approve the extensions in System Settings > Privacy & Security, then reboot the guest.",

@@ -67,17 +67,18 @@ On the OpenCore disk (`ide0`):
 
 ## Before applying: get a way into macOS
 
-Once the NullMoth driver loads, the Proxmox console goes black. The driver takes the display even with `vga std` and no monitor attached, so the web console shows nothing. Set up remote access in the guest **before** you attach the card:
+Once the NullMoth driver loads, the Proxmox console goes black. The driver takes the display even with `vga std`, so the web console shows nothing. The card needs a display of its own: connect a monitor or an HDMI/DisplayPort dummy plug to it. Without one, both the Proxmox console and Screen Sharing stay black (Screen Sharing mirrors the display on the card). SSH always works. `vga std` stays set because the firmware and OpenCore screens and recovery still use it. Set up remote access in the guest **before** you attach the card:
 
 1. In macOS open System Settings > General > Sharing and turn on **Remote Login** and **Screen Sharing**.
 2. Note the VM's IP address.
 3. Connect with `ssh <user>@<ip>` or any VNC client pointed at the VM's IP (from a Mac: `open vnc://<ip>`).
+4. Connect a monitor or an HDMI/DisplayPort dummy plug to the card. The guided flow asks you to confirm this too.
 
 If `systemsetup -setremotelogin on` is refused because it needs Full Disk Access, run `sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist` instead. The guided flow asks you to confirm this checklist before it attaches the card.
 
 ## After applying
 
-1. Start the VM. Once the NullMoth driver loads, the Proxmox console goes black; use SSH or Screen Sharing from then on (or plug a monitor into the card).
+1. Start the VM. Once the NullMoth driver loads, the Proxmox console goes black; to get a desktop, a monitor or an HDMI/DisplayPort dummy plug must be connected to the card (Screen Sharing then mirrors that display). SSH always works.
 2. Download the NullMoth release from https://github.com/nullmoth/nvidia-macos-driver/releases, check it with `shasum -a 256 -c SHA256SUMS`, then run `sudo ./install.sh` in the guest.
 3. Approve the extensions in System Settings > Privacy & Security and reboot the guest.
 4. Verify with `kmutil showloaded --list-only | grep -i nullmoth`. Expect 4 or more lines (NVRM, NVAccel, NVRMFB, NVRMAGDC; newer releases add more, for example NMXAudio in 2.7.2).

@@ -72,7 +72,7 @@ def test_a_partial_attach_only_reverts_the_hostpci_it_wrote():
 
 def twin_plan(tmp_path, same_subsys=False):
     root = make_host(tmp_path)
-    add_card(root, bdf="0000:06:00", group=7)
+    add_card(root, bdf="0000:06:00", group=7, driver=None)
     add_card(root, bdf="0000:41:00", group=9)
     if not same_subsys:
         for fn in ("0000:41:00.0", "0000:41:00.1"):

@@ -267,7 +267,7 @@ def test_host_step_already_done(host):
     ready(host)
     s = host.session()
     s.choose("06:00", 100, "gpu")
-    for ch in s.host_plan()["changes"]:
+    for ch in s.host_plan(write_optional=True)["changes"]:
         write(host.root, ch["path"], ch["new"])
     host.run.answers["update-initramfs"] = (0, "")
     plan = s.host_plan()
@@ -428,7 +428,7 @@ def test_verify_and_host_do_not_loop_when_there_is_nothing_to_write(host):
     ready(host)
     s = host.session()
     s.choose("06:00", 100, "gpu")
-    for ch in s.host_plan()["changes"]:
+    for ch in s.host_plan(write_optional=True)["changes"]:
         write(host.root, ch["path"], ch["new"])
     (host.root / "sys/bus/pci/devices/0000:06:00.0/driver").unlink()  # verify: not bound, host step has nothing to do
     s.goto(6)
@@ -436,7 +436,7 @@ def test_verify_and_host_do_not_loop_when_there_is_nothing_to_write(host):
     plan_empty = host.session().host_plan()
     plan_empty["commands"] = []
     s2 = host.session()
-    s2.host_plan = lambda allow_no_console=False: plan_empty
+    s2.host_plan = lambda allow_no_console=False, write_optional=False: plan_empty
     code, out = go(host, "--yes", session=s2)
     assert code == 2 and "nothing left for this tool to change" in out and s2.state["verify_retry"] is False
 

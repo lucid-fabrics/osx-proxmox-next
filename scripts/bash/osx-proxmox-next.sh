@@ -1682,7 +1682,8 @@ function nullmoth_fetch_amfipass() {
 function nullmoth_print_next_steps() {
   echo -e "\n${INFO}${YW}NullMoth next steps:${CL}"
   echo "  1. Start the VM. Once the NullMoth driver loads, the Proxmox console goes black (the driver takes the display"
-  echo "     even with vga std). Use SSH or Screen Sharing from then on, or plug a monitor into the card."
+  echo "     even with vga std). To get a desktop, connect a monitor or an HDMI/DisplayPort dummy plug to the card;"
+  echo "     Screen Sharing then mirrors that display. SSH always works."
   echo "  2. Download the NullMoth release yourself from ${NULLMOTH_URL}/releases and check it with"
   echo "     shasum -a 256 -c SHA256SUMS, then run sudo ./install.sh in the guest."
   echo "  3. Approve the extensions in System Settings > Privacy & Security, then reboot the guest."
@@ -1696,7 +1697,7 @@ function nullmoth_print_next_steps() {
 
 # Required in the guest BEFORE the card is attached: once the driver loads, the Proxmox console goes black.
 NULLMOTH_GUEST_PREP_TITLE="Before you attach (required): get a way into macOS that does not need the Proxmox console"
-NULLMOTH_GUEST_PREP_CONFIRM="Remote Login and Screen Sharing are on, and I can reach the VM over the network."
+NULLMOTH_GUEST_PREP_CONFIRM="Remote Login and Screen Sharing are on, I can reach the VM over the network, and a monitor or dummy plug is connected to the card."
 function nullmoth_print_guest_prep() {
   echo "${NULLMOTH_GUEST_PREP_TITLE}:"
   echo "  1. In macOS open System Settings > General > Sharing and turn on Remote Login and Screen Sharing."
@@ -1705,6 +1706,8 @@ function nullmoth_print_guest_prep() {
   echo "     (from a Mac: open vnc://<ip>)."
   echo "  4. If Remote Login will not switch on from the command line (systemsetup needs Full Disk Access), run:"
   echo "     sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist"
+  echo "  5. Connect a monitor or an HDMI/DisplayPort dummy plug to the card. Without one the card has no display, so the"
+  echo "     Proxmox console and Screen Sharing both stay black. Screen Sharing mirrors the display on the card; SSH always works."
 }
 
 function nullmoth_print_findings() {
@@ -2261,7 +2264,7 @@ def _add_change(plan, root, path, content, reason, mode=0o644):
 def new_plan():
     return {"changes": [], "commands": [], "notes": [], "warnings": [], "hard_warnings": [], "refusals": [],
             "manual": [], "skipped": [], "refresh": [], "reboot_required": False, "binding": "", "initramfs": False,
-            "identity": None}
+            "identity": None, "optional": False}
 
 
 def _modules_present(root):
@@ -2374,13 +2377,79 @@ def _subsys(value):
     return "0x%04x" % value if value is not None else "-"
 
 
-def plan_binding(facts, target, root, plan):
+_CMD_IDS_RE = re.compile(r"^vfio[-_]pci\.ids=([0-9A-Fa-f:,]+)$")
+_SOFTDEP_RE = re.compile(r"^\s*softdep\s+(\S+)\s+pre:(.*)$")
+
+
+def _persistent_binding(facts, target, fns, ids, root, by_id=True, ids_only=False):
+    """What already binds this card to vfio-pci at boot, as a short phrase, or "" when nothing we can find does.
+    Looks at: modprobe.d `options vfio-pci ids=` covering every id, a driver_override in an initramfs script or
+    udev rule that names the card, `vfio-pci.ids=` on the live or configured kernel command line, and
+    Proxmox-style `softdep <driver> pre: vfio-pci` lines for every driver that could claim the card."""
+    d = _p(root, "/etc/modprobe.d")
+    confs = sorted(d.glob("*.conf")) if d.is_dir() else []
+    have = set()
+    for f in confs:
+        have.update(_live_ids(_read(f) or ""))
+    if by_id and ids and all(i in have for i in ids):
+        return "vfio-pci ids in /etc/modprobe.d"
+    cmd_ids = set()
+    # what the boot loader will pass next time; the live command line only when that cannot be read
+    nxt = configured_cmdline(facts.get("bootloader"), root) + _tokens(_read(_p(root, KERNEL_CMDLINE)))
+    for tok in nxt or _tokens(facts.get("cmdline")):
+        m = _CMD_IDS_RE.match(tok)
+        if m:
+            cmd_ids.update(i.lower() for i in m.group(1).split(","))
+    if by_id and ids and all(i in cmd_ids for i in ids):
+        return "vfio-pci.ids on the kernel command line"
+    if ids_only:
+        return ""
+    needles = [f["bdf"].lower() for f in fns] + [target["bdf"].lower() + "."]
+    scripts = []
+    for sub in ("/etc/initramfs-tools/scripts", "/etc/udev/rules.d"):
+        top = _p(root, sub)
+        if top.is_dir():
+            scripts += [f for f in sorted(top.rglob("*")) if f.is_file()]
+    for f in scripts:
+        text = (_read(f) or "").lower()
+        if "driver_override" in text and "vfio-pci" in text and any(n in text for n in needles):
+            return "a driver_override script (%s)" % f.name
+    softdeps = set()
+    for f in confs:
+        for line in (_read(f) or "").splitlines():
+            m = _SOFTDEP_RE.match(line.split("#", 1)[0])
+            if m and "vfio-pci" in m.group(2).replace("_", "-").split():
+                softdeps.add(m.group(1).replace("-", "_"))
+    if all(n.replace("-", "_") in softdeps for n in _softdeps(target)):
+        return "vfio-pci softdep lines in /etc/modprobe.d"
+    return ""
+
+
+def plan_binding(facts, target, root, plan, opts=None):
+    opts = opts or {}
     fns = [f for f in target["functions"] if bindable(f, target["vendor"])]
     ids = []
     for fn in fns:
         ident = "%04x:%04x" % (fn["vendor"], fn["device"])
         if ident not in ids:
             ids.append(ident)
+    drivers = {d["bdf"]: d.get("driver") for d in facts["pci"]}
+    if fns and all(drivers.get(f["bdf"]) == "vfio-pci" for f in fns):
+        mine_bdfs = {fn["bdf"] for fn in target["functions"]}
+        has_twin = any(d["bdf"] not in mine_bdfs and d["vendor"] is not None
+                       and "%04x:%04x" % (d["vendor"], d["device"]) in ids for d in facts["pci"])
+        # an id-wide binding also takes an identical second card: that is the refusal further down, not "already OK"
+        idwide = has_twin and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
+        how = "" if idwide else _persistent_binding(facts, target, fns, ids, root, by_id=not has_twin)
+        if how:
+            plan["skipped"].append("The card is already bound to vfio-pci and set to bind at boot (%s)" % how)
+            return
+        if not idwide and not opts.get("write_optional"):
+            plan["optional"] = True
+            plan["warnings"].append(
+                "The card is bound to vfio-pci now, but nothing we can find binds it at boot; it may be lost "
+                "after a reboot. Writing a boot-time binding is optional and skipped unless you ask for it.")
+            return
     mine = {fn["bdf"] for fn in target["functions"]}
     twins = sorted(d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d["vendor"] is not None
                    and "%04x:%04x" % (d["vendor"], d["device"]) in ids)
@@ -2583,7 +2652,7 @@ def plan_host(facts, target, opts=None, root="/", run=default_run):
     plan_console(facts, target, opts, plan)
     plan_kernel_args(facts, target, root, plan)
     plan_modules(root, plan)
-    plan_binding(facts, target, root, plan)
+    plan_binding(facts, target, root, plan, opts)
     plan_vendor_reset(facts, target, root, run, plan)
     plan_containers(target, root, plan)
     boot_files = (GRUB_DROPIN, KERNEL_CMDLINE)
@@ -5205,7 +5274,11 @@ function gpu_undo() {
   local rj="${res:-}"; [ -n "$rj" ] || rj='{}'
   if [ -z "${vmids// /}" ] && [ "$(echo "$rj" | gpu_json 'bool(d.get("restored") or d.get("kept") or d.get("errors") or d.get("reboot_required"))')" != "True" ]; then
     nothing=yes
-    gpu_say "Nothing to undo: no GPU setup record found."
+    if [ -e "$GPU_STATE_DIR/gpu-setup.json" ]; then
+      gpu_say "Removed an empty setup record; nothing else to undo."
+    else
+      gpu_say "Nothing to undo: no GPU setup record found."
+    fi
     local qid
     for qid in $(qm list 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}'); do
       qm config "$qid" 2>/dev/null | grep -q '^hostpci0:' && qm config "$qid" 2>/dev/null | grep -q '^args:.*pci-hole64-size' \
@@ -5343,7 +5416,7 @@ function gpu_step_choose() {
     if gpu_use_ui; then
       display=$(whiptail --title "Display" --menu "Where do you want to see macOS?" 14 90 2 \
         gpu "Monitor on the GPU. Best performance. Plug a screen into the card; the Proxmox console goes blank." \
-        console "Keep the Proxmox console. The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: the console goes black once the driver loads." 3>&1 1>&2 2>&3) || return 0
+        console "Keep the Proxmox console. The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: the console goes black once the driver loads, so connect a monitor or a dummy plug to the card." 3>&1 1>&2 2>&3) || return 0
     fi
   fi
   if [ -z "$want_vm" ] && gpu_use_ui; then
@@ -5450,6 +5523,14 @@ function gpu_step_host() {
     [ -z "$refusals" ] || return 2
   fi
   gpu_json '"\n".join(["Note: " + x for x in d["notes"]] + ["WARN: " + x for x in d["warnings"]] + ["Manual step: " + x for x in d["manual"]] + ["OK: " + x for x in d["skipped"]])' <<<"$plan"
+  if [ "$(gpu_json 'd.get("optional") and not (d["changes"] or d["commands"] or d["manual"])' <<<"$plan")" == "True" ] \
+      && [ "${GPU_YES:-no}" != "yes" ] && [ "$(gpu_state_get 'd["verify_retry"]')" != "True" ] \
+      && gpu_ui_yesno "Optional" "Write the boot-time binding anyway? (optional)"; then
+    plan=$(python3 -c 'import json,sys; print(json.dumps({"target": json.loads(sys.argv[1]), "opts": {"write_optional": True}}))' "$target" | gpu_host plan) || return 1
+    refusals=$(gpu_json '"\n".join(d["refusals"])' <<<"$plan")
+    if [ -n "$refusals" ]; then gpu_say "REFUSED: $refusals"; return 2; fi
+    gpu_json '"\n".join(["Note: " + x for x in d["notes"]] + ["WARN: " + x for x in d["warnings"]] + ["Manual step: " + x for x in d["manual"]])' <<<"$plan"
+  fi
   if [ "$(gpu_json 'len(d["changes"]) + len(d["commands"]) + len(d["manual"])' <<<"$plan")" == "0" ]; then
     if [ "$(gpu_state_get 'd["verify_retry"]')" == "True" ]; then
       gpu_state_save '{"verify_retry": false}'
@@ -5599,7 +5680,7 @@ function gpu_step_first_boot() {
   vendor=$(gpu_state_get 'd["gpu"]["vendor"]')
   display=$(gpu_state_get 'd["display"]')
   if [ "$vendor" == "nvidia" ]; then
-    echo "Start the VM. Once the NullMoth driver loads, the Proxmox console goes black; use SSH or Screen Sharing from then on."
+    echo "Start the VM. Once the NullMoth driver loads, the Proxmox console goes black. Connect a monitor or an HDMI/DisplayPort dummy plug to the card to get a desktop (Screen Sharing mirrors it); SSH always works."
     echo "Checklist inside macOS:"
     nullmoth_print_next_steps
     echo "Driver releases: ${NULLMOTH_URL}/releases"

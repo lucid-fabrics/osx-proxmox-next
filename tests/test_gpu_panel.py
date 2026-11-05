@@ -353,7 +353,7 @@ def test_the_display_choice_is_two_full_radio_options(tmp_path):
             assert [text(app, f"#gp_display_desc_{i}").strip() for i in (0, 1)] == [
                 "Best performance. Plug a screen into the card. The Proxmox console goes blank.",
                 "The card accelerates apps; you keep using the web console. NVIDIA cards are the exception: "
-                "the console goes black once the driver loads."]
+                "the console goes black once the driver loads, so connect a monitor or a dummy plug to the card."]
             assert not app.query_one("#gp_display_0").disabled
             with pytest.raises(NoMatches):
                 app.query_one("#gp_display_select")  # the truncated dropdown is gone
@@ -442,7 +442,7 @@ def test_host_step_skips_when_nothing_is_needed(tmp_path):
     write(env.root, "/etc/modules", "vfio\nvfio_iommu_type1\nvfio_pci\n")
     s = env.session()
     s.choose("06:00", 100, "gpu")
-    for ch in s.host_plan()["changes"]:
+    for ch in s.host_plan(write_optional=True)["changes"]:
         write(env.root, ch["path"], ch["new"])
     env.run.answers["update-initramfs"] = (0, "")
 
@@ -452,7 +452,7 @@ def test_host_step_skips_when_nothing_is_needed(tmp_path):
             await pilot.pause()
             plan = s.host_plan()
             plan["commands"] = []
-            s.host_plan = lambda allow_no_console=False: plan
+            s.host_plan = lambda allow_no_console=False, write_optional=False: plan
             app._gp = s
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_gpu")

@@ -198,6 +198,16 @@ def _step_host(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     for key, prefix in (("notes", "Note: "), ("warnings", "WARN: "), ("manual", "Manual step: "), ("skipped", "OK: ")):
         for line in plan[key]:
             io.say(prefix + line)
+    if plan.get("optional") and not s.plan_needs_work(plan) and not s.state.get("verify_retry") \
+            and io.interactive and not args.yes \
+            and io.confirm("Write the boot-time binding anyway? (optional)", False):
+        plan = s.host_plan(write_optional=True)
+        for key, prefix in (("refusals", "REFUSED: "), ("notes", "Note: "), ("warnings", "WARN: "),
+                            ("manual", "Manual step: ")):
+            for line in plan[key]:
+                io.say(prefix + line)
+        if plan["refusals"]:
+            return EXIT_REFUSED
     if not s.plan_needs_work(plan) and s.state.get("verify_retry"):
         s.state["verify_retry"] = False
         s.save()
