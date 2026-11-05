@@ -1169,6 +1169,12 @@ def vm_fingerprint(cfg):
     return m.group(1).lower() if m else cfg.get("name", "")
 
 
+def record_vm_changed(record, cfg):
+    """True when *record* was written for another VM than *cfg* (a deleted and re-created VMID)."""
+    fp = record.get("fp", "")
+    return bool(fp) and fp != vm_fingerprint(cfg)
+
+
 def hostpci_key(value):
     """Order-free form of a hostpci value, so `pcie=1,0000:06:00` equals `0000:06:00,pcie=1`."""
     addrs, opts = set(), set()
@@ -1357,6 +1363,8 @@ def main(argv):
         _emit(record_write(payload))
     elif cmd == "vm-restore":
         _emit(vm_restore(payload["record"], parse_config(payload["cfg_raw"])))
+    elif cmd == "vm-stale":
+        print("1" if record_vm_changed(payload["record"], parse_config(payload["cfg_raw"])) else "0")
     elif cmd == "step":
         state = load_state(root) or new_state()
         (goto_step(state, payload["step"]) if payload.get("goto")
@@ -1401,7 +1409,7 @@ def main(argv):
     elif cmd == "hint-clear":
         clear_login_hint(root)
     else:
-        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
+        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|vm-stale|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
         return 64
     return 0
 

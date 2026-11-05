@@ -1729,11 +1729,13 @@ function nullmoth_vm_check() {
 
 # `osx-proxmox-next.sh nvidia-attach <vmid> <bdf> [--accept-nullmoth-risk] [--dry-run] [--macos <release>]`
 function nvidia_attach() {
-  local vmid="${1:-}" gpu="${2:-}" accept=no dry=no macos="" bdf args zip new_args version line
+  local vmid="${1:-}" gpu="${2:-}" accept=no dry=no macos="" confirmed=no yes=no bdf args zip new_args version line
   shift 2 2>/dev/null || shift $#
   while [ $# -gt 0 ]; do
     case "$1" in
       --accept-nullmoth-risk) accept=yes ;;
+      --yes|-y) yes=yes ;;
+      --guest-confirmed) confirmed=yes ;;  # internal: the walkthrough already asked
       --dry-run) dry=yes ;;
       --macos) macos="${2:-}"; shift ;;
       *) msg_error "Unknown option: $1"; return 1 ;;
@@ -1742,11 +1744,16 @@ function nvidia_attach() {
   done
   GPU_ISSUES=(); GPU_WARNS=(); GPU_HINTS=()
   [[ "$vmid" =~ ^[0-9]+$ ]] && bdf=$(gpu_normalize_bdf "$gpu") || {
-    msg_error "Usage: osx-proxmox-next.sh nvidia-attach <vmid> <pci-address> [--accept-nullmoth-risk] [--dry-run]"; return 1; }
+    msg_error "Usage: osx-proxmox-next.sh nvidia-attach <vmid> <pci-address> [--accept-nullmoth-risk] [--yes] [--dry-run]"; return 1; }
   if [ "$dry" == "yes" ]; then nullmoth_show_notice; else nullmoth_acknowledge "$accept" || return 1; fi
   echo
   nullmoth_print_guest_prep
   echo
+  if [ "$dry" != "yes" ] && [ "$confirmed" != "yes" ]; then
+    # --yes answers this question only; the NullMoth acknowledgement above is never answered by it.
+    local GPU_YES="$yes"
+    gpu_ui_yesno "Before you attach" "${NULLMOTH_GUEST_PREP_CONFIRM}" || { msg_error "Nothing was changed. Turn Remote Login and Screen Sharing on in macOS first, then run again (--yes answers this question)."; return 2; }
+  fi
 
   nullmoth_vm_check "$vmid" || true
   if [ -n "$NM_CFG" ]; then
@@ -3051,6 +3058,12 @@ def vm_fingerprint(cfg):
     return m.group(1).lower() if m else cfg.get("name", "")
 
 
+def record_vm_changed(record, cfg):
+    """True when *record* was written for another VM than *cfg* (a deleted and re-created VMID)."""
+    fp = record.get("fp", "")
+    return bool(fp) and fp != vm_fingerprint(cfg)
+
+
 def hostpci_key(value):
     """Order-free form of a hostpci value, so `pcie=1,0000:06:00` equals `0000:06:00,pcie=1`."""
     addrs, opts = set(), set()
@@ -3239,6 +3252,8 @@ def main(argv):
         _emit(record_write(payload))
     elif cmd == "vm-restore":
         _emit(vm_restore(payload["record"], parse_config(payload["cfg_raw"])))
+    elif cmd == "vm-stale":
+        print("1" if record_vm_changed(payload["record"], parse_config(payload["cfg_raw"])) else "0")
     elif cmd == "step":
         state = load_state(root) or new_state()
         (goto_step(state, payload["step"]) if payload.get("goto")
@@ -3283,7 +3298,7 @@ def main(argv):
     elif cmd == "hint-clear":
         clear_login_hint(root)
     else:
-        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
+        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|vm-stale|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
         return 64
     return 0
 
@@ -5170,6 +5185,9 @@ function gpu_undo() {
     elif ! qm status "$vmid" >/dev/null 2>&1; then
       rm -f "$(gpu_record_path "$vmid")"
       msg_ok "VM ${vmid}: it no longer exists, so there is nothing to revert on it"
+    elif [ "$(python3 -c 'import json,sys; print(json.dumps({"record": json.load(open(sys.argv[1])), "cfg_raw": sys.stdin.read()}))' "$(gpu_record_path "$vmid")" <<<"$(qm config "$vmid" 2>/dev/null)" | gpu_host vm-stale)" == "1" ]; then
+      mv "$(gpu_record_path "$vmid")" "$(gpu_record_path "$vmid").stale-$(date -u +%Y%m%dT%H%M%S)" 2>/dev/null || rm -f "$(gpu_record_path "$vmid")"
+      gpu_say "Skipped the record for VM ${vmid}: the VM changed since the card was attached, so nothing was reverted. Check its hostpci0, args and vga by hand."
     else
       gpu_detach_record "$vmid" no "$stop" || rc=$?
       [ "$rc" == "0" ] && msg_ok "VM ${vmid}: GPU settings restored"
@@ -5566,7 +5584,7 @@ function gpu_step_vm() {
   gpu_chosen_target >/dev/null || return $?   # last check before anything is written
   gpu_state_save "$(gpu_state_get 'json.dumps({"vm_records": d["vm_records"] + ([d["vm"]] if d["vm"] not in d["vm_records"] else [])})')"
   if [ "$vendor" == "nvidia" ]; then
-    nvidia_attach "$vmid" "$bdf" --accept-nullmoth-risk || return 1
+    nvidia_attach "$vmid" "$bdf" --accept-nullmoth-risk --guest-confirmed || return 1
   else
     amd_attach "$vmid" "$bdf" --display "$display" "${flags[@]}" || return 1
   fi

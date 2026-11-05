@@ -425,7 +425,7 @@ NV_STUBS = ("nullmoth_fetch_amfipass() { echo /cache/a.zip; }; nullmoth_oc_patch
 
 def test_nvidia_attach_records_the_originals_and_snapshots(bash, vm, tmp_path):
     vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
-    res = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk", env=nvidia_env(tmp_path, vm.env))
+    res = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk --yes", env=nvidia_env(tmp_path, vm.env))
     assert "NMOC 100 attach /cache/a.zip" in res.stdout
     assert vm.calls()[0] == "qm set 100 --hostpci0 0000:01:00,pcie=0" and vm.calls()[1].endswith(gpu.MMIO_ARG)
     rec = json.loads((tmp_path / "state/gpu-attach-100.json").read_text())
@@ -437,14 +437,14 @@ def test_nvidia_attach_records_the_originals_and_snapshots(bash, vm, tmp_path):
 @pytest.mark.parametrize("fail,needle", [("--hostpci0", "qm set --hostpci0 failed"), ("--args", "qm set --args failed")])
 def test_nvidia_attach_qm_set_failures(bash, vm, tmp_path, fail, needle):
     vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
-    res = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk", env={**nvidia_env(tmp_path, vm.env), "QM_FAIL": fail}, expect=1)
+    res = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk --yes", env={**nvidia_env(tmp_path, vm.env), "QM_FAIL": fail}, expect=1)
     assert needle in res.stdout
 
 
 def test_nvidia_detach_uses_the_record_and_the_legacy_path(bash, vm, tmp_path):
     vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
     env = nvidia_env(tmp_path, vm.env)
-    bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk", env=env)
+    bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk --yes", env=env)
     attached = MAC.replace("sequoia", "tahoe").replace("-cpu host", f"-cpu host {gpu.MMIO_ARG}") + "hostpci0: 0000:01:00,pcie=0\n"
     vm(100, "stopped", attached)
     (Path(vm.env["QM_DIR"]) / "calls.log").unlink()

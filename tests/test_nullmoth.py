@@ -344,7 +344,7 @@ def test_cli_dry_run_reports_refusal(monkeypatch, tmp_path, capsys):
 
 def test_cli_attach_applies(monkeypatch, tmp_path, capsys):
     applied = patch_cli(monkeypatch, tmp_path)
-    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 0
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk", "--yes"]) == 0
     assert len(applied[0]) == 5 and "kmutil showloaded" in capsys.readouterr().out
 
 
@@ -353,11 +353,11 @@ def test_cli_attach_failure_and_refusal_and_download_error(monkeypatch, tmp_path
     from osx_proxmox_next.executor import StepResult
     bad = ApplyResult(False, [StepResult("Prepare", "c", False, 1, "boom\nline")], tmp_path / "log")
     patch_cli(monkeypatch, tmp_path, results=bad)
-    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 10
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk", "--yes"]) == 10
     assert "FAILED at step: Prepare" in capsys.readouterr().out
-    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "09:00", "--accept-nullmoth-risk"]) == 2
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "09:00", "--accept-nullmoth-risk", "--yes"]) == 2
     monkeypatch.setattr(cli, "ensure_amfipass", lambda d: (_ for _ in ()).throw(DownloadError("x")))
-    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 5
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk", "--yes"]) == 5
     assert cli.run_cli(["nvidia-attach", "5", "--gpu", "01:00"]) == 2
 
 

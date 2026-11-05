@@ -275,7 +275,7 @@ def test_bash_host_console_follows_the_python_rule(bash, vm, tmp_path):
 def test_bash_nvidia_attach_prints_the_checklist_and_the_shared_wording(bash, vm, tmp_path):
     vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
     vm(101, "stopped", "hostpci0: 0000:01:00,pcie=0\n")
-    res = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk", env=nvidia_env(tmp_path, vm.env))
+    res = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk --yes", env=nvidia_env(tmp_path, vm.env))
     assert "Before you attach (required)" in res.stdout and "Remote Login and Screen Sharing" in res.stdout
     assert gpu.shared_note(101) in res.stdout
     assert "the Proxmox console goes black" in res.stdout and "4 or more lines" in res.stdout
@@ -285,7 +285,7 @@ def test_bash_gpu_setup_undo_reverts_an_nvidia_attach_exactly(bash, vm, tmp_path
     original = MAC.replace("sequoia", "tahoe")
     vm(100, "stopped", original)
     env = nvidia_env(tmp_path, vm.env)
-    bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk", env=env)
+    bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk --yes", env=env)
     vm(100, "stopped", original.replace("-cpu host", f"-cpu host {gpu.MMIO_ARG}") + "hostpci0: 0000:01:00,pcie=0\n")
     (Path(vm.env["QM_DIR"]) / "calls.log").unlink()
     env = {**env, "GPU_STATE_DIR": str(tmp_path / "state")}
@@ -312,7 +312,7 @@ def test_bash_nvidia_detach_drops_the_vm_from_the_walkthrough_list(bash, vm, tmp
     env = nvidia_env(tmp_path, vm.env)
     state_dir = Path(env["GPU_ROOT"]) / "var/lib/osx-proxmox-next"
     env["GPU_STATE_DIR"] = str(state_dir)
-    bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk", env=env)
+    bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk --yes", env=env)
     bash("gpu_state_save '{\"vm_records\": [100]}'", env=env)
     vm(100, "stopped", original.replace("-cpu host", f"-cpu host {gpu.MMIO_ARG}") + "hostpci0: 0000:01:00,pcie=0\n")
     bash(NV_STUBS + "nvidia_detach 100", env=env)
@@ -328,3 +328,102 @@ def test_docs_and_readme_copy():
         assert "stays on the emulated display" not in doc
     assert "4 or more lines" in (root / "docs/docs/guides/nvidia-nullmoth.md").read_text()
     assert "console goes black" in (root / "README.md").read_text()
+
+
+# ── undo skips a record that belongs to another VM, confirms follow the selection ──
+
+SKIPPED = ("Skipped the record for VM 100: the VM changed since the card was attached, so nothing was "
+           "reverted. Check its hostpci0, args and vga by hand.")
+
+
+def test_undo_skips_the_record_of_a_recreated_vm_and_keeps_it_as_stale(attached):
+    env, applied = attached
+    env.qm.vms[100] = ("stopped", env.qm.vms[100][1].replace("macos-sequoia", "another-vm"))
+    code, out = run(env, "--undo")
+    assert code == 0 and SKIPPED in out and "GPU settings restored" not in out and not applied
+    assert gpu.record_vmids() == []
+    assert len(list(gpu.STATE_DIR.glob("gpu-attach-100.json.stale-*"))) == 1
+    code, out = run(env, "--undo")  # the second run is not stuck on the same record
+    assert code == 0 and SKIPPED not in out
+
+
+def test_undo_still_reverts_the_vm_the_record_was_written_for(attached):
+    env, applied = attached
+    code, out = run(env, "--undo")
+    assert code == 0 and "GPU settings restored" in out and applied and "Skipped" not in out
+
+
+def test_choose_refuses_a_holder_that_appeared_after_the_scan(tmp_path):
+    env = nvidia_env_host(tmp_path)
+    s = env.session()
+    assert s.choose("0000:06:00", 100, "console", True, True, confirmed=[]) != []
+    assert s.choose("0000:06:00", 100, "console", True, True, confirmed=[120]) == []
+
+
+def test_cli_never_assumes_the_shared_card_warning_was_accepted(tmp_path):
+    env = nvidia_env_host(tmp_path)
+    code, out = run(env, "--vm", "100", "--gpu", "06:00", "--accept-nullmoth-risk")  # no --yes, not interactive
+    assert code == gpu_setup_cli.EXIT_REFUSED and "Nothing was changed" in out
+
+
+def test_tui_two_click_keys_follow_the_card_and_the_vm():
+    from types import SimpleNamespace as NS
+    from osx_proxmox_next._gpu_mixin import GpuSetupMixin as M
+    a, b = NS(bdf="0000:06:00", stopped_users=[120]), NS(bdf="0000:07:00", stopped_users=[120])
+    assert M._gp_share_key(a) != M._gp_share_key(b)
+    assert M._gp_share_key(a) != M._gp_share_key(NS(bdf="0000:06:00", stopped_users=[120, 130]))
+    s1 = NS(state={"vm": 100, "gpu": {"bdf": "0000:06:00"}})
+    s2 = NS(state={"vm": 101, "gpu": {"bdf": "0000:06:00"}})
+    assert M._gp_guest_key(s1) != M._gp_guest_key(s2)
+
+    class Dummy(M):
+        _gp_armed = None
+
+        def _gp_result(self, *_a, **_k):
+            pass
+
+    d = Dummy()
+    assert d._gp_confirm_click(M._gp_share_key(a), "x", "w") is False
+    assert d._gp_confirm_click(M._gp_share_key(b), "x", "w") is False  # another card: armed again, not accepted
+    assert d._gp_confirm_click(M._gp_share_key(b), "x", "w") is True
+
+
+# ── standalone nvidia-attach asks the Screen Sharing question ──
+
+def test_nvidia_attach_asks_the_guest_question_and_yes_answers_only_that(monkeypatch, tmp_path, capsys):
+    from test_nullmoth import patch_cli
+    applied = patch_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr("sys.stdin", type("T", (), {"isatty": lambda self: False})())
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 2
+    assert "Nothing was changed" in capsys.readouterr().out and not applied
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--yes"]) == 2  # --yes never gives the risk ack
+    assert not applied
+    monkeypatch.setattr("sys.stdin", type("T", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 0
+    assert applied
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    applied.clear()
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 2 and not applied
+
+
+def test_bash_undo_skips_the_record_of_a_recreated_vm(bash, vm, tmp_path):
+    from test_gpu_parity import put_record
+    from test_gpu_hardening_bash import walkthrough_env
+    root, state_dir, env = walkthrough_env(tmp_path, vm)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    put_record(tmp_path, 100, "0000:06:00", "amd", None, None, "std", True, "")
+    rec = json.loads((tmp_path / "state/gpu-attach-100.json").read_text())
+    rec["fp"] = "an-older-vm"
+    (state_dir / "gpu-attach-100.json").write_text(json.dumps(rec))
+    vm(100, "stopped", MAC)
+    res = bash("gpu_undo no", env=env)
+    assert SKIPPED in res.stdout + res.stderr and vm.calls() == []
+    assert not (state_dir / "gpu-attach-100.json").exists() and list(state_dir.glob("gpu-attach-100.json.stale-*"))
+
+
+def test_bash_nvidia_attach_asks_the_guest_question(bash, vm, tmp_path):
+    vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
+    env = nvidia_env(tmp_path, vm.env)
+    out = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk", env=env, expect=2)
+    assert "Nothing was changed" in out.stdout + out.stderr and vm.calls() == []

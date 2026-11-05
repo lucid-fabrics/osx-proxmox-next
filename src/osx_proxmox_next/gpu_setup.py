@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import re
 import textwrap
-from dataclasses import dataclass, field
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from . import amd_host, bios_guide, gpu, gpu_attach, host_setup, nullmoth, nvidia_host
-from .gpu import AttachRecord, load_record
+from .gpu import AttachRecord, load_record, parse_config
 from .host_setup import STEPS, default_run
 from .infrastructure import ProxmoxAdapter
 from .services import fetch_vm_info, get_proxmox_adapter, list_macos_vms
@@ -377,10 +378,13 @@ class Session:
                               "Pick another VM or create a Sequoia or Tahoe VM first.")
         return issues
 
-    def choose(self, bdf: str, vmid: int | None, display: str, ack: bool = False, share_ok: bool = False) -> list[str]:
+    def choose(self, bdf: str, vmid: int | None, display: str, ack: bool = False, share_ok: bool = False,
+               confirmed: Iterable[int] | None = None) -> list[str]:
         """Validate and store the choices. Returns the reasons it was refused (empty on success).
 
-        A card that a stopped VM also lists needs *share_ok* (the user confirmed the warning)."""
+        A card that a stopped VM also lists needs *share_ok* (the user confirmed the warning). When
+        *confirmed* is given it names the stopped VMs the user saw: a holder that is not in it (it
+        appeared after the scan) needs a new confirmation."""
         cards = {c.bdf: c for c in self.scan(exclude_vm=vmid if vmid is not None else -1)}
         card = cards.get(gpu.normalize_bdf(bdf) or bdf)
         if card is None:
@@ -388,7 +392,8 @@ class Session:
         if not card.selectable:
             return [card.why_not]
         issues: list[str] = []
-        if card.stopped_users and not share_ok:
+        unseen = confirmed is not None and not set(card.stopped_users) <= set(confirmed)
+        if card.stopped_users and (not share_ok or unseen):
             issues.append(" ".join(gpu.shared_note(v) for v in card.stopped_users)
                           + " Confirm that you want to use it anyway.")
         if vmid is not None:
@@ -630,9 +635,22 @@ class Session:
         # (this walkthrough or nvidia-attach).
         vmids = list(self.state["vm_records"]) + [v for v in gpu.record_vmids() if v not in self.state["vm_records"]]
         for vmid in vmids:
-            if load_record(vmid) is None:
+            record = load_record(vmid)
+            if record is None:
                 self._forget_vm(vmid)
                 messages.append(f"VM {vmid}: nothing to revert (the attach did not change it).")
+                continue
+            info = fetch_vm_info(vmid, adapter=self.pve)
+            if info is not None and host_setup.record_vm_changed(asdict(record), parse_config(info.config_raw)):
+                stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+                path = gpu.record_path(vmid)
+                try:
+                    path.rename(path.with_name(f"{path.name}.stale-{stamp}"))
+                except OSError:
+                    path.unlink(missing_ok=True)
+                self._forget_vm(vmid)
+                messages.append(f"Skipped the record for VM {vmid}: the VM changed since the card was attached, "
+                                "so nothing was reverted. Check its hostpci0, args and vga by hand.")
                 continue
             plan = gpu_attach.prepare_detach(vmid, adapter=self.pve, allow_stop=allow_stop, missing_ok=True)
             if not plan.ok:

@@ -152,7 +152,7 @@ def test_undo_can_stop_a_running_vm_when_asked(bash, vm, tmp_path):
 def test_a_refused_nvidia_attach_leaves_a_record_that_undo_can_finish(bash, vm, tmp_path):
     vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
     env = nvidia_env(tmp_path, vm.env)
-    bash("nullmoth_fetch_amfipass() { echo /cache/a.zip; }; nullmoth_oc_patch() { return 1; }; nvidia_attach 100 01:00 --accept-nullmoth-risk",
+    bash("nullmoth_fetch_amfipass() { echo /cache/a.zip; }; nullmoth_oc_patch() { return 1; }; nvidia_attach 100 01:00 --accept-nullmoth-risk --yes",
          env=env, expect=1)
     assert (tmp_path / "state/gpu-attach-100.json").exists() and vm.calls() == []
     out = bash(NV_STUBS + "gpu_detach_record 100", env=env).stdout
@@ -163,7 +163,7 @@ def test_nvidia_attach_refuses_a_vm_with_its_recovery_disk_and_forgets_earlier_r
     env = nvidia_env(tmp_path, vm.env)
     vm(100, "stopped", MAC.replace("sequoia", "tahoe") + "ide2: local:iso/rec.img,media=disk\n")
     vm(101, "stopped", MAC.replace("sequoia", "tahoe"))
-    out = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk || true; nvidia_attach 101 01:00 --dry-run",
+    out = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk --yes || true; nvidia_attach 101 01:00 --dry-run",
                env=env, expect=0).stdout
     assert "recovery disk attached" in out and "DRY RUN" in out and out.count("REFUSED") == 1
 

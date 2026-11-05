@@ -327,7 +327,7 @@ class GpuSetupMixin:
         ack = self.query_one("#gp_ack_in", Input).value.strip() == ACK_PHRASE  # type: ignore[attr-defined]
         vmid = int(choice) if choice and choice.isdigit() else None
         if card.stopped_users and not self._gp_confirm_click(
-                "share", "Choose this card",
+                self._gp_share_key(card), "Choose this card",
                 " ".join(card.notes) + " Press the button again to use it anyway."):
             return
 
@@ -342,7 +342,7 @@ class GpuSetupMixin:
                             "here for the VM step.")
             self._gp_render()
 
-        self._gp_async(lambda: s.choose(card.bdf, vmid, display, ack, bool(card.stopped_users)), done, "Checking the choices...")
+        self._gp_async(lambda: s.choose(card.bdf, vmid, display, ack, bool(card.stopped_users), confirmed=card.stopped_users), done, "Checking the choices...")
 
     # ── 3 BIOS ───────────────────────────────────────────────────────
 
@@ -548,7 +548,7 @@ class GpuSetupMixin:
             self._gp_vm_preview()
             return
         if s.state["gpu"]["vendor"] == "nvidia" and not self._gp_confirm_click(
-                "guest", "Attach the card now", nullmoth.GUEST_PREP_CONFIRM + " Press the button again to attach."):
+                self._gp_guest_key(s), "Attach the card now", nullmoth.GUEST_PREP_CONFIRM + " Press the button again to attach."):
             return
 
         def work() -> Any:
@@ -594,6 +594,16 @@ class GpuSetupMixin:
         self._gp_set("Setup finished", s.summary(), "Start a new setup")
 
     # ── buttons ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _gp_share_key(card) -> str:
+        """The two-click key of the shared-card warning: bound to this card and this set of holders."""
+        return f"share:{card.bdf}:{sorted(card.stopped_users)}"
+
+    @staticmethod
+    def _gp_guest_key(session) -> str:
+        """The two-click key of the guest-preparation question: bound to this VM and this card."""
+        return f"guest:{session.state['vm']}:{session.state['gpu']['bdf']}"
 
     def _gp_confirm_click(self, key: str, label: str, warning: str) -> bool:
         """Two-click confirmation for actions with side effects. True on the second click only; any

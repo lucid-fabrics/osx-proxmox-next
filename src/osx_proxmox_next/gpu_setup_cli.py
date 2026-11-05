@@ -109,7 +109,7 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     if chosen is None:
         io.say("Pick a card with --gpu <address>.")
         return EXIT_REFUSED
-    share_ok = True
+    share_ok = False
     if chosen.stopped_users:
         for note in chosen.notes:
             io.say("WARN: " + note)
@@ -142,7 +142,7 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     if chosen.vendor == "nvidia":
         io.say(nullmoth.notice_text())
         ack = args.accept_risk or io.typed(nullmoth.ACK_LABEL, nullmoth.ACK_PHRASE)
-    issues = s.choose(chosen.bdf, vmid, display, ack, share_ok)
+    issues = s.choose(chosen.bdf, vmid, display, ack, share_ok, confirmed=chosen.stopped_users if share_ok else ())
     for issue in issues:
         io.say("REFUSED: " + issue)
     return EXIT_REFUSED if issues else None

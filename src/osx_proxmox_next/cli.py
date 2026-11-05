@@ -157,6 +157,8 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
     attach.add_argument("--gpu", required=True, help="PCI address of the card, e.g. 01:00 or 0000:01:00.0")
     attach.add_argument("--accept-nullmoth-risk", action="store_true", dest="accept_risk",
                         help="Acknowledge the notice printed by this command (required to apply)")
+    attach.add_argument("--yes", action="store_true",
+                        help="Answer the Remote Login / Screen Sharing question (never the NullMoth notice)")
     attach.add_argument("--dry-run", action="store_true", dest="dry_run",
                         help="Print the preflight result and the plan, change nothing")
     attach.add_argument("--macos", type=str, default="",
@@ -775,6 +777,16 @@ def _run_plan(plan: nullmoth.AttachPlan, label: str) -> int:
     return 10
 
 
+def _confirm_guest_prep(yes: bool) -> bool:
+    """The Screen Sharing / Remote Login question of the walkthrough. --yes answers it; the NullMoth
+    acknowledgement is a separate flag and is never answered here."""
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        return False
+    return input(f"{nullmoth.GUEST_PREP_CONFIRM} [y/N] ").strip().lower() in ("y", "yes")
+
+
 def _run_nvidia_attach(args: argparse.Namespace) -> int:
     vmid = args.vmid
     if vmid < MIN_VMID or vmid > MAX_VMID:
@@ -788,6 +800,10 @@ def _run_nvidia_attach(args: argparse.Namespace) -> int:
     print()
     if not args.dry_run and not args.accept_risk:
         print("Nothing was changed. Read the notice above, then re-run with --accept-nullmoth-risk to apply.")
+        return 2
+    if not args.dry_run and not _confirm_guest_prep(getattr(args, "yes", False)):
+        print("Nothing was changed. Turn Remote Login and Screen Sharing on in macOS first, then run again "
+              "(--yes answers this question).")
         return 2
     cache_dir = Path(args.iso_dir or DEFAULT_ISO_DIR)
     zip_path = cache_dir / AMFIPASS.filename
