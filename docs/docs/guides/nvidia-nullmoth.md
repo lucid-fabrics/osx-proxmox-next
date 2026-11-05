@@ -92,4 +92,4 @@ The NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore 
 
 ## Status
 
-Beta. Tested end to end on an RTX 3060 with macOS Tahoe 26.7.2 and NullMoth 2.7.2: the driver loads, Metal 3 works, it survives reboots and the undo restores the VM exactly. Other cards and macOS versions have not been tried yet.
+Beta. NullMoth is a community project, and its compatibility is tested by its community, not by us. This tool only prepares the VM so the driver can be installed. We do not make, ship or support the driver, and we take no responsibility for installing it or for what it does.

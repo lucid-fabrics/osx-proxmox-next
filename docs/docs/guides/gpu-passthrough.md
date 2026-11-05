@@ -8,7 +8,7 @@ title: GPU passthrough (guided)
 One guided flow takes you from "there is a graphics card in my Proxmox server" to "macOS is using it". It works for every AMD and NVIDIA card macOS can drive. You never have to read a wiki, edit a file by hand or guess a command. Where a person has to act (the BIOS, plugging in a monitor, installing a driver inside macOS) the tool tells you exactly what to do and gives you a photo card, a QR code or a saved file to carry away.
 
 :::caution Beta
-The NVIDIA attach and undo were tested end to end on an RTX 3060 with macOS Tahoe. AMD cards and the host setup steps (kernel command line, vfio binding, host reboot) are covered by tests but not yet tried on real hardware. Every change is previewed, confirmed, backed up and undoable, but read the preview before you confirm it.
+NVIDIA support relies on NullMoth, a community driver tested by its own community: we added support for preparing the VM, but we take no responsibility for the driver or its install. AMD cards and the host setup steps (kernel command line, vfio binding, host reboot) are covered by tests but not yet tried on real hardware. Every change is previewed, confirmed, backed up and undoable, but read the preview before you confirm it.
 :::
 
 ## Start it
