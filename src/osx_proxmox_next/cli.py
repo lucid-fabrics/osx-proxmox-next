@@ -22,12 +22,14 @@ from .downloader import (
     ensure_restrictevents,
 )
 from .executor import apply_plan
+from .oc_builder import AMFIPASS, ensure_amfipass
 from .planner import build_plan, build_destroy_plan, build_edit_plan, build_clone_plan, build_post_install_plan, POST_INSTALL_BOOT_ORDER
 from .services import fetch_vm_info, get_proxmox_adapter, run_download_worker
 from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints
 from .support import SUPPORT_LINE, SUPPORT_LINES_POST_INSTALL
+from . import gpu_attach, gpu_setup_cli, nullmoth
 
 _MB = 1024 * 1024
 
@@ -143,6 +145,34 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
     )
     post_install.add_argument("--vmid", type=int, required=True, help="VM ID to update")
     post_install.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
+    attach = sub.add_parser(
+        "nvidia-attach",
+        help=(
+            "BETA: attach an NVIDIA Turing-or-newer GPU to an installed macOS VM and "
+            "prepare OpenCore for the third-party NullMoth driver. Requires "
+            "--accept-nullmoth-risk unless --dry-run."
+        ),
+    )
+    attach.add_argument("vmid", type=int, help="VM ID (must be stopped)")
+    attach.add_argument("--gpu", required=True, help="PCI address of the card, e.g. 01:00 or 0000:01:00.0")
+    attach.add_argument("--accept-nullmoth-risk", action="store_true", dest="accept_risk",
+                        help="Acknowledge the notice printed by this command (required to apply)")
+    attach.add_argument("--yes", action="store_true",
+                        help="Answer the Remote Login / Screen Sharing question (never the NullMoth notice)")
+    attach.add_argument("--dry-run", action="store_true", dest="dry_run",
+                        help="Print the preflight result and the plan, change nothing")
+    attach.add_argument("--macos", type=str, default="",
+                        help="sequoia or tahoe, when it cannot be read from the VM description or name")
+    attach.add_argument("--iso-dir", type=str, default="",
+                        help="Directory used to cache the pinned AMFIPass download")
+    gpu_setup_cli.add_parser(sub)
+    detach = sub.add_parser(
+        "nvidia-detach",
+        help="Remove the NVIDIA GPU, the MMIO window and the NullMoth OpenCore changes from a VM",
+    )
+    detach.add_argument("vmid", type=int, help="VM ID (must be stopped)")
+    detach.add_argument("--dry-run", action="store_true", dest="dry_run",
+                        help="Print the plan, change nothing")
     unattended = sub.add_parser(
         "install-unattended",
         help=(
@@ -311,6 +341,12 @@ def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
         return _run_post_install(args)
     if args.cmd == "install-unattended":
         return _run_install_unattended(args)
+    if args.cmd == "nvidia-attach":
+        return _run_nvidia_attach(args)
+    if args.cmd == "nvidia-detach":
+        return _run_nvidia_detach(args)
+    if args.cmd == "gpu-setup":
+        return gpu_setup_cli.run(args)
     return None
 
 
@@ -709,6 +745,114 @@ def _run_post_install(args: argparse.Namespace) -> int:
         print("Post-install FAILED.")
     print(f"Log: {result.log_path}")
     return 9
+
+
+def _print_plan_result(plan: nullmoth.AttachPlan) -> None:
+    for issue in plan.issues:
+        print(f"REFUSED: {issue}")
+    for line in plan.hints:
+        print(f"  {line}")
+    for warning in plan.warnings:
+        print(f"WARN: {warning}")
+
+
+def _print_steps(steps: list) -> None:
+    for idx, step in enumerate(steps, start=1):
+        print(f"{idx:02d}. {step.title}")
+        first = step.command.splitlines()[0]
+        print(f"    {first[:200]}{'...' if len(first) > 200 or step.command.count(chr(10)) else ''}")
+
+
+def _run_plan(plan: nullmoth.AttachPlan, label: str) -> int:
+    result = apply_plan(plan.steps, execute=True)
+    if result.ok:
+        print(f"{label} OK. Log: {result.log_path}")
+        return 0
+    failed = next((r for r in result.results if not r.ok), None)
+    if failed is not None:
+        print(f"{label} FAILED at step: {failed.title}")
+        for line in (failed.output or "").strip().splitlines()[-5:]:
+            print(f"  {line}")
+    print(f"Log: {result.log_path}")
+    return 10
+
+
+def _confirm_guest_prep(yes: bool) -> bool:
+    """The Screen Sharing / Remote Login question of the walkthrough. --yes answers it; the NullMoth
+    acknowledgement is a separate flag and is never answered here."""
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        return False
+    return input(f"{nullmoth.GUEST_PREP_CONFIRM} [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _run_nvidia_attach(args: argparse.Namespace) -> int:
+    vmid = args.vmid
+    if vmid < MIN_VMID or vmid > MAX_VMID:
+        print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
+        return 2
+    print(nullmoth.notice_text())
+    print()
+    print(nullmoth.GUEST_PREP_TITLE + ":")
+    for idx, line in enumerate(nullmoth.GUEST_PREP, start=1):
+        print(f"  {idx}. {line}")
+    print()
+    if not args.dry_run and not args.accept_risk:
+        print("Nothing was changed. Read the notice above, then re-run with --accept-nullmoth-risk to apply.")
+        return 2
+    if not args.dry_run and not _confirm_guest_prep(getattr(args, "yes", False)):
+        print("Nothing was changed. Turn Remote Login and Screen Sharing on in macOS first, then run again "
+              "(--yes answers this question).")
+        return 2
+    cache_dir = Path(args.iso_dir or DEFAULT_ISO_DIR)
+    zip_path = cache_dir / AMFIPASS.filename
+    plan = nullmoth.prepare_attach(vmid, args.gpu, zip_path, macos=args.macos or None)
+    _print_plan_result(plan)
+    if args.dry_run:
+        print("DRY RUN - nothing is changed.")
+        if plan.steps:
+            _print_steps(plan.steps)
+        return 0 if plan.ok else 2
+    if not plan.ok:
+        return 2
+    try:
+        ensure_amfipass(cache_dir)
+    except DownloadError as exc:
+        print(f"ERROR: could not fetch AMFIPass: {exc}")
+        return 5
+    snapshot = create_snapshot(vmid)
+    print(f"Snapshot saved: {snapshot.path}")
+    rc = _run_plan(plan, "NVIDIA attach")
+    if rc == 0:
+        print("\nNext steps:")
+        for idx, line in enumerate(nullmoth.NEXT_STEPS, start=1):
+            print(f"  {idx}. {line}")
+    return rc
+
+
+def _run_nvidia_detach(args: argparse.Namespace) -> int:
+    vmid = args.vmid
+    if vmid < MIN_VMID or vmid > MAX_VMID:
+        print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
+        return 2
+    plan = gpu_attach.prepare_detach(vmid)
+    _print_plan_result(plan)
+    if args.dry_run:
+        print("DRY RUN - nothing is changed.")
+        if plan.steps:
+            _print_steps(plan.steps)
+        return 0 if plan.ok else 2
+    if not plan.ok:
+        return 2
+    rc = _run_plan(plan, "NVIDIA detach")
+    if rc == 0:
+        try:
+            from .gpu_setup import Session
+            Session().forget_attached(vmid)
+        except OSError:
+            pass
+    return rc
 
 
 if __name__ == "__main__":

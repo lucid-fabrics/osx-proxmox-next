@@ -33,6 +33,7 @@ classifiers = [
 dependencies = [
   "textual>=0.60",
   "rich>=13.7",
+  "segno>=1.5",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +62,8 @@ osx_proxmox_next = [
     "data/opencore/*",
     "data/opencore/ACPI/*",
     "data/opencore/MCEReporterDisabler.kext/Contents/*",
+    "data/nullmoth/*",
+    "data/gpu/*",
 ]
 
 [tool.pytest.ini_options]

@@ -10,11 +10,12 @@ log = logging.getLogger(__name__)
 from textual.app import App, ComposeResult
 from textual.containers import Container
 from textual.reactive import reactive
-from textual.widgets import Button, Checkbox, Header, Input, ProgressBar, Static
+from textual.widgets import Button, Checkbox, Header, Input, OptionList, ProgressBar, RadioSet, Select, Static
 
 from . import __version__
 from ._edit_mixin import EditModeMixin
 from ._manage_mixin import ManageModeMixin
+from ._gpu_mixin import GpuSetupMixin
 from ._wizard_mixin import WizardStepsMixin
 from .assets import required_assets
 from .defaults import (
@@ -49,8 +50,9 @@ from .services import (
 )
 
 
-class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
+class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, GpuSetupMixin, App):
     CSS_PATH = Path(__file__).with_suffix(".tcss")
+    TITLE = "osx-proxmox-next"
 
     BINDINGS = [
         ("q", "quit", "Quit"),
@@ -130,6 +132,13 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
                 "install_btn": self._run_live_install,
                 "mode_create": lambda: self._toggle_mode("create"),
                 "mode_manage": lambda: self._toggle_mode("manage"),
+                "mode_gpu": lambda: self._toggle_mode("gpu"),
+                "gp_primary_btn": self._gp_primary,
+                "gp_secondary_btn": self._gp_secondary,
+                "gp_tertiary_btn": self._gp_tertiary,
+                "gp_stop_btn": self._gp_stop_selected,
+                "gp_back_btn": self._gp_back,
+                "gp_undo_btn": self._gp_undo,
                 "manage_refresh_btn": self._refresh_vm_list,
                 "manage_destroy_btn": self._run_destroy,
                 "edit_apply_btn": self._run_edit,
@@ -146,6 +155,24 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, App):
             self._validate_manage_vmid()
         if event.input.id in {"edit_vmid", "edit_name", "edit_cores", "edit_memory", "edit_bridge", "edit_disk_add"}:
             self._validate_edit_form()
+        if event.input.id in {"gp_ack_in", "gp_confirm_in"}:
+            self._gp_validate()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "gp_gpu_select":
+            self._gp_validate()
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        if event.radio_set.id == "gp_display_radio":
+            self._gp_validate()
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list.id == "gp_vm_list":
+            self._gp_validate()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "gp_vm_list":
+            self._gp_validate()
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id == "manage_purge_cb":

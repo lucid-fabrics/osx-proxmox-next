@@ -2403,8 +2403,16 @@ def test_wizard_state_manage_defaults() -> None:
 # ── Penryn CPU Detection Tests ────────────────────────────────────────
 
 
+def _pin_cpu_cores(monkeypatch, cores: int = 4) -> None:
+    """Make the detected core count independent of the machine running pytest."""
+    for target in ("osx_proxmox_next.app", "osx_proxmox_next._wizard_mixin", "osx_proxmox_next.defaults"):
+        monkeypatch.setattr(f"{target}.detect_cpu_cores", lambda: cores)
+
+
+
 def test_penryn_auto_checked_on_legacy_cpu(monkeypatch) -> None:
     """When detect_cpu_info returns needs_penryn=True, penryn_cb is checked and cores=4."""
+    _pin_cpu_cores(monkeypatch)
     from osx_proxmox_next.defaults import CpuInfo
     legacy_cpu = CpuInfo(vendor="Intel", model_name="Intel Xeon E5-2640 v4",
                          family=6, model=79, needs_emulated_cpu=False, needs_penryn=True)
@@ -2475,6 +2483,7 @@ def test_penryn_checkbox_sets_cpu_model_in_config(monkeypatch) -> None:
 
 def test_penryn_checkbox_updates_cores(monkeypatch) -> None:
     """Checking penryn_cb sets cores input to '4'; unchecking restores detected count."""
+    _pin_cpu_cores(monkeypatch)
     from osx_proxmox_next.defaults import CpuInfo
     no_penryn = CpuInfo(vendor="Intel", model_name="Intel Core i7-6700K",
                         family=6, model=94, needs_emulated_cpu=False, needs_penryn=False)

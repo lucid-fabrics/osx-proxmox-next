@@ -193,3 +193,26 @@ Input:focus { border: tall #2ec27e; background: #1a2c3f; }
     margin-top: 1;
 }
 .edit_result_fail { border: heavy #d44f4f; }
+
+#gp_rail { color: #9fc6e8; margin-bottom: 1; }
+#gp_title { color: #e6a817; }
+#gp_body { margin: 1 0; height: auto; }
+#gp_qr { background: white; color: black; width: auto; height: auto; padding: 0 1; margin-bottom: 1; }
+#gp_header { height: auto; }
+#gp_name { width: auto; color: #e6a817; text-style: bold; }
+#gp_tag { background: #e6a817; color: #1a1a1a; padding: 0 1; margin-left: 2; width: auto; text-style: bold; }
+#gp_gpu_select { width: 70; }
+#gp_vm_label, #gp_display_label, #gp_confirm_label, #gp_ack_label { color: #9fc6e8; margin-top: 1; }
+#gp_vm_list { height: auto; max-height: 12; width: 100%; border: round #1f4f7a; }
+#gp_display_radio { width: 100%; height: auto; margin-top: 0; }
+.gp_desc { color: #8ea4b8; height: auto; margin-bottom: 1; }
+#gp_ack_in, #gp_confirm_in { width: 40; }
+#gp_notice_title { color: #e6a817; margin-top: 1; }
+#gp_primary_btn { background: #2ec27e; color: #0b1a12; text-style: bold; }
+.gp_secondary { background: #1b2a3a; }
+#gp_result {
+    border: heavy #2ec27e;
+    padding: 1;
+    height: auto;
+    margin-top: 1;
+}

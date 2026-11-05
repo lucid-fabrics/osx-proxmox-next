@@ -26,17 +26,9 @@ Each VM needs its own CPU, RAM, and disk allocation. Don't overcommit host resou
 <details>
 <summary><strong>Can I use GPU passthrough?</strong></summary>
 
-Yes, but host-side setup is manual and must be done before the VM can use a discrete GPU:
+Yes. Run `osx-next-cli gpu-setup` (or pick **GPU Passthrough** in the TUI). It scans your cards, shows the BIOS settings to change on a card you can photograph, configures the host with a preview, backup and undo, attaches the card to your VM and walks you through the first boot. See [GPU passthrough (guided)](gpu-passthrough.md).
 
-1. Enable **VT-d / IOMMU** in BIOS/UEFI
-2. Add to kernel cmdline:
-   - Intel: `intel_iommu=on iommu=pt`
-   - AMD: `amd_iommu=on iommu=pt`
-3. Bind GPU + GPU audio to `vfio-pci`
-4. Reboot host
-5. Attach both PCI functions to VM (`hostpci0`, `hostpci1`)
-
-Reference: [Proxmox PCI(e) Passthrough Wiki](https://pve.proxmox.com/wiki/PCI(e)_Passthrough)
+AMD Polaris, Vega and Navi 10, 14, 21 and 23 cards use Apple's own drivers. NVIDIA Turing and newer cards work in beta through the third-party NullMoth driver on macOS Sequoia 15.5+ and Tahoe 26, with core macOS security turned off. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).
 
 </details>
 

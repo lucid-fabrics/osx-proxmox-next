@@ -1,0 +1,37 @@
+# AMD GPU allowlist for macOS guests (PCI vendor 1002).
+# The Python package (amd_host.py) reads this file and the bash installer embeds it
+# verbatim; tests/test_gpu_parity.py diffs the two. Change the file, then refresh the
+# bash copy.
+#
+# Sources: Apple kext IOPCIMatch lists dumped on macOS 12.2.1 (github.com/cmsj/macOSrecon,
+# data/GPU_AMD); Dortania GPU Buyers Guide (AMD page); OpenCore Legacy Patcher 3.0.0 AMD
+# patchsets (these families are native on CPUs with AVX2, on macOS 13 to 26). The 13 to 26
+# lists are assumed equal to the 12.2.1 dump (Apple only adds ids) and are not re-verified.
+# Vendor-reset table: github.com/gnif/vendor-reset src/device-db.h.
+#
+# family|label|reset|boot_args|tahoe|ids
+#   reset  : vendor-reset (card has the reset bug, install vendor-reset)
+#            vendor-reset-warn (same, plus a hard warning: host storage corruption reports)
+#            early-bind (not covered by vendor-reset, bind to vfio-pci before amdgpu loads)
+#   tahoe  : ok (a Mac that Tahoe supports ships this family) or unverified (no Tahoe report)
+#   ids    : hex device ids, ranges as A-B
+polaris10|Polaris 10/20/30 (RX 470/480/570/580/590, WX 5100/7100)|vendor-reset||ok|67C0 67C1 67C2 67C4 67C7 67C8 67C9 67CA 67CC 67CF 67D0 67DF
+polaris11|Polaris 11/21 (RX 460/560, WX 4100, Pro 560X)|vendor-reset||unverified|67E0 67E1 67E3 67E7 67E8 67E9 67EB 67EF 67FF
+vega10|Vega 10 (RX Vega 56/64, Vega Frontier, WX 8200/9100)|vendor-reset||unverified|6860-686F 687F
+vega20|Vega 20 (Radeon VII, Radeon Pro VII, Pro Vega II)|vendor-reset-warn||ok|66A0 66A1 66A2 66A3 66A7 66AF
+navi10|Navi 10 (RX 5600 XT/5700/5700 XT, W5700)|vendor-reset|agdpmod=pikera|ok|7310 7312 7318 7319 731A 731B 731F
+navi14|Navi 14 (RX 5300/5500 XT, W5500)|vendor-reset|agdpmod=pikera|ok|7340 7341 7343 7347 734F
+navi21|Navi 21 (RX 6800/6800 XT/6900 XT, W6800)|early-bind|agdpmod=pikera|ok|73A2 73A3 73AB 73BF
+navi23|Navi 23 (RX 6600/6600 XT, W6600)|early-bind|agdpmod=pikera|ok|73E3 73FF
+# Cards that work when the device id is spoofed at the VM level (hostpci device-id option).
+# spoof|real id|id the guest sees|family
+spoof|73AF|73BF|navi21
+spoof|73A5|73BF|navi21
+spoof|73EF|73FF|navi23
+# Never offered. deny|label|ids|one-line reason
+deny|RX 6700 series (Navi 22)|73C0 73C1 73C3 73DF|RX 6700 series (Navi 22): Apple never shipped an accelerator for it.
+deny|RX 6300/6400/6500 XT (Navi 24)|7420-743F|RX 6300/6400/6500 XT (Navi 24): macOS has no driver for it.
+deny|RX 580 2048SP / RX 590 GME|6FDF|RX 580 2048SP and RX 590 GME: Apple's driver does not match this variant.
+deny|RX 540/550 (Polaris 12)|6980-699F|RX 540/550 (Polaris 12): needs a device-id spoof and extra patches, not supported here.
+deny|RX 7000 series (RDNA3)|7440-747F 7480-749F|RX 7000 series: Apple never shipped a driver.
+deny|RX 9000 series (RDNA4)|7550-755F|RX 9000 series: Apple never shipped a driver.

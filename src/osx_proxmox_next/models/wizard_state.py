@@ -74,3 +74,4 @@ class WizardState:
     edit_ok: bool = False
     edit_log: list[str] = field(default_factory=list)
     edit_start_after: bool = False
+    # NVIDIA GPU (NullMoth, beta) panel

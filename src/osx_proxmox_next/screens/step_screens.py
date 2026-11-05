@@ -6,6 +6,7 @@ from textual.widgets import Button, Checkbox, Input, ProgressBar, Static
 
 from ..defaults import DEFAULT_BRIDGE, DEFAULT_ISO_DIR, DEFAULT_MEMORY_MB, DEFAULT_STORAGE, CpuInfo
 from ..domain import DEFAULT_VMID, SUPPORTED_MACOS
+from .gpu_panel import compose_gpu_panel
 
 __all__ = [
     "compose_step1",
@@ -31,6 +32,7 @@ def compose_step2() -> ComposeResult:
         with Horizontal(classes="action_row"):
             yield Button("Create VM", id="mode_create", classes="mode_btn mode_active")
             yield Button("Manage VMs", id="mode_manage", classes="mode_btn")
+            yield Button("GPU Passthrough", id="mode_gpu", classes="mode_btn")
         # Create panel
         with Vertical(id="create_panel"):
             yield Static("Choose macOS Version")
@@ -90,6 +92,7 @@ def compose_step2() -> ComposeResult:
                     yield Button("Apply Changes", id="edit_apply_btn", disabled=True)
             yield Static("", id="edit_log", classes="hidden")
             yield Static("", id="edit_result", classes="hidden")
+        yield from compose_gpu_panel()
 
 
 def compose_step3(storage_targets: list[str]) -> ComposeResult:

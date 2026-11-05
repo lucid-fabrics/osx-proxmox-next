@@ -32,14 +32,6 @@
   </a>
 </p>
 
-<p align="center">
-  <a href="https://ko-fi.com/s/84fe857595">
-    <img alt="GPU Passthrough Fund progress" src="https://api.lucidfabrics.com/api/public/progress/osx-proxmox-next/svg?v=2" width="600">
-  </a>
-  <br>
-  <sub>Goal: fund the workforce to build automated GPU compatibility detection and passthrough setup for macOS.</sub>
-</p>
-
 ---
 
 ## 🧰 Stop Wasting Afternoons on macOS VMs
@@ -90,6 +82,10 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 **Wizard (6 steps: Preflight → OS → Storage → Config → Dry Run → Install), including the Unattended install (BETA) toggle:**
 
 ![osx-proxmox-next TUI wizard demo](docs/static/img/demo-tui.gif)
+
+**Guided GPU passthrough: scan, BIOS card, host setup, attach:**
+
+![osx-proxmox-next GPU passthrough walkthrough demo](docs/static/img/demo-gpu.gif)
 
 **CLI tools (preflight, plan, doctor):**
 
@@ -464,17 +460,18 @@ Use `--verbose-boot` flag in CLI: `osx-next-cli apply --verbose-boot ...`. This 
 
 ## 🎮 GPU Passthrough
 
-Host-side setup is manual and required before the VM can use a discrete GPU.
+One guided flow takes a card from "it is in the server" to "macOS uses it": scan, a BIOS photo card with a QR code, host setup with a diff and backups, VM attach, first boot, and a full undo. It resumes across reboots.
 
-1. Enable **VT-d / IOMMU** in BIOS/UEFI
-2. Add to kernel cmdline:
-   - Intel: `intel_iommu=on iommu=pt`
-   - AMD: `amd_iommu=on iommu=pt`
-3. Bind GPU + GPU audio to `vfio-pci`
-4. Reboot host
-5. Attach both PCI functions to VM (`hostpci0`, `hostpci1`)
+```bash
+osx-next-cli gpu-setup            # or: TUI > GPU Passthrough, or osx-proxmox-next.sh gpu-setup
+osx-next-cli gpu-setup --status   # read only
+osx-next-cli gpu-setup --undo     # put everything back
+```
 
-📖 Reference: [Proxmox PCI(e) Passthrough Wiki](https://pve.proxmox.com/wiki/PCI(e)_Passthrough)
+- **AMD** Polaris, Vega, Navi 10/14/21/23 (RX 400/500, Vega 56/64, Radeon VII, RX 5000, RX 6600/6800/6900): native macOS drivers, no extra software. RX 6700, RX 7000 and RX 9000 series and APUs are not supported.
+- **NVIDIA** Turing and newer (RTX 20 to 50): beta, through the third-party NullMoth driver on Sequoia 15.5+ and Tahoe 26, with core macOS security turned off. The guided flow shows the NullMoth notice and asks you to acknowledge it. Once the driver loads, the Proxmox console goes black, so turn on Remote Login and Screen Sharing in macOS before you attach the card and connect a monitor or an HDMI/DisplayPort dummy plug to the card (without one there is no desktop; Screen Sharing mirrors that display and SSH always works).
+
+NVIDIA support relies on NullMoth, a community driver tested by its own community: we added support for preparing the VM, but we take no responsibility for the driver or its install. AMD cards and the host setup steps (kernel command line, vfio binding, host reboot) are covered by tests but not yet tried on real hardware. Full guide with the supported-cards matrix and a page per BIOS vendor: [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough).
 
 ---
 
@@ -716,18 +713,17 @@ Enables pre-commit, commit-msg, and pre-push hooks for:
 
 ### Can I pass through an NVIDIA GeForce GPU?
 
-No, not on any modern macOS. Apple dropped NVIDIA support years ago, and it never came back.
+Only Turing and newer (RTX 20 / 30 / 40 / 50), and only with a third-party driver. Apple dropped NVIDIA support years ago, but the community NullMoth driver provides Metal on macOS Sequoia 15.5+ and Tahoe 26. This project can prepare a VM for it (beta, see [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough)), but does not make, ship or support the driver, and it requires turning core macOS security off. After the driver loads the Proxmox console goes black, so enable Remote Login and Screen Sharing in macOS (System Settings > General > Sharing) before attaching and connect a monitor or an HDMI/DisplayPort dummy plug to the card to get a desktop (Screen Sharing then mirrors it; SSH always works).
 
-| Architecture | Cards | Last macOS that worked |
+| Architecture | Cards | macOS support |
 |---|---|---|
-| Kepler | GTX 600 / 700 | Big Sur 11 (native drivers) |
-| Maxwell | GTX 900 | High Sierra 10.13.6 (Web Drivers) |
-| Pascal | GTX 10-series, Titan Xp | High Sierra 10.13.6 (Web Drivers) |
-| Turing and newer | RTX 20 / 30 / 40 | Never supported |
+| Kepler | GTX 600 / 700 | Big Sur 11 (native drivers), not supported here |
+| Maxwell | GTX 900 | High Sierra 10.13.6 (Web Drivers), not supported here |
+| Pascal | GTX 10-series, Titan Xp | High Sierra 10.13.6 (Web Drivers), not supported here |
+| Volta | Titan V | Not supported |
+| Turing and newer | RTX 20 / 30 / 40 / 50 | Sequoia 15.5+ and Tahoe 26 via NullMoth (beta) |
 
-The newest GeForce card that ever ran on macOS was a **Pascal GTX 10-series**, and only up to **High Sierra**. NVIDIA's Web Drivers were never approved for Mojave or later, so anything Maxwell or newer is capped there. Kepler lasted longer only because real Macs shipped with it.
-
-For GPU passthrough on a current macOS guest (Ventura, Sonoma, Sequoia, Tahoe), use an **AMD** card instead. Polaris (RX 470/480/580), Vega, and Navi (RX 5000/6000) have native macOS drivers and work with WhateverGreen, which ships in the OpenCore image.
+Ventura and Sonoma guests have no NVIDIA path at all. For a conventional setup on any supported macOS, use an **AMD** card instead: Polaris (RX 470/480/570/580), Vega, and Navi 10, 14, 21 and 23 (RX 5000, RX 6600, RX 6800/6900) have native macOS drivers and work with WhateverGreen, which ships in the OpenCore image. RX 6700, RX 7000 and RX 9000 cards have no macOS driver.
 
 ### Why does macOS show "Memory Modules Misconfigured"?
 
@@ -767,7 +763,6 @@ In the TUI, tick **Force fresh download (ignore cached ISO)** on the Review step
 
 - 🧩 **Multi-VM templates** - save and reuse configurations across VMs
 - 🔄 **Auto-update OpenCore** - detect and pull latest OpenCore releases
-- 🎮 **GPU passthrough wizard** - guided IOMMU + VFIO setup *(unlocks at $1000 raised - see badge above)*. Fund goal: pay the workforce to build automated GPU compatibility detection and passthrough setup for macOS.
 
 ---
 
@@ -818,7 +813,7 @@ Yes. AMD hosts are auto-detected and run with Cascadelake-Server CPU emulation. 
 About 5 minutes of setup with the wizard, then the macOS installer runs unattended. Download time depends on your connection (recovery image is ~0.9 GB, downloaded once and cached).
 
 **Is GPU passthrough supported?**
-Yes, with manual host-side IOMMU setup. See [GPU Passthrough](#-gpu-passthrough).
+Yes. `osx-next-cli gpu-setup` walks you through it, including the BIOS and the host setup. See [GPU Passthrough](#-gpu-passthrough).
 
 **Is running macOS in a VM legal?**
 This project is for testing, lab use, and learning. Apple's license terms govern where macOS may run; you are responsible for compliance in your region.

@@ -44,7 +44,6 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
     (see ``defaults._xeon_hedt_cpu_model``) to avoid an XNU scheduler
     livelock under heavy multithreaded I/O.
 
-    Ref: luchina-gabriel/OSX-PROXMOX (battle-tested on ~5k installs).
     """
     if override:
         return (
@@ -386,12 +385,11 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
     ]
 
 
-def _restore_picker_timeout_script(vid: str) -> str:
-    """Return bash that puts the OpenCore picker back to auto-boot.
+def mount_oc_disk_script(vid: str) -> str:
+    """Return bash that loop-mounts the VM's ide0 (OpenCore) disk at $OC_MNT.
 
-    The disk is built with Timeout=0 so a half-finished install can never
-    auto-boot recovery. Once recovery is detached there is only one sane entry
-    left, so auto-boot is safe again and the VM can start unattended.
+    Ends with ``&& `` so a caller appends its own command. A trap on EXIT
+    unmounts and detaches the loop device, whatever the outcome.
     """
     q = shquote(vid)
     return (
@@ -409,7 +407,19 @@ def _restore_picker_timeout_script(vid: str) -> str:
         "{ [ -b \"${OC_LOOP}p1\" ] || { echo \"ERROR: ${OC_LOOP}p1 never appeared\"; "
         "false; }; } && "
         "mount \"${OC_LOOP}p1\" $OC_MNT && "
-        "python3 -c '"
+    )
+
+
+def _restore_picker_timeout_script(vid: str) -> str:
+    """Return bash that puts the OpenCore picker back to auto-boot.
+
+    The disk is built with Timeout=0 so a half-finished install can never
+    auto-boot recovery. Once recovery is detached there is only one sane entry
+    left, so auto-boot is safe again and the VM can start unattended.
+    """
+    return (
+        mount_oc_disk_script(vid)
+        + "python3 -c '"
         "import plistlib, os, sys; "
         "p=os.environ[\"OC_MNT\"]+\"/EFI/OC/config.plist\"; "
         "f=open(p,\"rb\"); c=plistlib.load(f); f.close(); "
