@@ -229,6 +229,19 @@ class TestDownloadRecovery:
         result = download_recovery("sequoia", tmp_path)
         assert result == existing
 
+    def test_existing_unwritable_file_still_served(self, tmp_path, monkeypatch):
+        """Alignment of a cached image is best-effort: read-only storage
+        must not turn a cache hit into a crash."""
+        existing = tmp_path / "sequoia-recovery.img"
+        existing.write_text("already here")
+
+        def deny_align(path, alignment=None):
+            raise PermissionError(13, "Read-only file system", str(path))
+
+        monkeypatch.setattr(dl_module, "_align_raw_image", deny_align)
+        result = download_recovery("sequoia", tmp_path)
+        assert result == existing
+
     def test_success(self, tmp_path, monkeypatch):
         session_resp = _make_response(b"")
         session_resp.headers = {"Set-Cookie": "session=ABC123; path=/; HttpOnly"}
@@ -669,6 +682,57 @@ class TestBuildRecoveryImage:
 
         _build_recovery_image(dmg, chunklist, dest)
         assert dest.exists()
+        # 2048 bytes isn't a multiple of the 1MiB alignment; the image must
+        # be padded so storage backends that require aligned raw images
+        # (ZFS, Ceph, some NFS mounts) can attach it.
+        assert dest.stat().st_size == 1024 * 1024
+
+    def test_align_failure_raises_download_error(self, tmp_path, monkeypatch):
+        """A fresh image that can't be aligned will fail at VM start, so the
+        failure must surface as a DownloadError, not a raw OSError."""
+        from osx_proxmox_next.downloader import _build_recovery_image
+        from osx_proxmox_next.infrastructure import CommandResult
+
+        dmg = tmp_path / "BaseSystem.dmg"
+        chunklist = tmp_path / "BaseSystem.chunklist"
+        dmg.write_bytes(b"x" * 1024)
+        chunklist.write_bytes(b"y" * 64)
+        dest = tmp_path / "recovery.img"
+
+        def handler(argv):
+            dest.write_bytes(b"\x00" * 2048)
+            return CommandResult(ok=True, returncode=0, output="")
+
+        import osx_proxmox_next.services as _svc
+        monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
+
+        def deny_align(path, alignment=None):
+            raise OSError(28, "No space left on device", str(path))
+
+        monkeypatch.setattr(dl_module, "_align_raw_image", deny_align)
+        with pytest.raises(DownloadError, match="Failed to align recovery image"):
+            _build_recovery_image(dmg, chunklist, dest)
+
+    def test_already_aligned_image_untouched(self, tmp_path, monkeypatch):
+        from osx_proxmox_next.downloader import _build_recovery_image
+        from osx_proxmox_next.infrastructure import CommandResult
+
+        dmg = tmp_path / "BaseSystem.dmg"
+        chunklist = tmp_path / "BaseSystem.chunklist"
+        dmg.write_bytes(b"x" * 1024)
+        chunklist.write_bytes(b"y" * 64)
+        dest = tmp_path / "recovery.img"
+        aligned_size = 2 * 1024 * 1024
+
+        def handler(argv):
+            dest.write_bytes(b"\x00" * aligned_size)
+            return CommandResult(ok=True, returncode=0, output="")
+
+        import osx_proxmox_next.services as _svc
+        monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
+
+        _build_recovery_image(dmg, chunklist, dest)
+        assert dest.stat().st_size == aligned_size
 
     def test_failure_cleans_up(self, tmp_path, monkeypatch):
         from osx_proxmox_next.downloader import _build_recovery_image

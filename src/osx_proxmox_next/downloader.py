@@ -32,6 +32,14 @@ class DownloadError(Exception):
     pass
 
 
+# Some storage backends (ZFS, Ceph, certain NFS mounts) require attached raw
+# images to be a multiple of the request alignment, typically 512B or 4096B.
+# dmg2img output isn't guaranteed to land on that boundary, and QEMU refuses
+# to start with "Image size is not a multiple of request alignment" if it
+# doesn't. 1MiB covers both alignments.
+_RAW_IMAGE_ALIGNMENT = 1024 * 1024
+
+
 RECOVERY_BOARD_IDS: dict[str, str] = {
     "ventura": "Mac-4B682C642B45593E",
     "sonoma": "Mac-827FAC58A8FDFA22",
@@ -139,6 +147,14 @@ def download_recovery(
     dest = dest_dir / f"{macos}-recovery.img"
     if dest.exists():
         log.debug("Recovery cache hit: %s", dest)
+        # Images cached by older versions may be unaligned; fix in place so
+        # a stale cache doesn't keep reproducing the QEMU alignment error.
+        # Best-effort: on read-only storage keep the old return-as-is
+        # behavior instead of turning a cache hit into a crash.
+        try:
+            _align_raw_image(dest)
+        except OSError as exc:
+            log.warning("Could not align cached recovery image %s: %s", dest, exc)
         return dest
 
     board_id = RECOVERY_BOARD_IDS[macos]
@@ -178,6 +194,26 @@ def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> 
                 "Install it with: apt install dmg2img"
             )
         raise DownloadError(f"Failed to convert recovery DMG: {result.output}")
+    # Unlike the cache-hit path, a freshly built image that can't be aligned
+    # WILL fail at VM start, so fail loud through the normal error channel.
+    try:
+        _align_raw_image(dest)
+    except OSError as exc:
+        raise DownloadError(f"Failed to align recovery image: {exc}") from exc
+
+
+def _align_raw_image(path: Path, alignment: int = _RAW_IMAGE_ALIGNMENT) -> None:
+    """Pad a raw image up to the next alignment boundary, in place.
+
+    Padding with zero bytes at the end doesn't touch the GPT primary header
+    or any partition contents; only the backup GPT header ends up pointing
+    at a stale last-LBA, which is harmless for a read-only recovery boot.
+    """
+    size = path.stat().st_size
+    aligned = -(-size // alignment) * alignment
+    if aligned != size:
+        with path.open("r+b") as f:
+            f.truncate(aligned)
 
 
 def _fetch_github_releases(version: str) -> list[dict]:

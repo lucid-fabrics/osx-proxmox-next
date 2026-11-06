@@ -87,8 +87,9 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     meta = SUPPORTED_MACOS[config.macos]
     vmid = str(config.vmid)
 
-    recovery_raw = resolve_recovery_or_installer_path(config)
-    opencore_path = resolve_opencore_path(config.macos)
+    extra_dirs = [Path(config.iso_dir)] if config.iso_dir else []
+    recovery_raw = resolve_recovery_or_installer_path(config, extra_dirs=extra_dirs)
+    opencore_path = resolve_opencore_path(config.macos, extra_dirs=extra_dirs)
     oc_disk = opencore_path.parent / f"opencore-{config.macos}-vm{vmid}.img"
 
     macos_label = meta["label"]
@@ -245,6 +246,14 @@ def _recovery_steps(
                 "trap '[ -n \"$RLOOP\" ] && { umount $OC_REC 2>/dev/null; losetup -d $RLOOP 2>/dev/null; }; rm -rf $OC_REC' EXIT; "
                 # Cleanup stale loops from previous failed runs (always runs, before python3)
                 f'for lo in $(losetup -j {shquote(str(recovery_raw))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+                # Fail early with a clear message instead of a losetup cascade
+                f'{{ [ -f {shquote(str(recovery_raw))} ] || {{ echo "ERROR: Recovery image not found: {shquote(str(recovery_raw))}. Hint: osx-next-cli download --macos {config.macos}"; false; }}; }} && '
+                # Pad to a 1MiB boundary: images built by older versions (or by
+                # hand) may not be request-alignment multiples, and QEMU then
+                # refuses to start. Download-time alignment only covers fresh
+                # builds; this covers every image that reaches apply.
+                f'SZ=$(stat -c%s {shquote(str(recovery_raw))}) && AL=$(( (SZ + 1048575) / 1048576 * 1048576 )) && '
+                f'{{ [ "$AL" -eq "$SZ" ] || truncate -s "$AL" {shquote(str(recovery_raw))}; }} && '
                 # Fix HFS+ dirty/lock flags so Linux mounts read-write,
                 # then write OpenCore .contentFlavour + .contentDetails
                 f"RECOVERY_IMG={shquote(str(recovery_raw))} python3 -c '"
@@ -321,7 +330,12 @@ def _disk_steps(ctx: _DiskBuildContext, macos_label: str) -> list[PlanStep]:
         ),
         PlanStep(
             title="Create main disk",
-            argv=["qm", "set", ctx.vmid, "--virtio0", f"{ctx.config.storage}:{ctx.config.disk_gb}"],
+            argv=[
+                "qm", "set", ctx.vmid, "--virtio0",
+                # cache=writeback avoids the O_DIRECT path, which corrupted
+                # stage-2 installs on some ZFS hosts (issue #117)
+                f"{ctx.config.storage}:{ctx.config.disk_gb},cache=writeback,iothread=1",
+            ],
         ),
         *_opencore_steps(ctx),
         *_recovery_steps(ctx.config, ctx.vmid, ctx.recovery_raw, macos_label),

@@ -690,6 +690,19 @@ fg=${fg}"
     exit 1
   }
   rm -f "$base_dmg"
+
+  # Some storage backends (ZFS, Ceph, certain NFS mounts) require attached
+  # raw images to be a multiple of the request alignment, typically 512B or
+  # 4096B. dmg2img output isn't guaranteed to land on that boundary, and
+  # QEMU refuses to start with "Image size is not a multiple of request
+  # alignment" if it doesn't. Pad to a 1MiB boundary to cover both.
+  local img_size aligned_size
+  img_size=$(stat -c%s "$output_img" 2>/dev/null || stat -f%z "$output_img")
+  aligned_size=$(( (img_size + 1048575) / 1048576 * 1048576 ))
+  if [ "$aligned_size" -ne "$img_size" ]; then
+    truncate -s "$aligned_size" "$output_img"
+  fi
+
   msg_ok "Downloaded and converted recovery image"
 }
 
@@ -6649,7 +6662,9 @@ msg_ok "Attached EFI disk + TPM"
 
 # ── Create main disk ──
 msg_info "Creating main disk (${DISK_SIZE})"
-qm set "$VMID" --virtio0 "${STORAGE}:${DISK_SIZE%G}" >/dev/null
+# cache=writeback avoids the O_DIRECT path, which corrupted stage-2
+# installs on some ZFS hosts (issue #117)
+qm set "$VMID" --virtio0 "${STORAGE}:${DISK_SIZE%G},cache=writeback,iothread=1" >/dev/null
 msg_ok "Created main disk"
 
 # ── Detect import command (PVE 8.x vs 9.x) ──

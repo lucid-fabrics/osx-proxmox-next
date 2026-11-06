@@ -587,3 +587,22 @@ def test_bash_pve_check_gates_on_major_version_only(tmp_path: Path, version: str
     else:
         assert "ACCEPTED" not in result.stdout
         assert result.returncode == 1
+
+
+def test_build_oc_disk_script_guards_missing_iso() -> None:
+    """A missing OpenCore ISO must fail with a clear message, not a losetup cascade."""
+    result = _oc_script()
+    guard = '{ [ -f /iso/opencore.iso ] || { echo "ERROR: OpenCore ISO not found'
+    assert guard in result
+    assert result.index("ERROR: OpenCore ISO not found") < result.index("losetup")
+    assert "osx-next-cli download --macos sequoia" in result
+
+
+def test_build_oc_disk_script_restrictevents_fragment_is_brace_group() -> None:
+    """The RestrictEvents fragment uses ';' separators internally; without a
+    surrounding brace group those break out of the '&&' chain, so an earlier
+    failure (e.g. missing ISO) still ran curl with RE_ZIP unset and produced
+    the misleading "curl: option -o: blank argument" error."""
+    result = _oc_script()
+    assert "{ export RE_ZIP=" in result
+    assert "fi; } && " in result
