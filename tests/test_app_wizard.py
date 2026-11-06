@@ -2451,6 +2451,29 @@ def test_penryn_unchecked_on_modern_cpu(monkeypatch) -> None:
     asyncio.run(_run())
 
 
+def test_hints_stay_hidden_when_boxes_checked_on_modern_cpu(monkeypatch) -> None:
+    """Checking penryn/e1000 on a modern CPU must not reveal the 'detected' hints (#107)."""
+    from osx_proxmox_next.defaults import CpuInfo
+    modern_cpu = CpuInfo(vendor="Intel", model_name="12th Gen Intel Core i7-12700K",
+                         family=6, model=151, needs_emulated_cpu=True, needs_penryn=False)
+    monkeypatch.setattr("osx_proxmox_next.app.detect_cpu_info", lambda: modern_cpu)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            await pilot.click("#penryn_cb")
+            await pilot.click("#e1000_cb")
+            await pilot.pause()
+            assert app.state.use_penryn is True
+            assert app.state.net_model == "e1000-82545em"
+            assert app.query_one("#penryn_hint").has_class("step_hidden")
+            assert app.query_one("#e1000_hint").has_class("step_hidden")
+
+    asyncio.run(_run())
+
+
 def test_penryn_checkbox_sets_cpu_model_in_config(monkeypatch) -> None:
     """Checking penryn_cb causes _read_form to return cpu_model='Penryn'."""
     from osx_proxmox_next.defaults import CpuInfo
@@ -2483,7 +2506,8 @@ def test_penryn_checkbox_sets_cpu_model_in_config(monkeypatch) -> None:
 
 def test_penryn_checkbox_updates_cores(monkeypatch) -> None:
     """Checking penryn_cb sets cores input to '4'; unchecking restores detected count."""
-    _pin_cpu_cores(monkeypatch)
+    # Detected count must differ from 4, or the assertions pass with no handler at all.
+    _pin_cpu_cores(monkeypatch, cores=8)
     from osx_proxmox_next.defaults import CpuInfo
     no_penryn = CpuInfo(vendor="Intel", model_name="Intel Core i7-6700K",
                         family=6, model=94, needs_emulated_cpu=False, needs_penryn=False)
@@ -2504,6 +2528,33 @@ def test_penryn_checkbox_updates_cores(monkeypatch) -> None:
             await pilot.click("#penryn_cb")
             await pilot.pause()
             assert cores_input.value == original_cores
+
+    asyncio.run(_run())
+
+
+def test_unattended_checkbox_leaves_cores_and_cpu_hint_alone(monkeypatch) -> None:
+    """The unattended box only flips state: it must not force 4 cores or show
+    the 'Older Intel CPU detected' hint (the Penryn handler leaked into it)."""
+    _pin_cpu_cores(monkeypatch, cores=8)
+    from osx_proxmox_next.defaults import CpuInfo
+    modern = CpuInfo(vendor="Intel", model_name="Intel Core i7-6700K",
+                     family=6, model=94, needs_emulated_cpu=False, needs_penryn=False)
+    monkeypatch.setattr("osx_proxmox_next.app.detect_cpu_info", lambda: modern)
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            cores_input = app.query_one("#cores", Input)
+            before = cores_input.value
+            for value in (True, False):
+                app.query_one("#unattended_cb", Checkbox).value = value
+                await pilot.pause()
+                assert app.state.unattended is value
+                assert cores_input.value == before
+                assert app.query_one("#penryn_hint").has_class("step_hidden")
+            assert app.state.use_penryn is False
 
     asyncio.run(_run())
 
