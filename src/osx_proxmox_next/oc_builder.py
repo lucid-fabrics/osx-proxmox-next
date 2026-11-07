@@ -41,6 +41,9 @@ __all__ = [
     "build_opencore_iso",
     "ensure_amfipass",
     "ensure_opencore_iso",
+    "is_current",
+    "pins_stamp",
+    "stamp_path",
 ]
 
 
@@ -325,9 +328,31 @@ def _iso_build_script(tree: Path, iso_tmp: Path) -> str:
         "[ -b \"${ILOOP}p1\" ] && "
         "mkfs.fat -F 32 -n OPENCORE ${ILOOP}p1 >/dev/null && "
         "mount ${ILOOP}p1 $IMNT && "
-        f"cp -a {qt}/. $IMNT/ && "
+        # FAT stores no owners: -a fails when the tree sits on root-squashed
+        # NFS (files owned by nobody), which silently forced the stale prebuilt.
+        f"cp -r {qt}/. $IMNT/ && "
         "umount $IMNT && losetup -d $ILOOP && ILOOP=''"
     )
+
+
+def pins_stamp() -> str:
+    """What a locally assembled image was built from: the sorted pinned SHA-256s.
+
+    The bash installer writes the same text (oc_pins_stamp), so either tool
+    accepts the other's image and both rebuild once a pin moves."""
+    return "".join(f"{sha}\n" for sha in sorted(c.sha256 for c in OC_COMPONENTS.values()))
+
+
+def stamp_path(iso: Path) -> Path:
+    return iso.with_name(iso.name + ".pins")
+
+
+def is_current(iso: Path) -> bool:
+    """True when *iso* was assembled locally from the current pins."""
+    try:
+        return stamp_path(iso).read_text() == pins_stamp()
+    except OSError:
+        return False
 
 
 def build_opencore_iso(dest_dir: Path, on_progress: ProgressCallback = None) -> Path:
@@ -348,6 +373,7 @@ def build_opencore_iso(dest_dir: Path, on_progress: ProgressCallback = None) -> 
             iso_tmp.unlink(missing_ok=True)
             raise DownloadError(f"OpenCore image build failed: {result.output}")
         iso_tmp.rename(iso)
+        stamp_path(iso).write_text(pins_stamp())
         log.info("Assembled OpenCore ISO at %s", iso)
         return iso
     finally:
@@ -368,9 +394,12 @@ def ensure_opencore_iso(
     would have survived. A checksum mismatch is NOT such a reason: it
     propagates as ChecksumError and aborts the install."""
     iso = dest_dir / _OPENCORE_UNIVERSAL
-    if iso.exists() and not force:
+    if iso.exists() and iso.stat().st_size and is_current(iso) and not force:
         log.debug("OpenCore cache hit: %s", iso)
         return iso
+    # No matching stamp: a prebuilt fallback or an image from older pins. Both
+    # carry outdated kexts (the prebuilt Lilu 1.6.8 turns itself off on
+    # Sequoia 15.8), so try a fresh assembly before reusing anything.
     try:
         return build_opencore_iso(dest_dir, on_progress)
     except ChecksumError:
@@ -378,6 +407,7 @@ def ensure_opencore_iso(
         raise
     except (DownloadError, OSError) as exc:
         log.warning("Local OpenCore assembly failed (%s); falling back to prebuilt ISO", exc)
+        stamp_path(iso).unlink(missing_ok=True)
         return download_opencore(macos, dest_dir, on_progress, force=force)
 
 

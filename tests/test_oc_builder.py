@@ -392,8 +392,10 @@ def test_assemble_efi_tree_layout(fake_components: Path) -> None:
 def test_iso_build_script_contents(tmp_path: Path) -> None:
     script = _iso_build_script(tmp_path / "tree", tmp_path / "oc.iso.part")
     for needle in ("truncate -s 128M", "sgdisk -Z", "-t 1:EF00", "mkfs.fat -F 32",
-                   "losetup -fP", "trap", "cp -a", "umount", "losetup -j"):
+                   "losetup -fP", "trap", "cp -r", "umount", "losetup -j"):
         assert needle in script, needle
+    # FAT has no owners: -a fails on a root-squashed NFS tree (owned by nobody).
+    assert "cp -a" not in script
 
 
 class _FakeAdapter:
@@ -441,9 +443,48 @@ def test_build_opencore_iso_failure_raises_and_cleans(fake_components: Path,
 def test_ensure_opencore_iso_cache_hit(tmp_path: Path, monkeypatch) -> None:
     iso = tmp_path / "opencore-osx-proxmox-vm.iso"
     iso.write_bytes(b"cached")
+    ocb.stamp_path(iso).write_text(ocb.pins_stamp())
     monkeypatch.setattr(ocb, "build_opencore_iso",
                         lambda *a, **k: pytest.fail("must not rebuild on cache hit"))
     assert ensure_opencore_iso("sequoia", tmp_path) == iso
+
+
+@pytest.mark.parametrize("stamp", [None, "0" * 64 + "\n"])
+def test_ensure_opencore_iso_rebuilds_unstamped_or_stale_cache(tmp_path: Path, monkeypatch,
+                                                              stamp: str | None) -> None:
+    """A prebuilt fallback (no stamp) or an image from older pins is never reused as is."""
+    iso = tmp_path / "opencore-osx-proxmox-vm.iso"
+    iso.write_bytes(b"prebuilt")
+    if stamp is not None:
+        ocb.stamp_path(iso).write_text(stamp)
+    built = []
+    monkeypatch.setattr(ocb, "build_opencore_iso",
+                        lambda dest, on_progress=None: built.append(dest) or iso)
+    assert ensure_opencore_iso("sequoia", tmp_path) == iso
+    assert built == [tmp_path]
+
+
+def test_ensure_opencore_iso_rebuilds_empty_cache(tmp_path: Path, monkeypatch) -> None:
+    iso = tmp_path / "opencore-osx-proxmox-vm.iso"
+    iso.write_bytes(b"")
+    ocb.stamp_path(iso).write_text(ocb.pins_stamp())
+    built = []
+    monkeypatch.setattr(ocb, "build_opencore_iso",
+                        lambda dest, on_progress=None: built.append(dest) or iso)
+    ensure_opencore_iso("sequoia", tmp_path)
+    assert built == [tmp_path]
+
+
+def test_pins_stamp_is_sorted_shas() -> None:
+    lines = ocb.pins_stamp().splitlines()
+    assert lines == sorted(c.sha256 for c in OC_COMPONENTS.values())
+    assert ocb.pins_stamp().endswith("\n")
+
+
+def test_build_opencore_iso_writes_stamp(fake_components: Path, monkeypatch) -> None:
+    _patch_adapter(monkeypatch, _FakeAdapter(ok=True))
+    iso = build_opencore_iso(fake_components / "iso")
+    assert ocb.stamp_path(iso).read_text() == ocb.pins_stamp()
 
 
 def test_ensure_opencore_iso_force_rebuilds(tmp_path: Path, monkeypatch) -> None:
@@ -473,6 +514,24 @@ def test_ensure_opencore_iso_falls_back_to_prebuilt(tmp_path: Path, monkeypatch)
     got = ensure_opencore_iso("sequoia", tmp_path)
     assert got == fallback_iso
     assert calls == [("sequoia", False)]
+
+
+def test_fallback_drops_stale_stamp(tmp_path: Path, monkeypatch) -> None:
+    """The prebuilt image must never inherit a stamp, or the next run would reuse it."""
+    iso = tmp_path / "opencore-osx-proxmox-vm.iso"
+    ocb.stamp_path(iso).write_text("0" * 64 + "\n")
+
+    def boom(dest, on_progress=None):
+        raise DownloadError("upstream offline")
+
+    def fake_download(macos, dest_dir, on_progress=None, force=False):
+        iso.write_bytes(b"prebuilt")
+        return iso
+
+    monkeypatch.setattr(ocb, "build_opencore_iso", boom)
+    monkeypatch.setattr(ocb, "download_opencore", fake_download)
+    assert ensure_opencore_iso("sequoia", tmp_path) == iso
+    assert not ocb.stamp_path(iso).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +564,21 @@ def test_bash_component_pins_match_python(bash_text: str) -> None:
         expanded = urls[name].replace("$OC_ACID", acid).replace("${OCBD_COMMIT}", commit)
         assert expanded == comp.url, name
         assert shas[name] == comp.sha256, name
+
+
+def test_bash_cache_requires_pin_stamp(bash_text: str) -> None:
+    block = bash_text[bash_text.index('OC_ISO="$CACHE_DIR/opencore-osx-proxmox-vm.iso"'):
+                      bash_text.index("# ── Download macOS recovery image")]
+    assert '"$(cat "$OC_ISO.pins" 2>/dev/null)" = "$(oc_pins_stamp)"' in block
+    assert 'oc_pins_stamp > "$OC_ISO.pins"' in block
+    assert 'rm -f "$OC_ISO" "$OC_ISO.pins"' in block
+
+
+def test_bash_assembly_copies_without_ownership(bash_text: str) -> None:
+    func = bash_text[bash_text.index("function assemble_opencore_iso()"):]
+    func = func[:func.index("\n}\n")]
+    assert 'cp -r "$tree"/. "$mnt"/' in func
+    assert "cp -a" not in func
 
 
 @pytest.mark.parametrize("var,rel", [
@@ -738,3 +812,13 @@ def test_bash_disk_stage_failure_reaches_fallback_branch(tmp_path: Path,
     assert "SURVIVED" in out, "assemble_opencore_iso exited the shell instead of returning"
     assert "BUILT" not in out
     assert not dest_iso.exists()
+
+
+@_bash_harness
+def test_bash_pins_stamp_matches_python(bash_text: str, tmp_path: Path) -> None:
+    """Both tools write the same stamp, so either accepts the other's cached image."""
+    harness = tmp_path / "stamp.sh"
+    harness.write_text(_extract_bash_sections(bash_text) + "\noc_pins_stamp\n")
+    result = _sp.run([_shutil.which("bash"), str(harness)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ocb.pins_stamp()

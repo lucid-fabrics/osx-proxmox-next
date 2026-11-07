@@ -755,6 +755,49 @@ def test_cli_auto_download_on_missing(monkeypatch, tmp_path):
     assert rc == 0
 
 
+
+def test_cli_apply_refreshes_stale_opencore(monkeypatch, tmp_path):
+    """A present but stale OpenCore image (prebuilt fallback) still triggers a refresh."""
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.executor import ApplyResult
+    from osx_proxmox_next.rollback import RollbackSnapshot
+
+    refreshed = []
+    monkeypatch.setattr(cli_module, "required_assets", lambda cfg: [
+        AssetCheck("OpenCore image", Path("/tmp/oc.iso"), True, "", downloadable=True, stale=True)])
+    monkeypatch.setattr(cli_module, "_auto_download_missing", lambda cfg, dest: refreshed.append(dest))
+    monkeypatch.setattr(cli_module, "detect_iso_storage", lambda: [str(tmp_path)])
+    monkeypatch.setattr(
+        cli_module, "create_snapshot",
+        lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
+    )
+    monkeypatch.setattr(
+        cli_module, "apply_plan",
+        lambda steps, execute=False: ApplyResult(ok=True, results=[], log_path=tmp_path / "log.txt"),
+    )
+    rc = run_cli(["apply", "--vmid", "900", "--name", "macos-sequoia", "--macos", "sequoia",
+                  "--cores", "8", "--memory", "16384", "--disk", "128", "--bridge", "vmbr0",
+                  "--storage", "local-lvm"])
+    assert rc == 0
+    assert refreshed == [tmp_path]
+
+
+def test_auto_download_includes_stale_opencore(monkeypatch, tmp_path):
+    from osx_proxmox_next.cli import _auto_download_missing
+    from osx_proxmox_next.assets import AssetCheck
+    from osx_proxmox_next.domain import VmConfig
+
+    sent = []
+    monkeypatch.setattr(cli_module, "required_assets", lambda cfg: [
+        AssetCheck("OpenCore image", Path("/tmp/oc.iso"), True, "", downloadable=True, stale=True)])
+    monkeypatch.setattr(cli_module, "run_download_worker",
+                        lambda cfg, missing, on_progress: (sent.extend(missing), [])[1])
+    cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
+                   memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
+    _auto_download_missing(cfg, tmp_path)
+    assert [a.name for a in sent] == ["OpenCore image"]
+
+
 # ── Status Tests ────────────────────────────────────────────────────
 
 
