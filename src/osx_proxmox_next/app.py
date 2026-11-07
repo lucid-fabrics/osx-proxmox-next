@@ -260,8 +260,11 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, GpuSetupMixin, A
             return
         assets = required_assets(config)
         missing = [a for a in assets if not a.ok]
-        downloadable = [a for a in missing if a.downloadable]
-        if not missing:
+        # Present but outdated (prebuilt fallback or older pins): refresh it,
+        # while the existing image stays usable if the refresh cannot happen.
+        stale = [a for a in assets if a.ok and a.stale and a.downloadable]
+        downloadable = [a for a in missing if a.downloadable] + stale
+        if not missing and not stale:
             self.state.assets_ok = True
             self.state.assets_missing = []
             self.state.downloads_complete = True
@@ -277,7 +280,7 @@ class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, GpuSetupMixin, A
             self.query_one("#download_progress", ProgressBar).update(total=100, progress=0)
             self.state.download_running = True
             force = self.query_one("#force_download_cb", Checkbox).value
-            Thread(target=self._download_worker, args=(config, missing, force), daemon=True).start()
+            Thread(target=self._download_worker, args=(config, missing + stale, force), daemon=True).start()
         else:
             self.query_one("#download_status", Static).update(
                 f"Missing assets: {', '.join(a.name for a in missing)}. Provide path manually."

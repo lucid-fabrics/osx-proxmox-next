@@ -53,6 +53,22 @@ class AssetCheck:
     ok: bool
     hint: str
     downloadable: bool = False
+    stale: bool = False  # present and usable, but should be refreshed when possible
+
+
+_UNIVERSAL_OC = "opencore-osx-proxmox-vm.iso"
+
+
+def _opencore_stale(path: Path) -> bool:
+    """The tool-managed image exists but was not assembled from the current pins.
+
+    That is the prebuilt fallback (Lilu 1.6.8, which turns itself off on
+    Sequoia 15.8) or an image from older pins. Images a user placed under
+    another name are left alone."""
+    if path.name != _UNIVERSAL_OC or not path.exists():
+        return False
+    from .oc_builder import is_current
+    return not is_current(path)
 
 
 def required_assets(config: VmConfig) -> list[AssetCheck]:
@@ -67,6 +83,7 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
             ok=opencore_path.exists(),
             hint="Provide OpenCore ISO before apply mode.",
             downloadable=True,
+            stale=_opencore_stale(opencore_path),
         )
     )
 

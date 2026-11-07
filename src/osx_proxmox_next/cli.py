@@ -73,7 +73,7 @@ def _cli_progress(p: DownloadProgress) -> None:
 
 def _auto_download_missing(config: VmConfig, dest_dir: Path) -> None:
     assets = required_assets(config)
-    missing = [a for a in assets if not a.ok and a.downloadable]
+    missing = [a for a in assets if (not a.ok or a.stale) and a.downloadable]
     if not missing:
         # ISO may be cached from an older version; still make sure the
         # RestrictEvents kext zip is available for the OpenCore disk build.
@@ -401,8 +401,9 @@ def _validate_and_fetch_assets(args: argparse.Namespace, config: VmConfig) -> in
 
     assets = required_assets(config)
     missing = [a for a in assets if not a.ok]
+    stale = any(a.stale for a in assets)
 
-    if missing and not getattr(args, "no_download", False):
+    if (missing or stale) and not getattr(args, "no_download", False):
         dest_dir = Path(config.iso_dir) if config.iso_dir else Path(detect_iso_storage()[0])
         _auto_download_missing(config, dest_dir)
         # Re-check after download

@@ -944,6 +944,50 @@ def test_download_worker_success(monkeypatch) -> None:
     asyncio.run(_run())
 
 
+def test_stale_opencore_is_refreshed(monkeypatch) -> None:
+    """A present but stale OpenCore image (prebuilt fallback) is rebuilt, nothing else."""
+    from osx_proxmox_next.assets import AssetCheck
+
+    calls = []
+
+    def fake_ensure(macos, dest, on_progress=None, force=False):
+        calls.append(macos)
+        return dest / "opencore-osx-proxmox-vm.iso"
+
+    monkeypatch.setattr(download_service, "ensure_opencore_iso", fake_ensure)
+    monkeypatch.setattr(download_service, "download_recovery",
+                        lambda *a, **k: pytest.fail("recovery is present"))
+    monkeypatch.setattr(app_module, "validate_config", lambda cfg: [])
+
+    async def _run() -> None:
+        app = NextApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            await _advance_to_step(pilot, app, 4)
+            monkeypatch.setattr(
+                app_module, "required_assets",
+                lambda cfg: [
+                    AssetCheck("OpenCore image", Path("/tmp/oc.iso"), True, "", downloadable=True, stale=True),
+                    AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), True, "", downloadable=True),
+                ],
+            )
+            app.query_one("#next_btn_4").scroll_visible()
+            for _ in range(3):
+                await pilot.pause()
+            await pilot.click("#next_btn_4")
+            for _ in range(5):
+                await pilot.pause()
+            for _ in range(30):
+                await pilot.pause()
+                time.sleep(0.05)
+                if not app.state.download_running:
+                    break
+            assert calls == ["sequoia"]
+            assert app.state.downloads_complete is True
+
+    asyncio.run(_run())
+
+
 def test_download_worker_opencore_error(monkeypatch) -> None:
     from osx_proxmox_next.assets import AssetCheck
     from osx_proxmox_next.downloader import DownloadError

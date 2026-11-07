@@ -394,3 +394,25 @@ def test_find_iso_skips_unresponsive_root(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(Path, "iterdir", _maybe_hang)
     found = assets._find_iso(["opencore-osx-proxmox-vm.iso"], extra_dirs=[dead, good])
     assert found is not None and found.name == "opencore-osx-proxmox-vm.iso"
+
+
+def test_opencore_stale_only_for_unstamped_universal_image(tmp_path: Path) -> None:
+    import osx_proxmox_next.oc_builder as ocb
+
+    universal = tmp_path / "opencore-osx-proxmox-vm.iso"
+    assert assets_module._opencore_stale(universal) is False  # missing: not stale, just absent
+    universal.write_bytes(b"prebuilt")
+    assert assets_module._opencore_stale(universal) is True
+    ocb.stamp_path(universal).write_text(ocb.pins_stamp())
+    assert assets_module._opencore_stale(universal) is False
+    user_image = tmp_path / "opencore-sequoia.iso"
+    user_image.write_bytes(b"mine")
+    assert assets_module._opencore_stale(user_image) is False
+
+
+def test_required_assets_flags_stale_opencore(tmp_path: Path) -> None:
+    (tmp_path / "opencore-osx-proxmox-vm.iso").write_bytes(b"prebuilt")
+    cfg = _cfg()
+    cfg.iso_dir = str(tmp_path)
+    oc = next(c for c in required_assets(cfg) if c.name == "OpenCore image")
+    assert oc.ok and oc.stale
