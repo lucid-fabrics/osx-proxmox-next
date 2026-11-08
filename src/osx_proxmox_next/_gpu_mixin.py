@@ -194,10 +194,14 @@ class GpuSetupMixin:
     def _gp_scan_done(self, result: Any) -> None:
         fields, cards, pool = result
         self._gp_cards = cards
-        self._gp_vm_pool = {"amd": [], "nvidia": [], **pool}
+        self._gp_vm_pool = {"amd": [], "nvidia": [], "intel": [], **pool}
         usable = [c for c in cards if c.selectable]
         body = Text("\n".join(pack_fields(fields, self._gp_width())) + "\n\n")
         body.append_text(self._gp_cards_renderable(cards))
+        rec = next((c for c in usable if c.recommended), None)
+        if rec is not None:
+            body.append("\n\n" + rec.detected_line + " Press the button to use it; nothing changes before that.",
+                        style="bold #2ec27e")
         if not usable:
             body.append("\n\nNo card here can run macOS graphics. See the docs for cards that work.")
         select = self.query_one("#gp_gpu_select", Select)  # type: ignore[attr-defined]

@@ -19,7 +19,7 @@
   </a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-Ventura%2013%20%7C%20Sonoma%2014%20%7C%20Sequoia%2015%20%7C%20Tahoe%2026-111111?logo=apple&logoColor=white">
   <a href="#-gpu-passthrough">
-    <img alt="GPU passthrough" src="https://img.shields.io/badge/GPU%20passthrough-AMD%20%7C%20NVIDIA%20(beta)-76B900">
+    <img alt="GPU passthrough" src="https://img.shields.io/badge/GPU%20passthrough-AMD%20%7C%20NVIDIA%20%7C%20Intel%20iGPU%20(beta)-76B900">
   </a>
   <a href="https://discord.gg/Ub6TunHYre">
     <img alt="Join Discord" src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white">
@@ -36,7 +36,7 @@
 </p>
 
 <p align="center">
-  <strong>🎮 New in v0.32: guided GPU passthrough.</strong> AMD Radeon with native macOS drivers, and NVIDIA RTX 20 to 50 through the community NullMoth driver (beta).<br>
+  <strong>🎮 New in v0.32: guided GPU passthrough.</strong> AMD Radeon with native macOS drivers, and NVIDIA RTX 20 to 50 through the community NullMoth driver (beta), and the Intel iGPU through WhateverXe (beta).<br>
   One command walks you through the BIOS, the host and the VM: <code>osx-next-cli gpu-setup</code> · <a href="#-gpu-passthrough">How it works</a>
 </p>
 
@@ -54,7 +54,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 **You get:**
 - A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
-- **Guided GPU passthrough (BETA)**: scan your cards, get a BIOS photo card with a QR code for your board, let the tool set up the host and attach the card, undo it all with one command. AMD Radeon natively, NVIDIA RTX 20 to 50 via the community NullMoth driver
+- **Guided GPU passthrough (BETA)**: scan your cards, get a BIOS photo card with a QR code for your board, let the tool set up the host and attach the card, undo it all with one command. AMD Radeon natively, NVIDIA RTX 20 to 50 via the community NullMoth driver, the Intel iGPU via WhateverXe
 - **Unattended install (BETA)**: tick one box and walk away - the tool erases the new disk, runs the installer, and answers every reboot until macOS sits at Setup Assistant
 - OpenCore boot image assembled on your host from pinned, checksum-verified upstream releases - no opaque prebuilt blob
 - Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
@@ -75,7 +75,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 | SMBIOS generation | External tool (GenSMBIOS) | Built-in, zero config |
 | Apple Services | Manual identity chain | One flag: `--apple-services` |
 | Tahoe 26 | Community trial & error | Supported |
-| GPU passthrough | Wiki pages, BIOS hunting, kernel flags, reboots | Guided walkthrough with undo, AMD + NVIDIA (beta) |
+| GPU passthrough | Wiki pages, BIOS hunting, kernel flags, reboots | Guided walkthrough with undo, AMD + NVIDIA + Intel iGPU (beta) |
 | Dry-run preview | Never | Always - see every `qm` command first |
 | Scripting / CI | Never | Full CLI + JSON export |
 | Post-install health check | Never | `osx-next-cli doctor --vmid <id>` |
@@ -480,6 +480,8 @@ osx-next-cli gpu-setup --undo     # put everything back
 
 - **AMD** Polaris, Vega, Navi 10/14/21/23 (RX 400/500, Vega 56/64, Radeon VII, RX 5000, RX 6600/6800/6900): native macOS drivers, no extra software. RX 6700, RX 7000 and RX 9000 series and APUs are not supported.
 - **NVIDIA** Turing and newer (RTX 20 to 50): beta, through the third-party NullMoth driver on Sequoia 15.5+ and Tahoe 26, with core macOS security turned off. The guided flow shows the NullMoth notice and asks you to acknowledge it. Once the driver loads, the Proxmox console goes black, so turn on Remote Login and Screen Sharing in macOS before you attach the card and connect a monitor or an HDMI/DisplayPort dummy plug to the card (without one there is no desktop; Screen Sharing mirrors that display and SSH always works).
+
+- **Intel iGPU** (beta, WhateverXe): Tiger Lake and Alder/Raptor Lake graphics give a macOS VM full Metal acceleration on Ventura, Sonoma and Sequoia, with Tahoe experimental. The scan finds the iGPU by itself and lists every GPU in the host with a status for the macOS release you pick ("works with macOS Sequoia 15", "not supported by macOS Sequoia 15", "in use by VM 100"). It preselects the strongest one that works (a supported AMD card beats the iGPU, the iGPU beats an NVIDIA card) and nothing changes until you confirm. What it costs: the host gives up its local screen, you need a monitor or an HDMI dummy plug on the native HDMI port (LSPCON HDMI and USB-C do not work, laptop panels mostly do not), and the host reboots once. The iGPU shares the CPU's power budget, so a busy host slows it down. On Tahoe every restart from inside macOS hangs, so restart that VM from Proxmox. Tested on one machine only (i5-1240P, Iris Xe 8086:46a6), every other chip is untested. `osx-next-cli igpu-install` builds the whole VM hands-off, including the graphics package. Details: [Intel iGPU (WhateverXe)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/intel-igpu-passthrough).
 
 NVIDIA support relies on NullMoth, a community driver tested by its own community: we added support for preparing the VM, but we take no responsibility for the driver or its install. AMD cards and the host setup steps (kernel command line, vfio binding, host reboot) are covered by tests but not yet tried on real hardware. Full guide with the supported-cards matrix and a page per BIOS vendor: [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough).
 

@@ -103,7 +103,7 @@ def _tokens(text):
 # reads or writes host or VM state checks it again, because PCIe addresses move when a card
 # changes slot, a BIOS option re-enumerates the buses, or another device is added.
 
-VENDOR_IDS = {"amd": 0x1002, "nvidia": 0x10DE}
+VENDOR_IDS = {"amd": 0x1002, "nvidia": 0x10DE, "intel": 0x8086}
 _IDENTITY_KEYS = ("vendor", "device", "subsys_vendor", "subsys_device", "class")
 _FN_BDF_RE = re.compile(r"^(?:([0-9a-fA-F]{4}):)?([0-9a-fA-F]{2}):([0-9a-fA-F]{2})(?:\.([0-7]))?$")
 
@@ -295,6 +295,8 @@ def configured_cmdline(bootloader, root="/"):
 
 def wanted_kernel_args(facts, target):
     args = []
+    if target["vendor"] == "intel" and facts["iommu_groups"] > 0:
+        return args  # the iGPU only needs the IOMMU to be on, however it got switched on
     if facts["cpu_vendor"] == "intel":
         args.append("intel_iommu=on")
     args.append("iommu=pt")
@@ -462,7 +464,7 @@ def _guard_target(target, plan):
     if fn0 is None or (fn0.get("class") or 0) >> 16 != 0x03 or fn0.get("vendor") != VENDOR_IDS.get(target["vendor"]):
         plan["refusals"].append(
             "The device at %s.0 is not a %s graphics card. Your PCI layout changed. Run the scan again."
-            % (target["bdf"], {"amd": "AMD", "nvidia": "NVIDIA"}.get(target["vendor"], "supported")))
+            % (target["bdf"], {"amd": "AMD", "nvidia": "NVIDIA", "intel": "Intel"}.get(target["vendor"], "supported")))
         return False
     for fn in fns:
         if (fn.get("class") or 0) >> 16 in (0x01, 0x02):
@@ -569,8 +571,58 @@ def _claiming_drivers(root):
     return found
 
 
+def _blacklisted(root, name):
+    d = _p(root, "/etc/modprobe.d")
+    for f in (sorted(d.glob("*.conf")) if d.is_dir() else []):
+        for line in (_read(f) or "").splitlines():
+            m = _BL_RE.match(line.split("#", 1)[0])
+            if m and m.group(1).replace("-", "_") == name:
+                return True
+    return False
+
+
+def plan_intel_binding(facts, target, root, plan):
+    """The Intel iGPU: the host gives it up completely. i915 is blacklisted and vfio-pci binds the id at boot.
+    No disable_vga (the legacy IGD mode needs the VGA decode), no softdeps (nothing else may load first)."""
+    fns = [f for f in target["functions"] if bindable(f, "intel")]
+    ids = []
+    for fn in fns:
+        ident = "%04x:%04x" % (fn["vendor"], fn["device"])
+        if ident not in ids:
+            ids.append(ident)
+    drivers = {d["bdf"]: d.get("driver") for d in facts["pci"]}
+    if fns and all(drivers.get(f["bdf"]) == "vfio-pci" for f in fns) and _blacklisted(root, "i915"):
+        how = _persistent_binding(facts, target, fns, ids, root)
+        if how:
+            plan["skipped"].append("The iGPU is already held by vfio-pci and i915 is blacklisted (%s)" % how)
+            return
+    mine = {fn["bdf"] for fn in target["functions"]}
+    twins = sorted(d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d["vendor"] is not None
+                   and "%04x:%04x" % (d["vendor"], d["device"]) in ids)
+    if twins:
+        plan["refusals"].append(
+            "Another device on this host has the same PCI id (%s). Binding by id would take it too." % ", ".join(twins))
+        return
+    existing = _existing_ids_lines(root)
+    for path, text in existing:
+        new = _merge_ids(text, ids)
+        if new != text:
+            _add_change(plan, root, path, new, "Add the iGPU's id to your existing vfio-pci line")
+    earlier = _live_ids(_read(_p(root, MODPROBE_FILE)) or "")
+    union = earlier + [i for i in ids if i not in earlier]
+    body = HEADER + "blacklist i915\n" + ("" if existing else "options vfio-pci ids=%s\n" % ",".join(union))
+    _add_change(plan, root, MODPROBE_FILE, body, "Give the iGPU to vfio-pci at boot (i915 is blacklisted)")
+    plan["warnings"].append(
+        "The host gives up its Intel graphics for good: the monitor on the host stays dark and the Proxmox "
+        "console works only over the network. Make sure you can reach the web UI or SSH before you reboot.")
+    plan["binding"] = "ids"
+
+
 def plan_binding(facts, target, root, plan, opts=None):
     opts = opts or {}
+    if target["vendor"] == "intel":
+        plan_intel_binding(facts, target, root, plan)
+        return
     fns = [f for f in target["functions"] if bindable(f, target["vendor"])]
     ids = []
     for fn in fns:
@@ -805,8 +857,15 @@ def plan_host(facts, target, opts=None, root="/", run=default_run):
         return plan
     plan_console(facts, target, opts, plan)
     plan_kernel_args(facts, target, root, plan)
-    plan_modules(root, plan)
-    plan_binding(facts, target, root, plan, opts)
+    if target["vendor"] == "intel":
+        plan_binding(facts, target, root, plan, opts)
+        if any("already held by vfio-pci" in line for line in plan["skipped"]):
+            plan["skipped"].append("The VFIO modules are loaded (the iGPU is bound)")
+        else:
+            plan_modules(root, plan)
+    else:
+        plan_modules(root, plan)
+        plan_binding(facts, target, root, plan, opts)
     plan_vendor_reset(facts, target, root, run, plan)
     plan_containers(target, root, plan)
     boot_files = (GRUB_DROPIN, KERNEL_CMDLINE)
@@ -1255,8 +1314,9 @@ def parse_config(raw):
 
 
 def _global_re(arg):
-    key = arg.split("=", 1)[0].replace("-global ", "", 1)
-    return re.compile(r"-global\s+" + re.escape(key) + r"=\S+")
+    """Matches the arg with any value: ``-global k=v``, ``-machine k=v`` and ``-set k=v`` alike."""
+    key = arg.split("=", 1)[0]
+    return re.compile(r"\s+".join(re.escape(part) for part in key.split()) + r"=\S+")
 
 
 def with_global_args(args, wanted):

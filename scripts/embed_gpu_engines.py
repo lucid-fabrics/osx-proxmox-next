@@ -2,7 +2,8 @@
 """Refresh the verbatim copies of the Python GPU engines inside the bash installer.
 
 Run after changing host_setup.py, bios_guide.py, data/gpu/bios_paths.json,
-data/gpu/amd_devices.txt, data/gpu/oc_boot_args.py or data/nullmoth/oc_patch.py:
+data/gpu/amd_devices.txt, data/gpu/oc_boot_args.py, data/nullmoth/oc_patch.py or any iGPU
+file (igpu_engine.py, data/gpu/intel_devices.txt, oc_igpu.py, igpu_*.sh, igpu_launchd.plist):
 
     python3 scripts/embed_gpu_engines.py
 
@@ -23,6 +24,12 @@ EMBEDS = (
     ("bios_paths.json", "GPU_EMBED_BIOS_PATHS", PKG / "data/gpu/bios_paths.json"),
     ("amd_devices.txt", "GPU_EMBED_AMD_DEVICES", PKG / "data/gpu/amd_devices.txt"),
     ("oc_boot_args.py", "GPU_EMBED_OC_BOOT_ARGS", PKG / "data/gpu/oc_boot_args.py"),
+    ("intel_devices.txt", "GPU_EMBED_INTEL_DEVICES", PKG / "data/gpu/intel_devices.txt"),
+    ("igpu_engine.py", "GPU_EMBED_IGPU_ENGINE", PKG / "igpu_engine.py"),
+    ("oc_igpu.py", "GPU_EMBED_OC_IGPU", PKG / "data/gpu/oc_igpu.py"),
+    ("igpu_firstboot.sh", "GPU_EMBED_IGPU_FIRSTBOOT", PKG / "data/gpu/igpu_firstboot.sh"),
+    ("igpu_stage.sh", "GPU_EMBED_IGPU_STAGE", PKG / "data/gpu/igpu_stage.sh"),
+    ("igpu_launchd.plist", "GPU_EMBED_IGPU_PLIST", PKG / "data/gpu/igpu_launchd.plist"),
 )
 
 

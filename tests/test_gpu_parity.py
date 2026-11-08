@@ -27,6 +27,12 @@ EMBEDS = {
     "bios_paths.json": ("GPU_EMBED_BIOS_PATHS", PKG / "data/gpu/bios_paths.json"),
     "amd_devices.txt": ("GPU_EMBED_AMD_DEVICES", PKG / "data/gpu/amd_devices.txt"),
     "oc_boot_args.py": ("GPU_EMBED_OC_BOOT_ARGS", PKG / "data/gpu/oc_boot_args.py"),
+    "intel_devices.txt": ("GPU_EMBED_INTEL_DEVICES", PKG / "data/gpu/intel_devices.txt"),
+    "igpu_engine.py": ("GPU_EMBED_IGPU_ENGINE", PKG / "igpu_engine.py"),
+    "oc_igpu.py": ("GPU_EMBED_OC_IGPU", PKG / "data/gpu/oc_igpu.py"),
+    "igpu_firstboot.sh": ("GPU_EMBED_IGPU_FIRSTBOOT", PKG / "data/gpu/igpu_firstboot.sh"),
+    "igpu_stage.sh": ("GPU_EMBED_IGPU_STAGE", PKG / "data/gpu/igpu_stage.sh"),
+    "igpu_launchd.plist": ("GPU_EMBED_IGPU_PLIST", PKG / "data/gpu/igpu_launchd.plist"),
 }
 
 
@@ -79,7 +85,8 @@ def test_embedding_script_is_idempotent(tmp_path):
 
 def test_embedded_engines_are_usable_standalone(bash, tmp_path):
     out = bash('gpu_engine_init; ls "$GPU_ENGINE_DIR"; python3 "$GPU_ENGINE_DIR/host_setup.py" bogus </dev/null', expect=None)
-    assert set(out.stdout.split()) == {"bios_guide.py", "bios_paths.json", "host_setup.py"}
+    assert set(out.stdout.split()) == {"bios_guide.py", "bios_paths.json", "host_setup.py", "igpu_engine.py", "intel_devices.txt",
+                                       "igpu_firstboot.sh", "igpu_stage.sh", "igpu_launchd.plist"}
     assert out.returncode == 64
 
 
@@ -502,6 +509,8 @@ def test_scan_and_card_text(bash, tmp_path, vm):
                                        parts[7] == "1", parts[12] == "1", parts[8] or None, users, [],
                                        [r for r in parts[10].split(",") if r]))
     assert len(cards) == 3
+    gpu_setup.apply_verdicts(cards, "sequoia")
+    assert [c.vendor for c in cards if c.recommended] == ["amd"]
     python_text = "\n".join(gpu_setup.card_text(c) for c in cards)
     bash_text = "\n".join(ln for ln in out.splitlines() if ln.startswith((">> ", "   ")) and ("+" in ln or "|" in ln))
     assert bash_text == python_text

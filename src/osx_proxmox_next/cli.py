@@ -29,7 +29,7 @@ from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints
 from .support import SUPPORT_LINE, SUPPORT_LINES_POST_INSTALL
-from . import gpu_attach, gpu_setup_cli, nullmoth
+from . import gpu_attach, gpu_setup_cli, igpu_cli, nullmoth
 
 _MB = 1024 * 1024
 
@@ -255,6 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_download_subparser(sub)
     common = _build_common_parser()
     _add_vm_subparsers(sub, common)
+    igpu_cli.add_parsers(sub, common)
     return parser
 
 
@@ -347,7 +348,7 @@ def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
         return _run_nvidia_detach(args)
     if args.cmd == "gpu-setup":
         return gpu_setup_cli.run(args)
-    return None
+    return igpu_cli.dispatch(args)
 
 
 def _detect_vm_disk_gb(vmid: int) -> int:

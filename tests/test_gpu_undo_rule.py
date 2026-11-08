@@ -284,4 +284,4 @@ def test_bash_undo_counts_opencore_kept_lines(bash):
     out = bash(stub + "gpu_undo no").stdout
     assert "Everything this setup changed is back" in out
     src = BASH
-    assert src.count("GPU_OC_KEPT=$((${GPU_OC_KEPT:-0} + 1))") == 2 and "kept=$((kept + GPU_OC_KEPT))" in src
+    assert src.count("GPU_OC_KEPT=$((${GPU_OC_KEPT:-0} + 1))") == 3 and "kept=$((kept + GPU_OC_KEPT))" in src

@@ -1,0 +1,83 @@
+# Intel iGPU allowlist for macOS guests (PCI vendor 8086, WhateverXe).
+# The Python package (igpu_engine.py) reads this file and the bash installer embeds it
+# verbatim; tests/test_igpu_parity.py diffs the two. Change the file, then run
+# scripts/embed_gpu_engines.py.
+#
+# Source: WhateverXe 0.8.0 kern_xelp_devices.hpp (github.com/b00t0x/WhateverXe, tag 0.8.0),
+# whose ids were checked against Linux v6.12 i915_pciids.h.
+#
+# family|key|label|rom
+#   rom: key of the pinned option ROM in igpu_engine.ROMS (LongQT-sea/intel-igpu-passthru v0.1)
+# device|id|family|status|model
+#   status: tested     passthrough proven end to end on real hardware
+#           untested   in WhateverXe's table with an automatic backend, never run through this tool
+#           nobackend  catalogued by WhateverXe but without an implemented backend: refused
+family|tgl|Tiger Lake|tgl
+family|adl-s|Alder Lake-S|tgl
+family|adl-p|Alder Lake-P|adl-h
+family|adl-n|Alder Lake-N|adl-n
+family|rpl-s|Raptor Lake-S|tgl
+family|rpl-p|Raptor Lake-P|adl-h
+family|rkl|Rocket Lake|tgl
+device|4680|adl-s|untested|Intel UHD Graphics 770
+device|4682|adl-s|untested|Intel UHD Graphics 730
+device|4688|adl-s|untested|Intel UHD Graphics
+device|468A|adl-s|untested|Intel UHD Graphics
+device|468B|adl-s|untested|Intel UHD Graphics
+device|4690|adl-s|untested|Intel UHD Graphics 770
+device|4692|adl-s|untested|Intel UHD Graphics 730
+device|4693|adl-s|untested|Intel UHD Graphics 710
+device|4626|adl-p|untested|Intel UHD Graphics
+device|4628|adl-p|untested|Intel UHD Graphics
+device|462A|adl-p|untested|Intel UHD Graphics
+device|46A0|adl-p|untested|Intel UHD Graphics
+device|46A1|adl-p|untested|Intel UHD Graphics
+device|46A2|adl-p|untested|Intel UHD Graphics
+device|46B0|adl-p|untested|Intel UHD Graphics
+device|46B1|adl-p|untested|Intel UHD Graphics
+device|46B2|adl-p|untested|Intel UHD Graphics
+device|46C0|adl-p|untested|Intel UHD Graphics
+device|46C1|adl-p|untested|Intel UHD Graphics
+device|46C2|adl-p|untested|Intel UHD Graphics
+device|46A3|adl-p|untested|Intel UHD Graphics
+device|46A6|adl-p|tested|Intel Iris Xe Graphics
+device|46A8|adl-p|untested|Intel Iris Xe Graphics
+device|46AA|adl-p|untested|Intel Iris Xe Graphics
+device|46B3|adl-p|untested|Intel UHD Graphics
+device|46C3|adl-p|untested|Intel UHD Graphics
+device|46D0|adl-n|untested|Intel UHD Graphics
+device|46D1|adl-n|untested|Intel UHD Graphics
+device|46D2|adl-n|untested|Intel UHD Graphics
+device|46D3|adl-n|untested|Intel Graphics
+device|46D4|adl-n|untested|Intel Graphics
+device|4C8A|rkl|nobackend|Intel UHD Graphics 750
+device|4C8B|rkl|nobackend|Intel UHD Graphics 730
+device|9A40|tgl|untested|Intel Iris Xe Graphics
+device|9A49|tgl|untested|Intel Iris Xe Graphics
+device|9A59|tgl|untested|Intel UHD Graphics
+device|9AC0|tgl|untested|Intel UHD Graphics
+device|9AC9|tgl|untested|Intel UHD Graphics
+device|9AD9|tgl|untested|Intel UHD Graphics
+device|9AF8|tgl|untested|Intel UHD Graphics
+device|9A60|tgl|untested|Intel UHD Graphics
+device|9A68|tgl|untested|Intel UHD Graphics
+device|9A70|tgl|untested|Intel UHD Graphics
+device|9A78|tgl|untested|Intel UHD Graphics
+device|A780|rpl-s|untested|Intel UHD Graphics 770
+device|A781|rpl-s|untested|Intel UHD Graphics
+device|A782|rpl-s|untested|Intel UHD Graphics 730
+device|A783|rpl-s|untested|Intel UHD Graphics
+device|A788|rpl-s|untested|Intel UHD Graphics
+device|A789|rpl-s|untested|Intel UHD Graphics
+device|A78A|rpl-s|untested|Intel UHD Graphics
+device|A78B|rpl-s|untested|Intel UHD Graphics
+device|A720|rpl-p|untested|Intel UHD Graphics
+device|A721|rpl-p|untested|Intel UHD Graphics
+device|A7A0|rpl-p|untested|Intel Iris Xe Graphics
+device|A7A1|rpl-p|untested|Intel Iris Xe Graphics
+device|A7A8|rpl-p|untested|Intel UHD Graphics
+device|A7A9|rpl-p|untested|Intel UHD Graphics
+device|A7AA|rpl-p|untested|Intel Graphics
+device|A7AB|rpl-p|untested|Intel Graphics
+device|A7AC|rpl-p|untested|Intel Graphics
+device|A7AD|rpl-p|untested|Intel Graphics

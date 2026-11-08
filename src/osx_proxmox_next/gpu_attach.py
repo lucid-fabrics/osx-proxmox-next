@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from shlex import quote as shquote
 
-from . import amd_host, nullmoth
+from . import amd_host, igpu_attach, nullmoth
 from .domain import PlanStep
 from .gpu import (
     AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps, gpu_users, hostpci_bdfs, running_user_issue, shared_note,
@@ -90,6 +90,8 @@ def build_detach_steps(
     steps.append(verify_stopped_step(vid))
     if record.oc == "gpu":
         steps.append(_oc_step(vid, "restore"))
+    elif record.oc == "igpu":
+        steps.append(igpu_attach.oc_step(vid, "restore", "Restore the previous OpenCore config"))
     steps += build_hostpci_detach_steps(vmid, current_args, has_hostpci0, record=record,
                                         profile=amd_host.AMD_PROFILE, cfg=cfg, notes=notes)
     return steps
@@ -162,7 +164,7 @@ def prepare_detach(
 ) -> AttachPlan:
     """Undo a GPU attach for either vendor (nvidia-detach and gpu-setup --undo share this)."""
     record = load_record(vmid)
-    if record is None or record.vendor != "amd":
+    if record is None or record.vendor not in ("amd", "intel"):
         return nullmoth.prepare_detach(vmid, adapter=adapter, allow_stop=allow_stop, missing_ok=missing_ok)
     plan = AttachPlan(vmid)
     info = fetch_vm_info(vmid, adapter=adapter or get_proxmox_adapter())
