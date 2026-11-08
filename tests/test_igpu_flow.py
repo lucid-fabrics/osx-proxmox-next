@@ -184,6 +184,8 @@ def test_the_record_remembers_the_originals_and_undo_restores_them(tmp_path):
 
 
 def test_fresh_vm_conversion_steps():
+    described = igpu_attach.build_fresh_vm_steps(996, "macOS Sequoia 15")
+    assert described[0].argv == ["qm", "set", "996", "--description", "macOS Sequoia 15 VM"] and len(described) == 4
     steps = igpu_attach.build_fresh_vm_steps(996)
     assert steps[0].argv == ["qm", "set", "996", "--machine", "pc"]
     assert "--sata1" in steps[1].argv[2] and "order=sata1;virtio0;ide0" in steps[1].argv[2]

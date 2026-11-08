@@ -1,6 +1,6 @@
 """Set up (or undo) a VM's OpenCore disk for Intel iGPU passthrough with WhateverXe.
 
-Usage: oc_igpu.py <EFI/OC directory> attach|restore|fadt|stage|unstage
+Usage: oc_igpu.py <EFI/OC directory> attach|restore|fadt|stage|unstage|mark
 
 The Python CLI/TUI and the standalone bash installer run this exact text (the
 bash script embeds it verbatim; tests/test_igpu_parity.py diffs the two).
@@ -20,6 +20,8 @@ stage    Makes the picker show only the recovery disk and wait for a key: Timeou
          only, so the installed APFS macOS, which the picker would otherwise highlight as the startup disk,
          is hidden). Used right before the VM boots recovery to stage the graphics package.
 unstage  Puts ScanPolicy back (the value saved by stage, else 0). The caller restores the picker timeout.
+mark     Notes that the WhateverXe Graphics package is installed inside macOS. From then on restore keeps
+         WhateverXe and AMFIPass in OpenCore: with the package installed and WhateverXe gone the guest hangs at boot.
 restore  Puts config.plist.pre-igpu back byte for byte and removes the two kexts, but only
          while config.plist still has the SHA-256 attach stored next to the backup. When the
          file changed since, the changed config and the backup stay and a KEPT line says so.
@@ -172,6 +174,7 @@ def fadt(oc_dir):
 
 STAGE_SCAN_POLICY = 0x201  # lock to file systems, allow HFS+ only
 SCAN_SAVED = 'igpu-scanpolicy.orig'
+PACKAGE_MARK = 'igpu-package-installed'
 
 
 def stage(oc_dir):
@@ -207,8 +210,20 @@ def unstage(oc_dir):
     sys.stderr.write('ScanPolicy restored\n')
 
 
+def mark(oc_dir):
+    with open(os.path.join(oc_dir, PACKAGE_MARK), 'w') as f:
+        f.write('installed\n')
+    sys.stderr.write('noted that the graphics package is installed\n')
+
+
 def restore(oc_dir):
     path = os.path.join(oc_dir, 'config.plist')
+    if os.path.exists(os.path.join(oc_dir, PACKAGE_MARK)):
+        sys.stderr.write(
+            'KEPT: the graphics package is installed inside macOS, so WhateverXe and AMFIPass stay in OpenCore. '
+            'Without WhateverXe that package makes the guest hang at boot. Remove the package inside macOS first '
+            'if you want the original OpenCore config back.\n')
+        return
     backup = os.path.join(oc_dir, BACKUP)
     if not os.path.exists(backup):
         sys.stderr.write('no ' + BACKUP + ' found, nothing to restore\n')
@@ -233,9 +248,9 @@ def restore(oc_dir):
 
 
 def main(argv):
-    actions = {'attach': attach, 'restore': restore, 'fadt': fadt, 'stage': stage, 'unstage': unstage}
+    actions = {'attach': attach, 'restore': restore, 'fadt': fadt, 'stage': stage, 'unstage': unstage, 'mark': mark}
     if len(argv) != 3 or argv[2] not in actions:
-        refuse('usage: oc_igpu.py <EFI/OC dir> attach|restore|fadt|stage|unstage', 64)
+        refuse('usage: oc_igpu.py <EFI/OC dir> attach|restore|fadt|stage|unstage|mark', 64)
     actions[argv[2]](argv[1])
 
 

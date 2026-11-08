@@ -59,13 +59,13 @@ fi
 
 waited=0
 while [ "$waited" -lt "$WAIT_SECONDS" ]; do
-  if /usr/bin/kmutil showloaded 2>/dev/null | grep -q org.b00t0x.WhateverXe; then
+  if /usr/bin/kmutil showloaded 2>/dev/null | grep -q 'org\.b00t0x\.WhateverXe '; then
     break
   fi
   sleep 5
   waited=$((waited + 5))
 done
-if ! /usr/bin/kmutil showloaded 2>/dev/null | grep -q org.b00t0x.WhateverXe; then
+if ! /usr/bin/kmutil showloaded 2>/dev/null | grep -q 'org\.b00t0x\.WhateverXe '; then
   log "WhateverXe did not load within ${WAIT_SECONDS}s (try $((tries + 1)) of $MAX_TRIES)"
   finish "not installed: WhateverXe not loaded (try $((tries + 1)) of $MAX_TRIES)"
 fi

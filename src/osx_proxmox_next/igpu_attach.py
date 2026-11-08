@@ -83,14 +83,17 @@ def rom_step(rom_path: Path, rom_file: str) -> PlanStep:
     )
 
 
-def build_fresh_vm_steps(vmid: int) -> list[PlanStep]:
+def build_fresh_vm_steps(vmid: int, macos_label: str = "") -> list[PlanStep]:
     """Turn a VM that was just created (q35, recovery on ide2, not started) into the i440fx shape the iGPU needs.
 
     PIIX IDE has no macOS driver, so the recovery disk moves to sata1; OpenCore gets FadtEnableReset, without
     which every guest restart hangs on i440fx."""
     vid = str(vmid)
     q = shquote(vid)
+    describe = ([PlanStep(title="Note the macOS release in the VM description",
+                          argv=["qm", "set", vid, "--description", f"{macos_label} VM"])] if macos_label else [])
     return [
+        *describe,
         PlanStep(title="Use the i440fx machine type", argv=["qm", "set", vid, "--machine", "pc"]),
         PlanStep(
             title="Move the recovery disk to sata1 (i440fx has no macOS driver for IDE)",

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
 from . import igpu_attach, igpu_engine, igpu_finish
 from .defaults import DEFAULT_ISO_DIR
-from .domain import MAX_VMID, MIN_VMID
+from .domain import MAX_VMID, MIN_VMID, SUPPORTED_MACOS
 from .intel_host import check_intel_gpu
 
 __all__ = ["add_parsers", "dispatch", "run_check", "run_finish", "run_install"]
@@ -36,6 +37,7 @@ def add_parsers(sub: argparse._SubParsersAction, common: argparse.ArgumentParser
         help=("BETA: attach the Intel iGPU to an installed i440fx macOS VM and install the graphics package "
               "inside it, with no steps in macOS. The VM must be stopped."),
     )
+    finish.add_argument("--yes", action="store_true", help="Skip the confirmation question")
     finish.add_argument("vmid", type=int, help="VM ID (stopped, installed, machine type pc)")
     finish.add_argument("--macos", default="", help="ventura, sonoma, sequoia or tahoe, when it cannot be read from the VM")
     finish.add_argument("--iso-dir", default="", help="Directory for the downloads (default: the ISO storage)")
@@ -89,6 +91,10 @@ def run_finish(args: argparse.Namespace) -> int:
         print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
         return 2
     print(NOTICE)
+    if not args.yes and not (sys.stdin.isatty() and input(
+            f"VM {vmid} boots macOS recovery once, then gets the iGPU. Continue? [y/N] ").strip().lower() in ("y", "yes")):
+        print("Nothing was changed. Confirm (or pass --yes) to attach the iGPU.")
+        return 2
     try:
         result = igpu_finish.finish(vmid, iso_dir=Path(args.iso_dir or DEFAULT_ISO_DIR), on_event=_on_event,
                                     macos=args.macos)
@@ -122,7 +128,7 @@ def run_install(args: argparse.Namespace) -> int:
         return 2
     snapshot = create_snapshot(config.vmid)
     # everything build_plan does except its final "Start VM"
-    steps = [s for s in build_plan(config) if s.title != "Start VM"] + igpu_attach.build_fresh_vm_steps(config.vmid)
+    steps = [s for s in build_plan(config) if s.title != "Start VM"] + igpu_attach.build_fresh_vm_steps(config.vmid, SUPPORTED_MACOS[config.macos]["label"])
     result = apply_plan(steps, execute=True)
     if not result.ok:
         failed = next((r for r in result.results if not r.ok), None)

@@ -43,23 +43,32 @@ def test_check_command(monkeypatch, capsys):
     assert cli.run_cli(["igpu-check"]) == 2
 
 
+def test_finish_asks_unless_yes(monkeypatch, capsys):
+    monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: igpu_finish.FinishResult("installed", True))
+    assert cli.run_cli(["igpu-finish", "996"]) == 2  # no terminal, no --yes: nothing happens
+    assert "Nothing was changed" in capsys.readouterr().out
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert cli.run_cli(["igpu-finish", "996"]) == 0
+
+
 def test_finish_command(monkeypatch, capsys):
     done = igpu_finish.FinishResult("installed", True, ["note one"])
     monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: done)
-    assert cli.run_cli(["igpu-finish", "996"]) == 0
+    assert cli.run_cli(["igpu-finish", "996", "--yes"]) == 0
     out = capsys.readouterr().out
     assert "NOTE: note one" in out and "Metal acceleration" in out and "BETA." in out
     monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: igpu_finish.FinishResult("not installed: x"))
-    assert cli.run_cli(["igpu-finish", "996"]) == 1
+    assert cli.run_cli(["igpu-finish", "996", "--yes"]) == 1
     assert "not installed yet: not installed: x" in capsys.readouterr().out
     monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: igpu_finish.FinishResult(""))
-    assert cli.run_cli(["igpu-finish", "996"]) == 1 and "reported nothing" in capsys.readouterr().out
+    assert cli.run_cli(["igpu-finish", "996", "--yes"]) == 1 and "reported nothing" in capsys.readouterr().out
 
     def boom(vmid, **k):
         raise igpu_finish.FinishError("no way")
     monkeypatch.setattr(igpu_finish, "finish", boom)
-    assert cli.run_cli(["igpu-finish", "996"]) == 2 and "ERROR: no way" in capsys.readouterr().out
-    assert cli.run_cli(["igpu-finish", "5"]) == 2 and "VMID must be between" in capsys.readouterr().out
+    assert cli.run_cli(["igpu-finish", "996", "--yes"]) == 2 and "ERROR: no way" in capsys.readouterr().out
+    assert cli.run_cli(["igpu-finish", "5", "--yes"]) == 2 and "VMID must be between" in capsys.readouterr().out
 
 
 class Pve:
@@ -121,7 +130,7 @@ ARGV = ["igpu-install", "--vmid", "996", "--name", "igpu-seq", "--macos", "sequo
 def test_install_happy_path(install, capsys):
     assert cli.run_cli(ARGV) == 0
     assert install.applied[0] == "Create VM shell" and "Start VM" not in install.applied
-    assert install.applied[-3:] == ["Use the i440fx machine type", "Move the recovery disk to sata1 (i440fx has no macOS driver for IDE)",
+    assert install.applied[-4:] == ["Note the macOS release in the VM description", "Use the i440fx machine type", "Move the recovery disk to sata1 (i440fx has no macOS driver for IDE)",
                                     "Set FadtEnableReset in OpenCore (restarts hang without it)"]
     assert install.slot == "sata1" and ("start", "996") in install.pve.calls and ("stop", "996") in install.pve.calls
     assert "Metal acceleration" in capsys.readouterr().out

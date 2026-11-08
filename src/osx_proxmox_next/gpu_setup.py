@@ -158,6 +158,21 @@ DEFAULT_MACOS = "sequoia"
 STRENGTH = {"amd": 3, "intel": 2, "nvidia": 1}
 
 
+def apply_verdicts(cards: list["GpuCard"], macos: str) -> None:
+    """Set every card's status for *macos* and mark the strongest one that works as recommended."""
+    macos = macos if macos in MACOS_NAMES else DEFAULT_MACOS
+    for card in cards:
+        card.macos = macos
+        card.recommended = False
+        card.works, card.status = version_status(card.vendor, card.device_id, card.kind, macos)
+        if card.running_users:
+            card.works, card.status = False, "in use by " + ", ".join(f"VM {v}" for v in card.running_users)
+        card.works = card.works and card.selectable
+    best = max((c for c in cards if c.works), key=lambda c: STRENGTH[c.vendor], default=None)
+    if best is not None:
+        best.recommended = True
+
+
 def version_status(vendor: str, device_id: int, kind: str, macos: str) -> tuple[bool, str]:
     """(works, one-line status) of a card for one macOS release. Reuses the AMD, NVIDIA and Intel support data."""
     name = MACOS_NAMES[macos]
@@ -388,16 +403,7 @@ class Session:
                 users=gpu.gpu_users(self.pve, bdf, exclude_vm, self.root) if kind != "unsupported" else [],
                 shares=shares, risky=risky, lxc=containers if kind != "unsupported" else [],
             ))
-        macos = macos if macos in MACOS_NAMES else DEFAULT_MACOS
-        for card in cards:
-            card.macos = macos
-            card.works, card.status = version_status(card.vendor, card.device_id, card.kind, macos)
-            if card.running_users:
-                card.works, card.status = False, "in use by " + ", ".join(f"VM {v}" for v in card.running_users)
-            card.works = card.works and card.selectable
-        best = max((c for c in cards if c.works), key=lambda c: STRENGTH[c.vendor], default=None)
-        if best is not None:
-            best.recommended = True
+        apply_verdicts(cards, macos)
         return sorted(cards, key=lambda c: (not c.selectable, not c.works, not c.recommended))  # usable, working, best first
 
     # ── 2. choose ────────────────────────────────────────────────────
@@ -789,6 +795,10 @@ class Session:
             if result.ok:
                 self._forget_vm(vmid)
                 messages.append(f"VM {vmid}: GPU settings restored.")
+                if record.oc == "igpu":
+                    messages.append(f"VM {vmid}: the graphics package stays installed inside macOS and does nothing "
+                                    "without the iGPU. While it is installed WhateverXe stays in OpenCore (the guest "
+                                    "hangs at boot without it); attaching the iGPU again reuses it.")
                 messages += [f"VM {vmid}: {w}" for w in plan.warnings]
                 messages += [f"VM {vmid}: {ln}" for ln in kept]
             else:

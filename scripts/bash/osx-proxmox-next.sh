@@ -5267,35 +5267,39 @@ def build_payload(pkg, out, run=default_run):
     if code != 0:
         return False, "mkfs.vfat failed: " + msg.strip()
     mnt = tempfile.mkdtemp(prefix="igpu-payload-")
+    code, msg = run(["mount", "-o", "loop", str(out), mnt], 60)
+    if code != 0:
+        os.rmdir(mnt)
+        return False, "could not mount the payload image: " + msg.strip()
     try:
-        code, msg = run(["mount", "-o", "loop", str(out), mnt], 60)
-        if code != 0:
-            return False, "could not mount the payload image: " + msg.strip()
-        try:
-            shutil.copyfile(pkg, os.path.join(mnt, "WhateverXe-Graphics.pkg"))
-            for src, name in PAYLOAD_FILES:
-                (Path(mnt) / name).write_text(render_payload_file(src, pkg_sha))
-        finally:
-            run(["sync"], 120)
-            run(["umount", mnt], 60)
+        shutil.copyfile(pkg, os.path.join(mnt, "WhateverXe-Graphics.pkg"))
+        for src, name in PAYLOAD_FILES:
+            (Path(mnt) / name).write_text(render_payload_file(src, pkg_sha))
     finally:
-        shutil.rmtree(mnt, ignore_errors=True)
+        run(["sync"], 120)
+        _release(mnt, run)
     return True, "payload disk built (%d MB)" % PAYLOAD_MB
 
 
 def read_result(img, run=default_run):
     """The text the guest left in result.txt on the payload disk, or '' (the VM must be stopped)."""
     mnt = tempfile.mkdtemp(prefix="igpu-result-")
+    code, _msg = run(["mount", "-o", "loop,ro", str(img), mnt], 60)
+    if code != 0:
+        os.rmdir(mnt)
+        return ""
     try:
-        code, _msg = run(["mount", "-o", "loop,ro", str(img), mnt], 60)
-        if code != 0:
-            return ""
-        try:
-            return _read(os.path.join(mnt, "result.txt")) or ""
-        finally:
-            run(["umount", mnt], 60)
+        return _read(os.path.join(mnt, "result.txt")) or ""
     finally:
-        shutil.rmtree(mnt, ignore_errors=True)
+        _release(mnt, run)
+
+
+def _release(mnt, run):
+    """Unmount and remove the mount folder. A folder that is still a mount point is left alone: removing
+    it recursively would delete the files of the payload image itself."""
+    code, _msg = run(["umount", mnt], 60)
+    if code == 0:
+        os.rmdir(mnt)
 
 
 # ── command line (used by the bash installer) ────────────────────────
@@ -5367,7 +5371,7 @@ GPU_EMBED_IGPU_ENGINE_EOF
 IFS= read -r -d '' GPU_EMBED_OC_IGPU <<'GPU_EMBED_OC_IGPU_EOF' || true
 """Set up (or undo) a VM's OpenCore disk for Intel iGPU passthrough with WhateverXe.
 
-Usage: oc_igpu.py <EFI/OC directory> attach|restore|fadt|stage|unstage
+Usage: oc_igpu.py <EFI/OC directory> attach|restore|fadt|stage|unstage|mark
 
 The Python CLI/TUI and the standalone bash installer run this exact text (the
 bash script embeds it verbatim; tests/test_igpu_parity.py diffs the two).
@@ -5387,6 +5391,8 @@ stage    Makes the picker show only the recovery disk and wait for a key: Timeou
          only, so the installed APFS macOS, which the picker would otherwise highlight as the startup disk,
          is hidden). Used right before the VM boots recovery to stage the graphics package.
 unstage  Puts ScanPolicy back (the value saved by stage, else 0). The caller restores the picker timeout.
+mark     Notes that the WhateverXe Graphics package is installed inside macOS. From then on restore keeps
+         WhateverXe and AMFIPass in OpenCore: with the package installed and WhateverXe gone the guest hangs at boot.
 restore  Puts config.plist.pre-igpu back byte for byte and removes the two kexts, but only
          while config.plist still has the SHA-256 attach stored next to the backup. When the
          file changed since, the changed config and the backup stay and a KEPT line says so.
@@ -5539,6 +5545,7 @@ def fadt(oc_dir):
 
 STAGE_SCAN_POLICY = 0x201  # lock to file systems, allow HFS+ only
 SCAN_SAVED = 'igpu-scanpolicy.orig'
+PACKAGE_MARK = 'igpu-package-installed'
 
 
 def stage(oc_dir):
@@ -5574,8 +5581,20 @@ def unstage(oc_dir):
     sys.stderr.write('ScanPolicy restored\n')
 
 
+def mark(oc_dir):
+    with open(os.path.join(oc_dir, PACKAGE_MARK), 'w') as f:
+        f.write('installed\n')
+    sys.stderr.write('noted that the graphics package is installed\n')
+
+
 def restore(oc_dir):
     path = os.path.join(oc_dir, 'config.plist')
+    if os.path.exists(os.path.join(oc_dir, PACKAGE_MARK)):
+        sys.stderr.write(
+            'KEPT: the graphics package is installed inside macOS, so WhateverXe and AMFIPass stay in OpenCore. '
+            'Without WhateverXe that package makes the guest hang at boot. Remove the package inside macOS first '
+            'if you want the original OpenCore config back.\n')
+        return
     backup = os.path.join(oc_dir, BACKUP)
     if not os.path.exists(backup):
         sys.stderr.write('no ' + BACKUP + ' found, nothing to restore\n')
@@ -5600,9 +5619,9 @@ def restore(oc_dir):
 
 
 def main(argv):
-    actions = {'attach': attach, 'restore': restore, 'fadt': fadt, 'stage': stage, 'unstage': unstage}
+    actions = {'attach': attach, 'restore': restore, 'fadt': fadt, 'stage': stage, 'unstage': unstage, 'mark': mark}
     if len(argv) != 3 or argv[2] not in actions:
-        refuse('usage: oc_igpu.py <EFI/OC dir> attach|restore|fadt|stage|unstage', 64)
+        refuse('usage: oc_igpu.py <EFI/OC dir> attach|restore|fadt|stage|unstage|mark', 64)
     actions[argv[2]](argv[1])
 
 
@@ -5673,13 +5692,13 @@ fi
 
 waited=0
 while [ "$waited" -lt "$WAIT_SECONDS" ]; do
-  if /usr/bin/kmutil showloaded 2>/dev/null | grep -q org.b00t0x.WhateverXe; then
+  if /usr/bin/kmutil showloaded 2>/dev/null | grep -q 'org\.b00t0x\.WhateverXe '; then
     break
   fi
   sleep 5
   waited=$((waited + 5))
 done
-if ! /usr/bin/kmutil showloaded 2>/dev/null | grep -q org.b00t0x.WhateverXe; then
+if ! /usr/bin/kmutil showloaded 2>/dev/null | grep -q 'org\.b00t0x\.WhateverXe '; then
   log "WhateverXe did not load within ${WAIT_SECONDS}s (try $((tries + 1)) of $MAX_TRIES)"
   finish "not installed: WhateverXe not loaded (try $((tries + 1)) of $MAX_TRIES)"
 fi
@@ -6105,7 +6124,8 @@ IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on 
 IGPU_TAHOE_NOTE="macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs (WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead."
 IGPU_STAGE_TIMEOUT=900
 IGPU_FIRSTBOOT_TIMEOUT=1500
-IGPU_TAHOE_FIRSTBOOT_TIMEOUT=600
+IGPU_RESULT_POLL=30
+IGPU_RESULT_GRACE=15
 
 # 0 when the host is ready for the iGPU (nothing printed). Used by the create-a-VM menu.
 function igpu_ready_quiet() {
@@ -6173,7 +6193,7 @@ function igpu_fetch_assets() {
 }
 
 # Mount the VM's ide0 (OpenCore) disk, run the iGPU patcher, unmount.
-# $1 vmid, $2 attach|restore|fadt|stage|unstage. attach needs IGPU_WEX_ZIP and IGPU_AMFI_ZIP.
+# $1 vmid, $2 attach|restore|fadt|stage|unstage|mark. attach needs IGPU_WEX_ZIP and IGPU_AMFI_ZIP.
 function igpu_oc_patch() {
   local nkept=0 vmid="$1" action="$2" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
@@ -6304,6 +6324,30 @@ function igpu_wait_stopped() {
   return 1
 }
 
+# Set a VM key back to what it was, or delete it when it had no value. $1 vmid $2 key $3 value
+function igpu_put_back() {
+  if [ -n "$3" ]; then qm set "$1" "--$2" "$3" >/dev/null 2>&1 || true
+  else qm set "$1" --delete "$2" >/dev/null 2>&1 || true; fi
+}
+
+# Wait for the first iGPU boot to end. The guest powers itself off, except Tahoe, which hangs while it shuts down:
+# there the result the guest left on the payload disk ends the wait. rc 0 when the VM stopped by itself.
+# $1 vmid $2 payload volume $3 yes|no (Tahoe). Mirrors igpu_finish._wait_first_boot.
+function igpu_wait_first_boot() {
+  local vmid="$1" ref="$2" tahoe="$3" t0 last res
+  t0=$(date +%s); last=$t0
+  while (( $(date +%s) - t0 < IGPU_FIRSTBOOT_TIMEOUT )); do
+    qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
+    if [ "$tahoe" == "yes" ] && (( $(date +%s) - last >= IGPU_RESULT_POLL )); then
+      last=$(date +%s)
+      res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+      case "$res" in installed*|failed:*|"not installed:"*) sleep "$IGPU_RESULT_GRACE"; return 1 ;; esac
+    fi
+    sleep 10
+  done
+  return 1
+}
+
 # Import a raw image as a disk of the VM and print the volume id. $1 vmid $2 file $3 storage
 function igpu_import_disk() {
   local vmid="$1" file="$2" storage="$3" out ref cmd=(qm importdisk)
@@ -6349,7 +6393,7 @@ function igpu_stage() {
 # Stage the graphics package, attach the iGPU and run the first boot. $1 vmid, $2 macos (optional).
 # The VM must be stopped, installed and i440fx. Mirrors igpu_finish.finish.
 function igpu_finish() {
-  local vmid="${1:-}" ver="${2:-}" cfg storage recovery_src payload payload_ref="" rec_ref="" timeout result leftover rc=0
+  local vmid="${1:-}" ver="${2:-}" cfg storage recovery_src payload payload_ref="" rec_ref="" result leftover rc=0 orig_vga orig_args orig_boot
   [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh igpu-finish <vmid> [macos]"; return 1; }
   GPU_ISSUES=(); GPU_WARNS=(); GPU_HINTS=()
   cfg=$(qm config "$vmid" 2>/dev/null) || { msg_error "VM $vmid not found."; return 1; }
@@ -6369,9 +6413,10 @@ function igpu_finish() {
   msg_info "Building the payload disk (graphics package, first-boot script)"
   igpu_engine payload "$IGPU_PKG" "$payload" 2>/dev/null || { msg_error "Could not build the payload disk"; return 1; }
   recovery_src="$TEMP_DIR/igpu-recovery-${vmid}.img"
-  download_recovery "$ver" "$recovery_src"
+  download_recovery "$ver" "$recovery_src" || { msg_error "Could not download the $ver recovery image"; return 1; }
   payload_ref=$(igpu_import_disk "$vmid" "$payload" "$storage") || { msg_error "Could not import the payload disk"; return 1; }
   rec_ref=$(igpu_import_disk "$vmid" "$recovery_src" "$storage") || { msg_error "Could not import the recovery disk"; igpu_drop_disk_ref "$vmid" "$payload_ref"; return 1; }
+  orig_vga=$(sed -n 's/^vga: //p' <<<"$cfg"); orig_args=$(sed -n 's/^args: //p' <<<"$cfg"); orig_boot=$(sed -n 's/^boot: //p' <<<"$cfg")
   qm set "$vmid" --sata1 "$rec_ref,media=disk" --sata2 "$payload_ref,media=disk" --boot 'order=sata1;virtio0;ide0' >/dev/null || rc=1
   if [ "$rc" == 0 ]; then
     [ "$(sed -n 's/^vga: //p' <<<"$cfg")" == "std" ] || [ -z "$(sed -n 's/^vga: //p' <<<"$cfg")" ] || qm set "$vmid" --vga std >/dev/null
@@ -6384,24 +6429,27 @@ function igpu_finish() {
   if [ "$rc" != 0 ]; then
     igpu_drop_disk "$vmid" sata2
     rm -f "$payload"
+    igpu_put_back "$vmid" vga "$orig_vga"; igpu_put_back "$vmid" args "$orig_args"; igpu_put_back "$vmid" boot "$orig_boot"
+    restore_picker_timeout "$vmid" || true
     return 1
   fi
   restore_picker_timeout "$vmid" || msg_info "Could not restore the picker's auto-boot; run post-install afterwards"
   igpu_attach "$vmid" || { msg_error "Attaching the iGPU failed. Undo with: gpu-setup --undo"; return 1; }
   qm set "$vmid" --boot 'order=ide0;virtio0' >/dev/null
   msg_info "First boot with the iGPU: the guest installs the graphics package and powers off"
-  timeout=$IGPU_FIRSTBOOT_TIMEOUT
-  [ "$ver" == "tahoe" ] && timeout=$IGPU_TAHOE_FIRSTBOOT_TIMEOUT
   qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }
-  if ! igpu_wait_stopped "$vmid" "$timeout"; then
+  if ! igpu_wait_first_boot "$vmid" "$payload_ref" "$([ "$ver" == "tahoe" ] && echo yes || echo no)"; then
     qm stop "$vmid" >/dev/null 2>&1 || true
     if [ "$ver" == "tahoe" ]; then echo -e "${INFO}${YW}${IGPU_TAHOE_NOTE}${CL}"
-    else echo -e "${INFO}${YW}The guest did not power off within $((timeout / 60)) minutes, so it was stopped.${CL}"; fi
+    else echo -e "${INFO}${YW}The guest did not power off within $((IGPU_FIRSTBOOT_TIMEOUT / 60)) minutes, so it was stopped.${CL}"; fi
     igpu_wait_stopped "$vmid" 120 || true
   fi
   result=$(igpu_engine result "$(pvesm path "$payload_ref" 2>/dev/null)" 2>/dev/null || true)
   igpu_drop_disk "$vmid" sata2
   rm -f "$payload"
+  if [ "$result" == "installed" ]; then
+    igpu_oc_patch "$vmid" mark || echo -e "${INFO}${YW}Could not note the installed package on the OpenCore disk: gpu-setup --undo would remove WhateverXe, which the installed package needs.${CL}"
+  fi
   qm start "$vmid" >/dev/null 2>&1 || true
   if [ "$result" == "installed" ]; then
     msg_ok "Done. VM $vmid has Metal acceleration. Plug a monitor or an HDMI dummy plug into the host's native HDMI port: the macOS screen appears there, the Proxmox console stays blank."
@@ -6436,11 +6484,76 @@ function igpu_detected_line() {
   printf '%s (%04x) detected: full macOS acceleration. The host gives up its local screen.%s' "${model:-Intel graphics}" "$device" "$reboot"
 }
 
-# 0 when a GPU_CARDS line is a supported Intel iGPU nothing running holds. Mirrors GpuCard.recommended.
-function igpu_card_recommended() {
-  local vname kind
-  IFS='|' read -r _ vname _ _ kind _ <<<"$1"
-  [ "$vname" == "intel" ] && [ "$kind" != "unsupported" ] && gpu_card_selectable "$1"
+# The macOS release a card is judged for. Mirrors gpu_setup.DEFAULT_MACOS and MACOS_NAMES.
+GPU_MACOS="${GPU_MACOS:-sequoia}"
+function gpu_macos_name() {
+  case "$1" in
+    ventura) echo "macOS Ventura 13" ;; sonoma) echo "macOS Sonoma 14" ;; tahoe) echo "macOS Tahoe 26" ;;
+    *) echo "macOS Sequoia 15" ;;
+  esac
+}
+
+# The release to judge cards for: the --macos flag ($2), else the chosen VM's ($1), else Sequoia.
+# Mirrors Session.macos_for.
+function gpu_macos_for() {
+  local vmid="$1" flag="$2" ver
+  case "$flag" in ventura|sonoma|sequoia|tahoe) echo "$flag"; return 0 ;; esac
+  if [ -n "$vmid" ] && [ "$vmid" != "-1" ]; then
+    ver=$(nullmoth_detect_macos "$(qm config "$vmid" 2>/dev/null)" || true)
+    case "$ver" in ventura|sonoma|sequoia|tahoe) echo "$ver"; return 0 ;; esac
+  fi
+  echo sequoia
+}
+
+# works|status for a GPU_CARDS line and a macOS release ($2). Mirrors gpu_setup.version_status plus the running-VM rule.
+function gpu_version_status() {
+  local line="$1" macos="$2" vname device kind users name u run="" fam key label reset args tahoe
+  IFS='|' read -r _ vname device _ kind _ _ _ _ users _ <<<"$line"
+  name=$(gpu_macos_name "$macos")
+  for u in ${users//,/ }; do [ "${u#*:}" == "running" ] && run+="${run:+, }VM ${u%%:*}"; done
+  if [ -n "$run" ]; then echo "no|in use by ${run}"; return 0; fi
+  if [ "$kind" == "unsupported" ]; then echo "no|not supported by ${name}"; return 0; fi
+  if [ "$vname" == "nvidia" ] && [ "$macos" != "sequoia" ] && [ "$macos" != "tahoe" ]; then
+    echo "no|not supported by ${name} (NullMoth needs macOS 15.5 or newer)"; return 0
+  fi
+  if [ "$vname" == "amd" ] && [ "$macos" == "tahoe" ] && fam=$(amd_family_for "$device"); then
+    IFS='|' read -r key label reset args tahoe <<<"$fam"
+    if [ "$tahoe" != "ok" ]; then echo "yes|works with ${name} (not confirmed on this family)"; return 0; fi
+  fi
+  if [ "$vname" == "intel" ] && [ "$macos" == "tahoe" ]; then echo "yes|works with ${name} (experimental: restart from Proxmox)"; return 0; fi
+  echo "yes|works with ${name}"
+}
+
+# Sets GPU_RECOMMENDED to the address of the strongest card that works for GPU_MACOS: a supported AMD card
+# beats the Intel iGPU, which beats an NVIDIA card. Mirrors the ranking in Session.scan.
+function gpu_recommend() {
+  local line vname best=0 rank works
+  GPU_RECOMMENDED=""
+  for line in "${GPU_CARDS[@]}"; do
+    gpu_card_selectable "$line" || continue
+    IFS='|' read -r works _ <<<"$(gpu_version_status "$line" "$GPU_MACOS")"
+    [ "$works" == "yes" ] || continue
+    IFS='|' read -r _ vname _ <<<"$line"
+    case "$vname" in amd) rank=3 ;; intel) rank=2 ;; *) rank=1 ;; esac
+    if (( rank > best )); then best=$rank; GPU_RECOMMENDED="${line%%|*}"; fi
+  done
+}
+
+# 0 when a GPU_CARDS line is the recommended one. Mirrors GpuCard.recommended.
+function gpu_card_recommended() { [ -n "${GPU_RECOMMENDED:-}" ] && [ "${1%%|*}" == "$GPU_RECOMMENDED" ]; }
+
+# `osx-proxmox-next.sh igpu-finish <vmid> [macos] [--yes]`: asks first, like the Python command.
+function igpu_finish_command() {
+  local -a pos=()
+  GPU_YES=no
+  while [ $# -gt 0 ]; do
+    case "$1" in --yes) GPU_YES=yes ;; *) pos+=("$1") ;; esac
+    shift
+  done
+  [[ "${pos[0]:-}" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh igpu-finish <vmid> [macos] [--yes]"; return 1; }
+  echo -e "${INFO}${YW}${IGPU_NOTICE}${CL}"
+  gpu_ui_yesno "Attach the iGPU" "VM ${pos[0]} boots macOS recovery once, then gets the iGPU. Continue?" || { echo "Nothing was changed. Confirm (or pass --yes) to attach the iGPU."; return 2; }
+  igpu_finish "${pos[@]}"
 }
 
 # `osx-proxmox-next.sh igpu-check`
@@ -6568,14 +6681,16 @@ function gpu_scan() {
     gpu_host_console "$sys/bus/pci/devices/$bdf.0" && console=1
     GPU_CARDS+=("${bdf}|${vname}|${device}|${name:-${vname^^} GPU}|${v_kind}|${v_head}|${v_detail}|${boot}|${driver}|${users}|${risky}|${lxc}|${console}")
   done
-  local -a first=() last=()
-  local card
-  local -a lead=()
+  local -a first=() last=() lead=() works_arr=()
+  local card works
+  gpu_recommend
   for card in "${GPU_CARDS[@]}"; do
-    if igpu_card_recommended "$card"; then lead+=("$card")
+    IFS='|' read -r works _ <<<"$(gpu_version_status "$card" "$GPU_MACOS")"
+    if gpu_card_recommended "$card"; then lead+=("$card")
+    elif gpu_card_selectable "$card" && [ "$works" == "yes" ]; then works_arr+=("$card")
     elif gpu_card_selectable "$card"; then first+=("$card"); else last+=("$card"); fi
   done
-  GPU_CARDS=("${lead[@]}" "${first[@]}" "${last[@]}")
+  GPU_CARDS=("${lead[@]}" "${works_arr[@]}" "${first[@]}" "${last[@]}")
 }
 
 # Why a GPU_CARDS line cannot be picked (empty when it can). Mirrors GpuCard.why_not.
@@ -6621,7 +6736,10 @@ function gpu_card_text() {
   local ident lines
   ident=$(printf '%s   %s %04x:%04x' "$bdf" "$(case "$vname" in nvidia) echo NVIDIA ;; intel) echo Intel ;; *) echo AMD ;; esac)" "$(case "$vname" in nvidia) echo $((0x10DE)) ;; intel) echo $((0x8086)) ;; *) echo $((0x1002)) ;; esac)" "$device")
   lines="${name}"$'\n'"${ident}"
-  ! igpu_card_recommended "$1" || lines+=$'\n'"Recommended: $(igpu_detected_line "$1")"
+  local st
+  IFS="|" read -r _ st <<<"$(gpu_version_status "$1" "$GPU_MACOS")"
+  lines+=$'\n'"${st}$(gpu_card_recommended "$1" && echo " (recommended)")"
+  [ "$vname" != "intel" ] || ! gpu_card_recommended "$1" || lines+=$'\n'"Recommended: $(igpu_detected_line "$1")"
   [ "$kind" == "unsupported" ] || lines+=$'\n'"${head}"$'\n'"${detail}"
   [ -z "$flags" ] || lines+=$'\n'"Status: ${flags}"
   while IFS= read -r note; do [ -z "$note" ] || lines+=$'\n'"Note: ${note}"; done < <(gpu_card_notes "$1")
@@ -6759,6 +6877,7 @@ function gpu_undo() {
 function gpu_setup() {
   local status=no undo=no vmid="" gpu="" display="" accept=no stop=no
   GPU_YES=no
+  GPU_MACOS_FLAG=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --status) status=yes ;;
@@ -6767,6 +6886,7 @@ function gpu_setup() {
       --vm) vmid="${2:-}"; shift ;;
       --gpu) gpu="${2:-}"; shift ;;
       --display) display="${2:-}"; shift ;;
+      --macos) GPU_MACOS_FLAG="${2:-}"; shift ;;
       --accept-nullmoth-risk) accept=yes ;;
       --stop-vm) stop=yes ;;
       *) msg_error "Unknown option: $1"; return 2 ;;
@@ -6844,6 +6964,7 @@ function gpu_step_choose() {
   local want_vm="$1" want_gpu="$2" display="$3" accept="$4" line bdf vname device name kind head detail boot driver users
   local -a usable=()
   gpu_summary_line
+  GPU_MACOS=$(gpu_macos_for "$want_vm" "${GPU_MACOS_FLAG:-}")
   gpu_scan "${want_vm:--1}"
   for line in "${GPU_CARDS[@]}"; do
     gpu_card_text "$line"
@@ -6859,22 +6980,33 @@ function gpu_step_choose() {
     fi
     return 2
   fi
-  local chosen="" rec=""
+  local chosen="" rec="" rec_vname rec_text
   if [ -z "$want_gpu" ]; then
-    for line in "${usable[@]}"; do if igpu_card_recommended "$line"; then rec="$line"; break; fi; done
-  fi
-  if [ -n "$rec" ]; then
-    local rec_text; rec_text=$(igpu_detected_line "$rec")
-    gpu_say "$rec_text"
-    if gpu_ui_yesno "Use the Intel iGPU?" "${rec_text}\n\nUse it for macOS?"; then
-      chosen="$rec"
-    elif [ ${#usable[@]} -eq 1 ]; then
-      gpu_say "Nothing was changed. Run again and confirm (or pass --yes) to use the Intel iGPU. Nothing is enabled without that confirmation: it takes the host console."
-      return 2
-    else
-      local -a others=()
-      for line in "${usable[@]}"; do [ "$line" == "$rec" ] || others+=("$line"); done
-      usable=("${others[@]}")
+    for line in "${usable[@]}"; do if gpu_card_recommended "$line"; then rec="$line"; break; fi; done
+    if [ -z "$rec" ]; then
+      gpu_say "No graphics card here works with $(gpu_macos_name "$GPU_MACOS"). Continuing without passthrough: nothing was changed."
+      return 0
+    fi
+    IFS='|' read -r _ rec_vname _ <<<"$rec"
+    if [ "$rec_vname" == "intel" ] || [ ${#usable[@]} -gt 1 ]; then
+      if [ "$rec_vname" == "intel" ]; then rec_text=$(igpu_detected_line "$rec")
+      else
+        local rec_name rec_status
+        IFS='|' read -r _ _ _ rec_name _ <<<"$rec"
+        IFS='|' read -r _ rec_status <<<"$(gpu_version_status "$rec" "$GPU_MACOS")"
+        rec_text="Recommended: ${rec_name} (${rec%%|*}), ${rec_status}."
+      fi
+      gpu_say "$rec_text"
+      if gpu_ui_yesno "Use the recommended card?" "${rec_text}\n\nUse it for macOS?"; then
+        chosen="$rec"
+      elif [ ${#usable[@]} -eq 1 ]; then
+        gpu_say "Nothing was changed. Run again and confirm (or pass --yes) to use it. Nothing is enabled without that confirmation$([ "$rec_vname" == "intel" ] && echo ": the Intel iGPU takes the host console")."
+        return 2
+      else
+        local -a others=()
+        for line in "${usable[@]}"; do [ "$line" == "$rec" ] || others+=("$line"); done
+        usable=("${others[@]}")
+      fi
     fi
   fi
   if [ -n "$chosen" ]; then
@@ -6883,6 +7015,11 @@ function gpu_step_choose() {
     local want; want=$(gpu_normalize_bdf "$want_gpu") || { msg_error "'$want_gpu' is not a PCI address"; return 2; }
     for line in "${usable[@]}"; do [ "${line%%|*}" == "$want" ] && chosen="$line"; done
     [ -n "$chosen" ] || { gpu_say "$want_gpu is not one of the usable cards above."; return 2; }
+  elif [ ${#usable[@]} -eq 1 ] && [ "$(cut -d'|' -f2 <<<"${usable[0]}")" == "intel" ]; then
+    # switched away from the recommendation to the iGPU: it still takes the host console, so ask
+    gpu_say "$(igpu_detected_line "${usable[0]}")"
+    gpu_ui_yesno "Use the Intel iGPU?" "$(igpu_detected_line "${usable[0]}")\n\nUse it for macOS?" || { gpu_say "Nothing was changed."; return 2; }
+    chosen="${usable[0]}"
   elif [ ${#usable[@]} -eq 1 ]; then
     chosen="${usable[0]}"
   elif gpu_use_ui; then
@@ -7656,7 +7793,7 @@ if [ "${1:-}" == "igpu-check" ]; then
 fi
 if [ "${1:-}" == "igpu-finish" ]; then
   check_root
-  if igpu_finish "${@:2}"; then exit 0; else exit 1; fi
+  if igpu_finish_command "${@:2}"; then exit 0; else exit 1; fi
 fi
 
 # `osx-proxmox-next.sh nvidia-attach <vmid> <pci-address>` / `nvidia-detach <vmid>`:

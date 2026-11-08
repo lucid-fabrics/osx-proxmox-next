@@ -11,6 +11,7 @@ from gpu_fakes import FakeRun, make_host
 from nullmoth_fakes import add_dev
 from osx_proxmox_next import gpu_setup, igpu_attach, igpu_engine
 from test_gpu_parity import BASH, BLOCK, QM, bash, block_file, vm  # noqa: F401  (fixtures)
+from test_igpu_flow import host as flow_host, session as flow_session
 
 VM_CFG = ('name: macos-sequoia\nargs: -device isa-applesmc,osk="x" -cpu host\nmachine: pc\n'
           'ide0: local-lvm:vm-100-disk-0,media=disk\nvirtio0: local-lvm:vm-100-disk-1,size=64G\nvga: std\n')
@@ -135,10 +136,65 @@ def test_the_recommendation_line_is_the_same(bash):
         assert out == card.detected_line and card.prepared is prepared
 
 
-def test_recommended_cards_lead_the_bash_scan(bash):
-    out = bash('GPU_CARDS=(); gpu_card_selectable() { return 0; }; '
-               'igpu_card_recommended "x|intel|1|n|intel|h|d" && echo yes; igpu_card_recommended "x|amd|1|n|native|h|d" || echo no').stdout
-    assert out.split() == ["yes", "no"]
+SCENARIOS = {
+    "igpu_only": dict(igpu="i915"),
+    "igpu_amd": dict(amd=True),
+    "igpu_nvidia": dict(nvidia=True),
+    "nvidia_only": dict(igpu=None, nvidia=True),
+    "nothing": dict(igpu=None),
+    "igpu_amd_nvidia": dict(amd=True, nvidia=True),
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(SCENARIOS))
+@pytest.mark.parametrize("macos", ["ventura", "sequoia", "tahoe"])
+def test_scan_order_status_and_recommendation_match_python(bash, vm, tmp_path, scenario, macos):
+    vm(120, "stopped", VM_CFG)
+    root = flow_host(tmp_path / "root", **SCENARIOS[scenario])
+    lspci = bash.stub_bin / "lspci"
+    lspci.write_text("#!/bin/sh\nexit 1\n")
+    lspci.chmod(0o755)
+    out = bash('GPU_MACOS=%s; gpu_scan; for l in "${GPU_CARDS[@]}"; do echo "CARD $l"; IFS="|" read -r _ st <<<"$(gpu_version_status "$l" "$GPU_MACOS")"; '
+               'echo "STATUS $st"; gpu_card_recommended "$l" && echo RECOMMENDED; done; true' % macos,
+               env={**vm.env, "GPU_SYSFS": str(root / "sys")}).stdout.splitlines()
+    sh_cards = [ln.split("|")[0][5:] for ln in out if ln.startswith("CARD ")]
+    sh_status = [ln[7:] for ln in out if ln.startswith("STATUS ")]
+    sh_rec = [sh_cards[i] for i, ln in enumerate([l for l in out if l.startswith(("CARD ", "RECOMMENDED"))]) if False]
+    sh_rec = [ln for ln in out if ln == "RECOMMENDED"]
+    py_cards = flow_session(root).scan(macos=macos)
+    assert sh_cards == [c.bdf for c in py_cards]
+    assert sh_status == [c.status for c in py_cards]
+    assert len(sh_rec) == sum(c.recommended for c in py_cards)
+    if sh_rec:
+        idx = [i for i, ln in enumerate(out) if ln == "RECOMMENDED"][0]
+        assert out[idx - 2].split("|")[0][5:] == next(c.bdf for c in py_cards if c.recommended)
+
+
+def test_the_bash_card_text_carries_the_status_and_the_recommendation_line(bash, vm, tmp_path):
+    vm(120, "stopped", VM_CFG)
+    root = flow_host(tmp_path / "root", amd=True)
+    lspci = bash.stub_bin / "lspci"
+    lspci.write_text("#!/bin/sh\nexit 1\n")
+    lspci.chmod(0o755)
+    out = bash('gpu_scan; for l in "${GPU_CARDS[@]}"; do gpu_card_text "$l"; done', env={**vm.env, "GPU_SYSFS": str(root / "sys")}).stdout
+    assert "works with macOS Sequoia 15 (recommended)" in out and "works with macOS Sequoia 15 " in out
+    assert out.count("(recommended)") == 1 and "Recommended: Intel" not in out  # the AMD card wins
+
+
+def test_the_bash_choice_asks_and_can_switch(bash, vm, tmp_path):
+    vm(120, "stopped", VM_CFG)
+    root = flow_host(tmp_path / "root", amd=True)
+    lspci = bash.stub_bin / "lspci"
+    lspci.write_text("#!/bin/sh\nexit 1\n")
+    lspci.chmod(0o755)
+    env = {**vm.env, "GPU_SYSFS": str(root / "sys"), "GPU_ROOT": str(root)}
+    stubs = ("gpu_summary_line() { :; }; gpu_state_save() { echo \"SAVE $1\" | cut -c1-80; }; gpu_step_complete() { :; }; "
+             "gpu_host() { echo '{}'; }; ")
+    declined = bash(stubs + "gpu_ui_yesno() { return 1; }; gpu_step_choose '' '' gpu no", env=env, expect=None)
+    assert "Recommended: " in declined.stdout  # the AMD card is offered, declining it falls to the iGPU, which asks again
+    nothing = flow_host(tmp_path / "none", igpu=None)
+    res = bash(stubs + "gpu_step_choose '' '' gpu no", env={**env, "GPU_SYSFS": str(nothing / "sys")}, expect=2)
+    assert "Nothing here can run macOS graphics" in res.stdout
 
 
 def test_the_first_boot_text_and_notice_match_python():
@@ -147,8 +203,8 @@ def test_the_first_boot_text_and_notice_match_python():
         assert line.split("\n")[0].replace("'", "'") in BLOCK
     from osx_proxmox_next import igpu_cli
     assert igpu_cli.NOTICE == re.search(r'^IGPU_NOTICE="(.*)"$', BLOCK, re.M).group(1)
-    for name in ("STAGE_TIMEOUT", "FIRSTBOOT_TIMEOUT", "TAHOE_FIRSTBOOT_TIMEOUT"):
+    for name in ("STAGE_TIMEOUT", "FIRSTBOOT_TIMEOUT", "RESULT_POLL", "RESULT_GRACE"):
         from osx_proxmox_next import igpu_finish
         key = {"STAGE_TIMEOUT": "IGPU_STAGE_TIMEOUT", "FIRSTBOOT_TIMEOUT": "IGPU_FIRSTBOOT_TIMEOUT",
-               "TAHOE_FIRSTBOOT_TIMEOUT": "IGPU_TAHOE_FIRSTBOOT_TIMEOUT"}[name]
+               "RESULT_POLL": "IGPU_RESULT_POLL", "RESULT_GRACE": "IGPU_RESULT_GRACE"}[name]
         assert int(re.search(rf"^{key}=(\d+)$", BLOCK, re.M).group(1)) == getattr(igpu_finish, name)

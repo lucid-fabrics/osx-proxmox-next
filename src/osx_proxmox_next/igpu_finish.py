@@ -44,8 +44,10 @@ __all__ = ["FinishError", "FinishResult", "finish", "wait_stopped"]
 
 STAGE_TIMEOUT = 900          # staging copies ~95 MB and halts
 FIRSTBOOT_TIMEOUT = 1500     # boot, WhateverXe wait (up to 120 s), package install, halt
-TAHOE_FIRSTBOOT_TIMEOUT = 600  # Tahoe cannot halt itself (WhateverXe issue 62): stop it from here
+RESULT_POLL = 30             # Tahoe cannot halt itself (WhateverXe issue 62): look for the guest's result instead
+RESULT_GRACE = 15            # let a result that was seen mid-write finish before it is trusted
 POLL = 10
+KNOWN_RESULTS = ("installed", "failed:", "not installed:")
 
 
 class FinishError(Exception):
@@ -96,6 +98,25 @@ def wait_stopped(pve: ProxmoxAdapter, vmid: int, timeout: float, clock: Callable
     while clock() < deadline:
         if "stopped" in pve.qm("status", str(vmid)).output:
             return True
+        sleep(POLL)
+    return False
+
+
+def _wait_first_boot(pve: ProxmoxAdapter, vmid: int, timeout: float, tahoe: bool, payload_ref: str,
+                     clock: Callable[[], float], sleep: Callable[[float], None]) -> bool:
+    """Wait for the first iGPU boot to end. The guest powers itself off, except Tahoe, which hangs while it
+    shuts down: there the result the guest left on the payload disk ends the wait (its LaunchDaemon unmounts the
+    disk before it asks for the shutdown). Returns True when the VM stopped by itself."""
+    deadline = clock() + timeout
+    last_look = clock()
+    while clock() < deadline:
+        if "stopped" in pve.qm("status", str(vmid)).output:
+            return True
+        if tahoe and clock() - last_look >= RESULT_POLL:
+            last_look = clock()
+            if _read_payload_result(pve, payload_ref).startswith(KNOWN_RESULTS):
+                sleep(RESULT_GRACE)
+                return False
         sleep(POLL)
     return False
 
@@ -166,6 +187,7 @@ def finish(
         on_event(f"Downloading the {version} recovery image")
         recovery = download_recovery(version, iso)
     payload_ref = recovery_ref = ""
+    original = {"vga": cfg.get("vga"), "args": cfg.get("args"), "boot": cfg.get("boot")}
     try:
         payload_ref = _import_disk(pve, vmid, payload, storage)
         recovery_ref = _import_disk(pve, vmid, recovery, storage)
@@ -184,6 +206,8 @@ def finish(
     except BaseException:
         _drop_disk(pve, vmid, "sata2")
         payload.unlink(missing_ok=True)
+        _put_back(pve, vmid, original)
+        console.restore_picker_timeout()
         raise
     finally:
         _drop_disk(pve, vmid, "sata1")
@@ -206,25 +230,39 @@ def finish(
     pve.qm("set", str(vmid), "--boot", POST_INSTALL_BOOT_ORDER)
 
     on_event("First boot with the iGPU: the guest installs the graphics package and powers off")
-    timeout = TAHOE_FIRSTBOOT_TIMEOUT if version == "tahoe" else FIRSTBOOT_TIMEOUT
+    tahoe = version == "tahoe"
     res = pve.qm("start", str(vmid))
     if not res.ok:
         raise FinishError(f"Could not start VM {vmid}: {res.output.strip()[-300:]}")
-    if not wait_stopped(pve, vmid, timeout, clock, sleep):
+    if not _wait_first_boot(pve, vmid, FIRSTBOOT_TIMEOUT, tahoe, payload_ref, clock, sleep):
         pve.qm("stop", str(vmid))
-        if version == "tahoe":
+        if tahoe:
             result.notes.append(TAHOE_NOTE)
         else:
-            result.notes.append(f"The guest did not power off within {timeout // 60} minutes, so it was stopped.")
+            result.notes.append(f"The guest did not power off within {FIRSTBOOT_TIMEOUT // 60} minutes, so it was stopped.")
         wait_stopped(pve, vmid, 120, clock, sleep)
     result.result = _read_payload_result(pve, payload_ref)
     result.installed = result.result == "installed"
     _drop_disk(pve, vmid, "sata2")
     payload.unlink(missing_ok=True)
+    if result.installed and not apply_plan(
+            [oc_step(str(vmid), "mark", "Note in OpenCore that the graphics package is installed")],
+            execute=True, adapter=pve).ok:
+        result.notes.append("Could not note the installed package on the OpenCore disk: gpu-setup --undo would "
+                            "remove WhateverXe, which the installed package needs.")
     pve.qm("start", str(vmid))
     on_event("Started the VM again" if result.installed else
              "Started the VM again; the graphics package is not installed (see the result above)")
     return result
+
+
+def _put_back(pve: ProxmoxAdapter, vmid: int, original: dict[str, str | None]) -> None:
+    """After a failed staging: the settings that staging changed go back to what the VM had."""
+    for key, value in original.items():
+        if value is None:
+            pve.qm("set", str(vmid), "--delete", key)
+        else:
+            pve.qm("set", str(vmid), f"--{key}", value)
 
 
 def _read_payload_result(pve: ProxmoxAdapter, ref: str) -> str:

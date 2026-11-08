@@ -220,8 +220,8 @@ def test_payload_files_carry_the_package_hash():
 class DiskRun:
     """Stands in for mkfs.vfat, mount and umount; mount drops a folder the engine fills."""
 
-    def __init__(self, fail: str = "", result: str = "") -> None:
-        self.calls, self.fail, self.result = [], fail, result
+    def __init__(self, fail: str = "", result: str = "", umount_fails: bool = False) -> None:
+        self.calls, self.fail, self.result, self.umount_fails = [], fail, result, umount_fails
 
     def __call__(self, argv, timeout=20):
         self.calls.append(argv)
@@ -229,6 +229,11 @@ class DiskRun:
             return 1, "boom"
         if argv[0] == "mount" and self.result:
             Path(argv[-1], "result.txt").write_text(self.result)
+        if argv[0] == "umount" and self.umount_fails:
+            return 1, "busy"
+        if argv[0] == "umount":  # a real unmount leaves an empty folder
+            for child in Path(argv[-1]).iterdir():
+                child.unlink()
         return 0, ""
 
 
@@ -250,6 +255,16 @@ def test_payload_build_failures(tmp_path, fail, text):
     pkg.write_bytes(b"pkg")
     ok, msg = eng.build_payload(str(pkg), str(tmp_path / "img"), DiskRun(fail))
     assert not ok and text in msg
+
+
+def test_a_busy_mount_is_never_deleted_recursively(tmp_path):
+    pkg = tmp_path / "p.pkg"
+    pkg.write_bytes(b"pkg")
+    run = DiskRun(umount_fails=True)
+    ok, _msg = eng.build_payload(str(pkg), str(tmp_path / "img"), run)
+    mnt = Path(next(c for c in run.calls if c[0] == "mount")[-1])
+    assert ok and (mnt / "WhateverXe-Graphics.pkg").exists()  # still there: nothing removed the files
+    assert eng.read_result(tmp_path / "i", DiskRun(result="x", umount_fails=True)) == "x"
 
 
 def test_payload_result(tmp_path):

@@ -106,7 +106,7 @@ class Console:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    e = SimpleNamespace(applied=[], results=deque(["staged", "installed"]), attach_ok=True, plan_issues=[], terminal=None)
+    e = SimpleNamespace(applied=[], results=deque(["staged", "installed"]), attach_ok=True, mark_ok=True, plan_issues=[], terminal=None)
     for name in ("w.zip", "a.zip", "x.rom", "g.pkg", "rec.img"):
         (tmp_path / name).write_bytes(b"x")
     assets = {"whateverxe": tmp_path / "w.zip", "amfipass": tmp_path / "a.zip", "rom": tmp_path / "x.rom", "graphics": tmp_path / "g.pkg"}
@@ -114,7 +114,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(igpu_finish, "check_intel_gpu", lambda: report)
     monkeypatch.setattr(igpu_finish, "ensure_igpu_assets", lambda iso, key: assets)
     monkeypatch.setattr(igpu_finish.igpu_engine, "build_payload", lambda pkg, out: (True, ""))
-    monkeypatch.setattr(igpu_finish.igpu_engine, "read_result", lambda path: e.results.popleft() if e.results else "")
+    monkeypatch.setattr(igpu_finish.igpu_engine, "read_result", lambda path: (e.results[0] if len(e.results) == 1 else e.results.popleft()) if e.results else "")
     monkeypatch.setattr(igpu_finish, "resolve_recovery_or_installer_path", lambda cfg: tmp_path / "rec.img")
     monkeypatch.setattr(igpu_finish, "create_snapshot", lambda vmid, adapter=None: SimpleNamespace(path=tmp_path / "snap"))
 
@@ -129,6 +129,8 @@ def env(tmp_path, monkeypatch):
     def apply(steps, execute=True, adapter=None, **k):
         e.applied.append([s.title for s in steps])
         ok = e.attach_ok or not steps or "Show every" in steps[0].title or "picker" in steps[0].title
+        if steps and "Note in OpenCore" in steps[0].title:
+            ok = e.mark_ok
         return ApplyResult(ok, [StepResult("t", "c", ok, 0, "")] if not ok else [], tmp_path / "log")
     monkeypatch.setattr(igpu_finish, "apply_plan", apply)
 
@@ -158,9 +160,16 @@ def test_the_whole_finish(env):
     assert "args" in pve.cfg and "max-ram-below-4g" not in pve.cfg["args"]
     assert ("start", "9") == pve.calls[-1]  # the last thing is the restart
     assert [t[0] for t in env.applied if t] == ["Make the OpenCore picker show recovery only and wait for a key",
-                                           "Show every volume in the OpenCore picker again"]
+                                           "Show every volume in the OpenCore picker again",
+                                           "Note in OpenCore that the graphics package is installed"]
     assert not (env.tmp / "igpu-payload-9.img").exists()
     assert any("First boot" in e for e in events) and events[-1] == "Started the VM again"
+
+
+def test_a_failed_mark_is_reported(env):
+    env.mark_ok = False
+    res, _pve, _ = go(env)
+    assert res.installed and any("gpu-setup --undo would remove WhateverXe" in n for n in res.notes)
 
 
 def test_the_picker_timeout_failure_is_reported_not_fatal(env):
@@ -180,10 +189,18 @@ def test_a_guest_that_never_powers_off_is_stopped(env):
     assert any("did not power off" in n for n in res.notes) and ("stop", "9") in pve.calls
 
 
-def test_tahoe_is_stopped_from_proxmox_with_the_note(env):
+def test_tahoe_ends_the_wait_when_the_guest_has_left_its_result(env):
     cfg = {**CFG, "name": "macos-tahoe"}
     res, pve, _ = go(env, pve=Pve(cfg, halts=(1, 10**6)))
-    assert igpu_attach.TAHOE_NOTE in res.notes
+    assert res.installed and igpu_attach.TAHOE_NOTE in res.notes and ("stop", "9") in pve.calls
+
+
+def test_tahoe_without_a_result_waits_the_full_time_and_ignores_half_written_text(env, monkeypatch):
+    cfg = {**CFG, "name": "macos-tahoe"}
+    seen = deque(["staged", "inst", "", "installed"])
+    monkeypatch.setattr(igpu_finish.igpu_engine, "read_result", lambda path: seen.popleft() if seen else "installed")
+    res, pve, _ = go(env, pve=Pve(cfg, halts=(1, 10**6)))
+    assert res.installed  # "inst" and "" were not trusted; the final read is the real one
 
 
 def test_the_release_can_be_given(env):
@@ -249,6 +266,7 @@ def test_staging_failures_clean_up_and_say_why(env):
     with pytest.raises(igpu_finish.FinishError, match="FileVault"):
         go(env, pve=pve)
     assert not any(k.startswith("sata") for k in pve.cfg)
+    assert pve.cfg["vga"] == "std" and "boot" not in pve.cfg and pve.cfg["args"] == CFG["args"]  # put back as it was
     assert env.applied[-1] == ["Show every volume in the OpenCore picker again"]  # best effort, even on failure
     assert not (env.tmp / "igpu-payload-9.img").exists()
 

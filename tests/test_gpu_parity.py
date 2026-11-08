@@ -509,6 +509,8 @@ def test_scan_and_card_text(bash, tmp_path, vm):
                                        parts[7] == "1", parts[12] == "1", parts[8] or None, users, [],
                                        [r for r in parts[10].split(",") if r]))
     assert len(cards) == 3
+    gpu_setup.apply_verdicts(cards, "sequoia")
+    assert [c.vendor for c in cards if c.recommended] == ["amd"]
     python_text = "\n".join(gpu_setup.card_text(c) for c in cards)
     bash_text = "\n".join(ln for ln in out.splitlines() if ln.startswith((">> ", "   ")) and ("+" in ln or "|" in ln))
     assert bash_text == python_text

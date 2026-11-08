@@ -88,6 +88,16 @@ def test_restore_puts_the_original_back(oc, zips):
     assert "nothing to restore" in run(oc, "restore").stderr  # repeatable
 
 
+def test_restore_keeps_whatever_xe_while_the_graphics_package_is_installed(oc, zips):
+    run(oc, "attach", zips)
+    patched = (oc / "config.plist").read_bytes()
+    assert run(oc, "mark").returncode == 0
+    res = run(oc, "restore")
+    assert res.returncode == 0 and res.stderr.startswith("KEPT:") and "hang at boot" in res.stderr
+    assert (oc / "config.plist").read_bytes() == patched and (oc / "Kexts/WhateverXe.kext").exists()
+    assert (oc / "config.plist.pre-igpu").exists()  # the backup stays for a later, safe restore
+
+
 def test_restore_keeps_a_config_the_user_changed(oc, zips):
     run(oc, "attach", zips)
     cfg = cfg_of(oc)

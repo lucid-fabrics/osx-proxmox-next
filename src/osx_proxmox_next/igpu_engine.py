@@ -378,35 +378,39 @@ def build_payload(pkg, out, run=default_run):
     if code != 0:
         return False, "mkfs.vfat failed: " + msg.strip()
     mnt = tempfile.mkdtemp(prefix="igpu-payload-")
+    code, msg = run(["mount", "-o", "loop", str(out), mnt], 60)
+    if code != 0:
+        os.rmdir(mnt)
+        return False, "could not mount the payload image: " + msg.strip()
     try:
-        code, msg = run(["mount", "-o", "loop", str(out), mnt], 60)
-        if code != 0:
-            return False, "could not mount the payload image: " + msg.strip()
-        try:
-            shutil.copyfile(pkg, os.path.join(mnt, "WhateverXe-Graphics.pkg"))
-            for src, name in PAYLOAD_FILES:
-                (Path(mnt) / name).write_text(render_payload_file(src, pkg_sha))
-        finally:
-            run(["sync"], 120)
-            run(["umount", mnt], 60)
+        shutil.copyfile(pkg, os.path.join(mnt, "WhateverXe-Graphics.pkg"))
+        for src, name in PAYLOAD_FILES:
+            (Path(mnt) / name).write_text(render_payload_file(src, pkg_sha))
     finally:
-        shutil.rmtree(mnt, ignore_errors=True)
+        run(["sync"], 120)
+        _release(mnt, run)
     return True, "payload disk built (%d MB)" % PAYLOAD_MB
 
 
 def read_result(img, run=default_run):
     """The text the guest left in result.txt on the payload disk, or '' (the VM must be stopped)."""
     mnt = tempfile.mkdtemp(prefix="igpu-result-")
+    code, _msg = run(["mount", "-o", "loop,ro", str(img), mnt], 60)
+    if code != 0:
+        os.rmdir(mnt)
+        return ""
     try:
-        code, _msg = run(["mount", "-o", "loop,ro", str(img), mnt], 60)
-        if code != 0:
-            return ""
-        try:
-            return _read(os.path.join(mnt, "result.txt")) or ""
-        finally:
-            run(["umount", mnt], 60)
+        return _read(os.path.join(mnt, "result.txt")) or ""
     finally:
-        shutil.rmtree(mnt, ignore_errors=True)
+        _release(mnt, run)
+
+
+def _release(mnt, run):
+    """Unmount and remove the mount folder. A folder that is still a mount point is left alone: removing
+    it recursively would delete the files of the payload image itself."""
+    code, _msg = run(["umount", mnt], 60)
+    if code == 0:
+        os.rmdir(mnt)
 
 
 # ── command line (used by the bash installer) ────────────────────────
