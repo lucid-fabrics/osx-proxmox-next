@@ -3,6 +3,8 @@
 # Copies the graphics package, the first-boot script and its LaunchDaemon into the installed
 # macOS (offline), checks the package, writes result.txt next to this script and powers off.
 SRC="$(cd "$(dirname "$0")" && pwd)"
+# tells the host the typed command arrived intact (it retypes when it never sees this)
+echo started >"$SRC/result.txt"; sync
 say() { echo "osx-proxmox-next: $*"; }
 fail() { say "FAILED: $*"; echo "failed: $*" >"$SRC/result.txt"; sync; /sbin/halt; exit 1; }
 

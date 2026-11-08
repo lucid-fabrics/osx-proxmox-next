@@ -276,6 +276,42 @@ def test_staging_that_never_halts_is_stopped_and_refused(env):
         go(env, pve=Pve(halts=(10**6,)))
 
 
+def reads(monkeypatch, seq):
+    items = iter(seq)
+    monkeypatch.setattr(igpu_finish.igpu_engine, "read_result", lambda path: next(items, "installed"))
+
+
+def test_a_dropped_key_retypes_the_command_until_the_script_starts(env, monkeypatch):
+    reads(monkeypatch, [""] * 13 + ["started", "staged", "installed"])
+    console = Console()
+    res, _pve, events = go(env, pve=Pve(halts=(40, 1)), console=console)
+    assert res.installed and console.typed == [igpu_finish.igpu_engine.STAGE_COMMAND] * 2
+    assert console.keys == ["ret", "ctrl-c", "ret"]
+    assert any("typing it again" in e for e in events)
+
+
+def test_a_command_that_never_starts_is_refused_after_three_tries(env, monkeypatch):
+    reads(monkeypatch, [""] * 1000)
+    console = Console()
+    with pytest.raises(igpu_finish.FinishError, match="did not start after 3 tries"):
+        go(env, pve=Pve(halts=(10**6,)), console=console)
+    assert len(console.typed) == 3 and console.keys == ["ret", "ctrl-c", "ret", "ctrl-c", "ret"]
+
+
+def test_the_start_wait_includes_the_time_the_typing_took(env, monkeypatch):
+    clock = Clock()
+    waits: list[float] = []
+    monkeypatch.setattr(igpu_finish, "_staging_started", lambda pve, vmid, ref, wait, c, s: waits.append(wait) or True)
+
+    class Slow(Console):
+        def type_text(self, t):
+            clock.sleep(len(t) * 1.5)
+            super().type_text(t)
+    igpu_finish.finish(9, console=Slow(), pve=Pve(), iso_dir=env.tmp, on_event=lambda m: None, clock=clock.monotonic,
+                       sleep=clock.sleep, work_dir=env.tmp)
+    assert waits == [igpu_finish.START_WAIT + len(igpu_finish.igpu_engine.STAGE_COMMAND) * 1.5]
+
+
 def test_recovery_that_never_shows_is_a_finish_error(env):
     env.terminal = UnattendedError("recovery never started")
     with pytest.raises(igpu_finish.FinishError, match="recovery never started"):

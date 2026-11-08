@@ -4980,8 +4980,9 @@ PAYLOAD_FILES = (("igpu_stage.sh", "stage.sh"), ("igpu_firstboot.sh", "firstboot
                  ("igpu_launchd.plist", LAUNCHD_PLIST))
 # Recovery on Sequoia does not mount the payload disk by itself (its FAT driver is loaded on demand by
 # mount -t msdos), Ventura does. So: find the partition by its label, free it, mount it by hand, run the script.
-STAGE_COMMAND = ("d=$(diskutil list | awk '/%s/{print $NF; exit}'); diskutil unmount $d >/dev/null 2>&1; "
-                 "mkdir -p /tmp/p; mount -t msdos /dev/$d /tmp/p && sh /tmp/p/stage.sh" % PAYLOAD_LABEL)
+# Typed key by key into Tahoe's slow recovery Terminal, so it stays as short as it can: all the logic is in stage.sh.
+STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /p;mount -t msdos /dev/$d /p&&sh /p/stage.sh"
+                 % PAYLOAD_LABEL)
 BOOT_ARGS = ("-allow3d", "-disablegfxfirmware", "-wex-tgl-hold-render-wake")
 GMS_ARG = "0x3"
 
@@ -5762,6 +5763,8 @@ IFS= read -r -d '' GPU_EMBED_IGPU_STAGE <<'GPU_EMBED_IGPU_STAGE_EOF' || true
 # Copies the graphics package, the first-boot script and its LaunchDaemon into the installed
 # macOS (offline), checks the package, writes result.txt next to this script and powers off.
 SRC="$(cd "$(dirname "$0")" && pwd)"
+# tells the host the typed command arrived intact (it retypes when it never sees this)
+echo started >"$SRC/result.txt"; sync
 say() { echo "osx-proxmox-next: $*"; }
 fail() { say "FAILED: $*"; echo "failed: $*" >"$SRC/result.txt"; sync; /sbin/halt; exit 1; }
 
@@ -6176,6 +6179,8 @@ IGPU_CACHE="${IGPU_CACHE:-/var/lib/vz/template/iso}"
 IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load slows it. macOS Tahoe is experimental: restart it from Proxmox, not from inside macOS."
 IGPU_TAHOE_NOTE="macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs (WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead."
 IGPU_STAGE_TIMEOUT=900
+IGPU_STAGE_ATTEMPTS=3
+IGPU_START_WAIT=60
 IGPU_FIRSTBOOT_TIMEOUT=1500
 IGPU_RESULT_POLL=30
 IGPU_RESULT_GRACE=15
@@ -6423,6 +6428,19 @@ function igpu_drop_disk() {
   [ -z "$key" ] || qm set "$vmid" --delete "$key" >/dev/null 2>&1 || true
 }
 
+# 0 once stage.sh left any result on the payload disk or the VM halted, 1 after $3 seconds without. Mirrors igpu_finish._staging_started.
+function igpu_staging_started() {
+  local vmid="$1" ref="$2" wait="$3" t0 res
+  t0=$(date +%s)
+  while :; do
+    qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
+    res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+    [ -n "$res" ] && return 0
+    (( $(date +%s) - t0 >= wait )) && return 1
+    sleep 5
+  done
+}
+
 # Boot the staging recovery, run the script from the payload disk, wait for the guest to power off.
 # $1 vmid $2 payload volume. Mirrors igpu_finish._stage.
 function igpu_stage() {
@@ -6431,9 +6449,26 @@ function igpu_stage() {
   qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }
   unattended_open_recovery_terminal "$vmid" || return 1
   msg_info "Staging the graphics package inside macOS (offline)"
-  unattended_type "$vmid" "$(igpu_engine stage-command)"
-  sleep 1
-  qm sendkey "$vmid" ret >/dev/null 2>&1
+  local attempt began typing started=no
+  for ((attempt = 1; attempt <= IGPU_STAGE_ATTEMPTS; attempt++)); do
+    began=$(date +%s)
+    unattended_type "$vmid" "$(igpu_engine stage-command)"
+    typing=$(( $(date +%s) - began ))
+    sleep 1
+    qm sendkey "$vmid" ret >/dev/null 2>&1
+    if igpu_staging_started "$vmid" "$payload_ref" $((IGPU_START_WAIT + typing)); then started=yes; break; fi
+    if (( attempt < IGPU_STAGE_ATTEMPTS )); then
+      msg_info "The staging command did not start (a key was probably dropped); typing it again"
+      qm sendkey "$vmid" ctrl-c >/dev/null 2>&1
+      sleep 1
+    fi
+  done
+  if [ "$started" != yes ]; then
+    qm stop "$vmid" >/dev/null 2>&1 || true
+    igpu_wait_stopped "$vmid" 120 || true
+    msg_error "The staging command did not start after ${IGPU_STAGE_ATTEMPTS} tries: the recovery Terminal drops keys"
+    return 1
+  fi
   if ! igpu_wait_stopped "$vmid" "$IGPU_STAGE_TIMEOUT"; then
     qm stop "$vmid" >/dev/null 2>&1 || true
     msg_error "The staging script did not finish within $((IGPU_STAGE_TIMEOUT / 60)) minutes"

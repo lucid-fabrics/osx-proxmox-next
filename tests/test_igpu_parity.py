@@ -180,6 +180,31 @@ def test_the_shared_note_matches_python(bash, ids):
     assert notes == [gpu.shared_note(ids)]
 
 
+STAGE_STUBS = (
+    'igpu_oc_patch() { :; }; unattended_open_recovery_terminal() { :; }; sleep() { :; }; msg_info() { echo "INFO $*"; }; '
+    'msg_error() { echo "ERR $*"; }; msg_ok() { :; }; pvesm() { echo /dev/payload; }; IGPU_START_WAIT=0; '
+    'qm() { case "$1" in sendkey) echo "KEY $3" >>"$STATE.keys";; status) echo "status: ${QMSTATUS:-running}";; esac; }; '
+    'unattended_type() { echo "TYPE"; N=$((N+1)); echo $N >"$STATE"; }; '
+    'igpu_engine() { case "$1" in stage-command) echo CMD;; result) if [ "$(cat "$STATE" 2>/dev/null || echo 0)" -ge "${STARTS_ON:-99}" ]; '
+    'then echo "${RESULT:-started}"; fi;; esac; }; ')
+
+
+def test_the_bash_stage_retypes_until_the_script_starts(bash, tmp_path):
+    state = tmp_path / "state"
+    env = {"STATE": str(state), "STARTS_ON": "2", "RESULT": "staged"}
+    out = bash(STAGE_STUBS + "N=0; igpu_wait_stopped() { return 0; }; igpu_stage 9 vol", env=env, expect=0).stdout.splitlines()
+    keys = (tmp_path / "state.keys").read_text().split("\n")
+    assert out.count("TYPE") == 2 and keys.count("KEY ret") == 2 and keys.count("KEY ctrl-c") == 1
+    assert any("typing it again" in ln for ln in out)
+
+
+def test_the_bash_stage_gives_up_after_three_tries(bash, tmp_path):
+    env = {"STATE": str(tmp_path / "state"), "STARTS_ON": "99"}
+    out = bash(STAGE_STUBS + "N=0; igpu_wait_stopped() { return 0; }; igpu_stage 9 vol", env=env, expect=1).stdout.splitlines()
+    assert out.count("TYPE") == 3 and (tmp_path / "state.keys").read_text().split("\n").count("KEY ctrl-c") == 2
+    assert any("did not start after 3 tries" in ln for ln in out)
+
+
 LAPTOP = "AD107M [GeForce RTX 4060 Max-Q / Mobile]"
 DESKTOP = "AD107 [GeForce RTX 4060]"
 
