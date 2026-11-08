@@ -368,8 +368,9 @@ NVIDIA_PROFILE = GpuProfile(vendor="nvidia", pcie=0, global_args=(MMIO_ARG,), si
 
 
 def _global_re(arg: str) -> re.Pattern[str]:
-    key = arg.split("=", 1)[0].replace("-global ", "", 1)
-    return re.compile(r"-global\s+" + re.escape(key) + r"=\S+")
+    """Matches the arg with any value: ``-global k=v``, ``-machine k=v`` and ``-set k=v`` alike."""
+    key = arg.split("=", 1)[0]
+    return re.compile(r"\s+".join(re.escape(part) for part in key.split()) + r"=\S+")
 
 
 def with_global_args(args: str, wanted: tuple[str, ...]) -> str:

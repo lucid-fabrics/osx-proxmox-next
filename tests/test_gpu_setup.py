@@ -117,7 +117,7 @@ def test_rail():
 
 # ── scan and choose ──────────────────────────────────────────────────
 
-def test_scan_lists_amd_and_nvidia_cards_only(tmp_path):
+def test_scan_lists_amd_nvidia_and_intel_cards_only(tmp_path):
     env = Env(tmp_path)
     add_card(env.root, bdf="0000:06:00", device=0x73FF, group=7)
     add_card(env.root, bdf="0000:01:00", vendor=0x10DE, device=0x2504, audio=0x228E, group=3, boot_vga=True)
@@ -126,7 +126,8 @@ def test_scan_lists_amd_and_nvidia_cards_only(tmp_path):
     add_other(env.root, "0000:07:00.0", 0x1912, 0x0015, 0x0C0330, 7)
     env.qm.vms[120] = ("running", "hostpci0: 0000:01:00,pcie=0\n")
     cards = {c.bdf: c for c in env.session().scan()}
-    assert set(cards) == {"0000:01:00", "0000:06:00", "0000:41:00"}
+    assert set(cards) == {"0000:00:02", "0000:01:00", "0000:06:00", "0000:41:00"}  # the USB controller is no card
+    assert cards["0000:00:02"].vendor == "intel" and cards["0000:00:02"].kind == "intel-untested"
     amd, nv, bad = cards["0000:06:00"], cards["0000:01:00"], cards["0000:41:00"]
     assert amd.kind == "native" and amd.selectable and amd.name == "Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600]"
     assert amd.shares == ["0000:07:00.0"] and amd.driver == "vfio-pci"
@@ -189,7 +190,7 @@ def test_choose_refusals(tmp_path):
     add_card(env.root, bdf="0000:41:00", vendor=0x10DE, device=0x1B80, audio=0x10F0, group=5)
     env.qm.vms[200] = ("stopped", "hostpci0: 0000:06:00,pcie=1\n")
     s = env.session()
-    assert "No AMD or NVIDIA card" in s.choose("09:00", None, "gpu")[0]
+    assert "No supported graphics card" in s.choose("09:00", None, "gpu")[0]
     stopped = s.choose("06:00", None, "gpu")  # VM 200 is stopped: it needs a confirmation, never a refusal
     assert "Also assigned to VM 200 (stopped)" in stopped[0] and "Confirm" in stopped[0]
     env.qm.vms[200] = ("running", "hostpci0: 0000:06:00,pcie=1\n")

@@ -5,7 +5,7 @@ title: GPU passthrough (guided)
 
 # GPU passthrough (guided)
 
-One guided flow takes you from "there is a graphics card in my Proxmox server" to "macOS is using it". It works for every AMD and NVIDIA card macOS can drive. You never have to read a wiki, edit a file by hand or guess a command. Where a person has to act (the BIOS, plugging in a monitor, installing a driver inside macOS) the tool tells you exactly what to do and gives you a photo card, a QR code or a saved file to carry away.
+One guided flow takes you from "there is a graphics card in my Proxmox server" to "macOS is using it". It works for every AMD and NVIDIA card macOS can drive, and for the Intel iGPU of recent processors (beta, see [Intel iGPU](intel-igpu-passthrough.md)). You never have to read a wiki, edit a file by hand or guess a command. Where a person has to act (the BIOS, plugging in a monitor, installing a driver inside macOS) the tool tells you exactly what to do and gives you a photo card, a QR code or a saved file to carry away.
 
 ![Guided GPU passthrough: scan, BIOS card, host setup, attach](/img/demo-gpu.gif)
 
@@ -18,7 +18,7 @@ NVIDIA support relies on NullMoth, a community driver tested by its own communit
 | Where | How |
 |-------|-----|
 | TUI | `osx-next`, then step 2, **GPU Passthrough** |
-| CLI | `osx-next-cli gpu-setup` (also `--status`, `--undo`, `--yes`, `--vm <vmid>`, `--gpu <address>`, `--display gpu\|console`) |
+| CLI | `osx-next-cli gpu-setup` (also `--status`, `--undo`, `--yes`, `--vm <vmid>`, `--gpu <address>`, `--display gpu\|console`, `--macos <release>`) |
 | Standalone script | `osx-proxmox-next.sh gpu-setup` (uses whiptail screens) |
 
 Run it again at any time: it resumes where it stopped. While a setup is paused, every login shows one line such as `GPU setup paused at step 3 of 8 (BIOS). Continue with: osx-next-cli gpu-setup`. The line goes away when the setup finishes or is undone.

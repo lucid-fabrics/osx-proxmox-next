@@ -31,6 +31,8 @@ from .downloader import (
     download_opencore,
 )
 
+from . import igpu_engine
+
 log = logging.getLogger(__name__)
 
 __all__ = [
@@ -38,6 +40,10 @@ __all__ = [
     "ChecksumError",
     "AMFIPASS",
     "Component",
+    "GRAPHICS_PKG",
+    "IGPU_ROMS",
+    "WHATEVERXE",
+    "AMFIPASS_MOD",
     "build_opencore_iso",
     "ensure_amfipass",
     "ensure_opencore_iso",
@@ -149,6 +155,23 @@ _OC_PKG_FILES = {
 _OCBD_SUBTREES = ("Resources/Font/", "Resources/Label/", "Resources/Image/Acidanthera/Syrah/")
 
 _ISO_SIZE_MB = 128
+
+
+# Intel iGPU passthrough (igpu_attach.py, igpu_finish.py). The pins live in igpu_engine.py because the bash
+# installer embeds that file; these are the same values as Components so the downloads share the verified,
+# progress-reporting fetch above. WhateverXe-Graphics carries Apple binaries: it is downloaded at setup time
+# and never committed.
+def _pin(key: str, version: str) -> Component:
+    _name, url, sha = igpu_engine.PINS[key]
+    return Component(version, url, sha)
+
+
+WHATEVERXE = _pin("whateverxe", igpu_engine.WEX_VERSION)
+# AMFIPass-v1.4.1-Mod from the WhateverXe-Graphics repo, pinned by commit (the NullMoth build above is a
+# different file)
+AMFIPASS_MOD = _pin("amfipass", "1.4.1-Mod")
+GRAPHICS_PKG = _pin("graphics", "0.4.1")
+IGPU_ROMS: dict[str, Component] = {key: Component("v0.1", url, sha) for key, (_n, url, sha) in igpu_engine.ROMS.items()}
 
 
 def _sha256(path: Path) -> str:
@@ -388,3 +411,11 @@ def ensure_amfipass(dest_dir: Path, on_progress: ProgressCallback = None) -> Pat
     downgraded, same as the base image components."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     return _fetch_component("AMFIPass", AMFIPASS, dest_dir, on_progress)
+
+
+def ensure_igpu_assets(dest_dir: Path, rom_key: str, on_progress: ProgressCallback = None) -> dict[str, Path]:
+    """Download (and verify) everything the iGPU setup needs: the two kext zips, the option ROM for
+    *rom_key* and the WhateverXe Graphics package. A checksum mismatch raises ChecksumError."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    wanted = {"whateverxe": WHATEVERXE, "amfipass": AMFIPASS_MOD, "rom": IGPU_ROMS[rom_key], "graphics": GRAPHICS_PKG}
+    return {name: _fetch_component(name, comp, dest_dir, on_progress) for name, comp in wanted.items()}

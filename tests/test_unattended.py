@@ -277,7 +277,7 @@ def test_bash_settle_watches_for_the_picker_coming_back(bash_text: str) -> None:
     fn = fn[:fn.index("\n}\n")]
     assert "UNATTENDED_RECOVERY_SETTLE" in fn
     assert "UNATTENDED_PICKER_MIN_BYTES" in fn and "return 1" in fn
-    install = bash_text[bash_text.index("function unattended_install()"):]
+    install = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
     assert install.index("UNATTENDED_MAX_RECOVERY_RESETS") < install.index("ctrl-f2")
     assert "kept resetting to the boot picker" in install
 
@@ -332,8 +332,8 @@ def test_bash_restores_auto_boot_after_the_detach(bash_text: str) -> None:
     from osx_proxmox_next.script_renderer import PICKER_TIMEOUT_INSTALLED
     m = re.search(r"^PICKER_TIMEOUT_INSTALLED=(\d+)$", bash_text, re.M)
     assert m and int(m.group(1)) == PICKER_TIMEOUT_INSTALLED
-    fn = bash_text[bash_text.index("function unattended_install()"):]
-    assert fn.index("--delete ide2") < fn.index('restore_picker_timeout "$vmid"') \
+    fn = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
+    assert fn.index('--delete "$recovery_slot"') < fn.index('restore_picker_timeout "$vmid"') \
         < fn.index('qm start "$vmid"')
     restore = bash_text[bash_text.index("function restore_picker_timeout()"):]
     restore = restore[:restore.index("\n}\n")]
@@ -470,8 +470,8 @@ def test_bash_power_cycles_a_restart_wedged_before_the_first_reboot(bash_text: s
     fn = fn[:fn.index("\n}\n")]
     assert "UNATTENDED_HUNG_STILL" in fn and "unattended_probe_hash" in fn
     assert "froze while restarting" in fn
-    install = bash_text[bash_text.index("function unattended_install()"):]
-    assert install.index('unattended_wait_first_reboot "$vmid"') < install.index("--delete ide2")
+    install = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
+    assert install.index('unattended_wait_first_reboot "$vmid"') < install.index('--delete "$recovery_slot"')
 
 
 def test_a_wedge_on_the_1080p_boot_logo_is_power_cycled() -> None:
@@ -499,7 +499,7 @@ def test_a_wedge_on_the_1080p_boot_logo_is_power_cycled() -> None:
 
 
 def test_bash_checks_for_a_wedge_before_the_1080p_branch(bash_text: str) -> None:
-    fn = bash_text[bash_text.index("function unattended_install()"):]
+    fn = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
     loop = fn[fn.index("while (( $(date +%s) - t0 < UNATTENDED_TOTAL_BUDGET ))"):]
     assert loop.index("UNATTENDED_HUNG_STILL )); then") \
         < loop.index("size > UNATTENDED_PICKER_MIN_BYTES )); then")
@@ -788,28 +788,28 @@ def test_bash_wires_unattended_after_start(bash_text: str) -> None:
 
 
 def test_bash_detaches_recovery_at_first_reboot(bash_text: str) -> None:
-    fn = bash_text[bash_text.index("function unattended_install()"):]
-    assert 'qm set "$vmid" --delete ide2' in fn
-    assert fn.index("unattended_install_command") < fn.index("--delete ide2")
+    fn = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
+    assert 'qm set "$vmid" --delete "$recovery_slot"' in fn
+    assert fn.index("unattended_install_command") < fn.index('--delete "$recovery_slot"')
     assert 'qm sendkey "$vmid" right' not in fn  # no blind entry-walking
 
 
 def test_bash_waits_for_a_still_screen_before_the_nav(bash_text: str) -> None:
-    fn = bash_text[bash_text.index("function unattended_install()"):]
+    fn = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
     assert fn.index('unattended_settle_recovery "$vmid"') \
         < fn.index('unattended_wait_still "$vmid"') < fn.index("ctrl-f2")
     assert "md5sum" in bash_text[bash_text.index("function unattended_probe_hash()"):]
 
 
 def test_bash_refuses_to_call_a_frozen_screen_done(bash_text: str) -> None:
-    fn = bash_text[bash_text.index("function unattended_install()"):]
+    fn = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
     assert fn.index("UNATTENDED_HUNG_STILL") < fn.index("UNATTENDED_DONE_QUIET")
     assert "macOS appears hung" in fn
     assert "unattended_probe_hash" in fn
 
 
 def test_bash_power_cycles_a_wedged_guest(bash_text: str) -> None:
-    fn = bash_text[bash_text.index("function unattended_install()"):]
+    fn = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
     assert "power-cycling" in fn
     assert fn.index("UNATTENDED_MAX_POWER_CYCLES") < fn.index("power-cycling")
     assert "unattended_wait_stopped" in fn
@@ -818,7 +818,7 @@ def test_bash_power_cycles_a_wedged_guest(bash_text: str) -> None:
 
 
 def test_bash_represses_a_parked_picker(bash_text: str) -> None:
-    fn = bash_text[bash_text.index("function unattended_install()"):]
+    fn = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
     assert "UNATTENDED_PICKER_REPRESS" in fn
     # command, the per-boot press and the parked re-press; the first picker
     # is pressed by unattended_wait_frame now, not by a one-shot sendkey
@@ -829,7 +829,7 @@ def test_bash_keeps_pressing_at_the_first_picker(bash_text: str) -> None:
     """Issue #142: one return at the first picker is dropped while OpenCanopy
     is still loading, and Timeout=0 then parks the picker for the whole
     recovery timeout."""
-    fn = bash_text[bash_text.index("function unattended_install()"):]
+    fn = bash_text[bash_text.index("function unattended_open_recovery_terminal()"):]
     assert 'unattended_wait_frame "$vmid" "$UNATTENDED_RECOVERY_TIMEOUT" below ret' in fn
     waiter = bash_text[bash_text.index("function unattended_wait_frame()"):]
     waiter = waiter[:waiter.index("\n}")]
@@ -845,3 +845,21 @@ def test_bash_saves_the_console_when_a_run_stalls(bash_text: str) -> None:
     assert "screendump $ppm" in saver                     # PPM fallback
     caller = bash_text[bash_text.index("if unattended_install "):]
     assert "unattended_save_frame" in caller[:caller.index("fi")]
+
+
+def test_the_recovery_slot_is_the_one_that_gets_detached() -> None:
+    """An i440fx iGPU VM keeps recovery on sata1: that is the slot the driver must delete."""
+    clock = FakeClock()
+    console = FakeConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS), (1000, PICKER), (1100, PICKER),
+                                  (1130, MACOS), (1700, PICKER), (1730, MACOS)])
+    run_unattended_install(console, 128, on_event=lambda m: None, clock=clock.monotonic, sleep=clock.sleep,
+                           recovery_slot="sata1")
+    assert ("set", "--delete", "sata1") in console.qm_calls and ("set", "--delete", "ide2") not in console.qm_calls
+
+
+def test_open_recovery_terminal_stops_at_the_terminal() -> None:
+    from osx_proxmox_next.unattended import open_recovery_terminal
+    clock = FakeClock()
+    console = FakeConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS)])
+    open_recovery_terminal(console, lambda m: None, clock.monotonic, clock.sleep)
+    assert list(TERMINAL_NAV) == console.keys[1:1 + len(TERMINAL_NAV)] and console.typed == []

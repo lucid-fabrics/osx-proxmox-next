@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterable
 
-from . import amd_host, bios_guide, gpu, gpu_attach, host_setup, nullmoth, nvidia_host
+from . import amd_host, bios_guide, gpu, gpu_attach, host_setup, igpu_attach, intel_host, nullmoth, nvidia_host
 from .gpu import AttachRecord, load_record, parse_config
 from .host_setup import STEPS, default_run
 from .infrastructure import ProxmoxAdapter
@@ -48,6 +48,13 @@ SUPPORTED_DOC = DOCS_ROOT + "gpu-passthrough#supported-cards"
 NEXT_NVIDIA = (f"Next, in macOS: install the NullMoth driver yourself (guide: {NULLMOTH_DOC}). "
                "We do not ship or support it.")
 NEXT_AMD = "Next: start the VM. macOS uses the card with its own driver."
+INTEL_DISPLAY_NOTE = ("Intel iGPU: the host gives it up for good (no local console), and the VM needs a monitor or an "
+                      "HDMI dummy plug on the host's native HDMI port. LSPCON HDMI and USB-C ports do not work.")
+INTEL_DOC = DOCS_ROOT + "intel-igpu-passthrough"
+NEXT_INTEL = ("Next: plug a monitor or an HDMI dummy plug into the native HDMI port and start the VM. "
+              "The graphics package installs itself on the first boot.")
+VENDOR_NAMES = {"amd": "AMD", "nvidia": "NVIDIA", "intel": "Intel"}
+VENDOR_IDS = {"amd": 0x1002, "nvidia": 0x10DE, "intel": 0x8086}
 _PRE_TURING = ("Older than the RTX 20 series: NVIDIA's macOS drivers stopped at High Sierra and NullMoth "
                "needs Turing or newer.")
 _BLACK_BOX = {
@@ -78,10 +85,10 @@ TROUBLESHOOTING = _BLACK_BOX
 @dataclass
 class GpuCard:
     bdf: str
-    vendor: str  # "amd" | "nvidia"
+    vendor: str  # "amd" | "nvidia" | "intel"
     device_id: int
     name: str
-    kind: str  # native | nullmoth | unsupported
+    kind: str  # native | nullmoth | intel | intel-untested | unsupported
     headline: str
     detail: str
     boot_vga: bool = False
@@ -91,6 +98,23 @@ class GpuCard:
     shares: list[str] = field(default_factory=list)
     risky: list[str] = field(default_factory=list)  # storage or network devices in the same IOMMU group
     lxc: list[tuple[int, str]] = field(default_factory=list)  # containers that use the host GPU driver nodes
+    model: str = ""  # marketing name from the device list (Intel iGPU only)
+    macos: str = ""  # the macOS release the verdict below is for
+    works: bool = False  # supported for that release and nothing running holds it
+    status: str = ""  # "works with macOS Sequoia 15", "not supported by macOS ...", "in use by VM 100"
+    recommended: bool = False  # the strongest card that works: preselected, still used only after a confirmation
+
+    @property
+    def prepared(self) -> bool:
+        return self.driver == "vfio-pci"
+
+    @property
+    def detected_line(self) -> str:
+        """One line for the recommended card: what was found and what it costs."""
+        model = self.model or "Intel graphics"
+        reboot = "" if self.prepared else " One host reboot needed."
+        return (f"{model} ({self.device_id:04x}) detected: full macOS acceleration. "
+                f"The host gives up its local screen.{reboot}")
 
     @property
     def running_users(self) -> list[int]:
@@ -127,6 +151,27 @@ class GpuCard:
 
 
 _MACOS_NUMBER = {"ventura": "13", "sonoma": "14", "sequoia": "15", "tahoe": "26"}
+MACOS_NAMES = {"ventura": "macOS Ventura 13", "sonoma": "macOS Sonoma 14", "sequoia": "macOS Sequoia 15",
+               "tahoe": "macOS Tahoe 26"}
+DEFAULT_MACOS = "sequoia"
+# a supported AMD card beats the Intel iGPU, which beats an NVIDIA card (beta, third-party driver)
+STRENGTH = {"amd": 3, "intel": 2, "nvidia": 1}
+
+
+def version_status(vendor: str, device_id: int, kind: str, macos: str) -> tuple[bool, str]:
+    """(works, one-line status) of a card for one macOS release. Reuses the AMD, NVIDIA and Intel support data."""
+    name = MACOS_NAMES[macos]
+    if kind == "unsupported":
+        return False, f"not supported by {name}"
+    if vendor == "nvidia" and macos not in ("sequoia", "tahoe"):
+        return False, f"not supported by {name} (NullMoth needs macOS 15.5 or newer)"
+    if vendor == "amd":
+        fam = amd_host.family_for(device_id)
+        if macos == "tahoe" and fam is not None and fam.tahoe != "ok":
+            return True, f"works with {name} (not confirmed on this family)"
+    if vendor == "intel" and macos == "tahoe":
+        return True, f"works with {name} (experimental: restart from Proxmox)"
+    return True, f"works with {name}"
 
 
 def verdict(vendor: str, device_id: int) -> tuple[str, str, str]:
@@ -137,6 +182,8 @@ def verdict(vendor: str, device_id: int) -> tuple[str, str, str]:
             return "unsupported", "Not supported by macOS", amd_host.unsupported_reason(device_id)
         span = "macOS 13 to 26" if fam.tahoe == "ok" else "macOS 13 to 15 (26 not confirmed)"
         return "native", f"Works natively on {span}", fam.label
+    if vendor == "intel":
+        return intel_host.verdict(device_id)
     if nvidia_host.is_supported_device(device_id):
         return ("nullmoth", "Works with NullMoth (beta) on macOS 15.5 to 26",
                 "Needs the third-party NullMoth driver, which you install yourself.")
@@ -160,8 +207,13 @@ def card_lines(card: GpuCard, width: int = CARD_WIDTH) -> list[str]:
     flags += [f"container {ctid} uses {node}" for ctid, node in card.lxc]
     if card.shares and not card.risky:
         flags.append("shares IOMMU group with " + ", ".join(card.shares))
-    chip = f"{0x10DE if card.vendor == 'nvidia' else 0x1002:04x}:{card.device_id:04x}"
-    lines = [card.name, f"{card.bdf}   {'NVIDIA' if card.vendor == 'nvidia' else 'AMD'} {chip}"]
+    chip = f"{VENDOR_IDS[card.vendor]:04x}:{card.device_id:04x}"
+    lines = [card.name, f"{card.bdf}   {VENDOR_NAMES[card.vendor]} {chip}"]
+    if card.status:
+        lines.append(("For this VM: " if not card.macos else "") + card.status
+                     + (" (recommended)" if card.recommended else ""))
+    if card.recommended and card.vendor == "intel":
+        lines.append("Recommended: " + card.detected_line)
     if card.kind != "unsupported":
         lines.append(card.headline)
         lines.append(card.detail)
@@ -304,14 +356,14 @@ class Session:
         m = re.search(r"\]:\s*(.*?)\s*\[[0-9a-f]{4}:[0-9a-f]{4}\]", out) if code == 0 else None
         return m.group(1) if m else ""
 
-    def scan(self, exclude_vm: int = -1) -> list[GpuCard]:
+    def scan(self, exclude_vm: int = -1, macos: str = DEFAULT_MACOS) -> list[GpuCard]:
         facts = self.facts()
         devices = {d["bdf"]: d for d in facts["pci"]}
         seen: list[str] = []
         cards: list[GpuCard] = []
         for disp in facts["displays"]:
             bdf = disp["bdf"].rsplit(".", 1)[0]
-            vendor = {0x1002: "amd", 0x10DE: "nvidia"}.get(disp["vendor"])
+            vendor = {0x1002: "amd", 0x10DE: "nvidia", 0x8086: "intel"}.get(disp["vendor"])
             if vendor is None or bdf in seen:
                 continue
             seen.append(bdf)
@@ -326,7 +378,9 @@ class Session:
                         if (other["class"] or 0) >> 16 in (0x01, 0x02):
                             risky.append(other["bdf"])
             containers = [(c, n) for c, n in host_setup.lxc_gpu_users(self.root) if n == "/dev/dri" or vendor == "nvidia"]
+            info = intel_host.lookup(disp["device"]) if vendor == "intel" else None
             cards.append(GpuCard(
+                model=info["model"] if info else "",
                 bdf=bdf, vendor=vendor, device_id=disp["device"], name=self._lspci_name(bdf) or f"{vendor.upper()} GPU",
                 kind=kind, headline=headline, detail=detail, boot_vga=bool(first["boot_vga"]), driver=first["driver"],
                 host_console=gpu.is_host_console(self.sysfs / "bus/pci/devices" / f"{bdf}.0",
@@ -334,9 +388,30 @@ class Session:
                 users=gpu.gpu_users(self.pve, bdf, exclude_vm, self.root) if kind != "unsupported" else [],
                 shares=shares, risky=risky, lxc=containers if kind != "unsupported" else [],
             ))
-        return sorted(cards, key=lambda c: not c.selectable)  # usable cards first, stable otherwise
+        macos = macos if macos in MACOS_NAMES else DEFAULT_MACOS
+        for card in cards:
+            card.macos = macos
+            card.works, card.status = version_status(card.vendor, card.device_id, card.kind, macos)
+            if card.running_users:
+                card.works, card.status = False, "in use by " + ", ".join(f"VM {v}" for v in card.running_users)
+            card.works = card.works and card.selectable
+        best = max((c for c in cards if c.works), key=lambda c: STRENGTH[c.vendor], default=None)
+        if best is not None:
+            best.recommended = True
+        return sorted(cards, key=lambda c: (not c.selectable, not c.works, not c.recommended))  # usable, working, best first
 
     # ── 2. choose ────────────────────────────────────────────────────
+
+    def macos_for(self, vmid: int | None, wanted: str = "") -> str:
+        """The release a card is judged for: the --macos flag, else the chosen VM's, else Sequoia."""
+        if wanted in MACOS_NAMES:
+            return wanted
+        if vmid is not None:
+            info = fetch_vm_info(vmid, adapter=self.pve)
+            version = nullmoth.detect_macos(gpu.parse_config(info.config_raw)) if info else None
+            if version in MACOS_NAMES:
+                return version
+        return DEFAULT_MACOS
 
     def macos_vms(self) -> list[str]:
         return list_macos_vms()
@@ -357,6 +432,8 @@ class Session:
                 why = "running: stop it first"
             elif vendor == "nvidia" and version not in ("sequoia", "tahoe"):
                 why = f"macOS {macos}: NullMoth needs 15.5+" if macos else "macOS version unknown: NullMoth needs 15.5+"
+            elif vendor == "intel" and info and info.config_raw:
+                why = next(iter(igpu_attach.vm_issues(vmid, gpu.parse_config(info.config_raw), False, False)), "")
             out.append(VmOption(vmid, name, macos, status, not why, why))
         return out
 
@@ -374,6 +451,8 @@ class Session:
         if "isa-applesmc" not in cfg.get("args", ""):
             issues.append(f"VM {vmid} is not a macOS VM made by this tool.")
         version = nullmoth.detect_macos(cfg)
+        if vendor == "intel":
+            issues += igpu_attach.vm_issues(vmid, cfg, False, True)
         if vendor == "nvidia":
             if version is None:
                 issues.append("Cannot tell which macOS this VM runs. NVIDIA cards need Sequoia 15.5+ or Tahoe.")
@@ -392,7 +471,7 @@ class Session:
         cards = {c.bdf: c for c in self.scan(exclude_vm=vmid if vmid is not None else -1)}
         card = cards.get(gpu.normalize_bdf(bdf) or bdf)
         if card is None:
-            return [f"No AMD or NVIDIA card at {bdf} on this host."]
+            return [f"No supported graphics card at {bdf} on this host."]
         if not card.selectable:
             return [card.why_not]
         issues: list[str] = []
@@ -402,6 +481,8 @@ class Session:
                           + " Confirm that you want to use it anyway.")
         if vmid is not None:
             issues += self.check_vm(vmid, card.vendor)
+        if card.vendor == "intel":
+            display = "gpu"
         if card.vendor == "nvidia":
             display = "console"
             if not ack:
@@ -567,8 +648,21 @@ class Session:
                 return plan
             return nullmoth.prepare_attach(vmid, bdf, Path(DEFAULT_ISO_DIR) / AMFIPASS.filename,
                                            allow_stop=allow_stop, adapter=self.pve, sysfs_root=self.sysfs)
+        if chosen["vendor"] == "intel":
+            return self.intel_plan(vmid, allow_stop)
         return gpu_attach.prepare_attach_amd(vmid, bdf, self.state["display"], allow_stop,
                                              adapter=self.pve, sysfs_root=self.sysfs)
+
+    def intel_plan(self, vmid: int, allow_stop: bool = False) -> nullmoth.AttachPlan:
+        """The iGPU attach preflight and plan. The downloads are not done here; the plan names where they go."""
+        from .defaults import DEFAULT_ISO_DIR
+        from .oc_builder import AMFIPASS_MOD, WHATEVERXE
+        info = intel_host.lookup(self.state["gpu"]["device"])
+        cache = Path(DEFAULT_ISO_DIR)
+        rom_file = info["rom_file"] if info else ""
+        return igpu_attach.prepare_attach_igpu(
+            vmid, cache / WHATEVERXE.filename, cache / AMFIPASS_MOD.filename, cache / rom_file,
+            allow_stop=allow_stop, adapter=self.pve, root=Path(self.root), run=self.run)
 
     def begin_attach(self) -> None:
         """Remember the VM before touching it, so --undo can find a half-done attach.
@@ -594,6 +688,8 @@ class Session:
             lines += [f"  {i}. {s}" for i, s in enumerate(nullmoth.NEXT_STEPS[1:], start=1)]
             lines += [f"Driver releases: {nullmoth.NULLMOTH_URL}/releases", f"Our guide: {NULLMOTH_DOC}"]
             return "\n".join(lines)
+        if chosen["vendor"] == "intel":
+            return "\n".join(igpu_attach.IGPU_NEXT_STEPS)
         where = ("on the monitor plugged into the card" if self.state["display"] == "gpu"
                  else "in the Proxmox console (the card does the acceleration)")
         return "Start the VM. You should see the OpenCore picker and then the macOS desktop " + where + "."
@@ -632,7 +728,7 @@ class Session:
         for c in changes:
             lines.append(f"  Changed: {c['path']}" + (f" (backup: {c['backup']})" if c["backup"] else " (new file)"))
         if gpu_info:
-            lines += ["", NEXT_NVIDIA if gpu_info["vendor"] == "nvidia" else NEXT_AMD, ""]
+            lines += ["", {"nvidia": NEXT_NVIDIA, "intel": NEXT_INTEL}.get(gpu_info["vendor"], NEXT_AMD), ""]
         lines.append("  Undo everything with: gpu-setup --undo")
         return "\n".join(lines)
 

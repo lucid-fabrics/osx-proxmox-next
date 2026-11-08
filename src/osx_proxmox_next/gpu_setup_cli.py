@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
-from . import bios_guide, gpu, host_setup, nullmoth
-from .gpu_setup import DISPLAY_OPTIONS, NVIDIA_DISPLAY_NOTE, SUPPORTED_DOC, TROUBLESHOOTING, CardChanged, Session, card_text, render_rail
+from . import bios_guide, gpu, host_setup, igpu_finish, nullmoth
+from . import gpu_setup
+from .gpu_setup import DISPLAY_OPTIONS, INTEL_DISPLAY_NOTE, NVIDIA_DISPLAY_NOTE, SUPPORTED_DOC, TROUBLESHOOTING, CardChanged, Session, card_text, render_rail
 
 __all__ = ["add_parser", "run"]
 
@@ -17,12 +18,14 @@ _ANSI_QR = "\x1b[30;47m{}\x1b[0m"
 def add_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "gpu-setup",
-        help="Guided GPU passthrough for AMD and NVIDIA cards: scan, BIOS, host setup, VM, first boot",
+        help="Guided GPU passthrough for AMD, NVIDIA and Intel iGPU: scan, BIOS, host setup, VM, first boot",
     )
     p.add_argument("--status", action="store_true", help="Show where the setup is and what this host needs. Changes nothing")
     p.add_argument("--undo", action="store_true", help="Restore every file and VM setting this setup changed")
     p.add_argument("--yes", action="store_true", help="Answer the confirmations (never the BIOS, reboot or risk notices)")
     p.add_argument("--vm", type=int, default=None, help="VM ID of the macOS VM that gets the card")
+    p.add_argument("--macos", default="", choices=("", "ventura", "sonoma", "sequoia", "tahoe"),
+                   help="macOS release the card is for (default: the --vm release, else sequoia). Decides which card is recommended")
     p.add_argument("--gpu", default="", help="PCI address of the card, e.g. 06:00 or 0000:06:00.0")
     p.add_argument("--display", choices=("gpu", "console"), default="",
                    help="AMD only: gpu = monitor on the card (vga none), console = keep the Proxmox console")
@@ -79,9 +82,9 @@ def _print_findings(io: _Io, plan_like) -> None:
 
 def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     io.say(s.summary_line())
-    cards = s.scan(exclude_vm=args.vm if args.vm is not None else -1)
+    cards = s.scan(exclude_vm=args.vm if args.vm is not None else -1, macos=s.macos_for(args.vm, args.macos))
     if not cards:
-        io.say("No AMD or NVIDIA graphics card found in this host.")
+        io.say("No supported graphics card found in this host.")
     for card in cards:
         io.say(card_text(card))
     usable = [c for c in cards if c.selectable]
@@ -93,12 +96,36 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
             io.say(f"Nothing here can run macOS graphics. Cards that work: {SUPPORTED_DOC}")
         return EXIT_REFUSED
     chosen = None
-    if args.gpu:
+    rec = next((c for c in usable if c.recommended), None)
+    if not args.gpu and rec is None:
+        io.say(f"No graphics card here works with {gpu_setup.MACOS_NAMES[usable[0].macos]}. Continuing without "
+               "passthrough: nothing was changed.")
+        return EXIT_OK
+    if not args.gpu and (rec.vendor == "intel" or len(usable) > 1):
+        io.say(rec.detected_line if rec.vendor == "intel" else f"Recommended: {rec.name} ({rec.bdf}), {rec.status}.")
+        if io.confirm(f"Use the {rec.name} ({rec.bdf}) for macOS?", args.yes):
+            chosen = rec
+        elif len(usable) == 1:
+            io.say("Nothing was changed. Run again and confirm (or pass --yes) to use it. Nothing is enabled "
+                   "without that confirmation" + (": the Intel iGPU takes the host console." if rec.vendor == "intel" else "."))
+            return EXIT_REFUSED
+        else:
+            usable = [c for c in usable if c is not rec]
+    if chosen is not None:
+        pass
+    elif args.gpu:
         wanted = gpu.normalize_bdf(args.gpu)
         chosen = next((c for c in usable if c.bdf == wanted), None)
         if chosen is None:
             io.say(f"{args.gpu} is not one of the usable cards above.")
             return EXIT_REFUSED
+    elif len(usable) == 1 and usable[0].vendor == "intel":
+        # switched away from the recommendation to the iGPU: it still takes the host console, so ask
+        io.say(usable[0].detected_line)
+        if not io.confirm(f"Use the {usable[0].name} ({usable[0].bdf}) for macOS?", args.yes):
+            io.say("Nothing was changed.")
+            return EXIT_REFUSED
+        chosen = usable[0]
     elif len(usable) == 1:
         chosen = usable[0]
     elif io.interactive:
@@ -125,6 +152,10 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         for opt in options:
             io.say("  " + opt.label)
         reply = io.ask("VM ID to use ('p' = set up the host now and pick the VM later, 'c' = create one first): ")
+        if reply.lower() == "c" and chosen.vendor == "intel":
+            io.say("The iGPU needs an i440fx VM, so create it with: osx-next-cli igpu-install (it installs macOS "
+                   "and the graphics package too). It sets the host up first if needed.")
+            reply = "p"
         if reply.lower() == "c":
             s.state["gpu"] = {"bdf": chosen.bdf, "vendor": chosen.vendor, "device": chosen.device_id,
                               "boot_vga": chosen.boot_vga, "name": chosen.name,
@@ -139,6 +170,8 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
             io.say(f"  {idx}) {label}\n     {desc}")
         display = "console" if io.ask("Choice [1]: ") == "2" else "gpu"
     ack = False
+    if chosen.vendor == "intel":
+        io.say(INTEL_DISPLAY_NOTE)
     if chosen.vendor == "nvidia":
         io.say(NVIDIA_DISPLAY_NOTE)
         io.say(nullmoth.notice_text())
@@ -297,6 +330,11 @@ def _step_vm(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
             return EXIT_REFUSED
         s.state["vm"] = args.vm
         s.save()
+    if s.state["vm"] is None and s.state["gpu"]["vendor"] == "intel":
+        io.say("The host is ready. Create the VM with: osx-next-cli igpu-install --vmid <id> --name <name> --macos "
+               "sequoia --cores 4 --memory 8192 --disk 64 --bridge vmbr0 --storage local-lvm. It installs macOS and "
+               "the graphics package hands-off. Or pick an installed i440fx macOS VM: " + s.pause() + " --vm <vmid>")
+        return EXIT_OK
     if s.state["vm"] is None:
         io.say("The host is ready. Pick or create the macOS VM, then run: " + s.pause() + " --vm <vmid>")
         return EXIT_OK
@@ -314,9 +352,14 @@ def _step_vm(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     io.say("This is what will change on VM %s (a snapshot of its config is saved first):" % s.state["vm"])
     for idx, step in enumerate(plan.steps, start=1):
         io.say(f"  {idx:02d}. {step.title}")
+    if s.state["gpu"]["vendor"] == "intel":
+        io.say("Before that, the VM boots macOS recovery once to put the graphics package inside macOS, "
+               "so the first boot with the iGPU installs it by itself. This takes about 15 minutes.")
     if not io.confirm("Attach the card now?", args.yes):
         io.say("Nothing was changed.")
         return EXIT_OK
+    if s.state["gpu"]["vendor"] == "intel":
+        return _finish_intel(s, io)
     from .executor import apply_plan
     from .rollback import create_snapshot
     if s.state["gpu"]["vendor"] == "nvidia":
@@ -331,6 +374,24 @@ def _step_vm(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         failed = next((r for r in result.results if not r.ok), None)
         io.say("FAILED" + (f" at step: {failed.title}" if failed else "") + f". Log: {result.log_path}")
         return EXIT_FAIL
+    s.vm_applied()
+    io.say("Card attached.")
+    return None
+
+
+def _finish_intel(s: Session, io: _Io) -> int | None:
+    """Stage the graphics package, attach the iGPU and run the first boot (igpu_finish does all of it)."""
+    s.begin_attach()
+    try:
+        result = igpu_finish.finish(s.state["vm"], pve=s.pve, on_event=lambda m: io.say("  " + m))
+    except igpu_finish.FinishError as exc:
+        io.say("FAILED: " + str(exc))
+        return EXIT_FAIL
+    for note in result.notes:
+        io.say("NOTE: " + note)
+    if not result.installed:
+        io.say("The graphics package is not installed yet (" + (result.result or "no result") + "). The VM is usable "
+               "without acceleration and tries again on its next boot.")
     s.vm_applied()
     io.say("Card attached.")
     return None
@@ -365,7 +426,7 @@ def _status(s: Session, io: _Io) -> int:
     for card in cards:
         io.say(card_text(card))
     if not cards:
-        io.say("No AMD or NVIDIA graphics card found.")
+        io.say("No supported graphics card found.")
     if not s.state["gpu"]:
         io.say("No setup in progress.")
         return EXIT_OK

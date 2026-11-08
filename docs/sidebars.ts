@@ -25,6 +25,7 @@ const sidebars: SidebarsConfig = {
         'guides/unattended-install',
         'guides/gpu-passthrough',
         'guides/nvidia-nullmoth',
+        'guides/intel-igpu-passthrough',
         'guides/faq',
       ],
     },

@@ -30,7 +30,8 @@ from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
-__all__ = ["QmConsole", "UnattendedError", "erase_install_command", "run_unattended_install"]
+__all__ = ["QmConsole", "UnattendedError", "erase_install_command", "open_recovery_terminal",
+           "run_unattended_install"]
 
 # Frame-size heuristics (bytes of a raw PPM screendump).
 PICKER_MIN_BYTES = 5_000_000       # 1920x1080 OpenCore picker
@@ -293,19 +294,9 @@ def _wait_first_reboot(console: QmConsole, on_event: Callable[[str], None],
                           "the installer's first reboot")
 
 
-def run_unattended_install(
-    console: QmConsole,
-    disk_gb: int,
-    on_event: Callable[[str], None] = log.info,
-    clock: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], None] = time.sleep,
-) -> dict:
-    """Drive the install until macOS sits quiet at Setup Assistant.
-
-    Returns {"reboots": N, "elapsed": seconds}. Raises UnattendedError when
-    a phase times out; the VM is left as-is for manual inspection."""
-    start = clock()
-
+def open_recovery_terminal(console: QmConsole, on_event: Callable[[str], None],
+                           clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
+    """Boot recovery from the OpenCore picker and open Terminal from its Utilities menu."""
     on_event("Waiting for the OpenCore boot picker")
     _wait(console, lambda s: s > PICKER_MIN_BYTES, PICKER_TIMEOUT,
           "the OpenCore picker", clock, sleep)
@@ -335,6 +326,25 @@ def run_unattended_install(
     console.seq(TERMINAL_NAV)
     sleep(TERMINAL_OPEN_WAIT)
 
+
+def run_unattended_install(
+    console: QmConsole,
+    disk_gb: int,
+    on_event: Callable[[str], None] = log.info,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    recovery_slot: str = "ide2",
+) -> dict:
+    """Drive the install until macOS sits quiet at Setup Assistant.
+
+    *recovery_slot* is the VM slot that holds the recovery disk (sata1 on an i440fx iGPU VM).
+
+    Returns {"reboots": N, "elapsed": seconds}. Raises UnattendedError when
+    a phase times out; the VM is left as-is for manual inspection."""
+    start = clock()
+
+    open_recovery_terminal(console, on_event, clock, sleep)
+
     command = erase_install_command(disk_gb)
     on_event("Typing the erase + startosinstall command (the VM disk is wiped now)")
     console.type_text(command)
@@ -352,7 +362,7 @@ def run_unattended_install(
     on_event("First reboot reached; detaching recovery so the picker has one entry")
     console.qm("stop")
     _wait_stopped(console, clock, sleep)
-    console.qm("set", "--delete", "ide2")
+    console.qm("set", "--delete", recovery_slot)
     restore_error = console.restore_picker_timeout()
     if restore_error:
         on_event(f"Could not restore the picker's auto-boot ({restore_error}); run "

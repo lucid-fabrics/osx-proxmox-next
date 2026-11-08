@@ -52,7 +52,7 @@ def test_status_without_a_setup(host):
 
 def test_status_without_cards(tmp_path):
     code, out = go(Env(tmp_path), "--status")
-    assert code == 0 and "No AMD or NVIDIA graphics card found." in out
+    assert code == 0 and "No supported graphics card found." in out
 
 
 def test_status_with_a_setup(host):
@@ -165,12 +165,13 @@ def test_interactive_choose_pick_vm_and_display(tmp_path):
     env = Env(tmp_path)
     add_card(env.root, bdf="0000:06:00", device=0x73FF, group=7)
     add_card(env.root, bdf="0000:41:00", device=0x67DF, group=9)
-    code, out = go(env, "--vm", "100", inputs=["2", "2", "n"], interactive=True)
+    code, out = go(env, "--vm", "100", inputs=["n", "2", "n"], interactive=True)  # decline the recommended card, take the other
     s = env.session()
     assert s.state["gpu"]["bdf"] == "0000:41:00" and s.state["display"] == "console"
-    s.state["step"] = 1
-    s.save()
-    code, out = go(env, inputs=["x"], interactive=True)
+    env3 = Env(tmp_path / "c")
+    for bdf, dev, grp in (("0000:06:00", 0x73FF, 7), ("0000:41:00", 0x67DF, 9), ("0000:42:00", 0x67FF, 11)):
+        add_card(env3.root, bdf=bdf, device=dev, group=grp)
+    code, out = go(env3, inputs=["n", "x"], interactive=True)  # decline the recommendation, then pick nothing valid
     assert code == 2 and "Pick a card with --gpu" in out
     env2 = Env(tmp_path / "b")
     add_card(env2.root)
