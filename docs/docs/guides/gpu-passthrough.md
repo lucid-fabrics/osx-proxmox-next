@@ -82,6 +82,7 @@ AMD cards are placed on a PCI Express port (`pcie=1`) and the VM gets `-global I
 |-----------------|-----------|
 | Turing and newer (RTX 20 / 30 / 40 / 50 series) | Yes, on macOS Sequoia 15.5+ and Tahoe 26 |
 | Kepler, Maxwell, Pascal, Volta (GTX 600 to GTX 10, Titan V) | No. Older than the RTX 20 series: NVIDIA's macOS drivers stopped at High Sierra and NullMoth needs Turing or newer. |
+| Laptop (mobile) NVIDIA GPUs of any generation | No. The scan marks them "not supported (laptop NVIDIA)", so on a machine with an Intel iGPU the iGPU is recommended instead. A card counts as a laptop part when its lspci name says Laptop, Mobile or Max-Q, or its chip name ends in M (for example AD107M). The name comes from the host's PCI ID list, so run `update-pciids` if a new laptop card shows up as just "Device". |
 | Ventura 13, Sonoma 14 guests | No |
 
 > **NVIDIA GPU support (Beta)**

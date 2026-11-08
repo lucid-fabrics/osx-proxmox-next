@@ -95,6 +95,7 @@ def test_constants_match():
     assert re.search(r'^GPU_AMD_GENERIC_REASON="(.*)"$', BLOCK, re.M).group(1) == amd_host._GENERIC_REASON
     assert re.search(r'^GPU_AMD_VEGA20_WARNING="(.*)"$', BLOCK, re.M).group(1) == amd_host._VEGA20_WARNING
     assert re.search(r'^GPU_PRE_TURING_REASON="(.*)"$', BLOCK, re.M).group(1) == gpu_setup._PRE_TURING
+    assert re.search(r'^GPU_LAPTOP_NVIDIA_REASON="(.*)"$', BLOCK, re.M).group(1) == gpu_setup._LAPTOP_NVIDIA
     assert re.search(r"^GPU_DOCS_ROOT=\"(.*)\"$", BLOCK, re.M).group(1) == gpu_setup.DOCS_ROOT
     resume = re.search(r"^GPU_RESUME_CMD='(.*)'$", BLOCK, re.M).group(1)
     assert resume.endswith("-- gpu-setup") and "lucid-fabrics/osx-proxmox-next" in resume

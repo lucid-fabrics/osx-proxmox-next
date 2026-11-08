@@ -1899,6 +1899,7 @@ GPU_RESUME_CMD='bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fa
 GPU_HOTPLUG_ARG="-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off"
 GPU_AMD_GENERIC_REASON="This AMD GPU has no Apple driver (APUs and cards newer than the RX 6000 series are not supported)."
 GPU_AMD_VEGA20_WARNING="Radeon VII / Pro VII: stopping and starting a VM that holds this card without rebooting the host has corrupted host storage on Proxmox 9 with vendor-reset (vendor-reset issue 112). Reboot the host between VM runs and do not rely on automatic restarts."
+GPU_LAPTOP_NVIDIA_REASON="This is a laptop NVIDIA GPU. Laptop GPUs sit behind the firmware and the mux, so the card cannot be handed to a VM reliably, and NullMoth is not tested on them. Use the Intel iGPU instead."
 GPU_PRE_TURING_REASON="Older than the RTX 20 series: NVIDIA's macOS drivers stopped at High Sierra and NullMoth needs Turing or newer."
 
 # ── GPU embedded: host_setup.py begin ──
@@ -5896,10 +5897,17 @@ function amd_hostpci_extra() {
   return 0
 }
 
-# kind|headline|detail for one card (vendor: amd|nvidia, device id decimal). Mirrors gpu_setup.verdict.
+# 0 when vendor ($1) is nvidia and the lspci name ($2) is a laptop part. Mirrors gpu_setup.is_laptop_nvidia.
+function gpu_is_laptop_nvidia() {
+  [ "$1" == "nvidia" ] && printf '%s' "$2" | grep -Eiq '\b(laptop|mobile|max-q)\b|\b[a-z]{2}[0-9]{2,3}m\b'
+}
+
+# kind|headline|detail for one card (vendor: amd|nvidia, device id decimal, lspci name). Mirrors gpu_setup.verdict.
 function gpu_verdict() {
   local vendor="$1" dev="$2" fam key label reset args tahoe tail
-  if [ "$vendor" == "amd" ]; then
+  if gpu_is_laptop_nvidia "$vendor" "${3:-}"; then
+    echo "unsupported|Not supported (laptop NVIDIA)|${GPU_LAPTOP_NVIDIA_REASON}"
+  elif [ "$vendor" == "amd" ]; then
     if ! fam=$(amd_family_for "$dev"); then
       echo "unsupported|Not supported by macOS|$(amd_unsupported_reason "$dev")"; return 0
     fi
@@ -6548,11 +6556,12 @@ function gpu_macos_for() {
 
 # works|status for a GPU_CARDS line and a macOS release ($2). Mirrors gpu_setup.version_status plus the running-VM rule.
 function gpu_version_status() {
-  local line="$1" macos="$2" vname device kind users name u run="" fam key label reset args tahoe
-  IFS='|' read -r _ vname device _ kind _ _ _ _ users _ <<<"$line"
+  local line="$1" macos="$2" vname device cname kind users name u run="" fam key label reset args tahoe
+  IFS='|' read -r _ vname device cname kind _ _ _ _ users _ <<<"$line"
   name=$(gpu_macos_name "$macos")
   for u in ${users//,/ }; do [ "${u#*:}" == "running" ] && run+="${run:+, }VM ${u%%:*}"; done
   if [ -n "$run" ]; then echo "no|in use by ${run}"; return 0; fi
+  if gpu_is_laptop_nvidia "$vname" "$cname"; then echo "no|not supported (laptop NVIDIA)"; return 0; fi
   if [ "$kind" == "unsupported" ]; then echo "no|not supported by ${name}"; return 0; fi
   if [ "$vname" == "nvidia" ] && [ "$macos" != "sequoia" ] && [ "$macos" != "tahoe" ]; then
     echo "no|not supported by ${name} (NullMoth needs macOS 15.5 or newer)"; return 0
@@ -6687,7 +6696,9 @@ function gpu_scan() {
     case "$vendor" in 4098) vname=amd ;; 4318) vname=nvidia ;; 32902) vname=intel ;; *) continue ;; esac
     seen+="$bdf "
     device=$(gpu_sys_num "$sys/bus/pci/devices/$bdf.0/device" 2>/dev/null || gpu_sys_num "$dev/device") || continue
-    IFS='|' read -r v_kind v_head v_detail <<<"$(gpu_verdict "$vname" "$device")"
+    name=$(lspci -nn -s "$bdf.0" 2>/dev/null | sed -n 's/^[^[]*\[[0-9a-f]\{4\}\]: *\(.*\) \[[0-9a-f]\{4\}:[0-9a-f]\{4\}\].*/\1/p' | head -1)
+    name="${name//|/\/}"
+    IFS='|' read -r v_kind v_head v_detail <<<"$(gpu_verdict "$vname" "$device" "$name")"
     boot=$(gpu_sys_num "$sys/bus/pci/devices/$bdf.0/boot_vga" 2>/dev/null || echo 0)
     driver=""
     [ -e "$sys/bus/pci/devices/$bdf.0/driver" ] && driver=$(basename "$(readlink -f "$sys/bus/pci/devices/$bdf.0/driver")")
@@ -6708,8 +6719,6 @@ function gpu_scan() {
         case $(( mc >> 16 )) in 1|2) risky+="${risky:+,}$member" ;; esac
       done
     fi
-    name=$(lspci -nn -s "$bdf.0" 2>/dev/null | sed -n 's/^[^[]*\[[0-9a-f]\{4\}\]: *\(.*\) \[[0-9a-f]\{4\}:[0-9a-f]\{4\}\].*/\1/p' | head -1)
-    name="${name//|/\/}"
     local lxc="" ct node
     if [ "$v_kind" != "unsupported" ]; then
       while read -r ct node; do

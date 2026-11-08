@@ -57,6 +57,17 @@ VENDOR_NAMES = {"amd": "AMD", "nvidia": "NVIDIA", "intel": "Intel"}
 VENDOR_IDS = {"amd": 0x1002, "nvidia": 0x10DE, "intel": 0x8086}
 _PRE_TURING = ("Older than the RTX 20 series: NVIDIA's macOS drivers stopped at High Sierra and NullMoth "
                "needs Turing or newer.")
+_LAPTOP_NVIDIA = ("This is a laptop NVIDIA GPU. Laptop GPUs sit behind the firmware and the mux, so the card cannot "
+                  "be handed to a VM reliably, and NullMoth is not tested on them. Use the Intel iGPU instead.")
+# lspci names come from pci.ids: "GeForce RTX 4060 Max-Q / Mobile", "GeForce RTX 4060 Laptop GPU", chip "AD107M"
+_LAPTOP_NAME = re.compile(r"\b(?:laptop|mobile|max-q)\b|\b[a-z]{2}\d{2,3}m\b", re.I)
+
+
+def is_laptop_nvidia(vendor: str, name: str) -> bool:
+    """A mobile NVIDIA part, judged by its pci.ids name (the same text lspci prints)."""
+    return vendor == "nvidia" and bool(_LAPTOP_NAME.search(name))
+
+
 _BLACK_BOX = {
     "no_signal": (
         "No signal on the monitor:\n"
@@ -102,6 +113,7 @@ class GpuCard:
     macos: str = ""  # the macOS release the verdict below is for
     works: bool = False  # supported for that release and nothing running holds it
     status: str = ""  # "works with macOS Sequoia 15", "not supported by macOS ...", "in use by VM 100"
+    laptop: bool = False  # a laptop NVIDIA GPU: never offered, the iGPU is recommended instead
     recommended: bool = False  # the strongest card that works: preselected, still used only after a confirmation
 
     @property
@@ -164,7 +176,7 @@ def apply_verdicts(cards: list["GpuCard"], macos: str) -> None:
     for card in cards:
         card.macos = macos
         card.recommended = False
-        card.works, card.status = version_status(card.vendor, card.device_id, card.kind, macos)
+        card.works, card.status = version_status(card.vendor, card.device_id, card.kind, macos, card.laptop)
         if card.running_users:
             card.works, card.status = False, "in use by " + ", ".join(f"VM {v}" for v in card.running_users)
         card.works = card.works and card.selectable
@@ -173,9 +185,11 @@ def apply_verdicts(cards: list["GpuCard"], macos: str) -> None:
         best.recommended = True
 
 
-def version_status(vendor: str, device_id: int, kind: str, macos: str) -> tuple[bool, str]:
+def version_status(vendor: str, device_id: int, kind: str, macos: str, laptop: bool = False) -> tuple[bool, str]:
     """(works, one-line status) of a card for one macOS release. Reuses the AMD, NVIDIA and Intel support data."""
     name = MACOS_NAMES[macos]
+    if laptop:
+        return False, "not supported (laptop NVIDIA)"
     if kind == "unsupported":
         return False, f"not supported by {name}"
     if vendor == "nvidia" and macos not in ("sequoia", "tahoe"):
@@ -189,8 +203,10 @@ def version_status(vendor: str, device_id: int, kind: str, macos: str) -> tuple[
     return True, f"works with {name}"
 
 
-def verdict(vendor: str, device_id: int) -> tuple[str, str, str]:
+def verdict(vendor: str, device_id: int, name: str = "") -> tuple[str, str, str]:
     """(kind, headline, detail) for one card. The headline is the plain-words verdict."""
+    if is_laptop_nvidia(vendor, name):
+        return "unsupported", "Not supported (laptop NVIDIA)", _LAPTOP_NVIDIA
     if vendor == "amd":
         fam = amd_host.family_for(device_id)
         if fam is None:
@@ -382,7 +398,8 @@ class Session:
             if vendor is None or bdf in seen:
                 continue
             seen.append(bdf)
-            kind, headline, detail = verdict(vendor, disp["device"])
+            lname = self._lspci_name(bdf)
+            kind, headline, detail = verdict(vendor, disp["device"], lname)
             funcs = sorted(b for b in devices if b.startswith(bdf + "."))
             first = devices.get(bdf + ".0", disp)
             shares, risky = [], []
@@ -396,7 +413,8 @@ class Session:
             info = intel_host.lookup(disp["device"]) if vendor == "intel" else None
             cards.append(GpuCard(
                 model=info["model"] if info else "",
-                bdf=bdf, vendor=vendor, device_id=disp["device"], name=self._lspci_name(bdf) or f"{vendor.upper()} GPU",
+                bdf=bdf, vendor=vendor, device_id=disp["device"], name=lname or f"{vendor.upper()} GPU",
+                laptop=is_laptop_nvidia(vendor, lname),
                 kind=kind, headline=headline, detail=detail, boot_vga=bool(first["boot_vga"]), driver=first["driver"],
                 host_console=gpu.is_host_console(self.sysfs / "bus/pci/devices" / f"{bdf}.0",
                                                  Path(self.root) / "proc/iomem"),

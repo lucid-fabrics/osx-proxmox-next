@@ -225,6 +225,47 @@ def test_the_igpu_beats_nvidia_on_sequoia_and_wins_alone_on_ventura(tmp_path):
     assert ventura["nvidia"].status == "not supported by macOS Ventura 13 (NullMoth needs macOS 15.5 or newer)"
 
 
+def lspci(name: str, device: int = 0x28E0) -> dict:
+    return {"lspci -nn -s 0000:01:00.0": (0, f"0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation {name} [10de:{device:04x}]\n")}
+
+
+def named_session(root: Path, answers: dict) -> Session:
+    return Session(str(root), FakeRun({**REGS, **answers}, default=(0, "")), FakeQm({100: ("stopped", VM)}))
+
+
+@pytest.mark.parametrize("name", ["AD107M [GeForce RTX 4060 Max-Q / Mobile]", "GA104 [GeForce RTX 3070 Laptop GPU]",
+                                  "TU117M [GeForce GTX 1650 Mobile]", "GA106M [Something]"])
+def test_a_laptop_nvidia_gpu_is_not_supported_and_the_igpu_is_recommended(tmp_path, name):
+    root = host(tmp_path, nvidia=True)
+    found = {c.vendor: c for c in named_session(root, lspci(name)).scan()}
+    card = found["nvidia"]
+    assert card.laptop and card.kind == "unsupported" and not card.works and not card.recommended
+    assert card.status == "not supported (laptop NVIDIA)" and card.headline == "Not supported (laptop NVIDIA)"
+    assert found["intel"].recommended
+    assert "Can't use" in gpu_setup.card_text(card) and "laptop NVIDIA" in gpu_setup.card_text(card)
+
+
+def test_a_laptop_nvidia_gpu_is_not_supported_on_every_release(tmp_path):
+    root = host(tmp_path, nvidia=True)
+    for macos in gpu_setup.MACOS_NAMES:
+        found = {c.vendor: c for c in named_session(root, lspci("AD107M [GeForce RTX 4060 Max-Q / Mobile]")).scan(macos=macos)}
+        assert found["nvidia"].status == "not supported (laptop NVIDIA)" and found["intel"].recommended
+
+
+def test_a_desktop_nvidia_gpu_next_to_the_igpu_is_unchanged(tmp_path):
+    root = host(tmp_path, nvidia=True)
+    found = {c.vendor: c for c in named_session(root, lspci("AD107 [GeForce RTX 4060]")).scan()}
+    assert not found["nvidia"].laptop and found["nvidia"].kind == "nullmoth" and found["nvidia"].works
+    assert found["intel"].recommended and not found["nvidia"].recommended
+
+
+def test_only_nvidia_parts_are_judged_by_name():
+    assert gpu_setup.is_laptop_nvidia("nvidia", "GeForce RTX 4060 Laptop GPU")
+    assert not gpu_setup.is_laptop_nvidia("amd", "Radeon RX 6800M Mobile")
+    assert not gpu_setup.is_laptop_nvidia("nvidia", "GeForce RTX 4090")
+    assert not gpu_setup.is_laptop_nvidia("nvidia", "")
+
+
 def test_the_list_leads_with_the_recommendation(tmp_path):
     order = [c.vendor for c in session(host(tmp_path, amd=True, nvidia=True)).scan()]
     assert order[0] == "amd" and set(order) == {"amd", "intel", "nvidia"}

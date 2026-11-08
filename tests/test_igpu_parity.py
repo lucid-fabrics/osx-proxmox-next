@@ -170,6 +170,38 @@ def test_scan_order_status_and_recommendation_match_python(bash, vm, tmp_path, s
         assert out[idx - 2].split("|")[0][5:] == next(c.bdf for c in py_cards if c.recommended)
 
 
+LAPTOP = "AD107M [GeForce RTX 4060 Max-Q / Mobile]"
+DESKTOP = "AD107 [GeForce RTX 4060]"
+
+
+@pytest.mark.parametrize("name", [LAPTOP, "GA104 [GeForce RTX 3070 Laptop GPU]", "TU117M [GeForce GTX 1650 Mobile]", DESKTOP, ""])
+def test_the_laptop_nvidia_check_matches_python(bash, name):
+    expect = "laptop" if gpu_setup.is_laptop_nvidia("nvidia", name) else "desktop"
+    out = bash(f"gpu_is_laptop_nvidia nvidia '{name}' && echo laptop || echo desktop").stdout.strip()
+    assert out == expect
+    assert bash(f"gpu_is_laptop_nvidia amd '{name}' && echo laptop || echo desktop").stdout.strip() == "desktop"
+    kind, head, detail = gpu_setup.verdict("nvidia", 0x28E0, name)
+    assert bash(f"gpu_verdict nvidia {0x28E0} '{name}'").stdout.strip() == f"{kind}|{head}|{detail}"
+
+
+@pytest.mark.parametrize("name,rec", [(LAPTOP, "intel"), (DESKTOP, "intel")])
+def test_a_laptop_nvidia_scan_matches_python(bash, vm, tmp_path, name, rec):
+    vm(120, "stopped", VM_CFG)
+    root = flow_host(tmp_path / "root", nvidia=True)
+    lspci = bash.stub_bin / "lspci"
+    lspci.write_text(f"#!/bin/sh\ncase \"$*\" in *01:00.0*) echo '0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation {name} [10de:2504]';; *) exit 1;; esac\n")
+    lspci.chmod(0o755)
+    out = bash('GPU_MACOS=sequoia; gpu_scan; for l in "${GPU_CARDS[@]}"; do echo "CARD $l"; IFS="|" read -r _ st <<<"$(gpu_version_status "$l" "$GPU_MACOS")"; '
+               'echo "STATUS $st"; done; true', env={**vm.env, "GPU_SYSFS": str(root / "sys")}).stdout.splitlines()
+    sh_cards = [ln.split("|")[0][5:] for ln in out if ln.startswith("CARD ")]
+    sh_status = [ln[7:] for ln in out if ln.startswith("STATUS ")]
+    sess = flow_session(root)
+    sess.run = FakeRun({"lspci -nn -s 0000:01:00.0": (0, f"0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation {name} [10de:2504]\n")}, default=(1, ""))
+    py = sess.scan(macos="sequoia")
+    assert sh_cards == [c.bdf for c in py] and sh_status == [c.status for c in py]
+    assert next(c for c in py if c.recommended).vendor == rec
+
+
 def test_the_bash_card_text_carries_the_status_and_the_recommendation_line(bash, vm, tmp_path):
     vm(120, "stopped", VM_CFG)
     root = flow_host(tmp_path / "root", amd=True)
