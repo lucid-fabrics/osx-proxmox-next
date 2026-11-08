@@ -12,7 +12,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from shlex import quote as shquote
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from . import host_setup
 from .domain import PlanStep
@@ -309,10 +309,13 @@ def is_host_console(dev: Path, iomem: Path | None = None) -> bool:
     return _fb_holds_bar(dev, iomem)
 
 
-def shared_note(vmid: int) -> str:
-    """The warning for a card that a stopped VM also lists (same wording in every entry point)."""
-    return (f"Also assigned to VM {vmid} (stopped). Only one of them can run at a time; "
-            "Proxmox refuses to start the second.")
+def shared_note(vmids: int | Iterable[int]) -> str:
+    """One warning for a card that stopped VMs also list (same wording in every entry point)."""
+    ids = [vmids] if isinstance(vmids, int) else list(vmids)
+    if len(ids) == 1:
+        return f"Also assigned to stopped VM {ids[0]}. Only one can run at a time; Proxmox refuses to start the second."
+    return (f"Also assigned to stopped VMs {', '.join(map(str, ids))}. Only one can run at a time; "
+            "Proxmox refuses to start the others.")
 
 
 def running_user_issue(vmid: int) -> str:

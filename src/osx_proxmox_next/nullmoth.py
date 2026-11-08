@@ -254,11 +254,14 @@ def prepare_attach(
     plan.warnings += [w + _BAR_NOTE if w.startswith("BAR1") else w for w in report.warnings]
     plan.hints += report.hints
     plan.issues += _slot_issues(cfg, report.bdf)
+    stopped_others: list[int] = []
     for other, other_running in gpu_users(pve, report.bdf, vmid) if report.ok else []:
         if other_running:
             plan.issues.append(running_user_issue(other))
         else:
-            plan.warnings.append(shared_note(other))
+            stopped_others.append(other)
+    if stopped_others:
+        plan.warnings.append(shared_note(stopped_others))
 
     if plan.ok:
         record = new_record(vmid, report.bdf, "nvidia", cfg, NVIDIA_PROFILE,

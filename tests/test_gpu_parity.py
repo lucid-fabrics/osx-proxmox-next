@@ -360,7 +360,7 @@ def test_amd_attach_usage_and_other_vms(bash, vm, tmp_path):
     assert "in use by running VM 101" in bash("amd_attach 100 06:00", env=env, expect=1).stdout
     vm(101, "stopped", "hostpci0: 06:00,pcie=1\n")
     ok = bash("gpu_oc_boot_args() { true; }; amd_attach 100 06:00 --stop-vm", env=env)
-    assert "Also assigned to VM 101 (stopped)" in ok.stdout
+    assert "Also assigned to stopped VM 101" in ok.stdout
 
 
 def test_amd_attach_stops_a_running_vm_when_asked(bash, vm, tmp_path):

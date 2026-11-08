@@ -77,7 +77,7 @@ def test_card_text_and_why_not():
                    host_console=True, driver="amdgpu", users=[(120, True), (121, False)], shares=["0000:07:00.0"])
     text = gpu_setup.card_text(card)
     assert text.isascii() and "host console" in text and "Can't use: In use by VM 120 (running)" in text
-    assert "VM 121 (stopped)" in text  # a stopped VM is a note, not a reason
+    assert "stopped VM 121" in text  # a stopped VM is a note, not a reason
     assert "shares IOMMU group" in text and "0000:07:00.0" in text and "AMD 1002:73ff" in text
     assert not card.selectable and card.why_not == "In use by VM 120 (running)"
     bad = GpuCard("0000:06:00", "nvidia", 0x1B80, "GTX", "unsupported", "Not supported by macOS", "old.")
@@ -192,7 +192,7 @@ def test_choose_refusals(tmp_path):
     s = env.session()
     assert "No supported graphics card" in s.choose("09:00", None, "gpu")[0]
     stopped = s.choose("06:00", None, "gpu")  # VM 200 is stopped: it needs a confirmation, never a refusal
-    assert "Also assigned to VM 200 (stopped)" in stopped[0] and "Confirm" in stopped[0]
+    assert "Also assigned to stopped VM 200" in stopped[0] and "Confirm" in stopped[0]
     env.qm.vms[200] = ("running", "hostpci0: 0000:06:00,pcie=1\n")
     assert "In use by VM 200 (running)" in s.choose("06:00", None, "gpu", share_ok=True)[0]
     env.qm.vms[200] = ("stopped", "hostpci0: 0000:06:00,pcie=1\n")

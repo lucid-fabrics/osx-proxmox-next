@@ -179,11 +179,14 @@ def prepare_attach_igpu(
     if cfg.get("hostpci0") is not None and existing != {report.bdf}:
         plan.issues.append(f"hostpci0 is already in use on this VM ({cfg['hostpci0']}). "
                            "Remove it first or run gpu-setup --undo.")
+    stopped_others: list[int] = []
     for other, other_running in gpu_users(pve, report.bdf, vmid) if report.ok else []:
         if other_running:
             plan.issues.append(running_user_issue(other))
         else:
-            plan.warnings.append(shared_note(other))
+            stopped_others.append(other)
+    if stopped_others:
+        plan.warnings.append(shared_note(stopped_others))
 
     if plan.ok and report.layout:
         settings = igpu_engine.vm_settings(report.layout["max_ram_below_4g_mb"], report.rom_file)

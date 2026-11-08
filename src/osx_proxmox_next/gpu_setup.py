@@ -144,7 +144,7 @@ class GpuCard:
     @property
     def notes(self) -> list[str]:
         """Warnings shown on the card: stopped VMs that also list it, and the firmware boot screen."""
-        out = [gpu.shared_note(vmid) for vmid in self.stopped_users]
+        out = [gpu.shared_note(self.stopped_users)] if self.stopped_users else []
         if self.boot_vga and not self.host_console:
             out.append("The firmware shows its boot screen on this card.")
         return out
@@ -501,7 +501,7 @@ class Session:
         issues: list[str] = []
         unseen = confirmed is not None and not set(card.stopped_users) <= set(confirmed)
         if card.stopped_users and (not share_ok or unseen):
-            issues.append(" ".join(gpu.shared_note(v) for v in card.stopped_users)
+            issues.append(gpu.shared_note(card.stopped_users)
                           + " Confirm that you want to use it anyway.")
         if vmid is not None:
             issues += self.check_vm(vmid, card.vendor)

@@ -47,7 +47,7 @@ def test_stopped_holder_is_a_note_and_the_card_stays_selectable(tmp_path):
     card = nvidia_env_host(tmp_path).session().scan()[0]
     assert card.selectable and card.users == [(120, False)]
     text = gpu_setup.card_text(card)
-    assert "Note: Also assigned to VM 120 (stopped)." in text
+    assert "Note: Also assigned to stopped VM 120." in text
     assert "Can't use" not in text and text.startswith(">>")
 
 
@@ -64,7 +64,7 @@ def test_mapping_holder_follows_the_same_rule(tmp_path):
 def test_choose_needs_the_explicit_confirm_for_a_stopped_holder(tmp_path):
     s = nvidia_env_host(tmp_path).session()
     issues = s.choose("06:00", 100, "console", ack=True)
-    assert issues and "Also assigned to VM 120 (stopped)" in issues[0] and "Confirm" in issues[0]
+    assert issues and "Also assigned to stopped VM 120" in issues[0] and "Confirm" in issues[0]
     assert s.state["gpu"] is None
     assert s.choose("06:00", 100, "console", ack=True, share_ok=True) == []
 
@@ -73,7 +73,7 @@ def test_walkthrough_with_a_stopped_holder_asks_and_never_says_nothing_can_run(t
     env = nvidia_env_host(tmp_path)
     code, out = run(env, "--gpu", "0000:06:00", "--vm", "100", "--accept-nullmoth-risk")
     assert code == gpu_setup_cli.EXIT_REFUSED and "Nothing here can run macOS graphics" not in out
-    assert "WARN: Also assigned to VM 120 (stopped)" in out and "Nothing was changed" in out
+    assert "WARN: Also assigned to stopped VM 120" in out and "Nothing was changed" in out
     session = env.session()
     code, out = run(env, "--gpu", "0000:06:00", "--vm", "100", "--accept-nullmoth-risk", "--yes", session=session)
     assert "Nothing here can run macOS graphics" not in out and "REFUSED" not in out.split("WARN")[0]
@@ -96,7 +96,7 @@ def test_nothing_here_message_only_when_no_card_is_supported(tmp_path):
 
 def test_attach_commands_use_the_same_rule_and_wording(tmp_path):
     msg = gpu.shared_note(120)
-    assert msg == ("Also assigned to VM 120 (stopped). Only one of them can run at a time; "
+    assert msg == ("Also assigned to stopped VM 120. Only one can run at a time; "
                    "Proxmox refuses to start the second.")
     assert gpu.running_user_issue(120) == "The card is in use by running VM 120."
 
@@ -242,7 +242,7 @@ def test_bash_stopped_holder_is_a_note_and_running_blocks(bash, vm, tmp_path):
     root, env = bash_env(tmp_path, vm.env)
     snippet = 'gpu_scan; for l in "${GPU_CARDS[@]}"; do gpu_card_selectable "$l" && echo SELECTABLE; gpu_card_text "$l"; done'
     out = bash(snippet, env=env).stdout
-    assert "SELECTABLE" in out and "Also assigned to VM 120 (stopped)" in out and "Can't use" not in out
+    assert "SELECTABLE" in out and "Also assigned to stopped VM 120" in out and "Can't use" not in out
     assert "host console" not in out and "The firmware shows its boot screen on this card." in out
     vm(120, "running", HOLDER)
     out = bash(snippet, env=env).stdout
@@ -256,10 +256,10 @@ def test_bash_stopped_holder_needs_the_confirm_and_never_hard_refuses(bash, vm, 
     vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
     root, env = bash_env(tmp_path, vm.env)
     res = bash("gpu_setup --gpu 06:00 --vm 100 --accept-nullmoth-risk", env=env, expect=2)  # no tty, no --yes
-    assert "WARN: Also assigned to VM 120 (stopped)" in res.stdout and "Nothing here can run" not in res.stdout
+    assert "WARN: Also assigned to stopped VM 120" in res.stdout and "Nothing here can run" not in res.stdout
     assert "Nothing was changed" in res.stdout
     res = bash("gpu_setup --yes --gpu 06:00 --vm 100 --accept-nullmoth-risk", env=env, expect=None)
-    assert "Nothing here can run" not in res.stdout and "Also assigned to VM 120 (stopped)" in res.stdout
+    assert "Nothing here can run" not in res.stdout and "Also assigned to stopped VM 120" in res.stdout
 
 
 def test_bash_host_console_follows_the_python_rule(bash, vm, tmp_path):

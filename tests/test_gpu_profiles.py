@@ -248,7 +248,7 @@ def test_amd_attach_refusals(tmp_path, vms, needle):
 
 def test_amd_attach_other_checks(tmp_path):
     stopped_user = amd_prep(tmp_path, vms={100: ("stopped", AMD_CFG), 101: ("stopped", "hostpci0: 06:00,pcie=1\n")})
-    assert stopped_user.ok and any("Also assigned to VM 101 (stopped)" in w for w in stopped_user.warnings)
+    assert stopped_user.ok and any("Also assigned to stopped VM 101" in w for w in stopped_user.warnings)
     same = amd_prep(tmp_path / "s", vms={100: ("stopped", AMD_CFG + "hostpci0: 0000:06:00,pcie=0\n")})
     assert same.ok
     unknown = amd_prep(tmp_path / "u", vms={100: ("stopped", AMD_CFG.replace("macos-sequoia", "vm"))})

@@ -1796,14 +1796,16 @@ function nvidia_attach() {
       GPU_ISSUES+=("hostpci0 is already in use on this VM (${hp0}). Remove it first or run nvidia-detach.")
     fi
     if [ "$gpu_ok" == "yes" ]; then
+      local -a stopped_others=()
       while read -r line; do
         [ -z "$line" ] && continue
         if [ "${line#* }" == "running" ]; then
           GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
         else
-          GPU_WARNS+=("Also assigned to VM ${line%% *} (stopped). Only one of them can run at a time; Proxmox refuses to start the second.")
+          stopped_others+=("${line%% *}")
         fi
       done < <(gpu_users "$vmid" "$bdf")
+      [ ${#stopped_others[@]} -eq 0 ] || GPU_WARNS+=("$(gpu_shared_note "${stopped_others[@]}")")
     fi
   fi
   nullmoth_print_findings
@@ -6064,11 +6066,13 @@ function amd_attach() {
       GPU_ISSUES+=("hostpci0 is already in use on this VM (${hp0}). Remove it first or run gpu-setup --undo.")
     fi
     if [ ${#GPU_ISSUES[@]} -eq 0 ]; then
+      local -a stopped_others=()
       while read -r line; do
         [ -z "$line" ] && continue
         if [ "${line#* }" == "running" ]; then GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
-        else GPU_WARNS+=("Also assigned to VM ${line%% *} (stopped). Only one of them can run at a time; Proxmox refuses to start the second."); fi
+        else stopped_others+=("${line%% *}"); fi
       done < <(gpu_users "$vmid" "$bdf")
+      [ ${#stopped_others[@]} -eq 0 ] || GPU_WARNS+=("$(gpu_shared_note "${stopped_others[@]}")")
     fi
   fi
   nullmoth_print_findings
@@ -6321,11 +6325,13 @@ function igpu_attach() {
       GPU_ISSUES+=("hostpci0 is already in use on this VM (${hp0}). Remove it first or run gpu-setup --undo.")
     fi
     if [ ${#GPU_ISSUES[@]} -eq 0 ]; then
+      local -a stopped_others=()
       while read -r line; do
         [ -z "$line" ] && continue
         if [ "${line#* }" == "running" ]; then GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
-        else GPU_WARNS+=("Also assigned to VM ${line%% *} (stopped). Only one of them can run at a time; Proxmox refuses to start the second."); fi
+        else stopped_others+=("${line%% *}"); fi
       done < <(gpu_users "$vmid" "0000:00:02")
+      [ ${#stopped_others[@]} -eq 0 ] || GPU_WARNS+=("$(gpu_shared_note "${stopped_others[@]}")")
     fi
   fi
   nullmoth_print_findings
@@ -6755,14 +6761,25 @@ function gpu_card_why_not() {
   fi
 }
 
+# One warning for the stopped VMs ($@: ids) that also list a card. Mirrors gpu.shared_note.
+function gpu_shared_note() {
+  if [ $# -eq 1 ]; then
+    echo "Also assigned to stopped VM $1. Only one can run at a time; Proxmox refuses to start the second."
+  else
+    local list="$1"; shift
+    local v; for v in "$@"; do list+=", $v"; done
+    echo "Also assigned to stopped VMs ${list}. Only one can run at a time; Proxmox refuses to start the others."
+  fi
+}
+
 # Warnings shown on a card, one per line. Mirrors GpuCard.notes.
 function gpu_card_notes() {
   local kind boot users console u
   IFS='|' read -r _ _ _ _ kind _ _ boot _ users _ _ console <<<"$1"
   [ "$kind" != "unsupported" ] || return 0
-  for u in ${users//,/ }; do
-    [ "${u#*:}" == "running" ] || echo "Also assigned to VM ${u%%:*} (stopped). Only one of them can run at a time; Proxmox refuses to start the second."
-  done
+  local -a stopped=()
+  for u in ${users//,/ }; do [ "${u#*:}" == "running" ] || stopped+=("${u%%:*}"); done
+  [ ${#stopped[@]} -eq 0 ] || gpu_shared_note "${stopped[@]}"
   if [ "$boot" == "1" ] && [ "$console" != "1" ]; then echo "The firmware shows its boot screen on this card."; fi
 }
 

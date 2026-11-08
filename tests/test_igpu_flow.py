@@ -8,7 +8,7 @@ import pytest
 
 from gpu_fakes import EFI_GRUB, FakeRun, add_card, make_host
 from nullmoth_fakes import FakeQm, add_dev, good_card
-from osx_proxmox_next import gpu_setup, gpu_setup_cli, host_setup, igpu_attach, igpu_engine, intel_host
+from osx_proxmox_next import gpu, gpu_setup, gpu_setup_cli, host_setup, igpu_attach, igpu_engine, intel_host
 from osx_proxmox_next.gpu_setup import Session
 
 REGS = {"setpci -s 00:02.0 C0.L 50.W": (0, "4b800001\n02c1\n"), "efibootmgr -v": (0, EFI_GRUB)}
@@ -264,6 +264,15 @@ def test_only_nvidia_parts_are_judged_by_name():
     assert not gpu_setup.is_laptop_nvidia("amd", "Radeon RX 6800M Mobile")
     assert not gpu_setup.is_laptop_nvidia("nvidia", "GeForce RTX 4090")
     assert not gpu_setup.is_laptop_nvidia("nvidia", "")
+
+
+def test_several_stopped_vms_share_one_note(tmp_path):
+    held = VM + "hostpci0: 0000:00:02.0,legacy-igd=1\n"
+    card = cards(host(tmp_path, igpu="vfio-pci"), vms={7: ("stopped", held), 8: ("stopped", held), 9: ("stopped", held)})["intel"]
+    shared = [n for n in card.notes if n.startswith("Also assigned")]
+    assert shared == ["Also assigned to stopped VMs 7, 8, 9. Only one can run at a time; Proxmox refuses to start the others."]
+    assert gpu.shared_note(7) == "Also assigned to stopped VM 7. Only one can run at a time; Proxmox refuses to start the second."
+    assert gpu.shared_note([7]) == gpu.shared_note(7)
 
 
 def test_the_list_leads_with_the_recommendation(tmp_path):

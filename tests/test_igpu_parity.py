@@ -9,7 +9,7 @@ import pytest
 
 from gpu_fakes import FakeRun, make_host
 from nullmoth_fakes import add_dev
-from osx_proxmox_next import gpu_setup, igpu_attach, igpu_engine
+from osx_proxmox_next import gpu, gpu_setup, igpu_attach, igpu_engine
 from test_gpu_parity import BASH, BLOCK, QM, bash, block_file, vm  # noqa: F401  (fixtures)
 from test_igpu_flow import host as flow_host, session as flow_session
 
@@ -168,6 +168,16 @@ def test_scan_order_status_and_recommendation_match_python(bash, vm, tmp_path, s
     if sh_rec:
         idx = [i for i, ln in enumerate(out) if ln == "RECOMMENDED"][0]
         assert out[idx - 2].split("|")[0][5:] == next(c.bdf for c in py_cards if c.recommended)
+
+
+@pytest.mark.parametrize("ids", [[7], [7, 8], [990, 991, 996]])
+def test_the_shared_note_matches_python(bash, ids):
+    out = bash("gpu_shared_note " + " ".join(map(str, ids))).stdout.strip()
+    assert out == gpu.shared_note(ids)
+    users = ",".join(f"{i}:stopped" for i in ids)
+    card = f"0000:00:02|intel|{0x46A6}|n|intel|h|d|0|vfio-pci|{users}|||0"
+    notes = [ln for ln in bash(f"gpu_card_notes '{card}'").stdout.splitlines() if ln.startswith("Also assigned")]
+    assert notes == [gpu.shared_note(ids)]
 
 
 LAPTOP = "AD107M [GeForce RTX 4060 Max-Q / Mobile]"
