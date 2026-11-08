@@ -214,19 +214,24 @@ def test_fetch_rejects_a_mismatch_and_keeps_nothing(tmp_path, monkeypatch):
 def test_payload_files_carry_the_package_hash():
     assert "@PKG_SHA256@" not in eng.render_payload_file("igpu_firstboot.sh", "ab" * 32)
     assert "ab" * 32 in eng.render_payload_file("igpu_firstboot.sh", "ab" * 32)
-    assert "STAGE_COMMAND" not in eng.STAGE_COMMAND and eng.STAGE_COMMAND == "sh /Volumes/OSXPNIGPU/stage.sh"
+    assert "STAGE_COMMAND" not in eng.STAGE_COMMAND and eng.STAGE_COMMAND.endswith("mount -t msdos /dev/$d /tmp/p && sh /tmp/p/stage.sh") and "OSXPNIGPU" in eng.STAGE_COMMAND
 
 
 class DiskRun:
-    """Stands in for mkfs.vfat, mount and umount; mount drops a folder the engine fills."""
+    """Stands in for sgdisk, losetup, partprobe, mkfs.vfat, mount and umount; mount drops a folder the engine fills."""
 
-    def __init__(self, fail: str = "", result: str = "", umount_fails: bool = False) -> None:
+    def __init__(self, fail: str = "", result: str = "", umount_fails: bool = False, no_partition: bool = False) -> None:
         self.calls, self.fail, self.result, self.umount_fails = [], fail, result, umount_fails
+        self.no_partition = no_partition
 
     def __call__(self, argv, timeout=20):
         self.calls.append(argv)
         if argv[0] == self.fail:
             return 1, "boom"
+        if argv[:2] == ["losetup", "-fP"]:
+            return 0, "/dev/loop9\n"
+        if argv[0] == "test":
+            return (1, "") if self.no_partition else (0, "")
         if argv[0] == "mount" and self.result:
             Path(argv[-1], "result.txt").write_text(self.result)
         if argv[0] == "umount" and self.umount_fails:
@@ -236,6 +241,9 @@ class DiskRun:
                 child.unlink()
         return 0, ""
 
+    def names(self):
+        return [c[0] for c in self.calls]
+
 
 def test_payload_build(tmp_path):
     pkg = tmp_path / "p.pkg"
@@ -243,18 +251,32 @@ def test_payload_build(tmp_path):
     run = DiskRun()
     ok, msg = eng.build_payload(str(pkg), str(tmp_path / "img"), run)
     assert ok and (tmp_path / "img").stat().st_size == eng.PAYLOAD_MB * eng.MB
-    mkfs = run.calls[0]
-    assert mkfs[:5] == ["mkfs.vfat", "-F", "32", "-n", "OSXPNIGPU"]
-    assert int(mkfs[-1]) == (eng.PAYLOAD_MB - eng.MAILBOX_MB) * 1024  # the tail stays outside the file system
-    assert [c[0] for c in run.calls] == ["mkfs.vfat", "mount", "sync", "umount"]
+    sgdisk = [c for c in run.calls if c[0] == "sgdisk"]
+    assert sgdisk[1][:5] == ["sgdisk", "-n", "1:0:0", "-t", "1:0700"]  # GPT with one Microsoft basic data partition
+    mkfs = next(c for c in run.calls if c[0] == "mkfs.vfat")
+    assert mkfs[:5] == ["mkfs.vfat", "-F", "32", "-n", "OSXPNIGPU"] and mkfs[-1] == "/dev/loop9p1"
+    assert run.names() == ["sgdisk", "sgdisk", "losetup", "partprobe", "test", "mkfs.vfat", "mount", "sync", "umount", "losetup"]
+    assert run.calls[-1] == ["losetup", "-d", "/dev/loop9"]
 
 
-@pytest.mark.parametrize("fail,text", [("mkfs.vfat", "mkfs.vfat failed"), ("mount", "could not mount")])
-def test_payload_build_failures(tmp_path, fail, text):
+@pytest.mark.parametrize("fail,text,detached", [("sgdisk", "sgdisk failed", False), ("losetup", "could not attach", False),
+                                                ("mkfs.vfat", "mkfs.vfat failed", True), ("mount", "could not mount", True)])
+def test_payload_build_failures(tmp_path, fail, text, detached):
     pkg = tmp_path / "p.pkg"
     pkg.write_bytes(b"pkg")
-    ok, msg = eng.build_payload(str(pkg), str(tmp_path / "img"), DiskRun(fail))
+    run = DiskRun(fail)
+    ok, msg = eng.build_payload(str(pkg), str(tmp_path / "img"), run)
     assert not ok and text in msg
+    assert (["losetup", "-d", "/dev/loop9"] in run.calls) is detached  # a loop device is never left behind
+
+
+def test_a_partition_that_never_appears_is_an_error(tmp_path):
+    pkg = tmp_path / "p.pkg"
+    pkg.write_bytes(b"pkg")
+    run = DiskRun(no_partition=True)
+    ok, msg = eng.build_payload(str(pkg), str(tmp_path / "img"), run)
+    assert not ok and "never appeared" in msg and run.calls[-1] == ["losetup", "-d", "/dev/loop9"]
+    assert eng.read_result(tmp_path / "i", DiskRun(no_partition=True)) == ""
 
 
 def test_a_busy_mount_is_never_deleted_recursively(tmp_path):
@@ -264,6 +286,7 @@ def test_a_busy_mount_is_never_deleted_recursively(tmp_path):
     ok, _msg = eng.build_payload(str(pkg), str(tmp_path / "img"), run)
     mnt = Path(next(c for c in run.calls if c[0] == "mount")[-1])
     assert ok and (mnt / "WhateverXe-Graphics.pkg").exists()  # still there: nothing removed the files
+    assert ["losetup", "-d", "/dev/loop9"] not in run.calls  # and the loop device still backs the mount
     assert eng.read_result(tmp_path / "i", DiskRun(result="x", umount_fails=True)) == "x"
 
 
@@ -271,6 +294,7 @@ def test_payload_result(tmp_path):
     assert eng.read_result(tmp_path / "i", DiskRun(result="installed\n")) == "installed"
     assert eng.read_result(tmp_path / "i", DiskRun()) == ""
     assert eng.read_result(tmp_path / "i", DiskRun(fail="mount")) == ""
+    assert eng.read_result(tmp_path / "i", DiskRun(fail="losetup")) == ""
 
 
 # ── command line ─────────────────────────────────────────────────────
@@ -309,3 +333,9 @@ def test_main_in_process(tmp_path, monkeypatch, capsys):
     assert eng.main(["x", "payload", "a", "b"]) == 1
     monkeypatch.setattr(eng, "read_result", lambda p: "staged")
     assert eng.main(["x", "result", "img"]) == 0 and "staged" in capsys.readouterr().out
+
+
+def test_every_character_of_the_stage_command_is_typeable():
+    from osx_proxmox_next.unattended import CHARMAP
+    for ch in eng.STAGE_COMMAND:
+        assert ch.islower() or ch.isupper() or ch.isdigit() or ch in CHARMAP, ch

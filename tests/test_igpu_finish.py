@@ -154,7 +154,7 @@ def test_the_whole_finish(env):
     console = Console()
     res, pve, events = go(env, console=console)
     assert res.installed and res.result == "installed" and res.notes == ["a note"]
-    assert console.typed == ["sh /Volumes/OSXPNIGPU/stage.sh"] and console.keys == ["ret"]
+    assert console.typed == [igpu_finish.igpu_engine.STAGE_COMMAND] and console.keys == ["ret"]
     # staging ran with the emulated display, nothing leftover, and the recovery and payload disks are gone again
     assert not any(k.startswith("sata") for k in pve.cfg) and pve.cfg["boot"] == "order=ide0;virtio0"
     assert "args" in pve.cfg and "max-ram-below-4g" not in pve.cfg["args"]

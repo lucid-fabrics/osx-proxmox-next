@@ -69,12 +69,14 @@ PCI_HOLE_MB = 3584
 
 PAYLOAD_LABEL = "OSXPNIGPU"
 PAYLOAD_MB = 160
-MAILBOX_MB = 1
 LAUNCHD_PLIST = "com.osxproxmoxnext.igpu-firstboot.plist"
 # data file name -> name on the payload disk
 PAYLOAD_FILES = (("igpu_stage.sh", "stage.sh"), ("igpu_firstboot.sh", "firstboot.sh"),
                  ("igpu_launchd.plist", LAUNCHD_PLIST))
-STAGE_COMMAND = "sh /Volumes/%s/stage.sh" % PAYLOAD_LABEL
+# Recovery on Sequoia does not mount the payload disk by itself (its FAT driver is loaded on demand by
+# mount -t msdos), Ventura does. So: find the partition by its label, free it, mount it by hand, run the script.
+STAGE_COMMAND = ("d=$(diskutil list | awk '/%s/{print $NF; exit}'); diskutil unmount $d >/dev/null 2>&1; "
+                 "mkdir -p /tmp/p; mount -t msdos /dev/$d /tmp/p && sh /tmp/p/stage.sh" % PAYLOAD_LABEL)
 BOOT_ARGS = ("-allow3d", "-disablegfxfirmware", "-wex-tgl-hold-render-wake")
 GMS_ARG = "0x3"
 
@@ -363,24 +365,54 @@ def render_payload_file(name, pkg_sha256):
     return (data_dir() / name).read_text().replace("@PKG_SHA256@", pkg_sha256)
 
 
-def build_payload(pkg, out, run=default_run):
-    """Build the FAT32 payload disk (graphics package, stage and first-boot scripts, LaunchDaemon).
+def _attach_loop(img, run):
+    """Attach *img* to a loop device with its partitions and return the partition node, or ("", message)."""
+    code, out = run(["losetup", "-fP", "--show", str(img)], 60)
+    loop = out.strip()
+    if code != 0 or not loop:
+        return "", "could not attach the payload image: " + out.strip()
+    part = loop + "p1"
+    for _ in range(10):
+        run(["partprobe", loop], 20)
+        if run(["test", "-b", part], 5)[0] == 0:
+            return loop, part
+    run(["losetup", "-d", loop], 20)
+    return "", "the payload partition never appeared"
 
-    A plain FAT32 volume without a partition table, so macOS recovery mounts it as /Volumes/OSXPNIGPU.
-    The last MAILBOX_MB of the image stay outside the file system. Returns (ok, message)."""
+
+def _release(mnt, loop, run):
+    """Unmount, remove the mount folder and free the loop device. A folder that is still a mount point is left
+    alone: removing it recursively would delete the files of the payload image itself."""
+    code, _msg = run(["umount", mnt], 60)
+    if code == 0:
+        os.rmdir(mnt)
+        run(["losetup", "-d", loop], 20)
+
+
+def build_payload(pkg, out, run=default_run):
+    """Build the payload disk: a GPT disk with one FAT32 partition (graphics package, stage and first-boot
+    scripts, LaunchDaemon). macOS recovery mounts it as /Volumes/OSXPNIGPU; a bare FAT32 volume without a
+    partition table mounted on Ventura but not on Sequoia. Returns (ok, message)."""
     pkg_sha = sha256_file(pkg)
     out = Path(out)
-    size = PAYLOAD_MB * MB
     with open(out, "wb") as f:
-        f.truncate(size)
-    blocks = (size - MAILBOX_MB * MB) // 1024
-    code, msg = run(["mkfs.vfat", "-F", "32", "-n", PAYLOAD_LABEL, str(out), str(blocks)], 120)
+        f.truncate(PAYLOAD_MB * MB)
+    for argv in (["sgdisk", "-Z", str(out)], ["sgdisk", "-n", "1:0:0", "-t", "1:0700", "-c", "1:" + PAYLOAD_LABEL, str(out)]):
+        code, msg = run(argv, 60)
+        if code != 0:
+            return False, "sgdisk failed: " + msg.strip()
+    loop, part = _attach_loop(out, run)
+    if not loop:
+        return False, part
+    code, msg = run(["mkfs.vfat", "-F", "32", "-n", PAYLOAD_LABEL, part], 120)
     if code != 0:
+        run(["losetup", "-d", loop], 20)
         return False, "mkfs.vfat failed: " + msg.strip()
     mnt = tempfile.mkdtemp(prefix="igpu-payload-")
-    code, msg = run(["mount", "-o", "loop", str(out), mnt], 60)
+    code, msg = run(["mount", part, mnt], 60)
     if code != 0:
         os.rmdir(mnt)
+        run(["losetup", "-d", loop], 20)
         return False, "could not mount the payload image: " + msg.strip()
     try:
         shutil.copyfile(pkg, os.path.join(mnt, "WhateverXe-Graphics.pkg"))
@@ -388,29 +420,25 @@ def build_payload(pkg, out, run=default_run):
             (Path(mnt) / name).write_text(render_payload_file(src, pkg_sha))
     finally:
         run(["sync"], 120)
-        _release(mnt, run)
+        _release(mnt, loop, run)
     return True, "payload disk built (%d MB)" % PAYLOAD_MB
 
 
 def read_result(img, run=default_run):
-    """The text the guest left in result.txt on the payload disk, or '' (the VM must be stopped)."""
+    """The text the guest left in result.txt on the payload disk, or '' (the guest must not be writing it)."""
+    loop, part = _attach_loop(img, run)
+    if not loop:
+        return ""
     mnt = tempfile.mkdtemp(prefix="igpu-result-")
-    code, _msg = run(["mount", "-o", "loop,ro", str(img), mnt], 60)
+    code, _msg = run(["mount", "-o", "ro", part, mnt], 60)
     if code != 0:
         os.rmdir(mnt)
+        run(["losetup", "-d", loop], 20)
         return ""
     try:
         return _read(os.path.join(mnt, "result.txt")) or ""
     finally:
-        _release(mnt, run)
-
-
-def _release(mnt, run):
-    """Unmount and remove the mount folder. A folder that is still a mount point is left alone: removing
-    it recursively would delete the files of the payload image itself."""
-    code, _msg = run(["umount", mnt], 60)
-    if code == 0:
-        os.rmdir(mnt)
+        _release(mnt, loop, run)
 
 
 # ── command line (used by the bash installer) ────────────────────────
