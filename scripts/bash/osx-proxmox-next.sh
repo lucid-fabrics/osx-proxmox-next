@@ -5873,6 +5873,8 @@ else
 fi
 
 say "staged OK"
+# flush the copied files first: the host stops the VM as soon as it reads "staged" (the halt below can wedge Tahoe's recovery)
+sync
 echo "staged" >"$SRC/result.txt"
 sync
 /sbin/halt
@@ -6257,11 +6259,12 @@ function igpu_pin() { igpu_engine pins | gpu_json "d['pins']['$1'][$2]"; }
 IGPU_CACHE="${IGPU_CACHE:-/var/lib/vz/template/iso}"
 IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load slows it. macOS Tahoe is experimental: restart it from Proxmox, not from inside macOS."
 IGPU_SETUP_NOTE="Finish Setup Assistant on the monitor or HDMI dummy plug on the host's native HDMI port, or over Screen Sharing. The Proxmox console stays blank: the iGPU is the only display."
-IGPU_TAHOE_STAGE_NOTE="The automatic graphics package setup does not work on macOS Tahoe yet: the staging script often stalls in the recovery Terminal. The VM config was put back as it was. Tahoe is experimental."
+IGPU_TAHOE_STAGE_NOTE="Staging stopped on macOS Tahoe, whose recovery Terminal can be slow to take input. The VM config was put back as it was; run the same command again. Tahoe is experimental."
 IGPU_TAHOE_NOTE="macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs (WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead."
 IGPU_STAGE_TIMEOUT=900
 IGPU_STAGE_ATTEMPTS=3
 IGPU_START_WAIT=60
+IGPU_STAGE_GRACE=20
 IGPU_FIRSTBOOT_TIMEOUT=1500
 IGPU_RESULT_POLL=30
 IGPU_RESULT_GRACE=15
@@ -6525,6 +6528,23 @@ function igpu_staging_started() {
   done
 }
 
+# 0 once the staging script is done: the VM halted, or stage.sh left "staged" or "failed: ..." on the payload disk
+# (its halt can wedge Tahoe's recovery, so the result ends the wait; the VM gets IGPU_STAGE_GRACE seconds to halt
+# first). 1 after $3 seconds without. Mirrors igpu_finish._wait_staged.
+function igpu_wait_staged() {
+  local vmid="$1" ref="$2" timeout="$3" t0 res
+  t0=$(date +%s)
+  while (( $(date +%s) - t0 < timeout )); do
+    qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
+    res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+    case "$res" in
+      staged*|failed:*) igpu_wait_stopped "$vmid" "$IGPU_STAGE_GRACE" || true; return 0 ;;
+    esac
+    sleep 5
+  done
+  return 1
+}
+
 # Boot the staging recovery, run the script from the payload disk, wait for the guest to power off.
 # $1 vmid $2 payload volume $3 macos (Tahoe gets an extra note on failure). Mirrors igpu_finish._stage.
 function igpu_stage() {
@@ -6556,10 +6576,15 @@ function igpu_stage() {
     msg_error "The staging command did not start after ${IGPU_STAGE_ATTEMPTS} tries.${shot:+ The screen at the last try is in ${shot}.}${tahoe_note}"
     return 1
   fi
-  if ! igpu_wait_stopped "$vmid" "$IGPU_STAGE_TIMEOUT"; then
+  if ! igpu_wait_staged "$vmid" "$payload_ref" "$IGPU_STAGE_TIMEOUT"; then
     qm stop "$vmid" >/dev/null 2>&1 || true
     msg_error "The staging script did not finish within $((IGPU_STAGE_TIMEOUT / 60)) minutes.${tahoe_note}"
     return 1
+  fi
+  if ! qm status "$vmid" 2>/dev/null | grep -q 'status: stopped'; then
+    # the script is done but its halt wedged (Tahoe recovery: every vCPU spins in the firmware's shutdown call)
+    qm stop "$vmid" >/dev/null 2>&1 || true
+    igpu_wait_stopped "$vmid" 120 || true
   fi
   path=$(pvesm path "$payload_ref" 2>/dev/null) || return 1
   staged=$(igpu_engine result "$path")
@@ -6597,7 +6622,6 @@ function igpu_finish() {
   nullmoth_print_findings
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
   echo -e "${INFO}${YW}${IGPU_NOTICE}${CL}"
-  [ "$ver" != "tahoe" ] || echo -e "${INFO}${YW}Note: ${IGPU_TAHOE_STAGE_NOTE%% The VM config*}${CL}"
   igpu_fetch_assets "$IGPU_ROM_KEY" || { msg_error "Could not download or verify the iGPU files"; return 1; }
   storage=$(sed -n 's/^\(virtio0\|efidisk0\|ide0\): \([^:,]*\):.*/\2/p' <<<"$cfg" | head -1)
   [ -n "$storage" ] || { msg_error "Could not tell which storage the VM disks are on"; return 1; }

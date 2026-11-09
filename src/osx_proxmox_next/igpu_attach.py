@@ -39,8 +39,8 @@ __all__ = [
 _PYEOF = "IGPU_OC_PY"
 TAHOE_NOTE = ("macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs "
               "(WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead.")
-TAHOE_STAGE_NOTE = ("The automatic graphics package setup does not work on macOS Tahoe yet: the staging script often "
-                    "stalls in the recovery Terminal. The VM config was put back as it was. Tahoe is experimental.")
+TAHOE_STAGE_NOTE = ("Staging stopped on macOS Tahoe, whose recovery Terminal can be slow to take input. "
+                    "The VM config was put back as it was; run the same command again. Tahoe is experimental.")
 SETUP_ASSISTANT_NOTE = ("Finish Setup Assistant on the monitor or HDMI dummy plug on the host's native HDMI port, or over "
                         "Screen Sharing. The Proxmox console stays blank: the iGPU is the only display.")
 IGPU_NEXT_STEPS = (

@@ -296,18 +296,37 @@ def test_staging_failures_clean_up_and_say_why(env):
     assert not (env.tmp / "igpu-payload-9.img").exists()
 
 
-def test_staging_that_never_halts_is_stopped_and_refused(env):
+def reads(monkeypatch, seq, rest="installed"):
+    items = iter(seq)
+    monkeypatch.setattr(igpu_finish.igpu_engine, "read_result", lambda path: next(items, rest))
+
+
+def test_staging_that_never_halts_is_stopped_and_refused(env, monkeypatch):
+    reads(monkeypatch, [], rest="started")  # the script began but never reported a result and never halted
     with pytest.raises(igpu_finish.FinishError, match="did not finish"):
         go(env, pve=Pve(halts=(10**6,)))
 
 
-def reads(monkeypatch, seq):
-    items = iter(seq)
-    monkeypatch.setattr(igpu_finish.igpu_engine, "read_result", lambda path: next(items, "installed"))
+def test_staging_whose_halt_wedges_is_stopped_by_the_host_once_the_result_is_in(env, monkeypatch):
+    """Tahoe recovery: stage.sh wrote "staged" and synced, then its halt wedged (every vCPU spins, the VM never stops)."""
+    reads(monkeypatch, ["started", "staged", "staged", "installed"])
+    clock = Clock()
+    pve = Pve(halts=(10**6, 1))
+    res = igpu_finish.finish(9, console=Console(), pve=pve, iso_dir=env.tmp, on_event=lambda m: None, clock=clock.monotonic,
+                             sleep=clock.sleep, work_dir=env.tmp, macos="tahoe")
+    assert res.installed
+    assert ("stop", "9") in pve.calls  # the host stopped the wedged recovery itself
+    assert clock.now < igpu_finish.STAGE_TIMEOUT  # and did not sit out the 15 minute timeout
+
+
+def test_a_staging_failure_reported_by_a_wedged_halt_is_still_reported(env, monkeypatch):
+    reads(monkeypatch, ["started", "failed: cannot copy the package", "failed: cannot copy the package"])
+    with pytest.raises(igpu_finish.FinishError, match="Staging failed: failed: cannot copy"):
+        go(env, pve=Pve(halts=(10**6,)))
 
 
 def test_a_dropped_key_retypes_the_command_until_the_script_starts(env, monkeypatch):
-    reads(monkeypatch, [""] * 13 + ["started", "staged", "installed"])
+    reads(monkeypatch, [""] * 13 + ["started", "staged", "staged", "installed"])
     console = Console()
     res, _pve, events = go(env, pve=Pve(halts=(40, 1)), console=console)
     assert res.installed and console.typed == [igpu_finish.igpu_engine.STAGE_COMMAND] * 2
@@ -337,7 +356,8 @@ def test_the_start_wait_includes_the_time_the_typing_took(env, monkeypatch):
     assert waits == [igpu_finish.START_WAIT + len(igpu_finish.igpu_engine.STAGE_COMMAND) * 1.5]
 
 
-def test_a_tahoe_staging_failure_says_so_and_puts_the_vm_back(env):
+def test_a_tahoe_staging_failure_says_to_run_again_and_puts_the_vm_back(env, monkeypatch):
+    reads(monkeypatch, [], rest="started")
     pve = Pve(halts=(10**6,))
     events: list[str] = []
     clock = Clock()
@@ -345,7 +365,8 @@ def test_a_tahoe_staging_failure_says_so_and_puts_the_vm_back(env):
         igpu_finish.finish(9, console=Console(), pve=pve, iso_dir=env.tmp, on_event=events.append, clock=clock.monotonic,
                            sleep=clock.sleep, work_dir=env.tmp, macos="tahoe")
     assert igpu_attach.TAHOE_STAGE_NOTE in str(err.value) and "did not finish" in str(err.value)
-    assert any(e.startswith("Note: The automatic graphics package setup does not work on macOS Tahoe") for e in events)
+    # Tahoe is not announced as unsupported up front: the staging works there, so only a failure says anything
+    assert not any("does not work on macOS Tahoe" in e for e in events) and "run the same command again" in str(err.value)
     # nothing the staging added is left behind
     assert not any(k.startswith("sata") for k in pve.cfg) and pve.cfg["vga"] == CFG["vga"] and pve.cfg["args"] == CFG["args"]
     assert pve.status == "stopped"
