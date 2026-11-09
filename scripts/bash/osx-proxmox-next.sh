@@ -6178,6 +6178,7 @@ function igpu_pin() { igpu_engine pins | gpu_json "d['pins']['$1'][$2]"; }
 
 IGPU_CACHE="${IGPU_CACHE:-/var/lib/vz/template/iso}"
 IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load slows it. macOS Tahoe is experimental: restart it from Proxmox, not from inside macOS."
+IGPU_SETUP_NOTE="Finish Setup Assistant on the monitor or HDMI dummy plug on the host's native HDMI port, or over Screen Sharing. The Proxmox console stays blank: the iGPU is the only display."
 IGPU_TAHOE_STAGE_NOTE="The automatic graphics package setup does not work on macOS Tahoe yet: the staging script often stalls in the recovery Terminal. The VM config was put back as it was. Tahoe is experimental."
 IGPU_TAHOE_NOTE="macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs (WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead."
 IGPU_STAGE_TIMEOUT=900
@@ -8586,7 +8587,11 @@ if [ "${UNATTENDED:-no}" == "yes" ] && [ "$START_VM" == "yes" ]; then
   if unattended_install "$VMID" "$DISK_GB_NUM" "$IGPU_SLOT"; then
     UNATTENDED_DONE=yes
     [ "${IGPU:-no}" != "yes" ] || igpu_after_install "$VMID" "$MACOS_VER"
-    echo -e "\n${INFO}${GN}Unattended install complete. Finish Setup Assistant in the VM console.${CL}"
+    if [ "${IGPU:-no}" == "yes" ]; then
+      echo -e "\n${INFO}${GN}Unattended install complete. ${IGPU_SETUP_NOTE}${CL}"
+    else
+      echo -e "\n${INFO}${GN}Unattended install complete. Finish Setup Assistant in the VM console.${CL}"
+    fi
   else
     SHOT=$(unattended_save_frame "$VMID") && \
       echo -e "\n${INFO}${YW}The console at that moment was saved to ${SHOT}.${CL}"

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from osx_proxmox_next import cli, igpu_cli, igpu_engine, igpu_finish, oc_builder
+from osx_proxmox_next import cli, igpu_attach, igpu_cli, igpu_engine, igpu_finish, oc_builder
 from osx_proxmox_next.domain import PlanStep
 from osx_proxmox_next.executor import ApplyResult, StepResult
 from osx_proxmox_next.unattended import UnattendedError
@@ -133,7 +133,10 @@ def test_install_happy_path(install, capsys):
     assert install.applied[-4:] == ["Note the macOS release in the VM description", "Use the i440fx machine type", "Move the recovery disk to sata1 (i440fx has no macOS driver for IDE)",
                                     "Set FadtEnableReset in OpenCore (restarts hang without it)"]
     assert install.slot == "sata1" and ("start", "996") in install.pve.calls and ("stop", "996") in install.pve.calls
-    assert "Metal acceleration" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Metal acceleration" in out
+    # vga is none, so the Proxmox console is blank: Setup Assistant is finished on the host's monitor, never "in the console"
+    assert out.rstrip().endswith(igpu_attach.SETUP_ASSISTANT_NOTE) and "Finish Setup Assistant in the VM console" not in out
 
 
 def test_install_asks_unless_yes(install, monkeypatch, capsys):

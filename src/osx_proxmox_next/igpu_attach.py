@@ -27,6 +27,7 @@ from .services import fetch_vm_info, get_proxmox_adapter
 
 __all__ = [
     "IGPU_NEXT_STEPS",
+    "SETUP_ASSISTANT_NOTE",
     "TAHOE_NOTE",
     "TAHOE_STAGE_NOTE",
     "build_attach_steps",
@@ -40,6 +41,8 @@ TAHOE_NOTE = ("macOS Tahoe 26 is experimental with the iGPU: every restart and s
               "(WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead.")
 TAHOE_STAGE_NOTE = ("The automatic graphics package setup does not work on macOS Tahoe yet: the staging script often "
                     "stalls in the recovery Terminal. The VM config was put back as it was. Tahoe is experimental.")
+SETUP_ASSISTANT_NOTE = ("Finish Setup Assistant on the monitor or HDMI dummy plug on the host's native HDMI port, or over "
+                        "Screen Sharing. The Proxmox console stays blank: the iGPU is the only display.")
 IGPU_NEXT_STEPS = (
     "Plug a monitor, or an HDMI dummy plug, into the host's native HDMI port (not an LSPCON HDMI or USB-C port) "
     "and start the VM. The OpenCore picker and the macOS desktop appear on that screen.",

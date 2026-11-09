@@ -261,6 +261,13 @@ def test_the_bash_stage_gives_up_after_three_tries(bash, tmp_path):
     assert any("did not start after 3 tries" in ln for ln in out)
 
 
+def test_the_bash_install_tells_igpu_users_to_use_the_monitor():
+    tail = BASH[BASH.index("unattended_install \"$VMID\" \"$DISK_GB_NUM\" \"$IGPU_SLOT\""):]
+    tail = tail[:tail.index("else\n    SHOT=")]
+    assert 'if [ "${IGPU:-no}" == "yes" ]; then' in tail and "${IGPU_SETUP_NOTE}" in tail
+    assert tail.index("${IGPU_SETUP_NOTE}") < tail.index("Finish Setup Assistant in the VM console")
+
+
 LAPTOP = "AD107M [GeForce RTX 4060 Max-Q / Mobile]"
 DESKTOP = "AD107 [GeForce RTX 4060]"
 
@@ -321,6 +328,7 @@ def test_the_bash_choice_asks_and_can_switch(bash, vm, tmp_path):
 
 
 def test_the_first_boot_text_and_notice_match_python():
+    assert igpu_attach.SETUP_ASSISTANT_NOTE == re.search(r'^IGPU_SETUP_NOTE="(.*)"$', BLOCK, re.M).group(1).replace("\\'", "'")
     assert igpu_attach.TAHOE_STAGE_NOTE == re.search(r'^IGPU_TAHOE_STAGE_NOTE="(.*)"$', BLOCK, re.M).group(1)
     assert igpu_attach.TAHOE_NOTE == re.search(r'^IGPU_TAHOE_NOTE="(.*)"$', BLOCK, re.M).group(1)
     for line in igpu_attach.IGPU_NEXT_STEPS:
