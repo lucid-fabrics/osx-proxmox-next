@@ -473,7 +473,11 @@ def read_bar_registers(path, offsets=None):
 def parse_accel(regs):
     """(active, detail) from register values. The GPU counts as in use when either ring tail is non-zero."""
     detail = ", ".join("%s=%#x" % (k, regs.get(k, 0)) for k in ACCEL_REGS)
-    return bool(regs.get("BCS_TAIL", 0) or regs.get("RCS_TAIL", 0)), detail
+    # a powered-down or reset device reads all ones from BAR0: that is no GPU work
+    tails = [regs.get(k, 0) for k in ("BCS_TAIL", "RCS_TAIL")]
+    if all(v == 0xFFFFFFFF for v in regs.values()) and regs:
+        return False, detail + " (the iGPU is not responding)"
+    return any(v not in (0, 0xFFFFFFFF) for v in tails), detail
 
 
 def wait_accel(read, timeout=ACCEL_TIMEOUT, poll=ACCEL_POLL, clock=None, sleep=None):

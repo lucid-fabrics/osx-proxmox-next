@@ -369,6 +369,9 @@ def test_parse_accel_needs_a_ring_tail():
     assert eng.parse_accel({"RCS_TAIL": 8})[0]
     assert not eng.parse_accel({"BCS_TAIL": 0, "RCS_TAIL": 0, "PLANE_SURF_1_A": 0x1000})[0]
     assert not eng.parse_accel({})[0]
+    off, why = eng.parse_accel({"BCS_TAIL": 0xFFFFFFFF, "RCS_TAIL": 0xFFFFFFFF, "PLANE_SURF_1_A": 0xFFFFFFFF})
+    assert not off and "not responding" in why  # a stopped VM leaves the device reading all ones
+    assert not eng.parse_accel({"BCS_TAIL": 0xFFFFFFFF, "RCS_TAIL": 0})[0]
 
 
 def test_read_bar_registers_reads_the_bar_file(tmp_path):
