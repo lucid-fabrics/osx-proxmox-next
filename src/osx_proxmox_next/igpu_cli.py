@@ -13,6 +13,8 @@ from .defaults import DEFAULT_ISO_DIR
 from .domain import MAX_VMID, MIN_VMID, SUPPORTED_MACOS
 from .intel_host import check_intel_gpu
 
+TROUBLESHOOTING_URL = "https://github.com/lucid-fabrics/osx-proxmox-next/blob/main/docs/docs/guides/intel-igpu-passthrough.md"
+
 __all__ = ["add_parsers", "dispatch", "run_check", "run_finish", "run_install"]
 
 DOCS = "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/intel-igpu-passthrough"
@@ -77,10 +79,16 @@ def _on_event(message: str) -> None:
 def _report_finish(vmid: int, result: igpu_finish.FinishResult) -> int:
     for note in result.notes:
         print(f"NOTE: {note}")
-    if result.installed:
-        print(f"Done. VM {vmid} has Metal acceleration. Plug a monitor or an HDMI dummy plug into the host's "
-              "native HDMI port: the macOS screen appears there, the Proxmox console stays blank.")
+    if result.installed and result.accelerated:
+        print(f"Done. VM {vmid}: Metal acceleration is active ({result.accel_detail}). Plug a monitor or an HDMI "
+              "dummy plug into the host's native HDMI port: the macOS screen appears there, the Proxmox console "
+              "stays blank.")
         return 0
+    if result.installed:
+        print(f"The graphics package is installed in VM {vmid}, but acceleration was not confirmed: the host saw "
+              f"no GPU work after the final boot ({result.accel_detail}).")
+        print(f"See the troubleshooting section of {TROUBLESHOOTING_URL}")
+        return 1
     print(f"The graphics package is not installed yet: {result.result or 'the guest reported nothing'}.")
     print("The VM is usable without acceleration. The package is tried again on the next boot (three tries at most).")
     return 1

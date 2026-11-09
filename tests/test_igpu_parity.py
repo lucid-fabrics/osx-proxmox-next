@@ -340,3 +340,45 @@ def test_the_first_boot_text_and_notice_match_python():
         key = {"STAGE_TIMEOUT": "IGPU_STAGE_TIMEOUT", "FIRSTBOOT_TIMEOUT": "IGPU_FIRSTBOOT_TIMEOUT",
                "RESULT_POLL": "IGPU_RESULT_POLL", "RESULT_GRACE": "IGPU_RESULT_GRACE"}[name]
         assert int(re.search(rf"^{key}=(\d+)$", BLOCK, re.M).group(1)) == getattr(igpu_finish, name)
+
+
+def _bar0(tmp_path: Path, **regs: int) -> Path:
+    import struct
+    sysfs = tmp_path / "sysfs"
+    dev = sysfs / "bus/pci/devices" / igpu_engine.IGD_BDF
+    dev.mkdir(parents=True)
+    buf = bytearray(0x80000)
+    for name, value in regs.items():
+        struct.pack_into("<I", buf, igpu_engine.ACCEL_REGS[name], value)
+    (dev / "resource0").write_bytes(bytes(buf))
+    return sysfs
+
+
+def test_the_accel_check_text_and_timeout_match_python():
+    from osx_proxmox_next import igpu_cli
+    assert int(re.search(r"^IGPU_ACCEL_TIMEOUT=(\d+)$", BLOCK, re.M).group(1)) == igpu_engine.ACCEL_TIMEOUT
+    assert igpu_cli.TROUBLESHOOTING_URL == re.search(r'^IGPU_TROUBLESHOOTING_URL="(.*)"$', BLOCK, re.M).group(1)
+    assert 'igpu_confirm_accel "$vmid"' in BLOCK
+
+
+@pytest.mark.parametrize("regs,ok", [({"RCS_TAIL": 0x1c8, "BCS_TAIL": 0x40, "PLANE_SURF_1_A": 0x2000}, True),
+                                     ({"PLANE_SURF_1_A": 0x2000}, False)])
+def test_bash_and_python_agree_on_whether_acceleration_is_confirmed(bash, tmp_path, capsys, regs, ok):
+    from osx_proxmox_next import igpu_cli, igpu_finish
+    sysfs = _bar0(tmp_path, **regs)
+    env = {"GPU_SYSFS": str(sysfs)}
+    res = bash("IGPU_ACCEL_TIMEOUT=0; igpu_confirm_accel 996", env=env, expect=0 if ok else 1)
+    active, detail = igpu_engine.check_accel(0, str(sysfs))
+    assert active == ok
+    py = igpu_finish.FinishResult("installed", True, [], active, detail)
+    assert igpu_cli._report_finish(996, py) == (0 if ok else 1)
+    py_out = capsys.readouterr().out
+    marker = "Metal acceleration is active" if ok else "acceleration was not confirmed"
+    assert marker in res.stdout and marker in py_out
+    assert f"({detail})" in res.stdout and f"({detail})" in py_out
+    assert ok or igpu_cli.TROUBLESHOOTING_URL in res.stdout
+
+
+def test_a_missing_bar_is_not_confirmed(bash, tmp_path):
+    res = bash("IGPU_ACCEL_TIMEOUT=0; igpu_confirm_accel 996", env={"GPU_SYSFS": str(tmp_path)}, expect=1)
+    assert "acceleration was not confirmed" in res.stdout and "cannot read the iGPU registers" in res.stdout

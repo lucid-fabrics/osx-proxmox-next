@@ -62,6 +62,8 @@ class FinishResult:
     result: str = ""           # what the guest reported: installed, not installed: ..., failed: ...
     installed: bool = False
     notes: list[str] = field(default_factory=list)
+    accelerated: bool = False  # the host saw the guest use the GPU after the final boot
+    accel_detail: str = ""
 
 
 def _storage_of(cfg: dict[str, str]) -> str:
@@ -258,6 +260,9 @@ def finish(
     pve.qm("start", str(vmid))
     on_event("Started the VM again" if result.installed else
              "Started the VM again; the graphics package is not installed (see the result above)")
+    if result.installed:
+        on_event(f"Checking from the host that macOS uses the iGPU (up to {igpu_engine.ACCEL_TIMEOUT // 60} minutes)")
+        result.accelerated, result.accel_detail = igpu_engine.check_accel(clock=clock, sleep=sleep)
     return result
 
 

@@ -13,6 +13,18 @@ from osx_proxmox_next.infrastructure import CommandResult
 from osx_proxmox_next.nullmoth import AttachPlan
 from osx_proxmox_next.unattended import UnattendedError
 
+@pytest.fixture(autouse=True)
+def accel(monkeypatch):
+    """The host-side acceleration check reads the real iGPU registers: scripted here."""
+    state = SimpleNamespace(answer=(True, "RCS_TAIL=0x1"), calls=0)
+
+    def check(**kw):
+        state.calls += 1
+        return state.answer
+    monkeypatch.setattr(igpu_finish.igpu_engine, "check_accel", check)
+    return state
+
+
 CFG = {
     "name": "macos-sequoia", "machine": "pc", "vga": "std",
     "args": '-device isa-applesmc,osk="x" -smbios type=2 -machine max-ram-below-4g=2G',
@@ -163,7 +175,20 @@ def test_the_whole_finish(env):
                                            "Show every volume in the OpenCore picker again",
                                            "Note in OpenCore that the graphics package is installed"]
     assert not (env.tmp / "igpu-payload-9.img").exists()
-    assert any("First boot" in e for e in events) and events[-1] == "Started the VM again"
+    assert any("First boot" in e for e in events) and "Started the VM again" in events
+    assert res.accelerated and res.accel_detail == "RCS_TAIL=0x1" and "uses the iGPU" in events[-1]
+
+
+def test_an_installed_package_without_gpu_work_is_not_called_accelerated(env, accel):
+    accel.answer = (False, "BCS_TAIL=0x0, RCS_TAIL=0x0")
+    res, pve, events = go(env)
+    assert res.installed and not res.accelerated and res.accel_detail.startswith("BCS_TAIL=0x0")
+
+
+def test_the_check_is_skipped_when_nothing_was_installed(env, accel):
+    env.results = deque(["staged", "not installed: WhateverXe not loaded (try 1 of 3)"])
+    res, pve, events = go(env)
+    assert not res.installed and not res.accelerated and accel.calls == 0
 
 
 def test_a_failed_mark_is_reported(env):

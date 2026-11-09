@@ -5355,6 +5355,73 @@ def read_result(img, run=default_run):
         _release(mnt, loop, run)
 
 
+# ── acceleration check (host side) ───────────────────────────────────
+
+# Gen12 registers in BAR0 that a guest with working acceleration leaves non-zero: the blitter and render
+# ring tails (a ring nobody submitted to stays at 0) and the first plane's surface address (display on).
+ACCEL_REGS = {"BCS_TAIL": 0x22030, "RCS_TAIL": 0x2030, "PLANE_SURF_1_A": 0x7019C}
+ACCEL_TIMEOUT = 300
+ACCEL_POLL = 10
+BAR0_SIZE = 16 << 20
+
+
+def read_bar_registers(path, offsets=None):
+    """Read the registers (name -> 32-bit value) from the BAR0 file at *path*, read-only."""
+    import mmap
+    import struct
+    offsets = offsets or ACCEL_REGS
+    fd = os.open(path, os.O_RDONLY | os.O_SYNC)
+    try:
+        size = min(os.fstat(fd).st_size or BAR0_SIZE, BAR0_SIZE)
+        m = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
+        try:
+            return {k: struct.unpack_from("<I", m, o)[0] for k, o in offsets.items()}
+        finally:
+            m.close()
+    finally:
+        os.close(fd)
+
+
+def parse_accel(regs):
+    """(active, detail) from register values. The GPU counts as in use when either ring tail is non-zero."""
+    detail = ", ".join("%s=%#x" % (k, regs.get(k, 0)) for k in ACCEL_REGS)
+    # a powered-down or reset device reads all ones from BAR0: that is no GPU work
+    tails = [regs.get(k, 0) for k in ("BCS_TAIL", "RCS_TAIL")]
+    if all(v == 0xFFFFFFFF for v in regs.values()) and regs:
+        return False, detail + " (the iGPU is not responding)"
+    return any(v not in (0, 0xFFFFFFFF) for v in tails), detail
+
+
+def wait_accel(read, timeout=ACCEL_TIMEOUT, poll=ACCEL_POLL, clock=None, sleep=None):
+    """Poll *read* (a callable returning register values) until the GPU shows work or *timeout* seconds pass.
+    Returns (active, detail of the last look)."""
+    import time
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    deadline = clock() + timeout
+    detail = "no reading"
+    while True:
+        try:
+            active, detail = parse_accel(read())
+        except OSError as exc:
+            active, detail = False, "cannot read the iGPU registers: %s" % exc
+        if active:
+            return True, detail
+        if clock() >= deadline:
+            return False, detail
+        sleep(poll)
+
+
+def bar0_path(root=None):
+    return os.path.join(root or os.environ.get("GPU_SYSFS", "/sys"), "bus/pci/devices", IGD_BDF, "resource0")
+
+
+def check_accel(timeout=ACCEL_TIMEOUT, root=None, clock=None, sleep=None):
+    """Wait for the running guest to use the iGPU. Returns (active, detail)."""
+    path = bar0_path(root)
+    return wait_accel(lambda: read_bar_registers(path), timeout, ACCEL_POLL, clock, sleep)
+
+
 # ── command line (used by the bash installer) ────────────────────────
 
 def _emit(obj):
@@ -5363,7 +5430,7 @@ def _emit(obj):
 
 def _usage():
     sys.stderr.write("usage: igpu_engine.py check|verdict <id>|lookup <id>|settings <mb> <rom>|merge-args|strip-args|"
-                     "fetch <rom:KEY|pin:NAME> <dir>|payload <pkg> <img>|result <img>|stage-command|pins\n")
+                     "fetch <rom:KEY|pin:NAME> <dir>|payload <pkg> <img>|result <img>|accel-check [seconds]|stage-command|pins\n")
     return 64
 
 
@@ -5407,6 +5474,10 @@ def main(argv):
     if cmd == "result" and len(argv) == 3:
         sys.stdout.write(read_result(argv[2]) + "\n")
         return 0
+    if cmd == "accel-check" and len(argv) in (2, 3):
+        active, detail = check_accel(int(argv[2]) if len(argv) == 3 else ACCEL_TIMEOUT)
+        sys.stdout.write(("active" if active else "inactive") + ": " + detail + "\n")
+        return 0 if active else 1
     if cmd == "stage-command":
         sys.stdout.write(STAGE_COMMAND + "\n")
         return 0
@@ -6194,6 +6265,9 @@ IGPU_START_WAIT=60
 IGPU_FIRSTBOOT_TIMEOUT=1500
 IGPU_RESULT_POLL=30
 IGPU_RESULT_GRACE=15
+IGPU_ACCEL_TIMEOUT=300
+IGPU_TROUBLESHOOTING_URL="https://github.com/lucid-fabrics/osx-proxmox-next/blob/main/docs/docs/guides/intel-igpu-passthrough.md"
+IGPU_PKG_INSTALLED=no  # set by igpu_finish: the package is in, whether or not acceleration was confirmed
 
 # 0 when the host is ready for the iGPU (nothing printed). Used by the create-a-VM menu.
 function igpu_ready_quiet() {
@@ -6493,6 +6567,21 @@ function igpu_stage() {
   msg_ok "Staged the graphics package"
 }
 
+# After the final boot: look from the host at the iGPU's ring tails (igpu_engine accel-check) and only then say
+# acceleration is active. rc 1 when the package is in but no GPU work was seen. Mirrors igpu_cli._report_finish.
+function igpu_confirm_accel() {
+  local vmid="$1" out="" detail
+  msg_info "Checking from the host that macOS uses the iGPU (up to $((IGPU_ACCEL_TIMEOUT / 60)) minutes)"
+  if out=$(igpu_engine accel-check "$IGPU_ACCEL_TIMEOUT" 2>/dev/null); then
+    msg_ok "Done. VM $vmid: Metal acceleration is active (${out#active: }). Plug a monitor or an HDMI dummy plug into the host's native HDMI port: the macOS screen appears there, the Proxmox console stays blank."
+    return 0
+  fi
+  detail="${out#inactive: }"
+  echo -e "${INFO}${YW}The graphics package is installed in VM $vmid, but acceleration was not confirmed: the host saw no GPU work after the final boot (${detail:-no reading}).${CL}"
+  echo -e "${INFO}${YW}See the troubleshooting section of ${IGPU_TROUBLESHOOTING_URL}${CL}"
+  return 1
+}
+
 # Stage the graphics package, attach the iGPU and run the first boot. $1 vmid, $2 macos (optional).
 # The VM must be stopped, installed and i440fx. Mirrors igpu_finish.finish.
 function igpu_finish() {
@@ -6555,9 +6644,11 @@ function igpu_finish() {
     igpu_oc_patch "$vmid" mark || echo -e "${INFO}${YW}Could not note the installed package on the OpenCore disk: gpu-setup --undo would remove WhateverXe, which the installed package needs.${CL}"
   fi
   qm start "$vmid" >/dev/null 2>&1 || true
+  IGPU_PKG_INSTALLED=no
   if [ "$result" == "installed" ]; then
-    msg_ok "Done. VM $vmid has Metal acceleration. Plug a monitor or an HDMI dummy plug into the host's native HDMI port: the macOS screen appears there, the Proxmox console stays blank."
-    return 0
+    IGPU_PKG_INSTALLED=yes
+    igpu_confirm_accel "$vmid"
+    return $?
   fi
   echo -e "${INFO}${YW}The graphics package is not installed yet: ${result:-the guest reported nothing}. The VM is usable without acceleration and tries again on its next boot (three tries at most).${CL}"
   return 1
@@ -6569,7 +6660,9 @@ function igpu_after_install() {
   qm stop "$vmid" >/dev/null 2>&1 || true
   unattended_wait_stopped "$vmid" || true
   msg_info "macOS is installed. Setting up the iGPU"
-  igpu_finish "$vmid" "$ver" || echo -e "\n${INFO}${YW}The iGPU setup did not finish. Run: osx-proxmox-next.sh igpu-finish ${vmid} ${ver}${CL}"
+  if ! igpu_finish "$vmid" "$ver" && [ "$IGPU_PKG_INSTALLED" != yes ]; then
+    echo -e "\n${INFO}${YW}The iGPU setup did not finish. Run: osx-proxmox-next.sh igpu-finish ${vmid} ${ver}${CL}"
+  fi
 }
 
 # Delete an imported volume that was never attached (a failed finish). $1 vmid $2 volume id
@@ -7440,7 +7533,7 @@ function gpu_step_vm() {
     nvidia_attach "$vmid" "$bdf" --accept-nullmoth-risk --guest-confirmed || return 1
   elif [ "$vendor" == "intel" ]; then
     gpu_say "Before the attach, the VM boots macOS recovery once to put the graphics package inside macOS, so the first boot with the iGPU installs it by itself. This takes about 15 minutes."
-    igpu_finish "$vmid" || gpu_say "The graphics package is not installed yet; see above."
+    igpu_finish "$vmid" || { [ "$IGPU_PKG_INSTALLED" == yes ] || gpu_say "The graphics package is not installed yet; see above."; }
   else
     amd_attach "$vmid" "$bdf" --display "$display" "${flags[@]}" || return 1
   fi
