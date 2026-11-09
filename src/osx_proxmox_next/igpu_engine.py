@@ -76,7 +76,8 @@ PAYLOAD_FILES = (("igpu_stage.sh", "stage.sh"), ("igpu_firstboot.sh", "firstboot
 # Recovery on Sequoia does not mount the payload disk by itself (its FAT driver is loaded on demand by
 # mount -t msdos), Ventura does. So: find the partition by its label, free it, mount it by hand, run the script.
 # Typed key by key into Tahoe's slow recovery Terminal, so it stays as short as it can: all the logic is in stage.sh.
-STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /p;mount -t msdos /dev/$d /p&&sh /p/stage.sh"
+# The mount point is under /tmp: the recovery root volume is read-only, so `mkdir /p` fails and nothing runs.
+STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /tmp/p;mount -t msdos /dev/$d /tmp/p&&sh /tmp/p/stage.sh"
                  % PAYLOAD_LABEL)
 BOOT_ARGS = ("-allow3d", "-disablegfxfirmware", "-wex-tgl-hold-render-wake")
 GMS_ARG = "0x3"

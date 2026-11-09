@@ -307,6 +307,8 @@ def _stage(vmid: int, pve: ProxmoxAdapter, console: QmConsole, payload_ref: str,
         console.sendkey("ret")
         if _staging_started(pve, vmid, payload_ref, START_WAIT + typing, clock, sleep):
             break
+        # keep what the Terminal showed: a garbled or failed command is read from this, not guessed
+        shot = console.save_frame(f"/tmp/osx-next-igpu-stage-{vmid}-try{attempt}.png") if hasattr(console, "save_frame") else ""
         if attempt < STAGE_ATTEMPTS:
             on_event("The staging command did not start (a key was probably dropped); typing it again")
             console.sendkey("ctrl-c")
@@ -314,7 +316,8 @@ def _stage(vmid: int, pve: ProxmoxAdapter, console: QmConsole, payload_ref: str,
     else:
         pve.qm("stop", str(vmid))
         wait_stopped(pve, vmid, 120, clock, sleep)
-        raise FinishError(f"The staging command did not start after {STAGE_ATTEMPTS} tries: the recovery Terminal drops keys.")
+        raise FinishError(f"The staging command did not start after {STAGE_ATTEMPTS} tries."
+                          + (f" The screen at the last try is in {shot}." if shot else ""))
     if not wait_stopped(pve, vmid, STAGE_TIMEOUT, clock, sleep):
         pve.qm("stop", str(vmid))
         wait_stopped(pve, vmid, 120, clock, sleep)

@@ -4981,7 +4981,8 @@ PAYLOAD_FILES = (("igpu_stage.sh", "stage.sh"), ("igpu_firstboot.sh", "firstboot
 # Recovery on Sequoia does not mount the payload disk by itself (its FAT driver is loaded on demand by
 # mount -t msdos), Ventura does. So: find the partition by its label, free it, mount it by hand, run the script.
 # Typed key by key into Tahoe's slow recovery Terminal, so it stays as short as it can: all the logic is in stage.sh.
-STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /p;mount -t msdos /dev/$d /p&&sh /p/stage.sh"
+# The mount point is under /tmp: the recovery root volume is read-only, so `mkdir /p` fails and nothing runs.
+STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /tmp/p;mount -t msdos /dev/$d /tmp/p&&sh /tmp/p/stage.sh"
                  % PAYLOAD_LABEL)
 BOOT_ARGS = ("-allow3d", "-disablegfxfirmware", "-wex-tgl-hold-render-wake")
 GMS_ARG = "0x3"
@@ -6449,7 +6450,7 @@ function igpu_stage() {
   qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }
   unattended_open_recovery_terminal "$vmid" || return 1
   msg_info "Staging the graphics package inside macOS (offline)"
-  local attempt began typing started=no
+  local attempt began typing started=no shot=""
   for ((attempt = 1; attempt <= IGPU_STAGE_ATTEMPTS; attempt++)); do
     began=$(date +%s)
     unattended_type "$vmid" "$(igpu_engine stage-command)"
@@ -6457,6 +6458,8 @@ function igpu_stage() {
     sleep 1
     qm sendkey "$vmid" ret >/dev/null 2>&1
     if igpu_staging_started "$vmid" "$payload_ref" $((IGPU_START_WAIT + typing)); then started=yes; break; fi
+    shot="/tmp/osx-next-igpu-stage-$vmid-try$attempt.ppm"  # what the Terminal showed, to read instead of guess
+    echo "screendump $shot" | qm monitor "$vmid" >/dev/null 2>&1 || true
     if (( attempt < IGPU_STAGE_ATTEMPTS )); then
       msg_info "The staging command did not start (a key was probably dropped); typing it again"
       qm sendkey "$vmid" ctrl-c >/dev/null 2>&1
@@ -6466,7 +6469,7 @@ function igpu_stage() {
   if [ "$started" != yes ]; then
     qm stop "$vmid" >/dev/null 2>&1 || true
     igpu_wait_stopped "$vmid" 120 || true
-    msg_error "The staging command did not start after ${IGPU_STAGE_ATTEMPTS} tries: the recovery Terminal drops keys"
+    msg_error "The staging command did not start after ${IGPU_STAGE_ATTEMPTS} tries.${shot:+ The screen at the last try is in ${shot}.}"
     return 1
   fi
   if ! igpu_wait_stopped "$vmid" "$IGPU_STAGE_TIMEOUT"; then
