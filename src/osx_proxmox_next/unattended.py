@@ -47,7 +47,7 @@ RECOVERY_STILL_FRAMES = 3          # identical consecutive frames = nothing anim
 TERMINAL_OPEN_WAITS = (10, 30, 60)  # seconds to wait for the Terminal window per try (Tahoe can be slow)
 TERMINAL_POLL = 2
 TERMINAL_REGION = (0.05, 0.15, 0.30, 0.62)  # left, top, right, bottom of the screen: empty desktop under the Utilities window
-REGION_DIFF = 12                   # per-channel difference that counts as a changed pixel
+REGION_DIFF = 4                    # per-channel difference that counts as a changed pixel (Sequoia's Terminal is only 6 above the desktop)
 REGION_CHANGED = 0.5               # share of changed pixels that means a window opened there
 DONE_QUIET = 900                   # no picker for 15 min after reboots = install done
 DONE_MOTION = 120                  # Setup Assistant redraws its menu-bar clock every minute

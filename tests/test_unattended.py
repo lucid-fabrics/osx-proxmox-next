@@ -868,13 +868,22 @@ def test_open_recovery_terminal_stops_at_the_terminal() -> None:
     assert list(TERMINAL_NAV) == console.keys[1:1 + len(TERMINAL_NAV)] and console.typed == []
 
 
-def ppm(window: bool, w: int = 128, h: int = 80) -> bytes:
+def ppm(window: bool, w: int = 128, h: int = 80, tone: tuple[int, int, int] = (38, 44, 58),
+        desk: tuple[int, int, int] = (20, 20, 20)) -> bytes:
     """A tiny screendump: dark desktop, optionally with a Terminal window over the left part."""
     rows = bytearray()
     for y in range(h):
         for x in range(w):
-            rows += bytes((38, 44, 58)) if window and 4 <= x <= 90 and 5 <= y <= 55 else bytes((20, 20, 20))
+            rows += bytes(tone) if window and 4 <= x <= 90 and 5 <= y <= 55 else bytes(desk)
     return b"P6\n%d %d\n255\n" % (w, h) + bytes(rows)
+
+
+def test_region_changed_sees_the_faint_sequoia_terminal():
+    """Seen live on Sequoia: the Terminal window is (30,30,30) over a (24,24,24) desktop, only 6 apart."""
+    from osx_proxmox_next.unattended import region_changed
+    desk, win = (24, 24, 24), (30, 30, 30)
+    assert region_changed(ppm(False, desk=desk), ppm(True, tone=win, desk=desk))
+    assert not region_changed(ppm(False, desk=desk), ppm(False, desk=desk))
 
 
 def test_region_changed_sees_a_window_open_and_ignores_the_rest():

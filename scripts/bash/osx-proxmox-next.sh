@@ -7534,7 +7534,7 @@ for y in range(int(h * 0.15), int(h * 0.62), 3):
     for x in range(int(w * 0.05), int(w * 0.30), 3):
         i, j = a[2] + (y * w + x) * 3, b[2] + (y * w + x) * 3
         total += 1
-        if max(abs(da[i + k] - db[j + k]) for k in range(3)) > 12:
+        if max(abs(da[i + k] - db[j + k]) for k in range(3)) > 4:
             changed += 1
 sys.exit(0 if total and changed / total > 0.5 else 1)
 PY
