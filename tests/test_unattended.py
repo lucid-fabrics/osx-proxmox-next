@@ -101,6 +101,9 @@ class FakeConsole:
                 size = value
         return size
 
+    def grab(self) -> bytes:
+        return b""  # no pixels to compare: open_recovery_terminal falls back to its fixed wait
+
     def frame_hash(self) -> str:
         """An animating screen hashes differently on every poll."""
         size = self.frame_size()
@@ -844,7 +847,8 @@ def test_bash_saves_the_console_when_a_run_stalls(bash_text: str) -> None:
     assert "-f png" in saver                              # PNG when QEMU can
     assert "screendump $ppm" in saver                     # PPM fallback
     caller = bash_text[bash_text.index("if unattended_install "):]
-    assert "unattended_save_frame" in caller[:caller.index("fi")]
+    # whatever grows the success branch, the failure branch saves the console before it tells the user to continue by hand
+    assert caller.index("unattended_save_frame") < caller.index("Unattended install did not finish")
 
 
 def test_the_recovery_slot_is_the_one_that_gets_detached() -> None:
@@ -863,3 +867,69 @@ def test_open_recovery_terminal_stops_at_the_terminal() -> None:
     console = FakeConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS)])
     open_recovery_terminal(console, lambda m: None, clock.monotonic, clock.sleep)
     assert list(TERMINAL_NAV) == console.keys[1:1 + len(TERMINAL_NAV)] and console.typed == []
+
+
+def ppm(window: bool, w: int = 128, h: int = 80, tone: tuple[int, int, int] = (38, 44, 58),
+        desk: tuple[int, int, int] = (20, 20, 20)) -> bytes:
+    """A tiny screendump: dark desktop, optionally with a Terminal window over the left part."""
+    rows = bytearray()
+    for y in range(h):
+        for x in range(w):
+            rows += bytes(tone) if window and 4 <= x <= 90 and 5 <= y <= 55 else bytes(desk)
+    return b"P6\n%d %d\n255\n" % (w, h) + bytes(rows)
+
+
+def test_region_changed_sees_the_faint_sequoia_terminal():
+    """Seen live on Sequoia: the Terminal window is (30,30,30) over a (24,24,24) desktop, only 6 apart."""
+    from osx_proxmox_next.unattended import region_changed
+    desk, win = (24, 24, 24), (30, 30, 30)
+    assert region_changed(ppm(False, desk=desk), ppm(True, tone=win, desk=desk))
+    assert not region_changed(ppm(False, desk=desk), ppm(False, desk=desk))
+
+
+def test_region_changed_sees_a_window_open_and_ignores_the_rest():
+    from osx_proxmox_next.unattended import region_changed
+    assert region_changed(ppm(False), ppm(True))
+    assert not region_changed(ppm(False), ppm(False))
+    assert not region_changed(ppm(False), b"") and not region_changed(b"junk", ppm(True))
+    assert not region_changed(ppm(False), ppm(True, 64, 40))  # another size is never a match
+
+
+class TerminalConsole(FakeConsole):
+    """The Terminal window shows once the Utilities menu has been walked `opens_on` times."""
+
+    def __init__(self, clock, schedule, opens_on):
+        super().__init__(clock, schedule)
+        self.opens_on = opens_on
+
+    def grab(self) -> bytes:
+        return ppm(self.keys.count("ctrl-f2") >= self.opens_on)
+
+
+def test_terminal_is_confirmed_open_before_anything_is_typed() -> None:
+    from osx_proxmox_next.unattended import open_recovery_terminal
+    clock = FakeClock()
+    console = TerminalConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS)], opens_on=1)
+    events: list[str] = []
+    open_recovery_terminal(console, events.append, clock.monotonic, clock.sleep)
+    assert console.keys.count("ctrl-f2") == 1 and not any("again" in e for e in events)
+
+
+def test_a_terminal_that_did_not_open_is_opened_again_with_longer_waits() -> None:
+    from osx_proxmox_next.unattended import open_recovery_terminal, TERMINAL_OPEN_WAITS
+    clock = FakeClock()
+    console = TerminalConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS)], opens_on=3)
+    events: list[str] = []
+    open_recovery_terminal(console, events.append, clock.monotonic, clock.sleep)
+    assert console.keys.count("ctrl-f2") == 3 == len(TERMINAL_OPEN_WAITS)
+    assert sum("opening it from the Utilities menu again" in e for e in events) == 2
+    assert console.keys.count("esc") == 4 and console.typed == []
+
+
+def test_a_terminal_that_never_opens_stops_before_typing() -> None:
+    from osx_proxmox_next.unattended import open_recovery_terminal
+    clock = FakeClock()
+    console = TerminalConsole(clock, [(0, 0), (30, PICKER), (60, 0), (200, MACOS)], opens_on=99)
+    with pytest.raises(UnattendedError, match="Terminal never opened"):
+        open_recovery_terminal(console, lambda m: None, clock.monotonic, clock.sleep)
+    assert console.typed == []

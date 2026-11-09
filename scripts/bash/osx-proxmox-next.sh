@@ -1803,14 +1803,16 @@ function nvidia_attach() {
       GPU_ISSUES+=("hostpci0 is already in use on this VM (${hp0}). Remove it first or run nvidia-detach.")
     fi
     if [ "$gpu_ok" == "yes" ]; then
+      local -a stopped_others=()
       while read -r line; do
         [ -z "$line" ] && continue
         if [ "${line#* }" == "running" ]; then
           GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
         else
-          GPU_WARNS+=("Also assigned to VM ${line%% *} (stopped). Only one of them can run at a time; Proxmox refuses to start the second.")
+          stopped_others+=("${line%% *}")
         fi
       done < <(gpu_users "$vmid" "$bdf")
+      [ ${#stopped_others[@]} -eq 0 ] || GPU_WARNS+=("$(gpu_shared_note "${stopped_others[@]}")")
     fi
   fi
   nullmoth_print_findings
@@ -1906,6 +1908,7 @@ GPU_RESUME_CMD='bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fa
 GPU_HOTPLUG_ARG="-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off"
 GPU_AMD_GENERIC_REASON="This AMD GPU has no Apple driver (APUs and cards newer than the RX 6000 series are not supported)."
 GPU_AMD_VEGA20_WARNING="Radeon VII / Pro VII: stopping and starting a VM that holds this card without rebooting the host has corrupted host storage on Proxmox 9 with vendor-reset (vendor-reset issue 112). Reboot the host between VM runs and do not rely on automatic restarts."
+GPU_LAPTOP_NVIDIA_REASON="This is a laptop NVIDIA GPU. Laptop GPUs sit behind the firmware and the mux, so the card cannot be handed to a VM reliably, and NullMoth is not tested on them. Use the Intel iGPU instead."
 GPU_PRE_TURING_REASON="Older than the RTX 20 series: NVIDIA's macOS drivers stopped at High Sierra and NullMoth needs Turing or newer."
 
 # ── GPU embedded: host_setup.py begin ──
@@ -4984,8 +4987,10 @@ PAYLOAD_FILES = (("igpu_stage.sh", "stage.sh"), ("igpu_firstboot.sh", "firstboot
                  ("igpu_launchd.plist", LAUNCHD_PLIST))
 # Recovery on Sequoia does not mount the payload disk by itself (its FAT driver is loaded on demand by
 # mount -t msdos), Ventura does. So: find the partition by its label, free it, mount it by hand, run the script.
-STAGE_COMMAND = ("d=$(diskutil list | awk '/%s/{print $NF; exit}'); diskutil unmount $d >/dev/null 2>&1; "
-                 "mkdir -p /tmp/p; mount -t msdos /dev/$d /tmp/p && sh /tmp/p/stage.sh" % PAYLOAD_LABEL)
+# Typed key by key into Tahoe's slow recovery Terminal, so it stays as short as it can: all the logic is in stage.sh.
+# The mount point is under /tmp: the recovery root volume is read-only, so `mkdir /p` fails and nothing runs.
+STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /tmp/p;mount -t msdos /dev/$d /tmp/p&&sh /tmp/p/stage.sh"
+                 % PAYLOAD_LABEL)
 BOOT_ARGS = ("-allow3d", "-disablegfxfirmware", "-wex-tgl-hold-render-wake")
 GMS_ARG = "0x3"
 
@@ -5766,6 +5771,8 @@ IFS= read -r -d '' GPU_EMBED_IGPU_STAGE <<'GPU_EMBED_IGPU_STAGE_EOF' || true
 # Copies the graphics package, the first-boot script and its LaunchDaemon into the installed
 # macOS (offline), checks the package, writes result.txt next to this script and powers off.
 SRC="$(cd "$(dirname "$0")" && pwd)"
+# tells the host the typed command arrived intact (it retypes when it never sees this)
+echo started >"$SRC/result.txt"; sync
 say() { echo "osx-proxmox-next: $*"; }
 fail() { say "FAILED: $*"; echo "failed: $*" >"$SRC/result.txt"; sync; /sbin/halt; exit 1; }
 
@@ -5903,10 +5910,17 @@ function amd_hostpci_extra() {
   return 0
 }
 
-# kind|headline|detail for one card (vendor: amd|nvidia, device id decimal). Mirrors gpu_setup.verdict.
+# 0 when vendor ($1) is nvidia and the lspci name ($2) is a laptop part. Mirrors gpu_setup.is_laptop_nvidia.
+function gpu_is_laptop_nvidia() {
+  [ "$1" == "nvidia" ] && printf '%s' "$2" | grep -Eiq '\b(laptop|mobile|max-q)\b|\b[a-z]{2}[0-9]{2,3}m\b'
+}
+
+# kind|headline|detail for one card (vendor: amd|nvidia, device id decimal, lspci name). Mirrors gpu_setup.verdict.
 function gpu_verdict() {
   local vendor="$1" dev="$2" fam key label reset args tahoe tail
-  if [ "$vendor" == "amd" ]; then
+  if gpu_is_laptop_nvidia "$vendor" "${3:-}"; then
+    echo "unsupported|Not supported (laptop NVIDIA)|${GPU_LAPTOP_NVIDIA_REASON}"
+  elif [ "$vendor" == "amd" ]; then
     if ! fam=$(amd_family_for "$dev"); then
       echo "unsupported|Not supported by macOS|$(amd_unsupported_reason "$dev")"; return 0
     fi
@@ -6063,11 +6077,13 @@ function amd_attach() {
       GPU_ISSUES+=("hostpci0 is already in use on this VM (${hp0}). Remove it first or run gpu-setup --undo.")
     fi
     if [ ${#GPU_ISSUES[@]} -eq 0 ]; then
+      local -a stopped_others=()
       while read -r line; do
         [ -z "$line" ] && continue
         if [ "${line#* }" == "running" ]; then GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
-        else GPU_WARNS+=("Also assigned to VM ${line%% *} (stopped). Only one of them can run at a time; Proxmox refuses to start the second."); fi
+        else stopped_others+=("${line%% *}"); fi
       done < <(gpu_users "$vmid" "$bdf")
+      [ ${#stopped_others[@]} -eq 0 ] || GPU_WARNS+=("$(gpu_shared_note "${stopped_others[@]}")")
     fi
   fi
   nullmoth_print_findings
@@ -6169,8 +6185,12 @@ function igpu_pin() { igpu_engine pins | gpu_json "d['pins']['$1'][$2]"; }
 
 IGPU_CACHE="${IGPU_CACHE:-/var/lib/vz/template/iso}"
 IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load slows it. macOS Tahoe is experimental: restart it from Proxmox, not from inside macOS."
+IGPU_SETUP_NOTE="Finish Setup Assistant on the monitor or HDMI dummy plug on the host's native HDMI port, or over Screen Sharing. The Proxmox console stays blank: the iGPU is the only display."
+IGPU_TAHOE_STAGE_NOTE="The automatic graphics package setup does not work on macOS Tahoe yet: the staging script often stalls in the recovery Terminal. The VM config was put back as it was. Tahoe is experimental."
 IGPU_TAHOE_NOTE="macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs (WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead."
 IGPU_STAGE_TIMEOUT=900
+IGPU_STAGE_ATTEMPTS=3
+IGPU_START_WAIT=60
 IGPU_FIRSTBOOT_TIMEOUT=1500
 IGPU_RESULT_POLL=30
 IGPU_RESULT_GRACE=15
@@ -6320,11 +6340,13 @@ function igpu_attach() {
       GPU_ISSUES+=("hostpci0 is already in use on this VM (${hp0}). Remove it first or run gpu-setup --undo.")
     fi
     if [ ${#GPU_ISSUES[@]} -eq 0 ]; then
+      local -a stopped_others=()
       while read -r line; do
         [ -z "$line" ] && continue
         if [ "${line#* }" == "running" ]; then GPU_ISSUES+=("The card is in use by running VM ${line%% *}.")
-        else GPU_WARNS+=("Also assigned to VM ${line%% *} (stopped). Only one of them can run at a time; Proxmox refuses to start the second."); fi
+        else stopped_others+=("${line%% *}"); fi
       done < <(gpu_users "$vmid" "0000:00:02")
+      [ ${#stopped_others[@]} -eq 0 ] || GPU_WARNS+=("$(gpu_shared_note "${stopped_others[@]}")")
     fi
   fi
   nullmoth_print_findings
@@ -6416,20 +6438,53 @@ function igpu_drop_disk() {
   [ -z "$key" ] || qm set "$vmid" --delete "$key" >/dev/null 2>&1 || true
 }
 
+# 0 once stage.sh left any result on the payload disk or the VM halted, 1 after $3 seconds without. Mirrors igpu_finish._staging_started.
+function igpu_staging_started() {
+  local vmid="$1" ref="$2" wait="$3" t0 res
+  t0=$(date +%s)
+  while :; do
+    qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
+    res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+    [ -n "$res" ] && return 0
+    (( $(date +%s) - t0 >= wait )) && return 1
+    sleep 5
+  done
+}
+
 # Boot the staging recovery, run the script from the payload disk, wait for the guest to power off.
-# $1 vmid $2 payload volume. Mirrors igpu_finish._stage.
+# $1 vmid $2 payload volume $3 macos (Tahoe gets an extra note on failure). Mirrors igpu_finish._stage.
 function igpu_stage() {
-  local vmid="$1" payload_ref="$2" path staged
+  local vmid="$1" payload_ref="$2" ver="${3:-}" path staged tahoe_note=""
+  [ "$ver" != "tahoe" ] || tahoe_note=" ${IGPU_TAHOE_STAGE_NOTE}"
   igpu_oc_patch "$vmid" stage || { msg_error "Could not patch the OpenCore disk (picker)"; return 1; }
   qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }
   unattended_open_recovery_terminal "$vmid" || return 1
   msg_info "Staging the graphics package inside macOS (offline)"
-  unattended_type "$vmid" "$(igpu_engine stage-command)"
-  sleep 1
-  qm sendkey "$vmid" ret >/dev/null 2>&1
+  local attempt began typing started=no shot=""
+  for ((attempt = 1; attempt <= IGPU_STAGE_ATTEMPTS; attempt++)); do
+    began=$(date +%s)
+    unattended_type "$vmid" "$(igpu_engine stage-command)"
+    typing=$(( $(date +%s) - began ))
+    sleep 1
+    qm sendkey "$vmid" ret >/dev/null 2>&1
+    if igpu_staging_started "$vmid" "$payload_ref" $((IGPU_START_WAIT + typing)); then started=yes; break; fi
+    shot="/tmp/osx-next-igpu-stage-$vmid-try$attempt.ppm"  # what the Terminal showed, to read instead of guess
+    echo "screendump $shot" | qm monitor "$vmid" >/dev/null 2>&1 || true
+    if (( attempt < IGPU_STAGE_ATTEMPTS )); then
+      msg_info "The staging command did not start (a key was probably dropped); typing it again"
+      qm sendkey "$vmid" ctrl-c >/dev/null 2>&1
+      sleep 1
+    fi
+  done
+  if [ "$started" != yes ]; then
+    qm stop "$vmid" >/dev/null 2>&1 || true
+    igpu_wait_stopped "$vmid" 120 || true
+    msg_error "The staging command did not start after ${IGPU_STAGE_ATTEMPTS} tries.${shot:+ The screen at the last try is in ${shot}.}${tahoe_note}"
+    return 1
+  fi
   if ! igpu_wait_stopped "$vmid" "$IGPU_STAGE_TIMEOUT"; then
     qm stop "$vmid" >/dev/null 2>&1 || true
-    msg_error "The staging script did not finish within $((IGPU_STAGE_TIMEOUT / 60)) minutes"
+    msg_error "The staging script did not finish within $((IGPU_STAGE_TIMEOUT / 60)) minutes.${tahoe_note}"
     return 1
   fi
   path=$(pvesm path "$payload_ref" 2>/dev/null) || return 1
@@ -6453,6 +6508,7 @@ function igpu_finish() {
   nullmoth_print_findings
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
   echo -e "${INFO}${YW}${IGPU_NOTICE}${CL}"
+  [ "$ver" != "tahoe" ] || echo -e "${INFO}${YW}Note: ${IGPU_TAHOE_STAGE_NOTE%% The VM config*}${CL}"
   igpu_fetch_assets "$IGPU_ROM_KEY" || { msg_error "Could not download or verify the iGPU files"; return 1; }
   storage=$(sed -n 's/^\(virtio0\|efidisk0\|ide0\): \([^:,]*\):.*/\2/p' <<<"$cfg" | head -1)
   [ -n "$storage" ] || { msg_error "Could not tell which storage the VM disks are on"; return 1; }
@@ -6470,7 +6526,7 @@ function igpu_finish() {
     [ "$(sed -n 's/^vga: //p' <<<"$cfg")" == "std" ] || [ -z "$(sed -n 's/^vga: //p' <<<"$cfg")" ] || qm set "$vmid" --vga std >/dev/null
     leftover=$(printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"args": sys.argv[1], "wanted": json.loads(sys.argv[2])["args_add"]}))' "$(sed -n 's/^args: //p' <<<"$cfg")" "$(igpu_engine settings 0 x)")" | igpu_engine strip-args)
     [ "$leftover" == "$(sed -n 's/^args: //p' <<<"$cfg")" ] || qm set "$vmid" --args "$leftover" >/dev/null
-    igpu_stage "$vmid" "$payload_ref" || rc=1
+    igpu_stage "$vmid" "$payload_ref" "$ver" || rc=1
   fi
   igpu_drop_disk "$vmid" sata1
   igpu_oc_patch "$vmid" unstage || true
@@ -6555,11 +6611,12 @@ function gpu_macos_for() {
 
 # works|status for a GPU_CARDS line and a macOS release ($2). Mirrors gpu_setup.version_status plus the running-VM rule.
 function gpu_version_status() {
-  local line="$1" macos="$2" vname device kind users name u run="" fam key label reset args tahoe
-  IFS='|' read -r _ vname device _ kind _ _ _ _ users _ <<<"$line"
+  local line="$1" macos="$2" vname device cname kind users name u run="" fam key label reset args tahoe
+  IFS='|' read -r _ vname device cname kind _ _ _ _ users _ <<<"$line"
   name=$(gpu_macos_name "$macos")
   for u in ${users//,/ }; do [ "${u#*:}" == "running" ] && run+="${run:+, }VM ${u%%:*}"; done
   if [ -n "$run" ]; then echo "no|in use by ${run}"; return 0; fi
+  if gpu_is_laptop_nvidia "$vname" "$cname"; then echo "no|not supported (laptop NVIDIA)"; return 0; fi
   if [ "$kind" == "unsupported" ]; then echo "no|not supported by ${name}"; return 0; fi
   if [ "$vname" == "nvidia" ] && [ "$macos" != "sequoia" ] && [ "$macos" != "tahoe" ]; then
     echo "no|not supported by ${name} (NullMoth needs macOS 15.5 or newer)"; return 0
@@ -6694,7 +6751,9 @@ function gpu_scan() {
     case "$vendor" in 4098) vname=amd ;; 4318) vname=nvidia ;; 32902) vname=intel ;; *) continue ;; esac
     seen+="$bdf "
     device=$(gpu_sys_num "$sys/bus/pci/devices/$bdf.0/device" 2>/dev/null || gpu_sys_num "$dev/device") || continue
-    IFS='|' read -r v_kind v_head v_detail <<<"$(gpu_verdict "$vname" "$device")"
+    name=$(lspci -nn -s "$bdf.0" 2>/dev/null | sed -n 's/^[^[]*\[[0-9a-f]\{4\}\]: *\(.*\) \[[0-9a-f]\{4\}:[0-9a-f]\{4\}\].*/\1/p' | head -1)
+    name="${name//|/\/}"
+    IFS='|' read -r v_kind v_head v_detail <<<"$(gpu_verdict "$vname" "$device" "$name")"
     boot=$(gpu_sys_num "$sys/bus/pci/devices/$bdf.0/boot_vga" 2>/dev/null || echo 0)
     driver=""
     [ -e "$sys/bus/pci/devices/$bdf.0/driver" ] && driver=$(basename "$(readlink -f "$sys/bus/pci/devices/$bdf.0/driver")")
@@ -6715,8 +6774,6 @@ function gpu_scan() {
         case $(( mc >> 16 )) in 1|2) risky+="${risky:+,}$member" ;; esac
       done
     fi
-    name=$(lspci -nn -s "$bdf.0" 2>/dev/null | sed -n 's/^[^[]*\[[0-9a-f]\{4\}\]: *\(.*\) \[[0-9a-f]\{4\}:[0-9a-f]\{4\}\].*/\1/p' | head -1)
-    name="${name//|/\/}"
     local lxc="" ct node
     if [ "$v_kind" != "unsupported" ]; then
       while read -r ct node; do
@@ -6753,14 +6810,25 @@ function gpu_card_why_not() {
   fi
 }
 
+# One warning for the stopped VMs ($@: ids) that also list a card. Mirrors gpu.shared_note.
+function gpu_shared_note() {
+  if [ $# -eq 1 ]; then
+    echo "Also assigned to stopped VM $1. Only one can run at a time; Proxmox refuses to start the second."
+  else
+    local list="$1"; shift
+    local v; for v in "$@"; do list+=", $v"; done
+    echo "Also assigned to stopped VMs ${list}. Only one can run at a time; Proxmox refuses to start the others."
+  fi
+}
+
 # Warnings shown on a card, one per line. Mirrors GpuCard.notes.
 function gpu_card_notes() {
   local kind boot users console u
   IFS='|' read -r _ _ _ _ kind _ _ boot _ users _ _ console <<<"$1"
   [ "$kind" != "unsupported" ] || return 0
-  for u in ${users//,/ }; do
-    [ "${u#*:}" == "running" ] || echo "Also assigned to VM ${u%%:*} (stopped). Only one of them can run at a time; Proxmox refuses to start the second."
-  done
+  local -a stopped=()
+  for u in ${users//,/ }; do [ "${u#*:}" == "running" ] || stopped+=("${u%%:*}"); done
+  [ ${#stopped[@]} -eq 0 ] || gpu_shared_note "${stopped[@]}"
   if [ "$boot" == "1" ] && [ "$console" != "1" ]; then echo "The firmware shows its boot screen on this card."; fi
 }
 
@@ -7441,6 +7509,57 @@ function gpu_troubleshoot_menu() {
 }
 # ── GPU walkthrough end ──
 
+# 0 when the left part of screen B (empty desktop under the recovery Utilities window) differs from screen A: a window
+# opened there. Both are raw PPM screendumps. Mirrors unattended.region_changed.
+function unattended_region_changed() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+def ppm(path):
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return None, None
+    parts, pos = [], 0
+    while len(parts) < 4 and pos < len(data):
+        end = pos
+        while end < len(data) and data[end:end + 1] not in b" \n\r\t":
+            end += 1
+        parts.append(data[pos:end])
+        pos = end + 1
+    if len(parts) < 4 or parts[0] != b"P6":
+        return None, None
+    try:
+        w, h = int(parts[1]), int(parts[2])
+    except ValueError:
+        return None, None
+    return ((w, h, pos), data) if len(data) - pos >= w * h * 3 else (None, None)
+(a, da), (b, db) = ppm(sys.argv[1]), ppm(sys.argv[2])
+if a is None or b is None or a[:2] != b[:2]:
+    sys.exit(1)
+w, h = a[:2]
+changed = total = 0
+for y in range(int(h * 0.15), int(h * 0.62), 3):
+    for x in range(int(w * 0.05), int(w * 0.30), 3):
+        i, j = a[2] + (y * w + x) * 3, b[2] + (y * w + x) * 3
+        total += 1
+        if max(abs(da[i + k] - db[j + k]) for k in range(3)) > 4:
+            changed += 1
+sys.exit(0 if total and changed / total > 0.5 else 1)
+PY
+}
+
+# Poll up to $3 seconds for the Terminal window (screen differs from the dump in $2). Mirrors unattended._terminal_open.
+function unattended_terminal_open() {
+  local vmid="$1" base="$2" wait="$3" t0
+  t0=$(date +%s)
+  while (( $(date +%s) - t0 < wait )); do
+    sleep 2
+    unattended_frame_size "$vmid" >/dev/null
+    if unattended_region_changed "$base" "/tmp/osx-next-unattended-$vmid.ppm"; then sleep 3; return 0; fi
+  done
+  return 1
+}
+
 # Boot recovery from the OpenCore picker and open Terminal from its Utilities menu.
 # Mirrors unattended.open_recovery_terminal. rc 1 (message printed) when a phase times out.
 function unattended_open_recovery_terminal() {
@@ -7469,13 +7588,27 @@ function unattended_open_recovery_terminal() {
   unattended_wait_still "$vmid"
   msg_ok "Unattended: recovery loaded"
 
-  # Utilities menu -> Terminal: ctrl-f2, right x4, down x3, ret
-  local key
-  for key in ctrl-f2 right right right right down down down ret; do
-    qm sendkey "$vmid" "$key" >/dev/null 2>&1
-    sleep 0.4
+  # Utilities menu -> Terminal: ctrl-f2, right x4, down x3, ret. Confirm the Terminal window really opened (the
+  # left part of the screen changes), else open it again with a longer wait. Mirrors unattended.open_recovery_terminal.
+  local key attempt waits=(10 30 60) wait base="/tmp/osx-next-unattended-$vmid.base.ppm"
+  unattended_frame_size "$vmid" >/dev/null
+  cp "/tmp/osx-next-unattended-$vmid.ppm" "$base" 2>/dev/null || : >"$base"
+  for ((attempt = 0; attempt < ${#waits[@]}; attempt++)); do
+    wait=${waits[$attempt]}
+    for key in ctrl-f2 right right right right down down down ret; do
+      qm sendkey "$vmid" "$key" >/dev/null 2>&1
+      sleep 0.4
+    done
+    if [ ! -s "$base" ]; then sleep "$wait"; return 0; fi  # no screendump to compare with: the old fixed wait
+    unattended_terminal_open "$vmid" "$base" "$wait" && { rm -f "$base"; return 0; }
+    if (( attempt + 1 < ${#waits[@]} )); then
+      msg_info "Unattended: Terminal did not open; opening it from the Utilities menu again"
+      qm sendkey "$vmid" esc >/dev/null 2>&1; sleep 0.4; qm sendkey "$vmid" esc >/dev/null 2>&1; sleep 0.4
+    fi
   done
-  sleep 10
+  rm -f "$base"
+  msg_error "Unattended: Terminal never opened from the Utilities menu in the recovery screen. Nothing was typed."
+  return 1
 }
 
 function unattended_install() {
@@ -8465,7 +8598,11 @@ if [ "${UNATTENDED:-no}" == "yes" ] && [ "$START_VM" == "yes" ]; then
   if unattended_install "$VMID" "$DISK_GB_NUM" "$IGPU_SLOT"; then
     UNATTENDED_DONE=yes
     [ "${IGPU:-no}" != "yes" ] || igpu_after_install "$VMID" "$MACOS_VER"
-    echo -e "\n${INFO}${GN}Unattended install complete. Finish Setup Assistant in the VM console.${CL}"
+    if [ "${IGPU:-no}" == "yes" ]; then
+      echo -e "\n${INFO}${GN}Unattended install complete. ${IGPU_SETUP_NOTE}${CL}"
+    else
+      echo -e "\n${INFO}${GN}Unattended install complete. Finish Setup Assistant in the VM console.${CL}"
+    fi
   else
     SHOT=$(unattended_save_frame "$VMID") && \
       echo -e "\n${INFO}${YW}The console at that moment was saved to ${SHOT}.${CL}"

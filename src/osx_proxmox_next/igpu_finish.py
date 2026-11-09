@@ -30,7 +30,7 @@ from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .executor import apply_plan
 from .gpu import parse_config
-from .igpu_attach import TAHOE_NOTE, oc_step, prepare_attach_igpu
+from .igpu_attach import TAHOE_NOTE, TAHOE_STAGE_NOTE, oc_step, prepare_attach_igpu
 from .infrastructure import ProxmoxAdapter
 from .intel_host import check_intel_gpu
 from .nullmoth import detect_macos
@@ -43,6 +43,9 @@ from .unattended import QmConsole, UnattendedError, open_recovery_terminal
 __all__ = ["FinishError", "FinishResult", "finish", "wait_stopped"]
 
 STAGE_TIMEOUT = 900          # staging copies ~95 MB and halts
+STAGE_ATTEMPTS = 3           # the typed command is retyped when the script never reports "started"
+START_WAIT = 60              # seconds after Return, plus the time the typing itself took
+START_POLL = 5
 FIRSTBOOT_TIMEOUT = 1500     # boot, WhateverXe wait (up to 120 s), package install, halt
 RESULT_POLL = 30             # Tahoe cannot halt itself (WhateverXe issue 62): look for the guest's result instead
 RESULT_GRACE = 15            # let a result that was seen mid-write finish before it is trusted
@@ -173,6 +176,8 @@ def finish(
         raise FinishError("Cannot attach the iGPU: " + " ".join(plan.issues))
     result = FinishResult(notes=list(plan.warnings))
     storage = _storage_of(cfg)
+    if version == "tahoe":
+        on_event("Note: " + TAHOE_STAGE_NOTE.split(" The VM config")[0])
     snapshot = create_snapshot(vmid, adapter=pve)
     on_event(f"Saved the VM config to {snapshot.path}")
 
@@ -202,7 +207,7 @@ def finish(
         leftover = igpu_engine.strip_args(cfg.get("args", ""), igpu_engine.vm_settings(0, "")["args_add"])
         if leftover != cfg.get("args", ""):
             pve.qm("set", str(vmid), "--args", leftover)
-        _stage(vmid, pve, console, payload_ref, on_event, clock, sleep)
+        _stage(vmid, pve, console, payload_ref, on_event, clock, sleep, version == "tahoe")
     except BaseException:
         _drop_disk(pve, vmid, "sata2")
         payload.unlink(missing_ok=True)
@@ -270,8 +275,21 @@ def _read_payload_result(pve: ProxmoxAdapter, ref: str) -> str:
     return igpu_engine.read_result(path) if path else ""
 
 
+def _staging_started(pve: ProxmoxAdapter, vmid: int, ref: str, wait: float,
+                     clock: Callable[[], float], sleep: Callable[[float], None]) -> bool:
+    """True once stage.sh left any result on the payload disk (it writes "started" first) or the VM halted."""
+    deadline = clock() + wait
+    while True:
+        if "stopped" in pve.qm("status", str(vmid)).output or _read_payload_result(pve, ref):
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(START_POLL)
+
+
 def _stage(vmid: int, pve: ProxmoxAdapter, console: QmConsole, payload_ref: str,
-           on_event: Callable[[str], None], clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
+           on_event: Callable[[str], None], clock: Callable[[], float], sleep: Callable[[float], None],
+           tahoe: bool = False) -> None:
     """Boot recovery, run the staging script from the payload disk and wait for the guest to power off."""
     step = oc_step(str(vmid), "stage", "Make the OpenCore picker show recovery only and wait for a key")
     if not apply_plan([step], execute=True, adapter=pve).ok:
@@ -284,13 +302,31 @@ def _stage(vmid: int, pve: ProxmoxAdapter, console: QmConsole, payload_ref: str,
     except UnattendedError as exc:
         raise FinishError(str(exc)) from exc
     on_event("Staging the graphics package inside macOS (offline)")
-    console.type_text(igpu_engine.STAGE_COMMAND)
-    sleep(1)
-    console.sendkey("ret")
+    for attempt in range(1, STAGE_ATTEMPTS + 1):
+        began = clock()
+        console.type_text(igpu_engine.STAGE_COMMAND)
+        typing = clock() - began  # the Terminal consumes keys at this pace, so the shell needs about as long again
+        sleep(1)
+        console.sendkey("ret")
+        if _staging_started(pve, vmid, payload_ref, START_WAIT + typing, clock, sleep):
+            break
+        # keep what the Terminal showed: a garbled or failed command is read from this, not guessed
+        shot = console.save_frame(f"/tmp/osx-next-igpu-stage-{vmid}-try{attempt}.png") if hasattr(console, "save_frame") else ""
+        if attempt < STAGE_ATTEMPTS:
+            on_event("The staging command did not start (a key was probably dropped); typing it again")
+            console.sendkey("ctrl-c")
+            sleep(1)
+    else:
+        pve.qm("stop", str(vmid))
+        wait_stopped(pve, vmid, 120, clock, sleep)
+        raise FinishError(f"The staging command did not start after {STAGE_ATTEMPTS} tries."
+                          + (f" The screen at the last try is in {shot}." if shot else "")
+                          + (" " + TAHOE_STAGE_NOTE if tahoe else ""))
     if not wait_stopped(pve, vmid, STAGE_TIMEOUT, clock, sleep):
         pve.qm("stop", str(vmid))
         wait_stopped(pve, vmid, 120, clock, sleep)
-        raise FinishError(f"The staging script did not finish within {STAGE_TIMEOUT // 60} minutes.")
+        raise FinishError(f"The staging script did not finish within {STAGE_TIMEOUT // 60} minutes."
+                          + (" " + TAHOE_STAGE_NOTE if tahoe else ""))
     staged = _read_payload_result(pve, payload_ref)
     if staged != "staged":
         raise FinishError("Staging failed: " + (staged or "the script left no result") +

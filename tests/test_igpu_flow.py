@@ -8,7 +8,7 @@ import pytest
 
 from gpu_fakes import EFI_GRUB, FakeRun, add_card, make_host
 from nullmoth_fakes import FakeQm, add_dev, good_card
-from osx_proxmox_next import gpu_setup, gpu_setup_cli, host_setup, igpu_attach, igpu_engine, intel_host
+from osx_proxmox_next import gpu, gpu_setup, gpu_setup_cli, host_setup, igpu_attach, igpu_engine, intel_host
 from osx_proxmox_next.gpu_setup import Session
 
 REGS = {"setpci -s 00:02.0 C0.L 50.W": (0, "4b800001\n02c1\n"), "efibootmgr -v": (0, EFI_GRUB)}
@@ -223,6 +223,56 @@ def test_the_igpu_beats_nvidia_on_sequoia_and_wins_alone_on_ventura(tmp_path):
     ventura = cards(host(tmp_path / "v", nvidia=True), "ventura")
     assert ventura["intel"].recommended and not ventura["nvidia"].works
     assert ventura["nvidia"].status == "not supported by macOS Ventura 13 (NullMoth needs macOS 15.5 or newer)"
+
+
+def lspci(name: str, device: int = 0x28E0) -> dict:
+    return {"lspci -nn -s 0000:01:00.0": (0, f"0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation {name} [10de:{device:04x}]\n")}
+
+
+def named_session(root: Path, answers: dict) -> Session:
+    return Session(str(root), FakeRun({**REGS, **answers}, default=(0, "")), FakeQm({100: ("stopped", VM)}))
+
+
+@pytest.mark.parametrize("name", ["AD107M [GeForce RTX 4060 Max-Q / Mobile]", "GA104 [GeForce RTX 3070 Laptop GPU]",
+                                  "TU117M [GeForce GTX 1650 Mobile]", "GA106M [Something]"])
+def test_a_laptop_nvidia_gpu_is_not_supported_and_the_igpu_is_recommended(tmp_path, name):
+    root = host(tmp_path, nvidia=True)
+    found = {c.vendor: c for c in named_session(root, lspci(name)).scan()}
+    card = found["nvidia"]
+    assert card.laptop and card.kind == "unsupported" and not card.works and not card.recommended
+    assert card.status == "not supported (laptop NVIDIA)" and card.headline == "Not supported (laptop NVIDIA)"
+    assert found["intel"].recommended
+    assert "Can't use" in gpu_setup.card_text(card) and "laptop NVIDIA" in gpu_setup.card_text(card)
+
+
+def test_a_laptop_nvidia_gpu_is_not_supported_on_every_release(tmp_path):
+    root = host(tmp_path, nvidia=True)
+    for macos in gpu_setup.MACOS_NAMES:
+        found = {c.vendor: c for c in named_session(root, lspci("AD107M [GeForce RTX 4060 Max-Q / Mobile]")).scan(macos=macos)}
+        assert found["nvidia"].status == "not supported (laptop NVIDIA)" and found["intel"].recommended
+
+
+def test_a_desktop_nvidia_gpu_next_to_the_igpu_is_unchanged(tmp_path):
+    root = host(tmp_path, nvidia=True)
+    found = {c.vendor: c for c in named_session(root, lspci("AD107 [GeForce RTX 4060]")).scan()}
+    assert not found["nvidia"].laptop and found["nvidia"].kind == "nullmoth" and found["nvidia"].works
+    assert found["intel"].recommended and not found["nvidia"].recommended
+
+
+def test_only_nvidia_parts_are_judged_by_name():
+    assert gpu_setup.is_laptop_nvidia("nvidia", "GeForce RTX 4060 Laptop GPU")
+    assert not gpu_setup.is_laptop_nvidia("amd", "Radeon RX 6800M Mobile")
+    assert not gpu_setup.is_laptop_nvidia("nvidia", "GeForce RTX 4090")
+    assert not gpu_setup.is_laptop_nvidia("nvidia", "")
+
+
+def test_several_stopped_vms_share_one_note(tmp_path):
+    held = VM + "hostpci0: 0000:00:02.0,legacy-igd=1\n"
+    card = cards(host(tmp_path, igpu="vfio-pci"), vms={7: ("stopped", held), 8: ("stopped", held), 9: ("stopped", held)})["intel"]
+    shared = [n for n in card.notes if n.startswith("Also assigned")]
+    assert shared == ["Also assigned to stopped VMs 7, 8, 9. Only one can run at a time; Proxmox refuses to start the others."]
+    assert gpu.shared_note(7) == "Also assigned to stopped VM 7. Only one can run at a time; Proxmox refuses to start the second."
+    assert gpu.shared_note([7]) == gpu.shared_note(7)
 
 
 def test_the_list_leads_with_the_recommendation(tmp_path):

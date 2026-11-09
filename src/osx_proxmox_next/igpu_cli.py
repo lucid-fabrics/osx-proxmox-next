@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from . import igpu_attach, igpu_engine, igpu_finish
+from .igpu_attach import SETUP_ASSISTANT_NOTE
 from .defaults import DEFAULT_ISO_DIR
 from .domain import MAX_VMID, MIN_VMID, SUPPORTED_MACOS
 from .intel_host import check_intel_gpu
@@ -162,7 +163,9 @@ def run_install(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}")
         print(f"macOS is installed. Fix the problem above, then run: osx-next-cli igpu-finish {config.vmid}")
         return 2
-    return _report_finish(config.vmid, finished)
+    code = _report_finish(config.vmid, finished)
+    print(SETUP_ASSISTANT_NOTE)  # vga is none: the Proxmox console is blank, so the setup is finished on the host's screen
+    return code
 
 
 def dispatch(args: argparse.Namespace) -> int | None:

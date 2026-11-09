@@ -214,7 +214,7 @@ def test_fetch_rejects_a_mismatch_and_keeps_nothing(tmp_path, monkeypatch):
 def test_payload_files_carry_the_package_hash():
     assert "@PKG_SHA256@" not in eng.render_payload_file("igpu_firstboot.sh", "ab" * 32)
     assert "ab" * 32 in eng.render_payload_file("igpu_firstboot.sh", "ab" * 32)
-    assert "STAGE_COMMAND" not in eng.STAGE_COMMAND and eng.STAGE_COMMAND.endswith("mount -t msdos /dev/$d /tmp/p && sh /tmp/p/stage.sh") and "OSXPNIGPU" in eng.STAGE_COMMAND
+    assert "STAGE_COMMAND" not in eng.STAGE_COMMAND and eng.STAGE_COMMAND.endswith("mount -t msdos /dev/$d /tmp/p&&sh /tmp/p/stage.sh") and "OSXPNIGPU" in eng.STAGE_COMMAND
 
 
 class DiskRun:
@@ -333,6 +333,16 @@ def test_main_in_process(tmp_path, monkeypatch, capsys):
     assert eng.main(["x", "payload", "a", "b"]) == 1
     monkeypatch.setattr(eng, "read_result", lambda p: "staged")
     assert eng.main(["x", "result", "img"]) == 0 and "staged" in capsys.readouterr().out
+
+
+def test_the_stage_command_is_short_and_the_script_reports_when_it_starts():
+    # typed key by key into Tahoe's slow recovery Terminal: only mount and run, the logic lives in stage.sh
+    assert len(eng.STAGE_COMMAND) <= 130 and eng.STAGE_COMMAND.count(";") <= 3
+    # recovery's root volume is read-only: the mount point must live under /tmp (mkdir /p fails there)
+    assert "mkdir /tmp/p" in eng.STAGE_COMMAND and "mkdir /p" not in eng.STAGE_COMMAND
+    script = (Path(eng.__file__).parent / "data/gpu/igpu_stage.sh").read_text().splitlines()
+    first = next(i for i, ln in enumerate(script) if ln.startswith("SRC="))
+    assert script[first + 2] == 'echo started >"$SRC/result.txt"; sync'
 
 
 def test_every_character_of_the_stage_command_is_typeable():

@@ -44,7 +44,11 @@ INSTALL_REBOOT_TIMEOUT = 1800      # startosinstall prep before its first reboot
 RECOVERY_SETTLE = 240              # minimum settle before the utilities window is looked for
 RECOVERY_STILL_MAX = 600           # extra grace while the recovery screen is still moving
 RECOVERY_STILL_FRAMES = 3          # identical consecutive frames = nothing animating
-TERMINAL_OPEN_WAIT = 10
+TERMINAL_OPEN_WAITS = (10, 30, 60)  # seconds to wait for the Terminal window per try (Tahoe can be slow)
+TERMINAL_POLL = 2
+TERMINAL_REGION = (0.05, 0.15, 0.30, 0.62)  # left, top, right, bottom of the screen: empty desktop under the Utilities window
+REGION_DIFF = 4                    # per-channel difference that counts as a changed pixel (Sequoia's Terminal is only 6 above the desktop)
+REGION_CHANGED = 0.5               # share of changed pixels that means a window opened there
 DONE_QUIET = 900                   # no picker for 15 min after reboots = install done
 DONE_MOTION = 120                  # Setup Assistant redraws its menu-bar clock every minute
 HUNG_STILL = 600                   # frame byte-identical for 10 min = macOS is wedged
@@ -121,6 +125,16 @@ class QmConsole:
             return os.path.getsize(self._probe)
         except FileNotFoundError:
             return 0
+
+    def grab(self) -> bytes:
+        """Raw bytes of a fresh screendump; b"" when it failed."""
+        if not self.frame_size():
+            return b""
+        try:
+            with open(self._probe, "rb") as probe:
+                return probe.read()
+        except OSError:
+            return b""
 
     def probe_hash(self) -> str:
         """md5 of the screendump frame_size() last wrote; "" when there is none."""
@@ -220,6 +234,54 @@ def _wait(console: QmConsole, predicate: Callable[[int], bool], timeout: float,
             last_press = clock()
         sleep(POLL_INTERVAL)
     raise UnattendedError(f"Timed out after {int(timeout)}s waiting for {what}")
+
+
+def _ppm(data: bytes) -> tuple[int, int, int] | None:
+    """(width, height, offset of the pixels) of a binary PPM, or None."""
+    parts, pos = [], 0
+    while len(parts) < 4 and pos < len(data):
+        end = pos
+        while end < len(data) and data[end:end + 1] not in b" \n\r\t":
+            end += 1
+        parts.append(data[pos:end])
+        pos = end + 1
+    if len(parts) < 4 or parts[0] != b"P6":
+        return None
+    try:
+        width, height = int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    return (width, height, pos) if len(data) - pos >= width * height * 3 else None
+
+
+def region_changed(before: bytes, after: bytes) -> bool:
+    """True when the left part of the screen, empty desktop under the recovery Utilities window, now holds a window.
+
+    The Terminal window opens there; a menu that stayed open or a window that never appeared leaves it as it was."""
+    a, b = _ppm(before), _ppm(after)
+    if a is None or b is None or a[:2] != b[:2]:
+        return False
+    width, height = a[:2]
+    left, top, right, bottom = TERMINAL_REGION
+    changed = total = 0
+    for y in range(int(height * top), int(height * bottom), 3):
+        for x in range(int(width * left), int(width * right), 3):
+            i, j = a[2] + (y * width + x) * 3, b[2] + (y * width + x) * 3
+            total += 1
+            if max(abs(before[i + k] - after[j + k]) for k in range(3)) > REGION_DIFF:
+                changed += 1
+    return total > 0 and changed / total > REGION_CHANGED
+
+
+def _terminal_open(console: QmConsole, baseline: bytes, wait: float,
+                   clock: Callable[[], float], sleep: Callable[[float], None]) -> bool:
+    deadline = clock() + wait
+    while clock() < deadline:
+        sleep(TERMINAL_POLL)
+        if region_changed(baseline, console.grab()):
+            sleep(3)  # let the prompt come up
+            return True
+    return False
 
 
 def _settle_recovery(console: QmConsole, clock: Callable[[], float],
@@ -323,8 +385,19 @@ def open_recovery_terminal(console: QmConsole, on_event: Callable[[str], None],
     _wait_still(console, on_event, clock, sleep)
 
     on_event("Opening Terminal from the Utilities menu")
-    console.seq(TERMINAL_NAV)
-    sleep(TERMINAL_OPEN_WAIT)
+    baseline = console.grab()
+    for attempt, wait in enumerate(TERMINAL_OPEN_WAITS, 1):
+        console.seq(TERMINAL_NAV)
+        if not baseline:  # no screendump to compare with: the old fixed wait
+            sleep(wait)
+            return
+        if _terminal_open(console, baseline, wait, clock, sleep):
+            return
+        if attempt < len(TERMINAL_OPEN_WAITS):
+            on_event("Terminal did not open; opening it from the Utilities menu again")
+            console.seq(("esc", "esc"))
+    raise UnattendedError("Terminal never opened from the Utilities menu in the recovery screen. "
+                          "Nothing was typed.")
 
 
 def run_unattended_install(

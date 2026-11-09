@@ -27,7 +27,9 @@ from .services import fetch_vm_info, get_proxmox_adapter
 
 __all__ = [
     "IGPU_NEXT_STEPS",
+    "SETUP_ASSISTANT_NOTE",
     "TAHOE_NOTE",
+    "TAHOE_STAGE_NOTE",
     "build_attach_steps",
     "build_fresh_vm_steps",
     "oc_igpu_script",
@@ -37,6 +39,10 @@ __all__ = [
 _PYEOF = "IGPU_OC_PY"
 TAHOE_NOTE = ("macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs "
               "(WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead.")
+TAHOE_STAGE_NOTE = ("The automatic graphics package setup does not work on macOS Tahoe yet: the staging script often "
+                    "stalls in the recovery Terminal. The VM config was put back as it was. Tahoe is experimental.")
+SETUP_ASSISTANT_NOTE = ("Finish Setup Assistant on the monitor or HDMI dummy plug on the host's native HDMI port, or over "
+                        "Screen Sharing. The Proxmox console stays blank: the iGPU is the only display.")
 IGPU_NEXT_STEPS = (
     "Plug a monitor, or an HDMI dummy plug, into the host's native HDMI port (not an LSPCON HDMI or USB-C port) "
     "and start the VM. The OpenCore picker and the macOS desktop appear on that screen.",
@@ -179,11 +185,14 @@ def prepare_attach_igpu(
     if cfg.get("hostpci0") is not None and existing != {report.bdf}:
         plan.issues.append(f"hostpci0 is already in use on this VM ({cfg['hostpci0']}). "
                            "Remove it first or run gpu-setup --undo.")
+    stopped_others: list[int] = []
     for other, other_running in gpu_users(pve, report.bdf, vmid) if report.ok else []:
         if other_running:
             plan.issues.append(running_user_issue(other))
         else:
-            plan.warnings.append(shared_note(other))
+            stopped_others.append(other)
+    if stopped_others:
+        plan.warnings.append(shared_note(stopped_others))
 
     if plan.ok and report.layout:
         settings = igpu_engine.vm_settings(report.layout["max_ram_below_4g_mb"], report.rom_file)
