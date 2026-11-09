@@ -44,7 +44,7 @@ def test_check_command(monkeypatch, capsys):
 
 
 def test_finish_asks_unless_yes(monkeypatch, capsys):
-    monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: igpu_finish.FinishResult("installed", True))
+    monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: igpu_finish.FinishResult("installed", True, [], True, "RCS_TAIL=0x1"))
     assert cli.run_cli(["igpu-finish", "996"]) == 2  # no terminal, no --yes: nothing happens
     assert "Nothing was changed" in capsys.readouterr().out
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True))
@@ -53,11 +53,17 @@ def test_finish_asks_unless_yes(monkeypatch, capsys):
 
 
 def test_finish_command(monkeypatch, capsys):
-    done = igpu_finish.FinishResult("installed", True, ["note one"])
+    done = igpu_finish.FinishResult("installed", True, ["note one"], True, "RCS_TAIL=0x1")
     monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: done)
     assert cli.run_cli(["igpu-finish", "996", "--yes"]) == 0
     out = capsys.readouterr().out
-    assert "NOTE: note one" in out and "Metal acceleration" in out and "BETA." in out
+    assert "NOTE: note one" in out and "Metal acceleration is active" in out and "BETA." in out
+    unconfirmed = igpu_finish.FinishResult("installed", True, [], False, "BCS_TAIL=0x0, RCS_TAIL=0x0")
+    monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: unconfirmed)
+    assert cli.run_cli(["igpu-finish", "996", "--yes"]) == 1
+    out = capsys.readouterr().out
+    assert "acceleration was not confirmed" in out and "Metal acceleration is active" not in out
+    assert igpu_cli.TROUBLESHOOTING_URL in out and "BCS_TAIL=0x0" in out
     monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: igpu_finish.FinishResult("not installed: x"))
     assert cli.run_cli(["igpu-finish", "996", "--yes"]) == 1
     assert "not installed yet: not installed: x" in capsys.readouterr().out
@@ -118,7 +124,7 @@ def install(monkeypatch):
     def finish(vmid, **k):
         if s.finished:
             raise s.finished
-        return igpu_finish.FinishResult("installed", True)
+        return igpu_finish.FinishResult("installed", True, [], True, "RCS_TAIL=0x1")
     monkeypatch.setattr(igpu_finish, "finish", finish)
     return s
 
@@ -134,7 +140,7 @@ def test_install_happy_path(install, capsys):
                                     "Set FadtEnableReset in OpenCore (restarts hang without it)"]
     assert install.slot == "sata1" and ("start", "996") in install.pve.calls and ("stop", "996") in install.pve.calls
     out = capsys.readouterr().out
-    assert "Metal acceleration" in out
+    assert "Metal acceleration is active" in out
     # vga is none, so the Proxmox console is blank: Setup Assistant is finished on the host's monitor, never "in the console"
     assert out.rstrip().endswith(igpu_attach.SETUP_ASSISTANT_NOTE) and "Finish Setup Assistant in the VM console" not in out
 

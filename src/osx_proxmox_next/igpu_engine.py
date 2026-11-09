@@ -443,6 +443,69 @@ def read_result(img, run=default_run):
         _release(mnt, loop, run)
 
 
+# ── acceleration check (host side) ───────────────────────────────────
+
+# Gen12 registers in BAR0 that a guest with working acceleration leaves non-zero: the blitter and render
+# ring tails (a ring nobody submitted to stays at 0) and the first plane's surface address (display on).
+ACCEL_REGS = {"BCS_TAIL": 0x22030, "RCS_TAIL": 0x2030, "PLANE_SURF_1_A": 0x7019C}
+ACCEL_TIMEOUT = 300
+ACCEL_POLL = 10
+BAR0_SIZE = 16 << 20
+
+
+def read_bar_registers(path, offsets=None):
+    """Read the registers (name -> 32-bit value) from the BAR0 file at *path*, read-only."""
+    import mmap
+    import struct
+    offsets = offsets or ACCEL_REGS
+    fd = os.open(path, os.O_RDONLY | os.O_SYNC)
+    try:
+        size = min(os.fstat(fd).st_size or BAR0_SIZE, BAR0_SIZE)
+        m = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
+        try:
+            return {k: struct.unpack_from("<I", m, o)[0] for k, o in offsets.items()}
+        finally:
+            m.close()
+    finally:
+        os.close(fd)
+
+
+def parse_accel(regs):
+    """(active, detail) from register values. The GPU counts as in use when either ring tail is non-zero."""
+    detail = ", ".join("%s=%#x" % (k, regs.get(k, 0)) for k in ACCEL_REGS)
+    return bool(regs.get("BCS_TAIL", 0) or regs.get("RCS_TAIL", 0)), detail
+
+
+def wait_accel(read, timeout=ACCEL_TIMEOUT, poll=ACCEL_POLL, clock=None, sleep=None):
+    """Poll *read* (a callable returning register values) until the GPU shows work or *timeout* seconds pass.
+    Returns (active, detail of the last look)."""
+    import time
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    deadline = clock() + timeout
+    detail = "no reading"
+    while True:
+        try:
+            active, detail = parse_accel(read())
+        except OSError as exc:
+            active, detail = False, "cannot read the iGPU registers: %s" % exc
+        if active:
+            return True, detail
+        if clock() >= deadline:
+            return False, detail
+        sleep(poll)
+
+
+def bar0_path(root=None):
+    return os.path.join(root or os.environ.get("GPU_SYSFS", "/sys"), "bus/pci/devices", IGD_BDF, "resource0")
+
+
+def check_accel(timeout=ACCEL_TIMEOUT, root=None, clock=None, sleep=None):
+    """Wait for the running guest to use the iGPU. Returns (active, detail)."""
+    path = bar0_path(root)
+    return wait_accel(lambda: read_bar_registers(path), timeout, ACCEL_POLL, clock, sleep)
+
+
 # ── command line (used by the bash installer) ────────────────────────
 
 def _emit(obj):
@@ -451,7 +514,7 @@ def _emit(obj):
 
 def _usage():
     sys.stderr.write("usage: igpu_engine.py check|verdict <id>|lookup <id>|settings <mb> <rom>|merge-args|strip-args|"
-                     "fetch <rom:KEY|pin:NAME> <dir>|payload <pkg> <img>|result <img>|stage-command|pins\n")
+                     "fetch <rom:KEY|pin:NAME> <dir>|payload <pkg> <img>|result <img>|accel-check [seconds]|stage-command|pins\n")
     return 64
 
 
@@ -495,6 +558,10 @@ def main(argv):
     if cmd == "result" and len(argv) == 3:
         sys.stdout.write(read_result(argv[2]) + "\n")
         return 0
+    if cmd == "accel-check" and len(argv) in (2, 3):
+        active, detail = check_accel(int(argv[2]) if len(argv) == 3 else ACCEL_TIMEOUT)
+        sys.stdout.write(("active" if active else "inactive") + ": " + detail + "\n")
+        return 0 if active else 1
     if cmd == "stage-command":
         sys.stdout.write(STAGE_COMMAND + "\n")
         return 0

@@ -46,6 +46,16 @@ osx-next-cli gpu-setup --undo               # put the VM and the host back
 
 An already installed q35 VM is not converted: switching the machine type of an installed macOS has not been tested. Create a new VM instead.
 
+## Troubleshooting
+
+### "Acceleration was not confirmed"
+
+After the last boot, `igpu-finish` waits up to 5 minutes and reads the iGPU's registers from the host (BAR0, read-only). It reports "Metal acceleration is active" only when the blitter or render ring tail (`BCS_TAIL`, `RCS_TAIL`) is non-zero, which means macOS submitted work to the GPU. If both stay at zero the graphics package is installed but the GPU is idle, and the command exits non-zero.
+
+- Check that the VM's OpenCore disk was assembled by this tool (it carries WhateverXe and AMFIPass) and not an older prebuilt image. Deleting `opencore-osx-proxmox-vm.iso` from the ISO cache makes the next run rebuild it.
+- The check needs the VM to be running with the iGPU on `hostpci0`. A slow Sequoia boot can need a few more minutes than the check waits, so look at the screen on the monitor before assuming it failed.
+- With nothing at all moving, run `gpu-setup --undo` and repeat the setup on a fresh VM.
+
 ## Undo
 
 `gpu-setup --undo` restores the VM's args, display setting and OpenCore config from the backup. The VM stays on the i440fx machine type, which boots fine without the card. The host files are restored from their backups and the host needs one more reboot to give the iGPU back to i915.

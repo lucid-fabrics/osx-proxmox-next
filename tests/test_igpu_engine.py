@@ -349,3 +349,62 @@ def test_every_character_of_the_stage_command_is_typeable():
     from osx_proxmox_next.unattended import CHARMAP
     for ch in eng.STAGE_COMMAND:
         assert ch.islower() or ch.isupper() or ch.isdigit() or ch in CHARMAP, ch
+
+
+# ── host-side acceleration check ──
+
+def _bar(tmp_path, **vals):
+    import struct
+    f = tmp_path / "resource0"
+    buf = bytearray(0x80000)
+    for name, v in vals.items():
+        struct.pack_into("<I", buf, eng.ACCEL_REGS[name], v)
+    f.write_bytes(bytes(buf))
+    return f
+
+
+def test_parse_accel_needs_a_ring_tail():
+    ok, detail = eng.parse_accel({"BCS_TAIL": 0x40, "RCS_TAIL": 0, "PLANE_SURF_1_A": 0x100000})
+    assert ok and "BCS_TAIL=0x40" in detail and "PLANE_SURF_1_A=0x100000" in detail
+    assert eng.parse_accel({"RCS_TAIL": 8})[0]
+    assert not eng.parse_accel({"BCS_TAIL": 0, "RCS_TAIL": 0, "PLANE_SURF_1_A": 0x1000})[0]
+    assert not eng.parse_accel({})[0]
+
+
+def test_read_bar_registers_reads_the_bar_file(tmp_path):
+    f = _bar(tmp_path, RCS_TAIL=0x1c8, PLANE_SURF_1_A=0x2000)
+    assert eng.read_bar_registers(str(f)) == {"BCS_TAIL": 0, "RCS_TAIL": 0x1c8, "PLANE_SURF_1_A": 0x2000}
+    empty = tmp_path / "empty"
+    empty.write_bytes(b"")
+    with pytest.raises(ValueError):  # a zero-size file reports the 16 MB BAR size, which it cannot back
+        eng.read_bar_registers(str(empty))
+
+
+def test_wait_accel_succeeds_once_the_gpu_works():
+    t = [0.0]
+    reads = iter([{}, {}, {"RCS_TAIL": 4}])
+    ok, detail = eng.wait_accel(lambda: next(reads), 300, 10, lambda: t[0], lambda s: t.__setitem__(0, t[0] + s))
+    assert ok and t[0] == 20 and "RCS_TAIL=0x4" in detail
+
+
+def test_wait_accel_gives_up_after_the_timeout_and_survives_read_errors():
+    t = [0.0]
+
+    def boom():
+        raise OSError("no such device")
+    ok, detail = eng.wait_accel(boom, 60, 10, lambda: t[0], lambda s: t.__setitem__(0, t[0] + s))
+    assert not ok and t[0] == 60 and "cannot read the iGPU registers: no such device" in detail
+
+
+def test_check_accel_and_the_command_line(tmp_path, capsys, monkeypatch):
+    bdf = tmp_path / "bus/pci/devices" / eng.IGD_BDF
+    bdf.mkdir(parents=True)
+    _bar(tmp_path, RCS_TAIL=4).rename(bdf / "resource0")
+    assert eng.bar0_path(str(tmp_path)) == str(bdf / "resource0")
+    assert eng.check_accel(5, str(tmp_path))[0]
+    monkeypatch.setenv("GPU_SYSFS", str(tmp_path))
+    assert eng.main(["eng.py", "accel-check", "5"]) == 0
+    assert capsys.readouterr().out.startswith("active: BCS_TAIL=0x0, RCS_TAIL=0x4")
+    _bar(tmp_path).rename(bdf / "resource0")
+    assert eng.main(["eng.py", "accel-check", "0"]) == 1
+    assert capsys.readouterr().out.startswith("inactive: BCS_TAIL=0x0")
