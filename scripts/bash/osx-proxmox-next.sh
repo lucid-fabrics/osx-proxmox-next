@@ -7495,6 +7495,57 @@ function gpu_troubleshoot_menu() {
 }
 # ── GPU walkthrough end ──
 
+# 0 when the left part of screen B (empty desktop under the recovery Utilities window) differs from screen A: a window
+# opened there. Both are raw PPM screendumps. Mirrors unattended.region_changed.
+function unattended_region_changed() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+def ppm(path):
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return None, None
+    parts, pos = [], 0
+    while len(parts) < 4 and pos < len(data):
+        end = pos
+        while end < len(data) and data[end:end + 1] not in b" \n\r\t":
+            end += 1
+        parts.append(data[pos:end])
+        pos = end + 1
+    if len(parts) < 4 or parts[0] != b"P6":
+        return None, None
+    try:
+        w, h = int(parts[1]), int(parts[2])
+    except ValueError:
+        return None, None
+    return ((w, h, pos), data) if len(data) - pos >= w * h * 3 else (None, None)
+(a, da), (b, db) = ppm(sys.argv[1]), ppm(sys.argv[2])
+if a is None or b is None or a[:2] != b[:2]:
+    sys.exit(1)
+w, h = a[:2]
+changed = total = 0
+for y in range(int(h * 0.15), int(h * 0.62), 3):
+    for x in range(int(w * 0.05), int(w * 0.30), 3):
+        i, j = a[2] + (y * w + x) * 3, b[2] + (y * w + x) * 3
+        total += 1
+        if max(abs(da[i + k] - db[j + k]) for k in range(3)) > 12:
+            changed += 1
+sys.exit(0 if total and changed / total > 0.5 else 1)
+PY
+}
+
+# Poll up to $3 seconds for the Terminal window (screen differs from the dump in $2). Mirrors unattended._terminal_open.
+function unattended_terminal_open() {
+  local vmid="$1" base="$2" wait="$3" t0
+  t0=$(date +%s)
+  while (( $(date +%s) - t0 < wait )); do
+    sleep 2
+    unattended_frame_size "$vmid" >/dev/null
+    if unattended_region_changed "$base" "/tmp/osx-next-unattended-$vmid.ppm"; then sleep 3; return 0; fi
+  done
+  return 1
+}
+
 # Boot recovery from the OpenCore picker and open Terminal from its Utilities menu.
 # Mirrors unattended.open_recovery_terminal. rc 1 (message printed) when a phase times out.
 function unattended_open_recovery_terminal() {
@@ -7523,13 +7574,27 @@ function unattended_open_recovery_terminal() {
   unattended_wait_still "$vmid"
   msg_ok "Unattended: recovery loaded"
 
-  # Utilities menu -> Terminal: ctrl-f2, right x4, down x3, ret
-  local key
-  for key in ctrl-f2 right right right right down down down ret; do
-    qm sendkey "$vmid" "$key" >/dev/null 2>&1
-    sleep 0.4
+  # Utilities menu -> Terminal: ctrl-f2, right x4, down x3, ret. Confirm the Terminal window really opened (the
+  # left part of the screen changes), else open it again with a longer wait. Mirrors unattended.open_recovery_terminal.
+  local key attempt waits=(10 30 60) wait base="/tmp/osx-next-unattended-$vmid.base.ppm"
+  unattended_frame_size "$vmid" >/dev/null
+  cp "/tmp/osx-next-unattended-$vmid.ppm" "$base" 2>/dev/null || : >"$base"
+  for ((attempt = 0; attempt < ${#waits[@]}; attempt++)); do
+    wait=${waits[$attempt]}
+    for key in ctrl-f2 right right right right down down down ret; do
+      qm sendkey "$vmid" "$key" >/dev/null 2>&1
+      sleep 0.4
+    done
+    if [ ! -s "$base" ]; then sleep "$wait"; return 0; fi  # no screendump to compare with: the old fixed wait
+    unattended_terminal_open "$vmid" "$base" "$wait" && { rm -f "$base"; return 0; }
+    if (( attempt + 1 < ${#waits[@]} )); then
+      msg_info "Unattended: Terminal did not open; opening it from the Utilities menu again"
+      qm sendkey "$vmid" esc >/dev/null 2>&1; sleep 0.4; qm sendkey "$vmid" esc >/dev/null 2>&1; sleep 0.4
+    fi
   done
-  sleep 10
+  rm -f "$base"
+  msg_error "Unattended: Terminal never opened from the Utilities menu in the recovery screen. Nothing was typed."
+  return 1
 }
 
 function unattended_install() {

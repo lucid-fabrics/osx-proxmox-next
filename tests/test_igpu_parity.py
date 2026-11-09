@@ -180,6 +180,62 @@ def test_the_shared_note_matches_python(bash, ids):
     assert notes == [gpu.shared_note(ids)]
 
 
+def shell_functions(*names: str) -> str:
+    """The text of bash functions from the installer, for tests that run them with stubbed commands."""
+    out = []
+    for name in names:
+        start = BASH.index(f"function {name}() {{")
+        out.append(BASH[start:BASH.index("\n}\n", start) + 3])
+    return "\n".join(out) + "\n"
+
+
+def run_shell(snippet: str, env: dict[str, str], expect: int | None = 0):
+    import subprocess
+    res = subprocess.run(["bash", "-c", "set -u\n" + snippet], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", **env}, timeout=60)
+    if expect is not None:
+        assert res.returncode == expect, (res.returncode, res.stdout, res.stderr)
+    return res
+
+
+def write_ppms(tmp_path):
+    from test_unattended import ppm
+    for name, window in (("plain", False), ("window", True)):
+        (tmp_path / f"{name}.ppm").write_bytes(ppm(window))
+    return tmp_path
+
+
+@pytest.mark.parametrize("before,after", [("plain", "window"), ("plain", "plain"), ("window", "plain"), ("window", "window")])
+def test_the_bash_region_check_matches_python(tmp_path, before, after):
+    from osx_proxmox_next.unattended import region_changed
+    d = write_ppms(tmp_path)
+    expect = region_changed((d / f"{before}.ppm").read_bytes(), (d / f"{after}.ppm").read_bytes())
+    fn = shell_functions("unattended_region_changed")
+    assert (run_shell(fn + f"unattended_region_changed {d}/{before}.ppm {d}/{after}.ppm", {}, None).returncode == 0) is expect
+    assert run_shell(fn + f"unattended_region_changed {d}/{before}.ppm /nope", {}, None).returncode == 1
+
+
+TERMINAL_STUBS = (
+    'UNATTENDED_PICKER_TIMEOUT=1; UNATTENDED_RECOVERY_TIMEOUT=1; UNATTENDED_MAX_RECOVERY_RESETS=2; '
+    'unattended_wait_frame() { return 0; }; unattended_settle_recovery() { return 0; }; unattended_wait_still() { :; }; '
+    'sleep() { :; }; date() { n=$(cat "$KEYS.clock" 2>/dev/null || echo 0); n=$((n+3)); echo $n >"$KEYS.clock"; echo $n; }; '
+    'msg_info() { echo "INFO $*"; }; msg_ok() { :; }; msg_error() { echo "ERR $*"; }; '
+    'qm() { [ "$1" == sendkey ] && echo "$3" >>"$KEYS"; return 0; }; '
+    'unattended_frame_size() { n=$(grep -c ctrl-f2 "$KEYS" 2>/dev/null || true); if [ "${n:-0}" -ge "$OPENS_ON" ]; then cp "$D/window.ppm" "/tmp/osx-next-unattended-$1.ppm"; '
+    'else cp "$D/plain.ppm" "/tmp/osx-next-unattended-$1.ppm"; fi; echo 1; }; ')
+
+
+@pytest.mark.parametrize("opens_on,rc,navs", [(1, 0, 1), (3, 0, 3), (99, 1, 3)])
+def test_the_bash_terminal_is_confirmed_before_typing(tmp_path, opens_on, rc, navs):
+    d = write_ppms(tmp_path)
+    keys = tmp_path / "keys"
+    env = {"KEYS": str(keys), "D": str(d), "OPENS_ON": str(opens_on)}
+    fns = shell_functions("unattended_region_changed", "unattended_terminal_open", "unattended_open_recovery_terminal")
+    out = run_shell(TERMINAL_STUBS + fns + "unattended_open_recovery_terminal 9777", env, expect=rc).stdout
+    assert keys.read_text().split().count("ctrl-f2") == navs
+    assert ("Terminal never opened" in out) is (rc == 1)
+    assert out.count("opening it from the Utilities menu again") == navs - 1 if rc == 0 else out.count("again") == 2
+
+
 STAGE_STUBS = (
     'igpu_oc_patch() { :; }; unattended_open_recovery_terminal() { :; }; sleep() { :; }; msg_info() { echo "INFO $*"; }; '
     'msg_error() { echo "ERR $*"; }; msg_ok() { :; }; pvesm() { echo /dev/payload; }; IGPU_START_WAIT=0; '
