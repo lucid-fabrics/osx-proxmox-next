@@ -865,6 +865,12 @@ function _oc_assemble_abort() {
 # caller can fall back to the prebuilt ISO; it must never exit the script
 # itself (checksum mismatches excepted: fetch_oc_component hard-stops).
 # Deliberately avoids setup_loop/safe_mount, which exit on failure.
+# What a locally assembled image was built from (sorted pinned SHA-256s).
+# Same text as oc_builder.pins_stamp(), so both tools share a cached image.
+function oc_pins_stamp() {
+  printf '%s\n' "${OC_COMPONENT_SHA256[@]}" | LC_ALL=C sort
+}
+
 function assemble_opencore_iso() {
   local dest_iso="$1"
   local tree="$TEMP_DIR/oc-tree"
@@ -906,7 +912,8 @@ function assemble_opencore_iso() {
     return 1
   fi
   BUILD_DEST_MNT="$mnt"
-  if ! cp -a "$tree"/. "$mnt"/; then
+  # FAT stores no owners; -a fails on trees owned by a squashed NFS user.
+  if ! cp -r "$tree"/. "$mnt"/; then
     _oc_assemble_abort "$mnt" "$iloop" "$img" "$tree"
     return 1
   fi
@@ -8172,12 +8179,16 @@ CACHE_DIR="/var/lib/vz/template/cache"
 mkdir -p "$CACHE_DIR" || { msg_error "Cannot create $CACHE_DIR"; exit 1; }
 OC_ISO="$CACHE_DIR/opencore-osx-proxmox-vm.iso"
 
-if [ -f "$OC_ISO" ] && [ -s "$OC_ISO" ]; then
+# Reuse the cache only when it was assembled from the current pins. A prebuilt
+# fallback or an image from older pins carries outdated kexts (the prebuilt
+# Lilu 1.6.8 turns itself off on Sequoia 15.8), so it is rebuilt.
+if [ -s "$OC_ISO" ] && [ "$(cat "$OC_ISO.pins" 2>/dev/null)" = "$(oc_pins_stamp)" ]; then
   msg_ok "Using cached OpenCore ISO"
 else
-  rm -f "$OC_ISO"
+  rm -f "$OC_ISO" "$OC_ISO.pins"
   msg_info "Assembling OpenCore boot image from pinned releases"
   if assemble_opencore_iso "$OC_ISO"; then
+    oc_pins_stamp > "$OC_ISO.pins"
     msg_ok "Assembled OpenCore boot image"
   else
     echo -e "  ${YW}WARN: local assembly failed, falling back to prebuilt ISO${CL}"
