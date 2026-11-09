@@ -847,7 +847,8 @@ def test_bash_saves_the_console_when_a_run_stalls(bash_text: str) -> None:
     assert "-f png" in saver                              # PNG when QEMU can
     assert "screendump $ppm" in saver                     # PPM fallback
     caller = bash_text[bash_text.index("if unattended_install "):]
-    assert "unattended_save_frame" in caller[:caller.index("fi")]
+    # whatever grows the success branch, the failure branch saves the console before it tells the user to continue by hand
+    assert caller.index("unattended_save_frame") < caller.index("Unattended install did not finish")
 
 
 def test_the_recovery_slot_is_the_one_that_gets_detached() -> None:
