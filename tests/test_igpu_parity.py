@@ -321,6 +321,7 @@ def test_the_bash_choice_asks_and_can_switch(bash, vm, tmp_path):
 
 
 def test_the_first_boot_text_and_notice_match_python():
+    assert igpu_attach.TAHOE_STAGE_NOTE == re.search(r'^IGPU_TAHOE_STAGE_NOTE="(.*)"$', BLOCK, re.M).group(1)
     assert igpu_attach.TAHOE_NOTE == re.search(r'^IGPU_TAHOE_NOTE="(.*)"$', BLOCK, re.M).group(1)
     for line in igpu_attach.IGPU_NEXT_STEPS:
         assert line.split("\n")[0].replace("'", "'") in BLOCK

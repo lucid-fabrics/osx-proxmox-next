@@ -312,6 +312,20 @@ def test_the_start_wait_includes_the_time_the_typing_took(env, monkeypatch):
     assert waits == [igpu_finish.START_WAIT + len(igpu_finish.igpu_engine.STAGE_COMMAND) * 1.5]
 
 
+def test_a_tahoe_staging_failure_says_so_and_puts_the_vm_back(env):
+    pve = Pve(halts=(10**6,))
+    events: list[str] = []
+    clock = Clock()
+    with pytest.raises(igpu_finish.FinishError) as err:
+        igpu_finish.finish(9, console=Console(), pve=pve, iso_dir=env.tmp, on_event=events.append, clock=clock.monotonic,
+                           sleep=clock.sleep, work_dir=env.tmp, macos="tahoe")
+    assert igpu_attach.TAHOE_STAGE_NOTE in str(err.value) and "did not finish" in str(err.value)
+    assert any(e.startswith("Note: The automatic graphics package setup does not work on macOS Tahoe") for e in events)
+    # nothing the staging added is left behind
+    assert not any(k.startswith("sata") for k in pve.cfg) and pve.cfg["vga"] == CFG["vga"] and pve.cfg["args"] == CFG["args"]
+    assert pve.status == "stopped"
+
+
 def test_recovery_that_never_shows_is_a_finish_error(env):
     env.terminal = UnattendedError("recovery never started")
     with pytest.raises(igpu_finish.FinishError, match="recovery never started"):

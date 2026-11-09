@@ -6178,6 +6178,7 @@ function igpu_pin() { igpu_engine pins | gpu_json "d['pins']['$1'][$2]"; }
 
 IGPU_CACHE="${IGPU_CACHE:-/var/lib/vz/template/iso}"
 IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load slows it. macOS Tahoe is experimental: restart it from Proxmox, not from inside macOS."
+IGPU_TAHOE_STAGE_NOTE="The automatic graphics package setup does not work on macOS Tahoe yet: the staging script often stalls in the recovery Terminal. The VM config was put back as it was. Tahoe is experimental."
 IGPU_TAHOE_NOTE="macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs (WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead."
 IGPU_STAGE_TIMEOUT=900
 IGPU_STAGE_ATTEMPTS=3
@@ -6443,9 +6444,10 @@ function igpu_staging_started() {
 }
 
 # Boot the staging recovery, run the script from the payload disk, wait for the guest to power off.
-# $1 vmid $2 payload volume. Mirrors igpu_finish._stage.
+# $1 vmid $2 payload volume $3 macos (Tahoe gets an extra note on failure). Mirrors igpu_finish._stage.
 function igpu_stage() {
-  local vmid="$1" payload_ref="$2" path staged
+  local vmid="$1" payload_ref="$2" ver="${3:-}" path staged tahoe_note=""
+  [ "$ver" != "tahoe" ] || tahoe_note=" ${IGPU_TAHOE_STAGE_NOTE}"
   igpu_oc_patch "$vmid" stage || { msg_error "Could not patch the OpenCore disk (picker)"; return 1; }
   qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }
   unattended_open_recovery_terminal "$vmid" || return 1
@@ -6469,12 +6471,12 @@ function igpu_stage() {
   if [ "$started" != yes ]; then
     qm stop "$vmid" >/dev/null 2>&1 || true
     igpu_wait_stopped "$vmid" 120 || true
-    msg_error "The staging command did not start after ${IGPU_STAGE_ATTEMPTS} tries.${shot:+ The screen at the last try is in ${shot}.}"
+    msg_error "The staging command did not start after ${IGPU_STAGE_ATTEMPTS} tries.${shot:+ The screen at the last try is in ${shot}.}${tahoe_note}"
     return 1
   fi
   if ! igpu_wait_stopped "$vmid" "$IGPU_STAGE_TIMEOUT"; then
     qm stop "$vmid" >/dev/null 2>&1 || true
-    msg_error "The staging script did not finish within $((IGPU_STAGE_TIMEOUT / 60)) minutes"
+    msg_error "The staging script did not finish within $((IGPU_STAGE_TIMEOUT / 60)) minutes.${tahoe_note}"
     return 1
   fi
   path=$(pvesm path "$payload_ref" 2>/dev/null) || return 1
@@ -6498,6 +6500,7 @@ function igpu_finish() {
   nullmoth_print_findings
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
   echo -e "${INFO}${YW}${IGPU_NOTICE}${CL}"
+  [ "$ver" != "tahoe" ] || echo -e "${INFO}${YW}Note: ${IGPU_TAHOE_STAGE_NOTE%% The VM config*}${CL}"
   igpu_fetch_assets "$IGPU_ROM_KEY" || { msg_error "Could not download or verify the iGPU files"; return 1; }
   storage=$(sed -n 's/^\(virtio0\|efidisk0\|ide0\): \([^:,]*\):.*/\2/p' <<<"$cfg" | head -1)
   [ -n "$storage" ] || { msg_error "Could not tell which storage the VM disks are on"; return 1; }
@@ -6515,7 +6518,7 @@ function igpu_finish() {
     [ "$(sed -n 's/^vga: //p' <<<"$cfg")" == "std" ] || [ -z "$(sed -n 's/^vga: //p' <<<"$cfg")" ] || qm set "$vmid" --vga std >/dev/null
     leftover=$(printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"args": sys.argv[1], "wanted": json.loads(sys.argv[2])["args_add"]}))' "$(sed -n 's/^args: //p' <<<"$cfg")" "$(igpu_engine settings 0 x)")" | igpu_engine strip-args)
     [ "$leftover" == "$(sed -n 's/^args: //p' <<<"$cfg")" ] || qm set "$vmid" --args "$leftover" >/dev/null
-    igpu_stage "$vmid" "$payload_ref" || rc=1
+    igpu_stage "$vmid" "$payload_ref" "$ver" || rc=1
   fi
   igpu_drop_disk "$vmid" sata1
   igpu_oc_patch "$vmid" unstage || true
