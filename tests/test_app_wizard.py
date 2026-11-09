@@ -11,6 +11,7 @@ from osx_proxmox_next import app as app_module
 from osx_proxmox_next.app import NextApp, WizardState
 from osx_proxmox_next.executor import ApplyResult
 from osx_proxmox_next.infrastructure import CommandResult
+from osx_proxmox_next.preflight import PreflightCheck
 from osx_proxmox_next.domain import DEFAULT_VMID, PlanStep, VmConfig
 from osx_proxmox_next.services import detection_service
 from osx_proxmox_next.services import proxmox_service
@@ -26,6 +27,18 @@ import pytest
 def _stub_restrictevents(monkeypatch):
     """Keep the best-effort RestrictEvents fetch off the network in tests."""
     monkeypatch.setattr(download_service, "ensure_restrictevents", lambda dest_dir: None)
+
+
+@pytest.fixture
+def _hermetic_host(monkeypatch):
+    """The wizard tests assume a bare machine: no Proxmox storages, no VMs, failing preflight.
+
+    Without this they read the real host they run on (a PVE node reports its own storages, the next free VMID
+    and passing checks) and fail there."""
+    monkeypatch.setattr(app_module, "detect_next_vmid", lambda *a, **k: 900)
+    monkeypatch.setattr(app_module, "detect_storage_targets", lambda *a, **k: ["local-lvm", "local"])
+    monkeypatch.setattr(app_module, "run_preflight_worker",
+                        lambda *a, **k: [PreflightCheck("qm available", False, "qm not found")])
 
 
 class FakePve:
@@ -105,6 +118,7 @@ def test_wizard_starts_at_step1() -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.usefixtures("_hermetic_host")
 def test_next_blocked_without_preflight() -> None:
     async def _run() -> None:
         app = NextApp()
@@ -454,6 +468,7 @@ def test_storage_selection_updates_buttons() -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.usefixtures("_hermetic_host")
 def test_detect_storage_fallback() -> None:
     async def _run() -> None:
         app = NextApp()
@@ -478,6 +493,7 @@ def test_prefill_form_on_step3_next() -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.usefixtures("_hermetic_host")
 def test_suggest_defaults_button() -> None:
     async def _run() -> None:
         app = NextApp()
@@ -677,6 +693,7 @@ def test_read_form_invalid_vmid() -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.usefixtures("_hermetic_host")
 def test_read_form_success() -> None:
     async def _run() -> None:
         app = NextApp()
