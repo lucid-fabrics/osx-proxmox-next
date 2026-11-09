@@ -326,6 +326,25 @@ def test_a_tahoe_staging_failure_says_so_and_puts_the_vm_back(env):
     assert pve.status == "stopped"
 
 
+def test_finish_refuses_a_vm_that_already_has_the_igpu_so_the_package_is_never_staged_twice(env):
+    cfg = {**CFG, "hostpci0": "0000:00:02.0,legacy-igd=1"}
+    console = Console()
+    with pytest.raises(igpu_finish.FinishError, match="already has a PCI device on hostpci0"):
+        go(env, pve=Pve(cfg), console=console)
+    assert console.typed == []
+
+
+def test_the_first_boot_script_is_one_shot():
+    from pathlib import Path
+    text = (Path(igpu_finish.__file__).parent / "data/gpu/igpu_firstboot.sh").read_text()
+    ok = text.index('if /usr/sbin/installer -pkg "$PKG" -target /')
+    # a successful install removes the package, the script, its LaunchDaemon and the try counter before reporting
+    assert 'rm -f "$PKG" "$PLIST" "$BASE/firstboot.sh" "$TRIES_FILE"' in text[ok:text.index('finish "installed"')]
+    # after the last try the LaunchDaemon goes too, so nothing runs on later boots
+    start = text.index('if [ "$tries" -ge "$MAX_TRIES" ]')
+    assert 'rm -f "$PLIST"' in text[start:text.index("\nfi\n", start)]
+
+
 def test_recovery_that_never_shows_is_a_finish_error(env):
     env.terminal = UnattendedError("recovery never started")
     with pytest.raises(igpu_finish.FinishError, match="recovery never started"):
