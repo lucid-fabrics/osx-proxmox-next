@@ -580,25 +580,12 @@ def test_a_second_reboot_line_during_the_quiet_check_starts_over(daemon):
     assert tracker.due(daemon.GRACE + daemon.QUIET + 1) is None  # the GRACE clock restarted
 
 
-def test_io_ops_counts_what_the_guest_sends_but_not_what_it_receives(daemon):
-    base = "\t\trd_operations: 10\n\t\twr_operations: 5\nnetin: 999\n"
+def test_io_ops_ignores_network_counters(daemon):
+    """Measured live: a hung Tahoe kernel still answers ARP and TCP, so netout moves while the guest is stuck."""
+    base = "\t\trd_operations: 10\n\t\twr_operations: 5\nnetin: 999\nnetout: 566586\n"
     assert daemon.io_ops(base) == 15
-    assert daemon.io_ops(base + "netout: 7\n") == 22
+    assert daemon.io_ops(base.replace("566586", "566960")) == 15
     assert daemon.io_ops("netout: 7\n") is None
-
-
-def test_a_vm_that_still_sends_packets_is_left_alone(daemon, capsys):
-    sent = iter(["netout: 100\n", "netout: 160\n"])
-
-    def runner(argv):
-        if argv[:2] == ["qm", "status"]:
-            return 0, ("\trd_operations: 1\n\twr_operations: 1\n" + next(sent)) if "--verbose" in argv else "status: running"
-        raise AssertionError(argv)
-    tracker = daemon.Tracker()
-    tracker.feed("Will be calling reboot(2) with flags: 0x0", 0.0)
-    assert daemon.step("7", tracker, daemon.GRACE, runner) is False
-    assert daemon.step("7", tracker, daemon.GRACE + daemon.QUIET, runner) is False
-    assert "left alone" in capsys.readouterr().out
 
 
 def test_a_missing_config_only_counts_while_the_cluster_file_system_is_up(daemon, monkeypatch, tmp_path):
