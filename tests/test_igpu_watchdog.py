@@ -390,12 +390,8 @@ def test_enable_steps_has_the_expected_commands_in_order(
     expected.extend(
         [
             ["oc", "serial", "100"],
-            [
-                "systemctl",
-                "enable",
-                "--now",
-                "osx-next-power-watchdog@100.service",
-            ],
+            ["systemctl", "enable", "osx-next-power-watchdog@100.service"],
+            ["systemctl", "restart", "osx-next-power-watchdog@100.service"],
         ]
     )
 
@@ -511,7 +507,7 @@ def test_prepare_refuses_a_release_that_restarts_normally(monkeypatch):
 def test_prepare_builds_the_enable_steps_for_tahoe_or_an_unknown_release(monkeypatch, version):
     _patch_prepare_inputs(monkeypatch, config_raw=_vm_config(), status="stopped", version=version)
     issues, steps = igpu_watchdog.prepare(100, adapter=object())
-    assert issues == [] and steps[-1].argv == ["systemctl", "enable", "--now", "osx-next-power-watchdog@100.service"]
+    assert issues == [] and steps[-1].argv == ["systemctl", "restart", "osx-next-power-watchdog@100.service"]
     # serial0 is already a socket in this config, so no qm set step
     assert not any(s.argv[:2] == ["qm", "set"] for s in steps)
 

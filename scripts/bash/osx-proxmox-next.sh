@@ -7121,7 +7121,8 @@ function igpu_watchdog_enable() {
     qm set "$vmid" --serial0 socket >/dev/null || return 1
   fi
   igpu_oc_patch "$vmid" serial || return 1
-  systemctl enable --now "osx-next-power-watchdog@${vmid}.service" || return 1
+  systemctl enable "osx-next-power-watchdog@${vmid}.service" || return 1
+  systemctl restart "osx-next-power-watchdog@${vmid}.service" || return 1
 }
 
 # Mirrors igpu_watchdog.disable_steps: the serial socket stays, it does no harm.

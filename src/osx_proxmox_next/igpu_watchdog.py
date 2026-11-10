@@ -56,8 +56,11 @@ def enable_steps(vmid: int, cfg: dict[str, str], data: Path | None = None) -> li
         steps.append(PlanStep(title="Give the VM a serial port (socket) for the kernel console",
                               argv=["qm", "set", vid, "--serial0", "socket"]))
     steps.append(oc_step(vid, "serial", "Send the macOS kernel console to the serial port (boot-arg serial=3)"))
-    steps.append(PlanStep(title=f"Start the power watchdog for VM {vid} (and at every host boot)",
-                          argv=["systemctl", "enable", "--now", unit_name(vmid)], risk="action"))
+    steps.append(PlanStep(title=f"Start the power watchdog for VM {vid} at every host boot",
+                          argv=["systemctl", "enable", unit_name(vmid)]))
+    # restart, not start: a watchdog that is already running must pick up the daemon installed above
+    steps.append(PlanStep(title=f"Start the power watchdog for VM {vid} now",
+                          argv=["systemctl", "restart", unit_name(vmid)], risk="action"))
     return steps
 
 
