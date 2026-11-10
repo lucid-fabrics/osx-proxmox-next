@@ -29,6 +29,7 @@ import time
 INTENT_RE = re.compile(r'Will be calling reboot\(2\) with flags: (0x[0-9a-fA-F]+)')
 RESET_RE = re.compile(r'BdsDxe: ')  # the firmware starting again
 BANNER_RE = re.compile(r'^Darwin Kernel Version ')  # a new kernel, unless a panic log repeats it under "Kernel version:"
+PANIC_RE = re.compile(r'panic\(cpu \d+ caller')
 RB_HALT = 0x8
 GRACE = 60        # launchd's reboot(2) line to a reset: a healthy guest needs under 10 s
 QUIET = 15        # no disk I/O for this long before the host steps in
@@ -221,7 +222,11 @@ def watch(vmid, sock_path):
                 buf = (buf + data)[-MAX_LINE:]  # a line longer than this is not one the watch looks for
                 while b'\n' in buf:
                     raw, buf = buf.split(b'\n', 1)
-                    state = tracker.feed(raw.decode('utf-8', 'replace'), time.monotonic())
+                    line = raw.decode('utf-8', 'replace')
+                    if PANIC_RE.search(line):
+                        # never acted on (a panic is not a request to restart), only kept for whoever looks later
+                        log(vmid, 'kernel panic: ' + line.strip()[:300])
+                    state = tracker.feed(line, time.monotonic())
                     if state == 'armed':
                         log(vmid, 'macOS asked for a %s, watching for the reset' % tracker.intent)
                     elif state == 'reset':

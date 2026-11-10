@@ -727,3 +727,11 @@ def test_watch_notes_a_guest_that_powered_off_by_itself(daemon, monkeypatch, cap
     path, _ = _serve(["Will be calling reboot(2) with flags: 0x8", "CPU halted"], keep_open=False)
     daemon.watch("7", path)
     assert "powered off by itself" in capsys.readouterr().out
+
+
+def test_watch_logs_a_kernel_panic_but_does_nothing_about_it(daemon, monkeypatch, capsys):
+    monkeypatch.setattr(daemon, "run", lambda argv, timeout=120: pytest.fail(f"no command expected: {argv}"))
+    path, _ = _serve(["panic(cpu 1 caller 0xffffff8012eb08a8): AppleIntelFramebuffer::setPowerState timeout"],
+                     keep_open=False)
+    daemon.watch("7", path)
+    assert "VM 7: kernel panic: panic(cpu 1 caller" in capsys.readouterr().out
