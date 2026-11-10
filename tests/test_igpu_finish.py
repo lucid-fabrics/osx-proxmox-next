@@ -118,7 +118,8 @@ class Console:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    e = SimpleNamespace(applied=[], results=deque(["staged", "installed"]), attach_ok=True, mark_ok=True, plan_issues=[], terminal=None)
+    e = SimpleNamespace(applied=[], results=deque(["staged", "installed"]), attach_ok=True, mark_ok=True, plan_issues=[], terminal=None,
+                        watchdog_ok=True)
     for name in ("w.zip", "a.zip", "x.rom", "g.pkg", "rec.img"):
         (tmp_path / name).write_bytes(b"x")
     assets = {"whateverxe": tmp_path / "w.zip", "amfipass": tmp_path / "a.zip", "rom": tmp_path / "x.rom", "graphics": tmp_path / "g.pkg"}
@@ -143,6 +144,8 @@ def env(tmp_path, monkeypatch):
         ok = e.attach_ok or not steps or "Show every" in steps[0].title or "picker" in steps[0].title
         if steps and "Note in OpenCore" in steps[0].title:
             ok = e.mark_ok
+        if steps and "power watchdog" in steps[0].title:
+            ok = e.watchdog_ok
         return ApplyResult(ok, [StepResult("t", "c", ok, 0, "")] if not ok else [], tmp_path / "log")
     monkeypatch.setattr(igpu_finish, "apply_plan", apply)
 
@@ -434,3 +437,24 @@ def test_helpers(env):
     assert "sata1" not in pve.cfg and not any(v == "local-lvm:vm-9-disk-5" for v in pve.cfg.values())
     igpu_finish._drop_disk(pve, 9, "sata2")  # nothing there: no error
     assert igpu_finish._read_payload_result(Pve(), "ref") == "staged"  # the fake read_result answers
+
+
+def test_tahoe_gets_the_power_watchdog_right_after_the_attach(env):
+    res, pve, events = go(env, pve=Pve({**CFG, "name": "macos-tahoe"}, halts=(1, 10**6)))
+    titles = [t[0] for t in env.applied if t]
+    assert res.watchdog and titles.index("Install the power watchdog on the host") == len(titles) - 2  # before "mark"
+    assert any("power watchdog" in ev for ev in events)
+    watchdog = next(t for t in env.applied if t and t[0] == "Install the power watchdog on the host")
+    assert "Give the VM a serial port (socket) for the kernel console" in watchdog  # the test VM has no serial0
+
+
+def test_a_failed_watchdog_install_is_a_note_not_a_failure(env):
+    env.watchdog_ok = False
+    res, _pve, _ = go(env, pve=Pve({**CFG, "name": "macos-tahoe"}, halts=(1, 10**6)))
+    assert res.installed and not res.watchdog
+    assert any("osx-next-cli igpu-watchdog 9" in n for n in res.notes)
+
+
+def test_other_releases_get_no_watchdog(env):
+    res, _pve, _ = go(env)
+    assert not res.watchdog and not any(t and "power watchdog" in t[0] for t in env.applied)

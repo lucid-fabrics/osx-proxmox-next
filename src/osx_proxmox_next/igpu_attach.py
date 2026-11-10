@@ -37,8 +37,9 @@ __all__ = [
 ]
 
 _PYEOF = "IGPU_OC_PY"
-TAHOE_NOTE = ("macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs "
-              "(WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead.")
+TAHOE_NOTE = ("macOS Tahoe 26 is experimental with the iGPU: every restart and shut down from inside macOS hangs at "
+              "the very end (WhateverXe issue 62). The power watchdog that igpu-finish installs on the host finishes "
+              "them about a minute later. A VM set up before gets it with the igpu-watchdog command.")
 TAHOE_STAGE_NOTE = ("Staging stopped on macOS Tahoe, whose recovery Terminal can be slow to take input. "
                     "The VM config was put back as it was; run the same command again. Tahoe is experimental.")
 SETUP_ASSISTANT_NOTE = ("Finish Setup Assistant on the monitor or HDMI dummy plug on the host's native HDMI port, or over "

@@ -199,7 +199,7 @@ def version_status(vendor: str, device_id: int, kind: str, macos: str, laptop: b
         if macos == "tahoe" and fam is not None and fam.tahoe != "ok":
             return True, f"works with {name} (not confirmed on this family)"
     if vendor == "intel" and macos == "tahoe":
-        return True, f"works with {name} (experimental: restart from Proxmox)"
+        return True, f"works with {name} (experimental)"
     return True, f"works with {name}"
 
 

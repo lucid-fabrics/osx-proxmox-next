@@ -5495,7 +5495,7 @@ GPU_EMBED_IGPU_ENGINE_EOF
 IFS= read -r -d '' GPU_EMBED_OC_IGPU <<'GPU_EMBED_OC_IGPU_EOF' || true
 """Set up (or undo) a VM's OpenCore disk for Intel iGPU passthrough with WhateverXe.
 
-Usage: oc_igpu.py <EFI/OC directory> attach|restore|fadt|stage|unstage|mark
+Usage: oc_igpu.py <EFI/OC directory> attach|restore|fadt|stage|unstage|mark|serial|unserial
 
 The Python CLI/TUI and the standalone bash installer run this exact text (the
 bash script embeds it verbatim; tests/test_igpu_parity.py diffs the two).
@@ -5517,6 +5517,9 @@ stage    Makes the picker show only the recovery disk and wait for a key: Timeou
 unstage  Puts ScanPolicy back (the value saved by stage, else 0). The caller restores the picker timeout.
 mark     Notes that the WhateverXe Graphics package is installed inside macOS. From then on restore keeps
          WhateverXe and AMFIPass in OpenCore: with the package installed and WhateverXe gone the guest hangs at boot.
+serial   Adds the boot-arg serial=3 so the kernel console goes to the VM's serial port, where the host's power
+         watchdog (igpu_power_watchdog.py) reads it. unserial removes it. Both keep the SHA-256 that restore
+         compares in step, so undo still puts the original config back.
 restore  Puts config.plist.pre-igpu back byte for byte and removes the two kexts, but only
          while config.plist still has the SHA-256 attach stored next to the backup. When the
          file changed since, the changed config and the backup stay and a KEPT line says so.
@@ -5711,6 +5714,37 @@ def mark(oc_dir):
     sys.stderr.write('noted that the graphics package is installed\n')
 
 
+SERIAL_ARG = 'serial=3'
+
+
+def _set_serial(oc_dir, on):
+    path = os.path.join(oc_dir, 'config.plist')
+    with open(path, 'rb') as f:
+        cfg = plistlib.load(f)
+    nv = cfg.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault(NVRAM_GUID, {})
+    stamp = os.path.join(oc_dir, PATCHED_SHA)
+    ours = False
+    if os.path.exists(stamp):
+        with open(stamp) as f:
+            ours = f.read().strip() == file_sha(path)
+    kept = [a for a in nv.get('boot-args', '').split() if a.split('=', 1)[0] != 'serial']
+    nv['boot-args'] = ' '.join(kept + [SERIAL_ARG] if on else kept)
+    write_plist(cfg, path)
+    if ours:
+        with open(stamp, 'w') as f:
+            f.write(file_sha(path) + '\n')
+    sys.stderr.write(('kernel console on the serial port (' + SERIAL_ARG + ')\n') if on
+                     else 'kernel console back on the screen only\n')
+
+
+def serial(oc_dir):
+    _set_serial(oc_dir, True)
+
+
+def unserial(oc_dir):
+    _set_serial(oc_dir, False)
+
+
 def restore(oc_dir):
     path = os.path.join(oc_dir, 'config.plist')
     if os.path.exists(os.path.join(oc_dir, PACKAGE_MARK)):
@@ -5743,9 +5777,10 @@ def restore(oc_dir):
 
 
 def main(argv):
-    actions = {'attach': attach, 'restore': restore, 'fadt': fadt, 'stage': stage, 'unstage': unstage, 'mark': mark}
+    actions = {'attach': attach, 'restore': restore, 'fadt': fadt, 'stage': stage, 'unstage': unstage, 'mark': mark,
+               'serial': serial, 'unserial': unserial}
     if len(argv) != 3 or argv[2] not in actions:
-        refuse('usage: oc_igpu.py <EFI/OC dir> attach|restore|fadt|stage|unstage|mark', 64)
+        refuse('usage: oc_igpu.py <EFI/OC dir> attach|restore|fadt|stage|unstage|mark|serial|unserial', 64)
     actions[argv[2]](argv[1])
 
 
@@ -5899,6 +5934,297 @@ IFS= read -r -d '' GPU_EMBED_IGPU_PLIST <<'GPU_EMBED_IGPU_PLIST_EOF' || true
 </plist>
 GPU_EMBED_IGPU_PLIST_EOF
 # ── GPU embedded: igpu_launchd.plist end ──
+# ── GPU embedded: igpu_power_watchdog.py begin ──
+IFS= read -r -d '' GPU_EMBED_IGPU_WATCHDOG <<'GPU_EMBED_IGPU_WATCHDOG_EOF' || true
+#!/usr/bin/env python3
+"""osx-proxmox-next power watchdog: finishes a macOS restart or shut down that hangs (host side, one VM).
+
+Usage: igpu_power_watchdog.py <vmid>     (run by the systemd unit osx-next-power-watchdog@<vmid>)
+
+macOS Tahoe with the Intel iGPU hangs at the very end of every restart and shut down (WhateverXe issue 62):
+the GPU faults while macOS tears the desktop down and the kernel waits for it forever. Only the host can end
+that, so this watches the VM's serial port, where the kernel console goes (boot-arg serial=3):
+
+1. launchd prints "Will be calling reboot(2) with flags: 0x..." once every app and service has quit.
+   Flags with RB_HALT (0x8) mean shut down, anything else means restart. Nothing else prints that line,
+   and a healthy guest that prints it is about to reset or power off anyway.
+2. A guest that resets prints the firmware's "BdsDxe:" lines (then a new kernel banner) within seconds, and
+   one that powers off closes the serial socket. Either ends the watch.
+3. Neither within GRACE seconds: the VM must also have done no disk I/O for QUIET seconds (a booting or
+   working guest always does). Only then the host stops it, and starts it again for a restart.
+
+The Python CLI and the standalone bash installer install this exact text (the bash script embeds it
+verbatim; tests/test_igpu_parity.py diffs the two). Standard library only.
+It disables its own unit and exits when the VM is gone or no longer has the iGPU and the serial port.
+"""
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+
+INTENT_RE = re.compile(r'Will be calling reboot\(2\) with flags: (0x[0-9a-fA-F]+)')
+RESET_RE = re.compile(r'BdsDxe: ')  # the firmware starting again
+BANNER_RE = re.compile(r'^Darwin Kernel Version ')  # a new kernel, unless a panic log repeats it under "Kernel version:"
+PANIC_RE = re.compile(r'panic\(cpu \d+ caller')
+RB_HALT = 0x8
+GRACE = 60        # launchd's reboot(2) line to a reset: a healthy guest needs under 10 s
+QUIET = 15        # no disk I/O for this long before the host steps in
+STOP_WAIT = 60    # qm stop, then the VM must be stopped within this long before qm start
+START_TRIES = 10   # qm start can fail for a moment (no quorum while a cluster node rejoins)
+START_RETRY = 15
+POLL = 1.0
+MAX_LINE = 65536
+CONF_DIR = '/etc/pve/qemu-server'
+SOCK_DIR = '/var/run/qemu-server'
+UNIT = 'osx-next-power-watchdog@%s.service'
+IGD_RE = re.compile(r'^hostpci\d+:\s*(host=)?(0000:)?00:02(\.0)?(,|$)', re.M)
+SERIAL_RE = re.compile(r'^serial0:\s*socket\s*$', re.M)
+OPS_RE = re.compile(r'^\s+(?:rd|wr)_operations:\s*(\d+)\s*$', re.M)
+PVE_READY = '/etc/pve/.version'  # present while the cluster file system is mounted
+
+
+def log(vmid, message):
+    sys.stdout.write('VM %s: %s\n' % (vmid, message))
+    sys.stdout.flush()
+
+
+def intent_of(line):
+    """'restart' or 'shutdown' for launchd's reboot(2) line, else None."""
+    m = INTENT_RE.search(line)
+    if not m:
+        return None
+    return 'shutdown' if int(m.group(1), 16) & RB_HALT else 'restart'
+
+
+def main_section(text):
+    """The VM's current config, without its snapshot sections."""
+    return re.split(r'^\[', text, maxsplit=1, flags=re.M)[0]
+
+
+def applies(conf_text):
+    """True while the VM has the iGPU passed through and its serial port as a socket."""
+    cur = main_section(conf_text)
+    return bool(IGD_RE.search(cur)) and bool(SERIAL_RE.search(cur))
+
+
+def io_ops(status_text):
+    """Disk read plus write operations over every disk, from `qm status <vmid> --verbose`. None when absent.
+
+    Network counters are no use here: the hung kernel still answers ARP and TCP with its interrupts alive."""
+    found = OPS_RE.findall(status_text)
+    return sum(int(n) for n in found) if found else None
+
+
+class Tracker:
+    """Fed with serial lines and the clock; says when the host has to step in.
+
+    idle -> armed (launchd's reboot(2) line) -> quiet (GRACE passed without a reset, disk counter taken)
+    -> act (QUIET passed and the counter did not move). A reset line, a closed socket or disk I/O go back to idle.
+    """
+
+    def __init__(self):
+        self.intent = None
+        self.since = 0.0
+        self.ops = None
+        self.quiet_since = None  # when the disk counter was taken (GRACE ran out), None before
+        self.prev = ''
+
+    def feed(self, line, now):
+        """One serial line. Returns 'armed' or 'reset' when the state changed, else None."""
+        prev, self.prev = self.prev, line.strip()
+        found = intent_of(line)
+        if found:
+            self.intent, self.since, self.ops, self.quiet_since = found, now, None, None
+            return 'armed'
+        if self.intent and (RESET_RE.search(line) or (BANNER_RE.search(line) and prev != 'Kernel version:')):
+            self.clear()
+            return 'reset'
+        return None
+
+    def clear(self):
+        self.intent, self.ops, self.quiet_since = None, None, None
+
+    def due(self, now):
+        """'check' when GRACE ran out (take the disk counter), 'decide' when QUIET ran out after it."""
+        if not self.intent:
+            return None
+        if self.quiet_since is None:
+            return 'check' if now - self.since >= GRACE else None
+        return 'decide' if now - self.quiet_since >= QUIET else None
+
+    def start_quiet(self, ops, now):
+        self.ops, self.quiet_since = ops, now
+
+
+def run(argv, timeout=120):
+    try:
+        res = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return res.returncode, (res.stdout or '') + (res.stderr or '')
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
+
+
+def vm_running(vmid, runner=run):
+    return 'status: running' in runner(['qm', 'status', str(vmid)])[1]
+
+
+def vm_ops(vmid, runner=run):
+    rc, out = runner(['qm', 'status', str(vmid), '--verbose'])
+    return io_ops(out) if rc == 0 else None
+
+
+def recover(vmid, intent, runner=run, clock=time.monotonic, sleep=time.sleep):
+    """Stop the hung VM, and start it again when macOS asked for a restart. True when that worked."""
+    rc, out = runner(['qm', 'stop', str(vmid)])
+    if rc != 0:
+        # a 'qm shutdown' from the Proxmox UI holds the VM lock while it waits for the hung guest
+        rc, out = runner(['qm', 'stop', str(vmid), '--overrule-shutdown', '1'])
+    if rc != 0:
+        log(vmid, 'qm stop failed: ' + out.strip()[-200:])
+        return False
+    if intent != 'restart':
+        return True
+    deadline = clock() + STOP_WAIT
+    while vm_running(vmid, runner):
+        if clock() >= deadline:
+            log(vmid, 'still running %d s after qm stop, not starting it' % STOP_WAIT)
+            return False
+        sleep(2)
+    for attempt in range(1, START_TRIES + 1):
+        rc, out = runner(['qm', 'start', str(vmid)])
+        if rc == 0:
+            return True
+        # seen live: a cluster node rejoining took quorum away for a few seconds
+        log(vmid, 'qm start failed (try %d of %d): %s' % (attempt, START_TRIES, out.strip()[-200:]))
+        if attempt < START_TRIES:
+            sleep(START_RETRY)
+    return False
+
+
+def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep):
+    """Act on what the tracker says is due. Returns True when the host stopped (and maybe started) the VM."""
+    due = tracker.due(now)
+    if due == 'check':
+        if not vm_running(vmid, runner):
+            tracker.clear()
+            return False
+        tracker.start_quiet(vm_ops(vmid, runner), now)
+        return False
+    if due != 'decide':
+        return False
+    before, intent = tracker.ops, tracker.intent
+    after = vm_ops(vmid, runner)
+    tracker.clear()
+    if not vm_running(vmid, runner):
+        return False
+    if before is None or after is None or after != before:
+        log(vmid, 'macOS asked for a %s %d s ago and did not reset, but its disks are still busy (%s -> %s '
+            'operations), so it is left alone' % (intent, GRACE + QUIET, before, after))
+        return False
+    log(vmid, 'macOS asked for a %s, then hung with no disk activity for %d s: %s' % (
+        intent, QUIET, 'stopping and starting it' if intent == 'restart' else 'stopping it'))
+    ok = recover(vmid, intent, runner, clock, sleep)
+    log(vmid, ('%s finished' % intent) if ok else ('%s could not be finished' % intent))
+    return True
+
+
+def disable(vmid, why):
+    log(vmid, why + '; disabling ' + UNIT % vmid)
+    run(['systemctl', 'disable', UNIT % vmid])
+
+
+def still_applies(vmid):
+    """None while the watch should go on, else the reason to stop."""
+    try:
+        with open(os.path.join(CONF_DIR, '%s.conf' % vmid)) as f:
+            text = f.read()
+    except FileNotFoundError:
+        # an empty /etc/pve (pve-cluster restarting) is not a deleted VM
+        return 'the VM config is gone' if os.path.exists(PVE_READY) else None
+    except OSError:
+        return None
+    if not applies(text):
+        return 'the VM no longer has the iGPU and a serial socket'
+    return None
+
+
+def watch(vmid, sock_path):
+    """Read one QEMU run of the serial socket until it closes."""
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(sock_path)
+    s.settimeout(POLL)
+    tracker, buf = Tracker(), b''
+    try:
+        while True:
+            try:
+                data = s.recv(4096)
+                if not data:
+                    if tracker.intent:
+                        log(vmid, 'powered off by itself' if tracker.intent == 'shutdown' else 'QEMU exited')
+                    return
+                buf = (buf + data)[-MAX_LINE:]  # a line longer than this is not one the watch looks for
+                while b'\n' in buf:
+                    raw, buf = buf.split(b'\n', 1)
+                    line = raw.decode('utf-8', 'replace')
+                    if PANIC_RE.search(line):
+                        # never acted on (a panic is not a request to restart), only kept for whoever looks later
+                        log(vmid, 'kernel panic: ' + line.strip()[:300])
+                    state = tracker.feed(line, time.monotonic())
+                    if state == 'armed':
+                        log(vmid, 'macOS asked for a %s, watching for the reset' % tracker.intent)
+                    elif state == 'reset':
+                        log(vmid, 'the guest reset by itself')
+            except socket.timeout:
+                pass
+            if step(vmid, tracker, time.monotonic(), run):
+                return
+    finally:
+        s.close()
+
+
+def main(argv):
+    if len(argv) != 2 or not argv[1].isdigit():
+        sys.stderr.write('usage: igpu_power_watchdog.py <vmid>\n')
+        return 64
+    vmid = argv[1]
+    sock_path = os.path.join(SOCK_DIR, '%s.serial0' % vmid)
+    log(vmid, 'power watchdog started')
+    last_check = None
+    while True:
+        now = time.monotonic()
+        if last_check is None or now - last_check >= 30:
+            last_check = now
+            why = still_applies(vmid)
+            if why:
+                disable(vmid, why)
+                return 0
+        try:
+            watch(vmid, sock_path)
+        except OSError:
+            time.sleep(3)
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
+GPU_EMBED_IGPU_WATCHDOG_EOF
+# ── GPU embedded: igpu_power_watchdog.py end ──
+# ── GPU embedded: osx-next-power-watchdog@.service begin ──
+IFS= read -r -d '' GPU_EMBED_IGPU_WATCHDOG_UNIT <<'GPU_EMBED_IGPU_WATCHDOG_UNIT_EOF' || true
+[Unit]
+Description=osx-proxmox-next power watchdog for macOS VM %i (finishes a restart or shut down that hangs)
+After=pve-cluster.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/osx-proxmox-next/igpu_power_watchdog.py %i
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+GPU_EMBED_IGPU_WATCHDOG_UNIT_EOF
+# ── GPU embedded: osx-next-power-watchdog@.service end ──
 
 # Write the embedded engines to a temp dir once.
 function gpu_engine_init() {
@@ -5912,6 +6238,8 @@ function gpu_engine_init() {
   printf '%s' "$GPU_EMBED_IGPU_FIRSTBOOT" >"$GPU_ENGINE_DIR/igpu_firstboot.sh"
   printf '%s' "$GPU_EMBED_IGPU_STAGE" >"$GPU_ENGINE_DIR/igpu_stage.sh"
   printf '%s' "$GPU_EMBED_IGPU_PLIST" >"$GPU_ENGINE_DIR/igpu_launchd.plist"
+  printf '%s' "$GPU_EMBED_IGPU_WATCHDOG" >"$GPU_ENGINE_DIR/igpu_power_watchdog.py"
+  printf '%s' "$GPU_EMBED_IGPU_WATCHDOG_UNIT" >"$GPU_ENGINE_DIR/osx-next-power-watchdog@.service"
 }
 
 # host_setup.py <command>; JSON on stdin, JSON on stdout. GPU_ROOT redirects it for tests.
@@ -6257,10 +6585,10 @@ function igpu_engine() { gpu_engine_init && python3 "$GPU_ENGINE_DIR/igpu_engine
 function igpu_pin() { igpu_engine pins | gpu_json "d['pins']['$1'][$2]"; }
 
 IGPU_CACHE="${IGPU_CACHE:-/var/lib/vz/template/iso}"
-IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load slows it. macOS Tahoe is experimental: restart it from Proxmox, not from inside macOS."
+IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load slows it. macOS Tahoe is experimental: a power watchdog on the host finishes its restarts and shut downs, which hang at the very end."
 IGPU_SETUP_NOTE="Finish Setup Assistant on the monitor or HDMI dummy plug on the host's native HDMI port, or over Screen Sharing. The Proxmox console stays blank: the iGPU is the only display."
 IGPU_TAHOE_STAGE_NOTE="Staging stopped on macOS Tahoe, whose recovery Terminal can be slow to take input. The VM config was put back as it was; run the same command again. Tahoe is experimental."
-IGPU_TAHOE_NOTE="macOS Tahoe 26 is experimental with the iGPU: every restart and shutdown from inside macOS hangs (WhateverXe issue 62). Restart the VM from Proxmox (qm stop, then qm start) instead."
+IGPU_TAHOE_NOTE="macOS Tahoe 26 is experimental with the iGPU: every restart and shut down from inside macOS hangs at the very end (WhateverXe issue 62). The power watchdog that igpu-finish installs on the host finishes them about a minute later. A VM set up before gets it with the igpu-watchdog command."
 IGPU_STAGE_TIMEOUT=900
 IGPU_STAGE_ATTEMPTS=3
 IGPU_START_WAIT=60
@@ -6653,6 +6981,13 @@ function igpu_finish() {
   restore_picker_timeout "$vmid" || msg_info "Could not restore the picker's auto-boot; run post-install afterwards"
   igpu_attach "$vmid" || { msg_error "Attaching the iGPU failed. Undo with: gpu-setup --undo"; return 1; }
   qm set "$vmid" --boot 'order=ide0;virtio0' >/dev/null
+  if [ "$ver" == "tahoe" ]; then
+    if igpu_watchdog_enable "$vmid"; then
+      msg_ok "Installed the power watchdog: restarts and shut downs from inside macOS Tahoe finish on their own"
+    else
+      echo -e "${INFO}${YW}Could not install the power watchdog, so restarts and shut downs from inside macOS Tahoe hang. Install it with: osx-proxmox-next.sh igpu-watchdog ${vmid}${CL}"
+    fi
+  fi
   msg_info "First boot with the iGPU: the guest installs the graphics package and powers off"
   qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }
   if ! igpu_wait_first_boot "$vmid" "$payload_ref" "$([ "$ver" == "tahoe" ] && echo yes || echo no)"; then
@@ -6742,7 +7077,7 @@ function gpu_version_status() {
     IFS='|' read -r key label reset args tahoe <<<"$fam"
     if [ "$tahoe" != "ok" ]; then echo "yes|works with ${name} (not confirmed on this family)"; return 0; fi
   fi
-  if [ "$vname" == "intel" ] && [ "$macos" == "tahoe" ]; then echo "yes|works with ${name} (experimental: restart from Proxmox)"; return 0; fi
+  if [ "$vname" == "intel" ] && [ "$macos" == "tahoe" ]; then echo "yes|works with ${name} (experimental)"; return 0; fi
   echo "yes|works with ${name}"
 }
 
@@ -6776,6 +7111,62 @@ function igpu_finish_command() {
   echo -e "${INFO}${YW}${IGPU_NOTICE}${CL}"
   gpu_ui_yesno "Attach the iGPU" "VM ${pos[0]} boots macOS recovery once, then gets the iGPU. Continue?" || { echo "Nothing was changed. Confirm (or pass --yes) to attach the iGPU."; return 2; }
   igpu_finish "${pos[@]}"
+}
+
+# The host-side power watchdog of a Tahoe iGPU VM (data/gpu/igpu_power_watchdog.py as the systemd unit
+# osx-next-power-watchdog@<vmid>). The VM must be stopped. Mirrors igpu_watchdog.enable_steps.
+IGPU_WD_DAEMON=/usr/local/lib/osx-proxmox-next/igpu_power_watchdog.py
+IGPU_WD_UNIT=/etc/systemd/system/osx-next-power-watchdog@.service
+IGPU_WD_NOTE="macOS Tahoe hangs at the end of every restart and shut down while the iGPU is attached (WhateverXe issue 62). A power watchdog on the host finishes them: about a minute after macOS hangs, the host stops the VM, and starts it again when you chose Restart. It reads the VM's serial port, so the Proxmox serial console of this VM stays busy."
+function igpu_watchdog_enable() {
+  local vmid="$1"
+  gpu_engine_init || return 1
+  install -D -m 755 "$GPU_ENGINE_DIR/igpu_power_watchdog.py" "$IGPU_WD_DAEMON" || return 1
+  install -D -m 644 "$GPU_ENGINE_DIR/osx-next-power-watchdog@.service" "$IGPU_WD_UNIT" || return 1
+  systemctl daemon-reload || return 1
+  if [ "$(qm config "$vmid" 2>/dev/null | sed -n 's/^serial0: //p')" != "socket" ]; then
+    qm set "$vmid" --serial0 socket >/dev/null || return 1
+  fi
+  igpu_oc_patch "$vmid" serial || return 1
+  systemctl enable "osx-next-power-watchdog@${vmid}.service" || return 1
+  systemctl restart "osx-next-power-watchdog@${vmid}.service" || return 1
+}
+
+# Mirrors igpu_watchdog.disable_steps: the serial socket stays, it does no harm.
+function igpu_watchdog_disable() {
+  local vmid="$1"
+  systemctl disable --now "osx-next-power-watchdog@${vmid}.service" 2>/dev/null || true
+  igpu_oc_patch "$vmid" unserial
+}
+
+# `osx-proxmox-next.sh igpu-watchdog <vmid> [--remove]`. Mirrors igpu_watchdog.prepare and igpu_cli.run_watchdog.
+function igpu_watchdog_command() {
+  local vmid="${1:-}" remove=no cfg ver line
+  [ "${2:-}" != "--remove" ] || remove=yes
+  [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh igpu-watchdog <vmid> [--remove]"; return 2; }
+  GPU_ISSUES=()
+  if ! cfg=$(qm config "$vmid" 2>/dev/null); then
+    GPU_ISSUES+=("VM $vmid not found.")
+  else
+    grep -q 'status: stopped' <<<"$(qm status "$vmid" 2>/dev/null)" || GPU_ISSUES+=("VM $vmid is running. Stop it first: qm stop $vmid")
+    if [ "$remove" == "no" ]; then
+      [[ "$(sed -n 's/^hostpci0: \([^,]*\).*/\1/p' <<<"$cfg")" == *00:02.0 ]] || GPU_ISSUES+=("VM $vmid does not have the iGPU on hostpci0. Set it up first: osx-proxmox-next.sh igpu-finish $vmid")
+      ver=$(nullmoth_detect_macos "$cfg" || true)
+      if [ -n "$ver" ] && [ "$ver" != "tahoe" ]; then
+        GPU_ISSUES+=("VM $vmid runs macOS ${ver^}, which restarts and shuts down normally with the iGPU. The watchdog is only for Tahoe.")
+      fi
+    fi
+  fi
+  for line in "${GPU_ISSUES[@]}"; do echo "REFUSED: $line"; done
+  [ ${#GPU_ISSUES[@]} -eq 0 ] || return 2
+  if [ "$remove" == "yes" ]; then
+    igpu_watchdog_disable "$vmid" || { echo "FAILED at: Take the kernel console off the serial port (boot-arg serial=3)"; return 4; }
+    echo "The power watchdog of VM $vmid is removed. Restarts and shut downs from inside macOS Tahoe hang again; stop the VM from Proxmox."
+    return 0
+  fi
+  igpu_watchdog_enable "$vmid" || { echo "FAILED to install the power watchdog of VM $vmid"; return 4; }
+  echo "The power watchdog of VM $vmid is running. $IGPU_WD_NOTE"
+  echo "Its log: journalctl -u osx-next-power-watchdog@${vmid}.service"
 }
 
 # `osx-proxmox-next.sh igpu-check`
@@ -8092,6 +8483,10 @@ fi
 if [ "${1:-}" == "igpu-finish" ]; then
   check_root
   if igpu_finish_command "${@:2}"; then exit 0; else exit 1; fi
+fi
+if [ "${1:-}" == "igpu-watchdog" ]; then
+  check_root
+  if igpu_watchdog_command "${@:2}"; then exit 0; else exit $?; fi
 fi
 
 # `osx-proxmox-next.sh nvidia-attach <vmid> <pci-address>` / `nvidia-detach <vmid>`:

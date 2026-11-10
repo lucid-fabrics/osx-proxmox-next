@@ -382,3 +382,70 @@ def test_bash_and_python_agree_on_whether_acceleration_is_confirmed(bash, tmp_pa
 def test_a_missing_bar_is_not_confirmed(bash, tmp_path):
     res = bash("IGPU_ACCEL_TIMEOUT=0; igpu_confirm_accel 996", env={"GPU_SYSFS": str(tmp_path)}, expect=1)
     assert "acceleration was not confirmed" in res.stdout and "cannot read the iGPU registers" in res.stdout
+
+
+# ── the power watchdog (Tahoe) ───────────────────────────────────────
+
+WD_CFG = VM_CFG.replace("name: macos-sequoia", "name: macos-tahoe") + "hostpci0: 0000:00:02.0,legacy-igd=1,romfile=x.rom\n"
+
+
+def test_the_watchdog_note_and_files_match_python():
+    from osx_proxmox_next import igpu_watchdog
+    assert igpu_watchdog.WATCHDOG_NOTE == re.search(r'^IGPU_WD_NOTE="(.*)"$', BLOCK, re.M).group(1)
+    assert f"IGPU_WD_DAEMON={igpu_watchdog.DAEMON_PATH}\n" in BLOCK and f"IGPU_WD_UNIT={igpu_watchdog.UNIT_PATH}\n" in BLOCK
+
+
+@pytest.mark.parametrize("serial", ["", "serial0: socket\n"])
+def test_the_bash_watchdog_install_runs_the_python_steps_in_order(bash, vm, serial):
+    from osx_proxmox_next import igpu_watchdog
+    vm(100, "stopped", WD_CFG + serial)
+    fake = ('install() { echo "RUN install $*" >&2; }; systemctl() { echo "RUN systemctl $*" >&2; }; '
+            'igpu_oc_patch() { echo "RUN oc $2" >&2; }; ')
+    res = bash(fake + 'qm() { if [ "$1" == set ]; then echo "RUN qm $*" >&2; else command qm "$@"; fi; }; igpu_watchdog_enable 100',
+               env=vm.env)
+    sh = [ln[4:] for ln in res.stderr.splitlines() if ln.startswith("RUN ")]
+    py = []
+    for step in igpu_watchdog.enable_steps(100, gpu_parse(WD_CFG + serial)):
+        if step.argv[0] == "bash":
+            py.append("oc serial")
+        elif step.argv[0] == "install":
+            py.append("install -D -m " + step.argv[3] + " <src> " + step.argv[5])
+        else:
+            py.append(" ".join(step.argv))
+    sh = [re.sub(r"install -D -m (\d+) \S+ ", r"install -D -m \1 <src> ", ln) for ln in sh]
+    assert sh == py
+
+
+def test_the_bash_watchdog_removal_matches_python(bash, vm):
+    from osx_proxmox_next import igpu_watchdog
+    vm(100, "stopped", WD_CFG)
+    res = bash('systemctl() { echo "RUN systemctl $*"; }; igpu_oc_patch() { echo "RUN oc $2"; }; igpu_watchdog_command 100 --remove',
+               env=vm.env)
+    assert [ln for ln in res.stdout.splitlines() if ln.startswith("RUN ")] == [
+        "RUN systemctl disable --now osx-next-power-watchdog@100.service", "RUN oc unserial"]
+    steps = igpu_watchdog.disable_steps(100)
+    assert "systemctl disable --now osx-next-power-watchdog@100.service" in steps[0].argv[2] and "unserial" in steps[1].argv[2]
+    assert "The power watchdog of VM 100 is removed." in res.stdout
+
+
+@pytest.mark.parametrize("cfg,status", [
+    (WD_CFG, "running"),
+    (WD_CFG.replace("hostpci0: 0000:00:02.0", "hostpci0: 0000:06:00"), "stopped"),
+    (WD_CFG.replace("macos-tahoe", "macos-sequoia"), "stopped"),
+])
+def test_the_bash_watchdog_refusals_match_python(bash, vm, monkeypatch, cfg, status):
+    from types import SimpleNamespace
+    from osx_proxmox_next import igpu_watchdog
+    vm(100, status, cfg)
+    res = bash("igpu_watchdog_command 100", env=vm.env, expect=2)
+    monkeypatch.setattr(igpu_watchdog, "fetch_vm_info", lambda vmid, adapter=None: SimpleNamespace(config_raw=cfg, status=status))
+    issues, steps = igpu_watchdog.prepare(100, adapter=object())
+    norm = lambda s: s.replace("osx-proxmox-next.sh igpu-finish", "osx-next-cli igpu-finish")
+    assert [norm(ln[len("REFUSED: "):]) for ln in res.stdout.splitlines() if ln.startswith("REFUSED: ")] == issues and not steps
+
+
+def test_the_bash_finish_installs_the_watchdog_for_tahoe_between_attach_and_first_boot():
+    body = BLOCK[BLOCK.index("function igpu_finish() {"):BLOCK.index("function igpu_after_install()")]
+    assert body.index('igpu_attach "$vmid"') < body.index('if igpu_watchdog_enable "$vmid"') < body.index('qm start "$vmid"')
+    assert 'if [ "$ver" == "tahoe" ]; then\n    if igpu_watchdog_enable "$vmid"' in body
+    assert 'if [ "${1:-}" == "igpu-watchdog" ]' in BASH

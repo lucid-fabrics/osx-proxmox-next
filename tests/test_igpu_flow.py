@@ -163,7 +163,7 @@ def test_attach_notes_tahoe_unknown_macos_and_other_holders(tmp_path):
     root = host(tmp_path, igpu="vfio-pci")
     other = VM.replace("name: igpu-seq", "name: other") + "hostpci0: 0000:00:02.0,legacy-igd=1\n"
     plan = attach(root, {100: ("stopped", VM.replace("igpu-seq", "macos-tahoe")), 200: ("stopped", other)})
-    assert plan.ok and any("every restart and shutdown" in w for w in plan.warnings) and any("VM 200" in w for w in plan.warnings)
+    assert plan.ok and any("every restart and shut down" in w for w in plan.warnings) and any("VM 200" in w for w in plan.warnings)
     assert any("Cannot tell which macOS" in w for w in attach(root, {100: ("stopped", VM.replace("igpu-seq", "vm"))}).warnings)
     busy = attach(root, {100: ("stopped", VM), 200: ("running", other)})
     assert any("running VM 200" in i for i in busy.issues)

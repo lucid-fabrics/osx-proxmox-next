@@ -33,6 +33,8 @@ EMBEDS = {
     "igpu_firstboot.sh": ("GPU_EMBED_IGPU_FIRSTBOOT", PKG / "data/gpu/igpu_firstboot.sh"),
     "igpu_stage.sh": ("GPU_EMBED_IGPU_STAGE", PKG / "data/gpu/igpu_stage.sh"),
     "igpu_launchd.plist": ("GPU_EMBED_IGPU_PLIST", PKG / "data/gpu/igpu_launchd.plist"),
+    "igpu_power_watchdog.py": ("GPU_EMBED_IGPU_WATCHDOG", PKG / "data/gpu/igpu_power_watchdog.py"),
+    "osx-next-power-watchdog@.service": ("GPU_EMBED_IGPU_WATCHDOG_UNIT", PKG / "data/gpu/osx-next-power-watchdog@.service"),
 }
 
 
@@ -86,7 +88,8 @@ def test_embedding_script_is_idempotent(tmp_path):
 def test_embedded_engines_are_usable_standalone(bash, tmp_path):
     out = bash('gpu_engine_init; ls "$GPU_ENGINE_DIR"; python3 "$GPU_ENGINE_DIR/host_setup.py" bogus </dev/null', expect=None)
     assert set(out.stdout.split()) == {"bios_guide.py", "bios_paths.json", "host_setup.py", "igpu_engine.py", "intel_devices.txt",
-                                       "igpu_firstboot.sh", "igpu_stage.sh", "igpu_launchd.plist"}
+                                       "igpu_firstboot.sh", "igpu_stage.sh", "igpu_launchd.plist",
+                                       "igpu_power_watchdog.py", "osx-next-power-watchdog@.service"}
     assert out.returncode == 64
 
 
