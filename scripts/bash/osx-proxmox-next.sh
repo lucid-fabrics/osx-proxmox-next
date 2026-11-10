@@ -5953,6 +5953,13 @@ that, so this watches the VM's serial port, where the kernel console goes (boot-
 3. Neither within GRACE seconds: the VM must also have done no disk I/O for QUIET seconds (a booting or
    working guest always does). Only then the host stops it, and starts it again for a restart.
 
+A kernel panic ("panic(cpu N caller ...") is handled the same way as a restart. WhateverXe can hang the GPU
+under load (issues 25, 40, 44, 75); Apple's driver then resets it in a loop and the kernel finally panics,
+and a panicked guest with this config never resets by itself (all its vCPUs spin). So when a panic line is
+not followed by a reset within GRACE seconds and the disks stay idle, the host stops and starts the VM.
+At most PANIC_MAX of those per PANIC_WINDOW seconds (counted while this process runs): a guest that panics at
+every boot is left stopped. A panic after macOS asked for a restart or shut down only finishes that request.
+
 The Python CLI and the standalone bash installer install this exact text (the bash script embeds it
 verbatim; tests/test_igpu_parity.py diffs the two). Standard library only.
 It disables its own unit and exits when the VM is gone or no longer has the iGPU and the serial port.
@@ -5969,6 +5976,8 @@ RESET_RE = re.compile(r'BdsDxe: ')  # the firmware starting again
 BANNER_RE = re.compile(r'^Darwin Kernel Version ')  # a new kernel, unless a panic log repeats it under "Kernel version:"
 PANIC_RE = re.compile(r'panic\(cpu \d+ caller')
 RB_HALT = 0x8
+PANIC_MAX = 3      # restarts after a panic within PANIC_WINDOW; past that the VM is stopped and left stopped
+PANIC_WINDOW = 3600
 GRACE = 60        # launchd's reboot(2) line to a reset: a healthy guest needs under 10 s
 QUIET = 15        # no disk I/O for this long before the host steps in
 STOP_WAIT = 60    # qm stop, then the VM must be stopped within this long before qm start
@@ -6032,12 +6041,16 @@ class Tracker:
         self.prev = ''
 
     def feed(self, line, now):
-        """One serial line. Returns 'armed' or 'reset' when the state changed, else None."""
+        """One serial line. Returns 'armed', 'panic' or 'reset' when the state changed, else None."""
         prev, self.prev = self.prev, line.strip()
         found = intent_of(line)
         if found:
             self.intent, self.since, self.ops, self.quiet_since = found, now, None, None
             return 'armed'
+        if PANIC_RE.search(line) and not self.intent:
+            # a panic while a restart or shut down is already being watched keeps what macOS asked for
+            self.intent, self.since, self.ops, self.quiet_since = 'panic', now, None, None
+            return 'panic'
         if self.intent and (RESET_RE.search(line) or (BANNER_RE.search(line) and prev != 'Kernel version:')):
             self.clear()
             return 'reset'
@@ -6075,8 +6088,13 @@ def vm_ops(vmid, runner=run):
     return io_ops(out) if rc == 0 else None
 
 
+def panic_allowed(history, now):
+    """True while fewer than PANIC_MAX panic restarts happened in the last PANIC_WINDOW seconds."""
+    return sum(1 for t in history if now - t < PANIC_WINDOW) < PANIC_MAX
+
+
 def recover(vmid, intent, runner=run, clock=time.monotonic, sleep=time.sleep):
-    """Stop the hung VM, and start it again when macOS asked for a restart. True when that worked."""
+    """Stop the hung VM, and start it again after a restart or a panic. True when that worked."""
     rc, out = runner(['qm', 'stop', str(vmid)])
     if rc != 0:
         # a 'qm shutdown' from the Proxmox UI holds the VM lock while it waits for the hung guest
@@ -6084,7 +6102,7 @@ def recover(vmid, intent, runner=run, clock=time.monotonic, sleep=time.sleep):
     if rc != 0:
         log(vmid, 'qm stop failed: ' + out.strip()[-200:])
         return False
-    if intent != 'restart':
+    if intent == 'shutdown':
         return True
     deadline = clock() + STOP_WAIT
     while vm_running(vmid, runner):
@@ -6103,8 +6121,10 @@ def recover(vmid, intent, runner=run, clock=time.monotonic, sleep=time.sleep):
     return False
 
 
-def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep):
-    """Act on what the tracker says is due. Returns True when the host stopped (and maybe started) the VM."""
+def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep, history=None):
+    """Act on what the tracker says is due. Returns True when the host stopped (and maybe started) the VM.
+
+    history holds the clock() times of earlier panic restarts (see panic_allowed); step appends to it."""
     due = tracker.due(now)
     if due == 'check':
         if not vm_running(vmid, runner):
@@ -6119,14 +6139,28 @@ def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep)
     tracker.clear()
     if not vm_running(vmid, runner):
         return False
+    what = 'macOS panicked' if intent == 'panic' else 'macOS asked for a %s' % intent
     if before is None or after is None or after != before:
-        log(vmid, 'macOS asked for a %s %d s ago and did not reset, but its disks are still busy (%s -> %s '
-            'operations), so it is left alone' % (intent, GRACE + QUIET, before, after))
+        if intent == 'panic':
+            # a panicked kernel prints nothing more, so keep watching the disks instead of forgetting the panic
+            tracker.intent, tracker.since = intent, now - GRACE
+            tracker.start_quiet(after, now)
+            return False
+        log(vmid, '%s %d s ago and did not reset, but its disks are still busy (%s -> %s operations), so it '
+            'is left alone' % (what, GRACE + QUIET, before, after))
         return False
-    log(vmid, 'macOS asked for a %s, then hung with no disk activity for %d s: %s' % (
-        intent, QUIET, 'stopping and starting it' if intent == 'restart' else 'stopping it'))
+    history = [] if history is None else history
+    if intent == 'panic' and not panic_allowed(history, clock()):
+        log(vmid, 'macOS panicked again, %d restarts after a panic within %d minutes: stopping it and leaving '
+            'it stopped' % (PANIC_MAX, PANIC_WINDOW // 60))
+        intent = 'shutdown'
+    elif intent == 'panic':
+        history.append(clock())
+    log(vmid, '%s, then hung with no disk activity for %d s: %s' % (
+        what, QUIET, 'stopping it' if intent == 'shutdown' else 'stopping and starting it'))
     ok = recover(vmid, intent, runner, clock, sleep)
-    log(vmid, ('%s finished' % intent) if ok else ('%s could not be finished' % intent))
+    done = 'restart' if intent == 'panic' else intent
+    log(vmid, ('%s finished' % done) if ok else ('%s could not be finished' % done))
     return True
 
 
@@ -6150,8 +6184,8 @@ def still_applies(vmid):
     return None
 
 
-def watch(vmid, sock_path):
-    """Read one QEMU run of the serial socket until it closes."""
+def watch(vmid, sock_path, history=None):
+    """Read one QEMU run of the serial socket until it closes. history: see step."""
     s = socket.socket(socket.AF_UNIX)
     s.connect(sock_path)
     s.settimeout(POLL)
@@ -6169,16 +6203,18 @@ def watch(vmid, sock_path):
                     raw, buf = buf.split(b'\n', 1)
                     line = raw.decode('utf-8', 'replace')
                     if PANIC_RE.search(line):
-                        # never acted on (a panic is not a request to restart), only kept for whoever looks later
+                        # kept for whoever looks later; the tracker below decides whether the host steps in
                         log(vmid, 'kernel panic: ' + line.strip()[:300])
                     state = tracker.feed(line, time.monotonic())
-                    if state == 'armed':
+                    if state == 'panic':
+                        log(vmid, 'watching for macOS to restart by itself after the panic')
+                    elif state == 'armed':
                         log(vmid, 'macOS asked for a %s, watching for the reset' % tracker.intent)
                     elif state == 'reset':
                         log(vmid, 'the guest reset by itself')
             except socket.timeout:
                 pass
-            if step(vmid, tracker, time.monotonic(), run):
+            if step(vmid, tracker, time.monotonic(), run, history=history):
                 return
     finally:
         s.close()
@@ -6191,7 +6227,7 @@ def main(argv):
     vmid = argv[1]
     sock_path = os.path.join(SOCK_DIR, '%s.serial0' % vmid)
     log(vmid, 'power watchdog started')
-    last_check = None
+    last_check, history = None, []
     while True:
         now = time.monotonic()
         if last_check is None or now - last_check >= 30:
@@ -6201,7 +6237,7 @@ def main(argv):
                 disable(vmid, why)
                 return 0
         try:
-            watch(vmid, sock_path)
+            watch(vmid, sock_path, history)
         except OSError:
             time.sleep(3)
 
@@ -7117,7 +7153,7 @@ function igpu_finish_command() {
 # osx-next-power-watchdog@<vmid>). The VM must be stopped. Mirrors igpu_watchdog.enable_steps.
 IGPU_WD_DAEMON=/usr/local/lib/osx-proxmox-next/igpu_power_watchdog.py
 IGPU_WD_UNIT=/etc/systemd/system/osx-next-power-watchdog@.service
-IGPU_WD_NOTE="macOS Tahoe hangs at the end of every restart and shut down while the iGPU is attached (WhateverXe issue 62). A power watchdog on the host finishes them: about a minute after macOS hangs, the host stops the VM, and starts it again when you chose Restart. It reads the VM's serial port, so the Proxmox serial console of this VM stays busy."
+IGPU_WD_NOTE="macOS Tahoe hangs at the end of every restart and shut down while the iGPU is attached (WhateverXe issue 62). A power watchdog on the host finishes them: about a minute after macOS hangs, the host stops the VM, and starts it again when you chose Restart. It also restarts the VM when macOS panics and stays down. It reads the VM's serial port, so the Proxmox serial console of this VM stays busy."
 function igpu_watchdog_enable() {
   local vmid="$1"
   gpu_engine_init || return 1

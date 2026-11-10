@@ -28,8 +28,9 @@ DAEMON_PATH = f"{LIB_DIR}/{DAEMON_FILE}"
 UNIT_PATH = f"/etc/systemd/system/{UNIT_FILE}"
 WATCHDOG_NOTE = ("macOS Tahoe hangs at the end of every restart and shut down while the iGPU is attached "
                  "(WhateverXe issue 62). A power watchdog on the host finishes them: about a minute after macOS "
-                 "hangs, the host stops the VM, and starts it again when you chose Restart. It reads the VM's "
-                 "serial port, so the Proxmox serial console of this VM stays busy.")
+                 "hangs, the host stops the VM, and starts it again when you chose Restart. It also restarts the VM "
+                 "when macOS panics and stays down. It reads the VM's serial port, so the Proxmox serial console "
+                 "of this VM stays busy.")
 
 
 def unit_name(vmid: int) -> str:

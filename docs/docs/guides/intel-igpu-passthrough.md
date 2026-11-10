@@ -19,6 +19,7 @@ The whole recipe was proven on one machine: an i5-1240P (Alder Lake-P, Iris Xe, 
 - **The iGPU shares the CPU's power budget.** When the host is busy (a video transcode, for example) the package hits its power limit and the iGPU slows down. Metal stays on, the desktop just gets sluggish.
 - **Tahoe is experimental.** The automatic graphics package setup (`igpu-install` and `igpu-finish`) works on Tahoe 26. Its recovery Terminal is slower to take input than on the other releases, so if the staging step ever stops, the tool puts the VM config back as it was and you can run the same command again. Every restart or shut down from inside macOS hangs at the very end on Tahoe (WhateverXe issue 62). The tool installs a small power watchdog on the host that finishes them for you, see [Restart and shut down on Tahoe](#restart-and-shut-down-on-tahoe). Ventura, Sonoma and Sequoia restart normally.
 - A WindowServer crash leaves the GPU dead until the VM restarts. It is rare and logging out is safe.
+- **The GPU can hang by itself (seen on Tahoe).** WhateverXe sometimes hangs the GPU right when macOS starts using it, a minute or two after boot. Apple's driver then resets it over and over, the screen stops updating, and under heavy load the kernel can panic about ten minutes later. In testing the hang hit 2 of 10 boots in one session and every boot in a later one, with or without the power watchdog, and neither `-wex-tgl-hold-render-wake` nor `-wex-no-host-rps` changed that. It is a WhateverXe bug (issues 25, 40, 44 and 75). On Tahoe the power watchdog restarts the VM after such a panic. If the screen freezes without a panic, restart the VM from Proxmox.
 
 ## How the right GPU is picked
 
@@ -58,6 +59,8 @@ For a Tahoe VM, `igpu-finish` installs a power watchdog: a systemd unit `osx-nex
 3. The VM's disks then stay idle for 15 more seconds.
 
 Then it runs `qm stop`, followed by `qm start` when you chose Restart. So a restart from the Apple menu takes about 75 seconds longer than usual and a shut down about 75 seconds, but neither needs Proxmox. A VM that is working, booting or busy never prints that line, and a guest that resets or powers off by itself is left alone.
+
+The watchdog also restarts the VM after a kernel panic. A panicked macOS guest with the iGPU never resets on its own (its vCPUs spin forever), so when the serial port shows `panic(cpu ...` and the VM has not reset 60 seconds later with its disks idle for 15 more, the host stops and starts it. macOS shows the panic report after that boot. After three such restarts within an hour the watchdog stops the VM and leaves it off, so a guest that panics at every boot does not loop.
 
 What it costs and how to check it:
 
