@@ -635,7 +635,23 @@ def test_recover_reports_a_failed_stop_and_a_failed_start(daemon, capsys):
             return 0, "status: stopped"
         return (1, "no iGPU") if argv[:2] == ["qm", "start"] else (0, "")
     assert daemon.recover("7", "restart", runner, clock=lambda: 0.0, sleep=lambda s: None) is False
-    assert "qm start failed: no iGPU" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"qm start failed (try {daemon.START_TRIES} of {daemon.START_TRIES}): no iGPU" in out
+
+
+def test_recover_retries_qm_start_while_the_cluster_has_no_quorum(daemon, capsys):
+    starts, slept = [], []
+
+    def runner(argv):
+        if argv[:2] == ["qm", "status"]:
+            return 0, "status: stopped"
+        if argv[:2] == ["qm", "start"]:
+            starts.append(argv)
+            return (1, "cluster not ready - no quorum?") if len(starts) < 3 else (0, "")
+        return 0, ""
+    assert daemon.recover("7", "restart", runner, clock=lambda: 0.0, sleep=slept.append) is True
+    assert len(starts) == 3 and slept == [daemon.START_RETRY, daemon.START_RETRY]
+    assert "try 1 of" in capsys.readouterr().out
 
 
 def test_run_returns_the_exit_code_and_output(daemon):

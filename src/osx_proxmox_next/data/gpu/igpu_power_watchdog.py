@@ -34,6 +34,8 @@ RB_HALT = 0x8
 GRACE = 60        # launchd's reboot(2) line to a reset: a healthy guest needs under 10 s
 QUIET = 15        # no disk I/O for this long before the host steps in
 STOP_WAIT = 60    # qm stop, then the VM must be stopped within this long before qm start
+START_TRIES = 10   # qm start can fail for a moment (no quorum while a cluster node rejoins)
+START_RETRY = 15
 POLL = 1.0
 MAX_LINE = 65536
 CONF_DIR = '/etc/pve/qemu-server'
@@ -152,10 +154,15 @@ def recover(vmid, intent, runner=run, clock=time.monotonic, sleep=time.sleep):
             log(vmid, 'still running %d s after qm stop, not starting it' % STOP_WAIT)
             return False
         sleep(2)
-    rc, out = runner(['qm', 'start', str(vmid)])
-    if rc != 0:
-        log(vmid, 'qm start failed: ' + out.strip()[-200:])
-    return rc == 0
+    for attempt in range(1, START_TRIES + 1):
+        rc, out = runner(['qm', 'start', str(vmid)])
+        if rc == 0:
+            return True
+        # seen live: a cluster node rejoining took quorum away for a few seconds
+        log(vmid, 'qm start failed (try %d of %d): %s' % (attempt, START_TRIES, out.strip()[-200:]))
+        if attempt < START_TRIES:
+            sleep(START_RETRY)
+    return False
 
 
 def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep):
