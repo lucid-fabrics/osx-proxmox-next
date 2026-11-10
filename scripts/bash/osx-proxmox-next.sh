@@ -5948,10 +5948,11 @@ that, so this watches the VM's serial port, where the kernel console goes (boot-
 1. launchd prints "Will be calling reboot(2) with flags: 0x..." once every app and service has quit.
    Flags with RB_HALT (0x8) mean shut down, anything else means restart. Nothing else prints that line,
    and a healthy guest that prints it is about to reset or power off anyway.
-2. A guest that resets prints the firmware's "BdsDxe:" lines within seconds, and
+2. A guest that resets prints the firmware's "BdsDxe:" lines (then a new kernel banner) within seconds, and
    one that powers off closes the serial socket. Either ends the watch.
-3. Neither within GRACE seconds: the VM must also have done no disk I/O for QUIET seconds (a booting or
-   working guest always does). Only then the host stops it, and starts it again for a restart.
+3. Neither within GRACE seconds: the VM must also have done no disk I/O and sent nothing on the network
+   for QUIET seconds (a booting or working guest always does). Only then the host stops it, and starts it
+   again for a restart.
 
 The Python CLI and the standalone bash installer install this exact text (the bash script embeds it
 verbatim; tests/test_igpu_parity.py diffs the two). Standard library only.
@@ -5965,19 +5966,22 @@ import sys
 import time
 
 INTENT_RE = re.compile(r'Will be calling reboot\(2\) with flags: (0x[0-9a-fA-F]+)')
-RESET_RE = re.compile(r'BdsDxe: ')  # the firmware: a kernel banner is no proof, panic logs repeat it
+RESET_RE = re.compile(r'BdsDxe: ')  # the firmware starting again
+BANNER_RE = re.compile(r'^Darwin Kernel Version ')  # a new kernel, unless a panic log repeats it under "Kernel version:"
 RB_HALT = 0x8
 GRACE = 60        # launchd's reboot(2) line to a reset: a healthy guest needs under 10 s
-QUIET = 15        # no disk I/O for this long before the host steps in
+QUIET = 15        # no disk I/O and no network sends for this long before the host steps in
 STOP_WAIT = 60    # qm stop, then the VM must be stopped within this long before qm start
 POLL = 1.0
 MAX_LINE = 65536
 CONF_DIR = '/etc/pve/qemu-server'
 SOCK_DIR = '/var/run/qemu-server'
 UNIT = 'osx-next-power-watchdog@%s.service'
-IGD_RE = re.compile(r'^hostpci\d+:\s*(0000:)?00:02(\.0)?(,|$)', re.M)
+IGD_RE = re.compile(r'^hostpci\d+:\s*(host=)?(0000:)?00:02(\.0)?(,|$)', re.M)
 SERIAL_RE = re.compile(r'^serial0:\s*socket\s*$', re.M)
 OPS_RE = re.compile(r'^\s+(?:rd|wr)_operations:\s*(\d+)\s*$', re.M)
+NETOUT_RE = re.compile(r'^netout:\s*(\d+)\s*$', re.M)  # sent by the guest; netin also counts broadcasts it ignores
+PVE_READY = '/etc/pve/.version'  # present while the cluster file system is mounted
 
 
 def log(vmid, message):
@@ -6005,9 +6009,14 @@ def applies(conf_text):
 
 
 def io_ops(status_text):
-    """Read plus write operations over every disk, from `qm status <vmid> --verbose`. None when absent."""
+    """Disk read and write operations plus bytes the guest sent, from `qm status <vmid> --verbose`.
+
+    A guest that is alive moves this (a booting one reads, an idle one still sends mDNS and ARP); a hung one does
+    not. None when the output has no disk counters."""
     found = OPS_RE.findall(status_text)
-    return sum(int(n) for n in found) if found else None
+    if not found:
+        return None
+    return sum(int(n) for n in found) + sum(int(n) for n in NETOUT_RE.findall(status_text))
 
 
 class Tracker:
@@ -6022,14 +6031,16 @@ class Tracker:
         self.since = 0.0
         self.ops = None
         self.quiet_since = None  # when the disk counter was taken (GRACE ran out), None before
+        self.prev = ''
 
     def feed(self, line, now):
         """One serial line. Returns 'armed' or 'reset' when the state changed, else None."""
+        prev, self.prev = self.prev, line.strip()
         found = intent_of(line)
         if found:
             self.intent, self.since, self.ops, self.quiet_since = found, now, None, None
             return 'armed'
-        if self.intent and RESET_RE.search(line):
+        if self.intent and (RESET_RE.search(line) or (BANNER_RE.search(line) and prev != 'Kernel version:')):
             self.clear()
             return 'reset'
         return None
@@ -6044,7 +6055,6 @@ class Tracker:
         if self.quiet_since is None:
             return 'check' if now - self.since >= GRACE else None
         return 'decide' if now - self.quiet_since >= QUIET else None
-        return None
 
     def start_quiet(self, ops, now):
         self.ops, self.quiet_since = ops, now
@@ -6107,10 +6117,10 @@ def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep)
     if not vm_running(vmid, runner):
         return False
     if before is None or after is None or after != before:
-        log(vmid, 'macOS asked for a %s %d s ago and did not reset, but its disks are still busy (%s -> %s '
-            'operations), so it is left alone' % (intent, GRACE + QUIET, before, after))
+        log(vmid, 'macOS asked for a %s %d s ago and did not reset, but it still uses its disks or network '
+            '(%s -> %s), so it is left alone' % (intent, GRACE + QUIET, before, after))
         return False
-    log(vmid, 'macOS asked for a %s, then hung with no disk activity for %d s: %s' % (
+    log(vmid, 'macOS asked for a %s, then hung with no disk or network activity for %d s: %s' % (
         intent, QUIET, 'stopping and starting it' if intent == 'restart' else 'stopping it'))
     ok = recover(vmid, intent, runner, clock, sleep)
     log(vmid, ('%s finished' % intent) if ok else ('%s could not be finished' % intent))
@@ -6127,8 +6137,11 @@ def still_applies(vmid):
     try:
         with open(os.path.join(CONF_DIR, '%s.conf' % vmid)) as f:
             text = f.read()
+    except FileNotFoundError:
+        # an empty /etc/pve (pve-cluster restarting) is not a deleted VM
+        return 'the VM config is gone' if os.path.exists(PVE_READY) else None
     except OSError:
-        return 'the VM config is gone'
+        return None
     if not applies(text):
         return 'the VM no longer has the iGPU and a serial socket'
     return None

@@ -312,6 +312,7 @@ def test_still_applies_uses_the_config_directory_and_detects_missing_settings(
     daemon, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(daemon, "CONF_DIR", str(tmp_path))
+    monkeypatch.setattr(daemon, "PVE_READY", str(tmp_path / "100.conf"))
 
     (tmp_path / "100.conf").write_text(
         "hostpci0: 0000:00:02.0,pcie=1,x-vga=1\n"
@@ -556,12 +557,75 @@ def test_the_cli_parses_and_dispatches_igpu_watchdog(monkeypatch):
     assert cli.run_cli(["igpu-watchdog", "996", "--remove"]) == 0 and got == [(996, True)]
 
 
-def test_the_reset_line_is_the_firmware_not_a_kernel_banner(daemon):
-    """A panic log repeats "Darwin Kernel Version", so only the firmware's BdsDxe lines prove a reset."""
+BANNER = "Darwin Kernel Version 25.6.0: Mon Oct 12 00:33:09 PDT 2026; root:xnu-12377/RELEASE_X86_64"
+
+
+def test_a_panic_log_repeating_the_kernel_banner_is_not_a_reset(daemon):
+    """A panic prints "Kernel version:" and then the banner: the guest is still hung."""
     tracker = daemon.Tracker()
     tracker.feed("com.apple.xpc.launchd|x (system) <Notice>: Will be calling reboot(2) with flags: 0x0", 1.0)
-    assert tracker.feed("Darwin Kernel Version 25.6.0: Mon Oct 12 00:33:09 PDT 2026", 2.0) is None
+    assert tracker.feed("Kernel version:", 2.0) is None and tracker.feed(BANNER, 2.0) is None
     assert tracker.intent == "restart"
+
+
+def test_a_new_kernel_banner_is_a_reset_even_without_the_firmware_lines(daemon):
+    tracker = daemon.Tracker()
+    tracker.feed("Will be calling reboot(2) with flags: 0x0", 1.0)
+    assert tracker.feed("MACH Reboot", 2.0) is None and tracker.feed(BANNER, 9.0) == "reset"
+    assert tracker.intent is None
+
+
+def test_a_second_reboot_line_during_the_quiet_check_starts_over(daemon):
+    tracker = daemon.Tracker()
+    tracker.feed("Will be calling reboot(2) with flags: 0x0", 0.0)
+    tracker.start_quiet(5, daemon.GRACE)
+    tracker.feed("Will be calling reboot(2) with flags: 0x8", daemon.GRACE + 1)
+    assert tracker.intent == "shutdown" and tracker.ops is None
+    assert tracker.due(daemon.GRACE + daemon.QUIET + 1) is None  # the GRACE clock restarted
+
+
+def test_io_ops_counts_what_the_guest_sends_but_not_what_it_receives(daemon):
+    base = "\t\trd_operations: 10\n\t\twr_operations: 5\nnetin: 999\n"
+    assert daemon.io_ops(base) == 15
+    assert daemon.io_ops(base + "netout: 7\n") == 22
+    assert daemon.io_ops("netout: 7\n") is None
+
+
+def test_a_vm_that_still_sends_packets_is_left_alone(daemon, capsys):
+    sent = iter(["netout: 100\n", "netout: 160\n"])
+
+    def runner(argv):
+        if argv[:2] == ["qm", "status"]:
+            return 0, ("\trd_operations: 1\n\twr_operations: 1\n" + next(sent)) if "--verbose" in argv else "status: running"
+        raise AssertionError(argv)
+    tracker = daemon.Tracker()
+    tracker.feed("Will be calling reboot(2) with flags: 0x0", 0.0)
+    assert daemon.step("7", tracker, daemon.GRACE, runner) is False
+    assert daemon.step("7", tracker, daemon.GRACE + daemon.QUIET, runner) is False
+    assert "left alone" in capsys.readouterr().out
+
+
+def test_a_missing_config_only_counts_while_the_cluster_file_system_is_up(daemon, monkeypatch, tmp_path):
+    monkeypatch.setattr(daemon, "CONF_DIR", str(tmp_path))
+    monkeypatch.setattr(daemon, "PVE_READY", str(tmp_path / ".version"))
+    assert daemon.still_applies("7") is None  # /etc/pve empty: pve-cluster restarting
+    (tmp_path / ".version").write_text("1")
+    assert daemon.still_applies("7") == "the VM config is gone"
+    (tmp_path / "7.conf").mkdir()  # unreadable for another reason
+    assert daemon.still_applies("7") is None
+
+
+def test_the_igpu_may_be_written_with_host_equals(daemon):
+    assert daemon.applies("hostpci0: host=0000:00:02.0,legacy-igd=1\nserial0: socket\n")
+
+
+def test_watch_reads_lines_split_across_reads_and_joined_in_one(daemon, monkeypatch, capsys):
+    monkeypatch.setattr(daemon, "run", lambda argv, timeout=120: pytest.fail(f"no command expected: {argv}"))
+    path, _ = _serve(["Will be calling reboot(2) with flags: 0x0\r\nMACH Reboot\r\nBdsDxe: loading Boot0004"],
+                     keep_open=False)
+    daemon.watch("7", path)
+    out = capsys.readouterr().out
+    assert "asked for a restart" in out and "reset by itself" in out
 
 
 def test_a_vm_whose_counters_cannot_be_read_is_left_alone(daemon):

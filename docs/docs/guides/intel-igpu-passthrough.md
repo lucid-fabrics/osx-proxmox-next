@@ -55,7 +55,7 @@ For a Tahoe VM, `igpu-finish` installs a power watchdog: a systemd unit `osx-nex
 
 1. macOS printed `Will be calling reboot(2) with flags: ...`. launchd prints that line once every app and service has quit, right before the kernel restarts or powers off. The flags say which one you chose.
 2. 60 seconds later the VM has neither powered off nor reset (a reset shows the firmware's `BdsDxe:` lines on the serial port within seconds).
-3. The VM's disks then stay idle for 15 more seconds.
+3. The VM's disks then stay idle and it sends nothing on the network for 15 more seconds.
 
 Then it runs `qm stop`, followed by `qm start` when you chose Restart. So a restart from the Apple menu takes about 75 seconds longer than usual and a shut down about 75 seconds, but neither needs Proxmox. A VM that is working, booting or busy never prints that line, and a guest that resets or powers off by itself is left alone.
 
