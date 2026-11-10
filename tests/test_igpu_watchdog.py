@@ -745,9 +745,115 @@ def test_watch_notes_a_guest_that_powered_off_by_itself(daemon, monkeypatch, cap
     assert "powered off by itself" in capsys.readouterr().out
 
 
-def test_watch_logs_a_kernel_panic_but_does_nothing_about_it(daemon, monkeypatch, capsys):
+def test_watch_logs_a_kernel_panic_and_leaves_a_vm_that_went_away(daemon, monkeypatch, capsys):
     monkeypatch.setattr(daemon, "run", lambda argv, timeout=120: pytest.fail(f"no command expected: {argv}"))
     path, _ = _serve(["panic(cpu 1 caller 0xffffff8012eb08a8): AppleIntelFramebuffer::setPowerState timeout"],
                      keep_open=False)
     daemon.watch("7", path)
-    assert "VM 7: kernel panic: panic(cpu 1 caller" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "VM 7: kernel panic: panic(cpu 1 caller" in out and "restart by itself after the panic" in out
+
+
+def test_watch_restarts_a_guest_that_stays_down_after_a_panic(daemon, monkeypatch, capsys):
+    """Seen live in a heavy GPU soak: WhateverXe hangs the GPU, the kernel panics and the VM spins forever."""
+    calls, state = [], {"stopped": False}
+
+    def runner(argv, timeout=120):
+        calls.append(argv)
+        if argv[:2] == ["qm", "status"]:
+            if "--verbose" in argv:
+                return 0, "\trd_operations: 5\n\twr_operations: 1\n"
+            return 0, "status: stopped" if state["stopped"] else "status: running"
+        state["stopped"] = argv[:2] == ["qm", "stop"]
+        return 0, ""
+    monkeypatch.setattr(daemon, "run", runner)
+    monkeypatch.setattr(daemon, "GRACE", 0)
+    monkeypatch.setattr(daemon, "QUIET", 0)
+    monkeypatch.setattr(daemon, "POLL", 0.05)
+    path, done = _serve(["panic(cpu 1 caller 0xffffff8012eb08a8): AppleIntelFramebuffer::setPowerState timeout",
+                         "Kernel version:", "Darwin Kernel Version 25.6.0"], keep_open=True)
+    history = []
+    daemon.watch("7", path, history)
+    done.set()
+    assert [a for a in calls if a[:2] in (["qm", "stop"], ["qm", "start"])] == [["qm", "stop", "7"], ["qm", "start", "7"]]
+    assert len(history) == 1 and "macOS panicked, then hung" in capsys.readouterr().out
+
+
+
+PANIC = "panic(cpu 2 caller 0xffffff8001234567): AppleIntelFramebuffer::setPowerState timeout"
+
+
+def _panic_runner(calls, state, ops=("120", "35")):
+    """qm status reports running until qm stop; the disk counters come from ops, one pair per --verbose call."""
+    reads = iter(ops) if isinstance(ops, list) else None
+
+    def runner(argv):
+        calls.append(argv)
+        if argv[:2] == ["qm", "status"]:
+            if "--verbose" in argv:
+                rd, wr = next(reads) if reads else ops
+                return 0, f" rd_operations: {rd}\n wr_operations: {wr}\n"
+            return 0, "status: stopped" if state["stopped"] else "status: running"
+        state["stopped"] = argv[:2] == ["qm", "stop"]
+        return 0, ""
+    return runner
+
+
+def _actions(calls):
+    return [a for a in calls if a[:2] in (["qm", "stop"], ["qm", "start"])]
+
+
+def test_tracker_arms_on_a_kernel_panic_and_clears_on_a_reset(daemon):
+    tracker = daemon.Tracker()
+    assert tracker.feed(PANIC, 1.0) == "panic" and tracker.intent == "panic"
+    assert tracker.feed(PANIC, 5.0) is None and tracker.since == 1.0  # a nested panic does not restart GRACE
+    assert tracker.feed("BdsDxe: loading Boot0004", 9.0) == "reset" and tracker.intent is None
+
+
+def test_a_panic_after_a_shutdown_request_keeps_the_shutdown(daemon):
+    tracker = daemon.Tracker()
+    tracker.feed("Will be calling reboot(2) with flags: 0x8", 1.0)
+    assert tracker.feed(PANIC, 2.0) is None and tracker.intent == "shutdown"
+
+
+def test_step_restarts_a_vm_that_stays_down_after_a_panic(daemon):
+    calls, state, history = [], {"stopped": False}, []
+    tracker = daemon.Tracker()
+    tracker.feed(PANIC, 100.0)
+    tracker.start_quiet(155, 100.0 + daemon.GRACE)
+    assert daemon.step("100", tracker, 100.0 + daemon.GRACE + daemon.QUIET, _panic_runner(calls, state),
+                       clock=lambda: 1000.0, sleep=lambda _s: None, history=history) is True
+    assert _actions(calls) == [["qm", "stop", "100"], ["qm", "start", "100"]] and history == [1000.0]
+
+
+def test_a_panic_with_busy_disks_is_watched_again_not_forgotten(daemon):
+    calls, state = [], {"stopped": False}
+    runner = _panic_runner(calls, state, ops=[("120", "40"), ("120", "40")])
+    tracker = daemon.Tracker()
+    tracker.feed(PANIC, 0.0)
+    tracker.start_quiet(155, daemon.GRACE)
+    now = daemon.GRACE + daemon.QUIET
+    assert daemon.step("7", tracker, now, runner, clock=lambda: 0.0, sleep=lambda _s: None, history=[]) is False
+    assert tracker.intent == "panic" and tracker.ops == 160 and not _actions(calls)
+    assert daemon.step("7", tracker, now + daemon.QUIET, runner, clock=lambda: 0.0, sleep=lambda _s: None,
+                       history=[]) is True
+    assert _actions(calls) == [["qm", "stop", "7"], ["qm", "start", "7"]]
+
+
+def test_panic_allowed_counts_only_restarts_inside_the_window(daemon):
+    now = 100000.0
+    assert daemon.panic_allowed([now - daemon.PANIC_WINDOW + 1] * daemon.PANIC_MAX, now) is False
+    assert daemon.panic_allowed([now - daemon.PANIC_WINDOW - 1] * daemon.PANIC_MAX, now) is True
+    assert daemon.panic_allowed([now] * (daemon.PANIC_MAX - 1), now) is True
+
+
+def test_too_many_panics_in_an_hour_leave_the_vm_stopped(daemon, capsys):
+    calls, state = [], {"stopped": False}
+    history = [1000.0 - n for n in range(daemon.PANIC_MAX)]
+    tracker = daemon.Tracker()
+    tracker.feed(PANIC, 100.0)
+    tracker.start_quiet(155, 100.0 + daemon.GRACE)
+    assert daemon.step("100", tracker, 100.0 + daemon.GRACE + daemon.QUIET, _panic_runner(calls, state),
+                       clock=lambda: 1000.0, sleep=lambda _s: None, history=history) is True
+    assert _actions(calls) == [["qm", "stop", "100"]] and len(history) == daemon.PANIC_MAX
+    assert "leaving it stopped" in capsys.readouterr().out
