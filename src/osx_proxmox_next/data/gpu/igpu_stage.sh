@@ -34,6 +34,8 @@ else
 fi
 
 say "staged OK"
+# flush the copied files first: the host stops the VM as soon as it reads "staged" (the halt below can wedge Tahoe's recovery)
+sync
 echo "staged" >"$SRC/result.txt"
 sync
 /sbin/halt

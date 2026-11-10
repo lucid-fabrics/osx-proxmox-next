@@ -46,6 +46,8 @@ STAGE_TIMEOUT = 900          # staging copies ~95 MB and halts
 STAGE_ATTEMPTS = 3           # the typed command is retyped when the script never reports "started"
 START_WAIT = 60              # seconds after Return, plus the time the typing itself took
 START_POLL = 5
+STAGE_GRACE = 20             # after the script reported its result: time for its own halt before the host stops the VM
+STAGE_DONE = ("staged", "failed:")
 FIRSTBOOT_TIMEOUT = 1500     # boot, WhateverXe wait (up to 120 s), package install, halt
 RESULT_POLL = 30             # Tahoe cannot halt itself (WhateverXe issue 62): look for the guest's result instead
 RESULT_GRACE = 15            # let a result that was seen mid-write finish before it is trusted
@@ -178,8 +180,6 @@ def finish(
         raise FinishError("Cannot attach the iGPU: " + " ".join(plan.issues))
     result = FinishResult(notes=list(plan.warnings))
     storage = _storage_of(cfg)
-    if version == "tahoe":
-        on_event("Note: " + TAHOE_STAGE_NOTE.split(" The VM config")[0])
     snapshot = create_snapshot(vmid, adapter=pve)
     on_event(f"Saved the VM config to {snapshot.path}")
 
@@ -292,6 +292,24 @@ def _staging_started(pve: ProxmoxAdapter, vmid: int, ref: str, wait: float,
         sleep(START_POLL)
 
 
+def _wait_staged(pve: ProxmoxAdapter, vmid: int, ref: str, timeout: float,
+                 clock: Callable[[], float], sleep: Callable[[float], None]) -> bool:
+    """Wait until the staging script is finished: the VM halted, or the script left its result on the payload disk.
+
+    stage.sh syncs before it writes "staged" (or "failed: ..."), then halts. On Tahoe that halt can wedge the
+    recovery (every vCPU spins at 100% and the VM never stops), so the result ends the wait; the VM gets
+    STAGE_GRACE seconds to halt by itself first. False when neither happened within *timeout*."""
+    deadline = clock() + timeout
+    while clock() < deadline:
+        if "stopped" in pve.qm("status", str(vmid)).output:
+            return True
+        if _read_payload_result(pve, ref).startswith(STAGE_DONE):
+            wait_stopped(pve, vmid, STAGE_GRACE, clock, sleep)
+            return True
+        sleep(START_POLL)
+    return False
+
+
 def _stage(vmid: int, pve: ProxmoxAdapter, console: QmConsole, payload_ref: str,
            on_event: Callable[[str], None], clock: Callable[[], float], sleep: Callable[[float], None],
            tahoe: bool = False) -> None:
@@ -327,11 +345,15 @@ def _stage(vmid: int, pve: ProxmoxAdapter, console: QmConsole, payload_ref: str,
         raise FinishError(f"The staging command did not start after {STAGE_ATTEMPTS} tries."
                           + (f" The screen at the last try is in {shot}." if shot else "")
                           + (" " + TAHOE_STAGE_NOTE if tahoe else ""))
-    if not wait_stopped(pve, vmid, STAGE_TIMEOUT, clock, sleep):
+    if not _wait_staged(pve, vmid, payload_ref, STAGE_TIMEOUT, clock, sleep):
         pve.qm("stop", str(vmid))
         wait_stopped(pve, vmid, 120, clock, sleep)
         raise FinishError(f"The staging script did not finish within {STAGE_TIMEOUT // 60} minutes."
                           + (" " + TAHOE_STAGE_NOTE if tahoe else ""))
+    if "stopped" not in pve.qm("status", str(vmid)).output:
+        # the script is done but its halt wedged (Tahoe recovery: every vCPU spins in the firmware's shutdown call)
+        pve.qm("stop", str(vmid))
+        wait_stopped(pve, vmid, 120, clock, sleep)
     staged = _read_payload_result(pve, payload_ref)
     if staged != "staged":
         raise FinishError("Staging failed: " + (staged or "the script left no result") +
