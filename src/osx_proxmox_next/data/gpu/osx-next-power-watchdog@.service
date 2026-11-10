@@ -1,0 +1,11 @@
+[Unit]
+Description=osx-proxmox-next power watchdog for macOS VM %i (finishes a restart or shut down that hangs)
+After=pve-cluster.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/osx-proxmox-next/igpu_power_watchdog.py %i
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

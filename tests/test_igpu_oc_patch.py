@@ -193,3 +193,41 @@ def test_unstage_restores_a_custom_policy_and_leaves_a_changed_one(oc):
 def test_usage(oc):
     assert run(oc, "bogus").returncode == 64
     assert subprocess.run([sys.executable, str(SCRIPT)], capture_output=True).returncode == 64
+
+
+def _boot_args(oc: Path) -> str:
+    return cfg_of(oc)["NVRAM"]["Add"][GUID]["boot-args"]
+
+
+def test_serial_adds_the_kernel_console_once_and_unserial_takes_it_off(oc):
+    assert run(oc, "serial").returncode == 0 and run(oc, "serial").returncode == 0
+    assert _boot_args(oc).split().count("serial=3") == 1 and "-allow3d" in _boot_args(oc)
+    res = run(oc, "unserial")
+    assert res.returncode == 0 and "serial" not in _boot_args(oc) and "screen only" in res.stderr
+
+
+def test_serial_replaces_another_serial_value(oc):
+    run(oc, "serial")
+    cfg = cfg_of(oc)
+    cfg["NVRAM"]["Add"][GUID]["boot-args"] = "keepsyms=1 serial=1"
+    (oc / "config.plist").write_bytes(plistlib.dumps(cfg))
+    run(oc, "serial")
+    assert _boot_args(oc) == "keepsyms=1 serial=3"
+
+
+def test_restore_after_serial_still_puts_the_original_back(oc, zips):
+    """serial runs after attach: it keeps attach's checksum in step, so undo is not mistaken for a user edit."""
+    original = (oc / "config.plist").read_bytes()
+    run(oc, "attach", zips)
+    run(oc, "serial")
+    res = run(oc, "restore")
+    assert res.returncode == 0 and "KEPT" not in res.stderr and (oc / "config.plist").read_bytes() == original
+
+
+def test_serial_leaves_the_checksum_of_a_user_edited_config_alone(oc, zips):
+    run(oc, "attach", zips)
+    cfg = cfg_of(oc)
+    cfg["Misc"]["Boot"]["Timeout"] = 3  # the user's own change after the attach
+    (oc / "config.plist").write_bytes(plistlib.dumps(cfg))
+    run(oc, "serial")
+    assert run(oc, "restore").stderr.startswith("KEPT:")

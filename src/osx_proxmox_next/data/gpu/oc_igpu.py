@@ -1,6 +1,6 @@
 """Set up (or undo) a VM's OpenCore disk for Intel iGPU passthrough with WhateverXe.
 
-Usage: oc_igpu.py <EFI/OC directory> attach|restore|fadt|stage|unstage|mark
+Usage: oc_igpu.py <EFI/OC directory> attach|restore|fadt|stage|unstage|mark|serial|unserial
 
 The Python CLI/TUI and the standalone bash installer run this exact text (the
 bash script embeds it verbatim; tests/test_igpu_parity.py diffs the two).
@@ -22,6 +22,9 @@ stage    Makes the picker show only the recovery disk and wait for a key: Timeou
 unstage  Puts ScanPolicy back (the value saved by stage, else 0). The caller restores the picker timeout.
 mark     Notes that the WhateverXe Graphics package is installed inside macOS. From then on restore keeps
          WhateverXe and AMFIPass in OpenCore: with the package installed and WhateverXe gone the guest hangs at boot.
+serial   Adds the boot-arg serial=3 so the kernel console goes to the VM's serial port, where the host's power
+         watchdog (igpu_power_watchdog.py) reads it. unserial removes it. Both keep the SHA-256 that restore
+         compares in step, so undo still puts the original config back.
 restore  Puts config.plist.pre-igpu back byte for byte and removes the two kexts, but only
          while config.plist still has the SHA-256 attach stored next to the backup. When the
          file changed since, the changed config and the backup stay and a KEPT line says so.
@@ -216,6 +219,37 @@ def mark(oc_dir):
     sys.stderr.write('noted that the graphics package is installed\n')
 
 
+SERIAL_ARG = 'serial=3'
+
+
+def _set_serial(oc_dir, on):
+    path = os.path.join(oc_dir, 'config.plist')
+    with open(path, 'rb') as f:
+        cfg = plistlib.load(f)
+    nv = cfg.setdefault('NVRAM', {}).setdefault('Add', {}).setdefault(NVRAM_GUID, {})
+    stamp = os.path.join(oc_dir, PATCHED_SHA)
+    ours = False
+    if os.path.exists(stamp):
+        with open(stamp) as f:
+            ours = f.read().strip() == file_sha(path)
+    kept = [a for a in nv.get('boot-args', '').split() if a.split('=', 1)[0] != 'serial']
+    nv['boot-args'] = ' '.join(kept + [SERIAL_ARG] if on else kept)
+    write_plist(cfg, path)
+    if ours:
+        with open(stamp, 'w') as f:
+            f.write(file_sha(path) + '\n')
+    sys.stderr.write(('kernel console on the serial port (' + SERIAL_ARG + ')\n') if on
+                     else 'kernel console back on the screen only\n')
+
+
+def serial(oc_dir):
+    _set_serial(oc_dir, True)
+
+
+def unserial(oc_dir):
+    _set_serial(oc_dir, False)
+
+
 def restore(oc_dir):
     path = os.path.join(oc_dir, 'config.plist')
     if os.path.exists(os.path.join(oc_dir, PACKAGE_MARK)):
@@ -248,9 +282,10 @@ def restore(oc_dir):
 
 
 def main(argv):
-    actions = {'attach': attach, 'restore': restore, 'fadt': fadt, 'stage': stage, 'unstage': unstage, 'mark': mark}
+    actions = {'attach': attach, 'restore': restore, 'fadt': fadt, 'stage': stage, 'unstage': unstage, 'mark': mark,
+               'serial': serial, 'unserial': unserial}
     if len(argv) != 3 or argv[2] not in actions:
-        refuse('usage: oc_igpu.py <EFI/OC dir> attach|restore|fadt|stage|unstage|mark', 64)
+        refuse('usage: oc_igpu.py <EFI/OC dir> attach|restore|fadt|stage|unstage|mark|serial|unserial', 64)
     actions[argv[2]](argv[1])
 
 

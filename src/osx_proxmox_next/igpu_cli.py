@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import igpu_attach, igpu_engine, igpu_finish
+from . import igpu_attach, igpu_engine, igpu_finish, igpu_watchdog
 from .igpu_attach import SETUP_ASSISTANT_NOTE
 from .defaults import DEFAULT_ISO_DIR
 from .domain import MAX_VMID, MIN_VMID, SUPPORTED_MACOS
@@ -15,14 +15,15 @@ from .intel_host import check_intel_gpu
 
 TROUBLESHOOTING_URL = "https://github.com/lucid-fabrics/osx-proxmox-next/blob/main/docs/docs/guides/intel-igpu-passthrough.md"
 
-__all__ = ["add_parsers", "dispatch", "run_check", "run_finish", "run_install"]
+__all__ = ["add_parsers", "dispatch", "run_check", "run_finish", "run_install", "run_watchdog"]
 
 DOCS = "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/intel-igpu-passthrough"
 NOTICE = (
     "BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox "
     "console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native "
     "HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load "
-    "slows it. macOS Tahoe is experimental: restart it from Proxmox, not from inside macOS."
+    "slows it. macOS Tahoe is experimental: a power watchdog on the host finishes its restarts and shut downs, "
+    "which hang at the very end."
 )
 
 
@@ -44,6 +45,13 @@ def add_parsers(sub: argparse._SubParsersAction, common: argparse.ArgumentParser
     finish.add_argument("vmid", type=int, help="VM ID (stopped, installed, machine type pc)")
     finish.add_argument("--macos", default="", help="ventura, sonoma, sequoia or tahoe, when it cannot be read from the VM")
     finish.add_argument("--iso-dir", default="", help="Directory for the downloads (default: the ISO storage)")
+    watchdog = sub.add_parser(
+        "igpu-watchdog",
+        help=("BETA: install (or --remove) the host-side power watchdog of a macOS Tahoe VM with the iGPU, which "
+              "finishes restarts and shut downs that hang. igpu-finish installs it already. The VM must be stopped."),
+    )
+    watchdog.add_argument("vmid", type=int, help="VM ID (stopped, Tahoe, iGPU on hostpci0)")
+    watchdog.add_argument("--remove", action="store_true", help="Stop and remove the watchdog of this VM")
 
 
 def _print_report(report) -> None:
@@ -176,6 +184,28 @@ def run_install(args: argparse.Namespace) -> int:
     return code
 
 
+def run_watchdog(args: argparse.Namespace) -> int:
+    from .executor import apply_plan
+
+    issues, steps = igpu_watchdog.prepare(args.vmid, remove=args.remove)
+    for line in issues:
+        print(f"REFUSED: {line}")
+    if issues:
+        return 2
+    result = apply_plan(steps, execute=True)
+    if not result.ok:
+        failed = next((r for r in result.results if not r.ok), None)
+        print("FAILED" + (f" at: {failed.title}" if failed else "") + f". Log: {result.log_path}")
+        return 4
+    if args.remove:
+        print(f"The power watchdog of VM {args.vmid} is removed. Restarts and shut downs from inside macOS Tahoe "
+              "hang again; stop the VM from Proxmox.")
+    else:
+        print(f"The power watchdog of VM {args.vmid} is running. {igpu_watchdog.WATCHDOG_NOTE}")
+        print(f"Its log: journalctl -u {igpu_watchdog.unit_name(args.vmid)}")
+    return 0
+
+
 def dispatch(args: argparse.Namespace) -> int | None:
     if args.cmd == "igpu-check":
         return run_check()
@@ -183,4 +213,6 @@ def dispatch(args: argparse.Namespace) -> int | None:
         return run_finish(args)
     if args.cmd == "igpu-install":
         return run_install(args)
+    if args.cmd == "igpu-watchdog":
+        return run_watchdog(args)
     return None

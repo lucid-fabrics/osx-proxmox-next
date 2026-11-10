@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import igpu_engine
+from . import igpu_engine, igpu_watchdog
 from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .executor import apply_plan
@@ -66,6 +66,7 @@ class FinishResult:
     notes: list[str] = field(default_factory=list)
     accelerated: bool = False  # the host saw the guest use the GPU after the final boot
     accel_detail: str = ""
+    watchdog: bool = False     # the host-side power watchdog is installed (Tahoe)
 
 
 def _storage_of(cfg: dict[str, str]) -> str:
@@ -235,6 +236,8 @@ def finish(
         raise FinishError("Attaching the iGPU failed" + (f" at: {failed.title}" if failed else "")
                           + f". Log: {applied.log_path}. Undo with: gpu-setup --undo")
     pve.qm("set", str(vmid), "--boot", POST_INSTALL_BOOT_ORDER)
+    if igpu_watchdog.applies_to(version):
+        _enable_watchdog(pve, vmid, result, on_event)
 
     on_event("First boot with the iGPU: the guest installs the graphics package and powers off")
     tahoe = version == "tahoe"
@@ -264,6 +267,18 @@ def finish(
         on_event(f"Checking from the host that macOS uses the iGPU (up to {igpu_engine.ACCEL_TIMEOUT // 60} minutes)")
         result.accelerated, result.accel_detail = igpu_engine.check_accel(clock=clock, sleep=sleep)
     return result
+
+
+def _enable_watchdog(pve: ProxmoxAdapter, vmid: int, result: FinishResult, on_event: Callable[[str], None]) -> None:
+    """Tahoe hangs at the end of every restart and shut down with the iGPU: the host-side watchdog finishes them."""
+    cfg = parse_config(pve.qm("config", str(vmid)).output)
+    applied = apply_plan(igpu_watchdog.enable_steps(vmid, cfg), execute=True, adapter=pve)
+    if applied.ok:
+        result.watchdog = True
+        on_event("Installed the power watchdog: restarts and shut downs from inside macOS Tahoe finish on their own")
+    else:
+        result.notes.append(f"Could not install the power watchdog (log: {applied.log_path}), so restarts and shut "
+                            f"downs from inside macOS Tahoe hang. Install it with: osx-next-cli igpu-watchdog {vmid}")
 
 
 def _put_back(pve: ProxmoxAdapter, vmid: int, original: dict[str, str | None]) -> None:

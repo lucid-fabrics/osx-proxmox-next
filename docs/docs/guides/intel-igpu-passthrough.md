@@ -17,7 +17,7 @@ The whole recipe was proven on one machine: an i5-1240P (Alder Lake-P, Iris Xe, 
 - **You need a monitor or an HDMI dummy plug** on the host's native HDMI port. HDMI that goes through an LSPCON converter and USB-C display outputs do not work. Laptop built-in panels mostly do not work either (WhateverXe issue 49).
 - **One host reboot** is needed the first time, so the host can hand the iGPU to vfio-pci. If the host is already prepared the tool skips it.
 - **The iGPU shares the CPU's power budget.** When the host is busy (a video transcode, for example) the package hits its power limit and the iGPU slows down. Metal stays on, the desktop just gets sluggish.
-- **Tahoe is experimental.** The automatic graphics package setup (`igpu-install` and `igpu-finish`) works on Tahoe 26. Its recovery Terminal is slower to take input than on the other releases, so if the staging step ever stops, the tool puts the VM config back as it was and you can run the same command again. Every restart or shutdown from inside macOS hangs on Tahoe (WhateverXe issue 62), so restart the VM from Proxmox instead (`qm stop`, then `qm start`). Ventura, Sonoma and Sequoia restart normally.
+- **Tahoe is experimental.** The automatic graphics package setup (`igpu-install` and `igpu-finish`) works on Tahoe 26. Its recovery Terminal is slower to take input than on the other releases, so if the staging step ever stops, the tool puts the VM config back as it was and you can run the same command again. Every restart or shut down from inside macOS hangs at the very end on Tahoe (WhateverXe issue 62). The tool installs a small power watchdog on the host that finishes them for you, see [Restart and shut down on Tahoe](#restart-and-shut-down-on-tahoe). Ventura, Sonoma and Sequoia restart normally.
 - A WindowServer crash leaves the GPU dead until the VM restarts. It is rare and logging out is safe.
 
 ## How the right GPU is picked
@@ -39,12 +39,31 @@ osx-next-cli igpu-check                     # can this host do it, and what woul
 osx-next-cli igpu-install --vmid 996 --name igpu-seq --macos sequoia \
   --cores 4 --memory 8192 --disk 64 --bridge vmbr0 --storage local-lvm
 osx-next-cli igpu-finish 996                # an installed i440fx VM: attach the iGPU and install the package
+osx-next-cli igpu-watchdog 996              # Tahoe: add the power watchdog to a VM set up before (--remove takes it off)
 osx-next-cli gpu-setup --undo               # put the VM and the host back
 ```
 
-`igpu-install` creates the VM, installs macOS hands-off like [unattended install](unattended-install.md) and finishes the iGPU setup, 60 to 90 minutes in total. The same commands exist in the standalone script: `osx-proxmox-next.sh igpu-check` and `igpu-finish <vmid>`, and the create-a-VM menu asks about the iGPU when the host is ready.
+`igpu-install` creates the VM, installs macOS hands-off like [unattended install](unattended-install.md) and finishes the iGPU setup, 60 to 90 minutes in total. The same commands exist in the standalone script: `osx-proxmox-next.sh igpu-check`, `igpu-finish <vmid>` and `igpu-watchdog <vmid> [--remove]`, and the create-a-VM menu asks about the iGPU when the host is ready.
 
 An already installed q35 VM is not converted: switching the machine type of an installed macOS has not been tested. Create a new VM instead.
+
+## Restart and shut down on Tahoe
+
+With the iGPU attached, macOS Tahoe faults the GPU while it closes the desktop, and the kernel then waits for the GPU forever. The VM stays on with a black screen. This is a WhateverXe bug (issue 62) that the tool cannot fix, so it finishes the job from the host instead.
+
+For a Tahoe VM, `igpu-finish` installs a power watchdog: a systemd unit `osx-next-power-watchdog@<vmid>` that reads the VM's serial port. The VM gets `serial0: socket` and the boot-arg `serial=3`, which sends the macOS kernel console there. The watchdog acts only when all of this is true:
+
+1. macOS printed `Will be calling reboot(2) with flags: ...`. launchd prints that line once every app and service has quit, right before the kernel restarts or powers off. The flags say which one you chose.
+2. 60 seconds later the VM has neither powered off nor reset (a reset shows the firmware's `BdsDxe:` lines on the serial port within seconds).
+3. The VM's disks then stay idle for 15 more seconds.
+
+Then it runs `qm stop`, followed by `qm start` when you chose Restart. So a restart from the Apple menu takes about 75 seconds longer than usual and a shut down about 75 seconds, but neither needs Proxmox. A VM that is working, booting or busy never prints that line, and a guest that resets or powers off by itself is left alone.
+
+What it costs and how to check it:
+
+- The Proxmox serial console (`qm terminal`) of that VM does not work while the watchdog holds the serial port.
+- Every decision is logged: `journalctl -u osx-next-power-watchdog@<vmid>`.
+- `osx-next-cli igpu-watchdog <vmid> --remove` stops it and takes `serial=3` off (the VM must be stopped). It also turns itself off once the VM is deleted or no longer has the iGPU.
 
 ## Troubleshooting
 
