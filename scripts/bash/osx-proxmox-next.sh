@@ -4935,6 +4935,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -4944,10 +4945,10 @@ IGD_BDF = "0000:" + IGD_SLOT
 KVM_DIR = "/usr/share/kvm"
 MB = 1024 * 1024
 
-# Pinned downloads. Every file is checked against its SHA-256 before use and never replaced
-# silently: a mismatch is an error. Keep the URLs on tags or commits, never on a moving branch.
+# Pinned downloads (option ROMs, AMFIPass). Every file is checked against its SHA-256 before use and never
+# replaced silently: a mismatch is an error. Keep the URLs on tags or commits, never on a moving branch.
+# WhateverXe and WhateverXe Graphics are not pinned: they come from the GitHub releases (see "releases" below).
 _LONGQT = "https://github.com/LongQT-sea/intel-igpu-passthru/releases/download/v0.1/"
-_WEX = "https://github.com/b00t0x/WhateverXe/releases/download/0.8.0/"
 _WEX_GFX = "https://github.com/b00t0x/WhateverXe-Graphics/"
 _WEX_GFX_COMMIT = "88d64a340e6f0d52e3f32a136c920d190ac43c53"
 ROMS = {
@@ -4958,16 +4959,12 @@ ROMS = {
     "adl-n": ("ADL-N_TWL_GOPv21_igd.rom", _LONGQT + "ADL-N_TWL_GOPv21_igd.rom",
               "2d2343fccbbeaf3d7df2280dd25a5f60a0aaf4b8e8ded15997b444d23afe0c3a"),
 }
-WEX_VERSION = "0.8.0"
 PINS = {
-    "whateverxe": ("WhateverXe-0.8.0-RELEASE.zip", _WEX + "WhateverXe-0.8.0-RELEASE.zip",
-                   "5b71e14ce10c673f6baba276183f268d7f04766d298cd34f1df0bb96f11c8e4b"),
     "amfipass": ("AMFIPass-v1.4.1-Mod-RELEASE.zip",
                  _WEX_GFX + "raw/" + _WEX_GFX_COMMIT + "/extras/AMFIPass-v1.4.1-Mod-RELEASE.zip",
                  "71f41de42e355d2a83e6f093ef34a5b24d0a9c9a9085830b2317f1b874f56250"),
-    "graphics": ("WhateverXe-Graphics-0.4.1.pkg", _WEX_GFX + "releases/download/v0.4.1/WhateverXe-Graphics-0.4.1.pkg",
-                 "7f7ce3b924ad421cff0c4f30534598858474b8c9539c4b889a461bc1d5fed02c"),
 }
+AMFIPASS_VERSION = "1.4.1-Mod"
 
 # Memory layout. OVMF puts a constant 65 MB of its own allocations above the guest's graphics
 # memory (measured on pve-edk2-firmware, PVE 9.2), WhateverXe compares the guest graphics memory
@@ -5272,6 +5269,170 @@ def rom_for_family(family, text=None):
     return ROMS[families[family][1]]
 
 
+# ── WhateverXe releases (GitHub) ─────────────────────────────────────
+
+# WhateverXe and WhateverXe Graphics are never pinned: the newest published release is the default and the user
+# may pick any older one. The file of a release is verified against the sha256 `digest` GitHub stores for the
+# asset; a release without a digest, or a download that does not match, is an error. There is no silent fallback.
+GITHUB_API = "https://api.github.com/repos/"
+LATEST = "latest"
+RELEASE_KINDS = {
+    "whateverxe": ("b00t0x/WhateverXe", re.compile(r"^WhateverXe-.+-RELEASE\.zip$"), "WhateverXe"),
+    "graphics": ("b00t0x/WhateverXe-Graphics", re.compile(r"^WhateverXe-Graphics-.+\.pkg$"), "WhateverXe Graphics"),
+}
+TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+STATE_FIELDS = ("whateverxe", "graphics")
+
+
+class ReleaseError(Exception):
+    """GitHub could not be asked, or a release cannot be used. The message says what to do next."""
+
+
+def github_get(url):
+    """The JSON GitHub returns for *url*. GITHUB_TOKEN, when set, raises the rate limit."""
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "osx-proxmox-next"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as resp:  # noqa: S310
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 429):
+            raise ReleaseError("GitHub refused the request (rate limit reached). Wait a few minutes and run the "
+                               "command again, or set GITHUB_TOKEN to a GitHub token to raise the limit.") from exc
+        if exc.code == 404:
+            raise ReleaseError("GitHub has no such release.") from exc
+        raise ReleaseError("GitHub answered HTTP %d for %s. Try again in a few minutes." % (exc.code, url)) from exc
+    except (OSError, ValueError) as exc:
+        raise ReleaseError("Could not reach GitHub (%s). Check the network and run the command again." % exc) from exc
+
+
+def _pick(kind, rel):
+    """The download of release *rel* for *kind* (None when the release does not carry the file)."""
+    repo, rx, _label = RELEASE_KINDS[kind]
+    assets = [a for a in rel.get("assets") or [] if rx.match(a.get("name") or "")]
+    if len(assets) != 1:
+        return None
+    asset = assets[0]
+    tag = rel.get("tag_name") or ""
+    if os.path.basename(asset["name"]) != asset["name"] or not TAG_RE.match(tag):
+        return None  # a name or tag that is not a plain word is never put on a path or a command line
+    m = DIGEST_RE.match(asset.get("digest") or "")
+    return {"kind": kind, "tag": tag, "version": tag[1:] if tag[:1] in "vV" else tag, "name": asset["name"],
+            "url": asset.get("browser_download_url") or "", "sha256": m.group(1) if m else "",
+            "prerelease": bool(rel.get("prerelease")), "published": rel.get("published_at") or ""}
+
+
+def list_releases(kind, get=None):
+    """Every published release of *kind* that has the file, newest first."""
+    repo = RELEASE_KINDS[kind][0]
+    data = (get or github_get)("%s%s/releases?per_page=30" % (GITHUB_API, repo))
+    picks = [_pick(kind, r) for r in data if not r.get("draft")]
+    return sorted((p for p in picks if p), key=lambda p: p["published"], reverse=True)
+
+
+def _usable(pick):
+    """The pick itself, or ReleaseError when it cannot be verified or does not come from the project."""
+    label = RELEASE_KINDS[pick["kind"]][2]
+    repo = RELEASE_KINDS[pick["kind"]][0]
+    if not pick["sha256"]:
+        raise ReleaseError("%s %s has no sha256 digest on GitHub, so its download cannot be verified and is "
+                           "refused. Pick another release." % (label, pick["tag"]))
+    if not pick["url"].startswith("https://github.com/%s/releases/download/" % repo):
+        raise ReleaseError("%s %s points at an unexpected download address, refused." % (label, pick["tag"]))
+    return pick
+
+
+def resolve(kind, choice=LATEST, get=None):
+    """The release picked by *choice* ("latest" or a tag) with `source` set to latest or chosen."""
+    label = RELEASE_KINDS[kind][2]
+    choice = choice or LATEST
+    if choice == LATEST:
+        found = [p for p in list_releases(kind, get) if not p["prerelease"]]
+        if not found:
+            raise ReleaseError("No published release of %s has the file this tool needs." % label)
+        return dict(_usable(found[0]), source=LATEST)
+    if not TAG_RE.match(choice):
+        raise ReleaseError("%r is not a release tag." % choice)
+    want = choice.lstrip("vV")
+    for pick in list_releases(kind, get):
+        if pick["tag"] == choice or pick["version"] == want:
+            return dict(_usable(pick), source="chosen")
+    try:
+        pick = _pick(kind, (get or github_get)("%s%s/releases/tags/%s" % (GITHUB_API, RELEASE_KINDS[kind][0], choice)))
+    except ReleaseError as exc:
+        raise ReleaseError("%s has no release tagged %s (%s). See the list with: igpu-versions" % (label, choice, exc)) from exc
+    if pick is None:
+        raise ReleaseError("%s %s has no download this tool can use." % (label, choice))
+    return dict(_usable(pick), source="chosen")
+
+
+def select_assets(wex=LATEST, graphics=LATEST, get=None):
+    """{"whateverxe": pick, "graphics": pick}; a ReleaseError names the one that failed."""
+    return {"whateverxe": resolve("whateverxe", wex, get), "graphics": resolve("graphics", graphics, get)}
+
+
+def fetch_release(pick, dest_dir, fetcher=None):
+    """Download *pick* into *dest_dir* (a cached file with the right hash is reused) and return its path."""
+    return (fetcher or fetch)(pick["url"], pick["sha256"], Path(dest_dir) / pick["name"])
+
+
+# ── what is installed, per VM ────────────────────────────────────────
+
+STATE_DIR = "/var/lib/osx-proxmox-next/igpu"
+
+
+def state_path(vmid, base=None):
+    return Path(base or os.environ.get("IGPU_STATE_DIR") or STATE_DIR) / ("%s.json" % int(vmid))
+
+
+def read_state(vmid, base=None):
+    try:
+        data = json.loads(state_path(vmid, base).read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_state(vmid, update, base=None):
+    """Merge *update* into the VM's record (versions, sources, package state) and return the record."""
+    import time
+    path = state_path(vmid, base)
+    data = read_state(vmid, base)
+    data.update(update)
+    data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+    return data
+
+
+def picks_state(picks, macos=""):
+    """The state fields that name the chosen downloads (see write_state)."""
+    out = {"amfipass_version": AMFIPASS_VERSION, "macos": macos}
+    for key in STATE_FIELDS:
+        if key in picks:
+            p = picks[key]
+            out.update({key + "_version": p["version"], key + "_tag": p["tag"], key + "_sha256": p["sha256"],
+                        key + "_source": p["source"]})
+    return out
+
+
+def describe_state(state):
+    """One plain line per installed component, for reports and status output."""
+    lines = []
+    for key, label in (("whateverxe", "WhateverXe"), ("graphics", "WhateverXe Graphics")):
+        if state.get(key + "_version"):
+            lines.append("%s %s (%s)" % (label, state[key + "_version"],
+                                         "latest when installed" if state.get(key + "_source") == LATEST else "chosen by the user"))
+    if state.get("amfipass_version"):
+        lines.append("AMFIPass %s (pinned)" % state["amfipass_version"])
+    return lines
+
+
 # ── payload disk ─────────────────────────────────────────────────────
 
 def render_payload_file(name, pkg_sha256):
@@ -5430,7 +5591,8 @@ def _emit(obj):
 
 def _usage():
     sys.stderr.write("usage: igpu_engine.py check|verdict <id>|lookup <id>|settings <mb> <rom>|merge-args|strip-args|"
-                     "fetch <rom:KEY|pin:NAME> <dir>|payload <pkg> <img>|result <img>|accel-check [seconds]|stage-command|pins\n")
+                     "fetch <rom:KEY|pin:NAME> <dir>|assets <dir> [wex] [graphics]|releases <whateverxe|graphics>|"
+                     "state-write <vmid>|state-record <vmid> <macos>|state-show <vmid>|payload <pkg> <img>|result <img>|accel-check [seconds]|stage-command|pins\n")
     return 64
 
 
@@ -5466,6 +5628,32 @@ def main(argv):
             sys.stderr.write("ERROR: %s\n" % exc)
             return 1
         sys.stdout.write(str(path) + "\n")
+        return 0
+    if cmd == "assets" and len(argv) in (3, 4, 5):
+        try:
+            picks = select_assets(*argv[3:])
+            out = {k: dict(p, path=str(fetch_release(p, argv[2]))) for k, p in picks.items()}
+        except (ReleaseError, OSError, ValueError) as exc:
+            sys.stderr.write("ERROR: %s\n" % exc)
+            return 1
+        _emit(out)
+        return 0
+    if cmd == "releases" and len(argv) == 3 and argv[2] in RELEASE_KINDS:
+        try:
+            _emit(list_releases(argv[2]))
+        except ReleaseError as exc:
+            sys.stderr.write("ERROR: %s\n" % exc)
+            return 1
+        return 0
+    if cmd == "state-write" and len(argv) == 3:
+        _emit(write_state(argv[2], json.loads(sys.stdin.read())))
+        return 0
+    if cmd == "state-record" and len(argv) == 4:
+        picks = json.loads(sys.stdin.read())
+        write_state(argv[2], picks_state(picks, argv[3]))
+        return 0
+    if cmd == "state-show" and len(argv) == 3:
+        sys.stdout.write("\n".join(describe_state(read_state(argv[2]))) + "\n")
         return 0
     if cmd == "payload" and len(argv) == 4:
         ok, msg = build_payload(argv[2], argv[3])
@@ -5504,7 +5692,8 @@ Standard library only.
 attach   Backs up config.plist to config.plist.pre-igpu (kept if it already exists), unpacks
          WhateverXe.kext and AMFIPass.kext from the two zips named in the environment
          (IGPU_WEX_ZIP / IGPU_WEX_SHA256 and IGPU_AMFI_ZIP / IGPU_AMFI_SHA256, each checked
-         against its pinned SHA-256 first) into Kexts/, lists both right after Lilu, turns
+         against its expected SHA-256 first; the kext is found by name, also inside one wrapping folder,
+         and its executable is read from its Info.plist) into Kexts/, lists both right after Lilu, turns
          WhateverGreen off, sets ACPI > Quirks > FadtEnableReset and adds the boot-args
          -allow3d -disablegfxfirmware -wex-tgl-hold-render-wake. Running it twice changes
          nothing the second time. Refuses when config.plist still carries the NVIDIA
@@ -5543,6 +5732,7 @@ BOOT_ARGS = ('-allow3d', '-disablegfxfirmware', '-wex-tgl-hold-render-wake')
 NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 NULLMOTH_ARGS = ('nvfb', 'nvaccel', 'nvfbheads', '-nvkmsnosmooth')
 IONDRV = 'com.apple.iokit.IONDRVSupport'
+WEX_BUNDLE_ID = 'org.b00t0x.WhateverXe'
 
 
 def refuse(message, code=2):
@@ -5577,8 +5767,23 @@ def merge_boot_args(current, wanted):
     return ' '.join(kept + list(wanted))
 
 
+def find_bundle(names, bundle):
+    """The path inside the zip that holds *bundle*, up to and including the .kext folder (at most two folders
+    deep, so a release that wraps the kext in a folder still works). Exactly one match, else None."""
+    base = bundle[:-len('.kext')].lower()
+    exact, loose = set(), set()
+    for name in names:
+        parts = name.split('/')
+        for i, part in enumerate(parts[:-1]):
+            if i <= 2 and part.endswith('.kext'):
+                (exact if part == bundle else loose if base in part.lower() else set()).add('/'.join(parts[:i + 1]))
+    found = exact or loose
+    return found.pop() if len(found) == 1 else None
+
+
 def unpack_kext(zip_path, expected_sha, bundle, kexts_dir):
-    """Unpack *bundle* from a verified zip into kexts_dir, replacing an older copy."""
+    """Unpack *bundle* from a verified zip into kexts_dir, replacing an older copy.
+    Returns the kext's executable name and bundle identifier from its Info.plist."""
     if not zip_path or not os.path.exists(zip_path):
         refuse('the %s zip is missing (%s)' % (bundle, zip_path or 'not set'))
     actual = file_sha(zip_path)
@@ -5589,21 +5794,37 @@ def unpack_kext(zip_path, expected_sha, bundle, kexts_dir):
     shutil.rmtree(tmp, ignore_errors=True)
     count = 0
     with zipfile.ZipFile(zip_path) as z:
+        prefix = find_bundle([i.filename for i in z.infolist()], bundle)
+        if prefix is None:
+            kexts = sorted(set(n.split('/')[0] for n in z.namelist() if '.kext' in n.split('/')[0]))
+            refuse('no %s inside the %s zip (found: %s). This release is laid out differently than the tool '
+                   'expects; pick another release.' % (bundle, os.path.basename(zip_path), ', '.join(kexts) or 'no kext'))
         for info in z.infolist():
             name = info.filename
-            if info.is_dir() or not name.startswith(bundle + '/'):
+            if info.is_dir() or not name.startswith(prefix + '/'):
                 continue
             if name.startswith('/') or '..' in name.split('/'):
                 refuse('unsafe path in the %s zip: %s' % (bundle, name))
-            out = os.path.join(tmp, name[len(bundle) + 1:])
+            out = os.path.join(tmp, name[len(prefix) + 1:])
             os.makedirs(os.path.dirname(out), exist_ok=True)
             with z.open(info) as src, open(out, 'wb') as dst:
                 shutil.copyfileobj(src, dst)
             count += 1
     if count == 0:
         refuse('no %s inside the zip' % bundle)
+    try:
+        with open(os.path.join(tmp, 'Contents', 'Info.plist'), 'rb') as f:
+            info = plistlib.load(f)
+    except (OSError, ValueError):
+        refuse('the %s in the zip has no readable Contents/Info.plist' % bundle)
+    exe = info.get('CFBundleExecutable') or bundle[:-len('.kext')]
+    if os.path.basename(exe) != exe or exe in ('.', '..'):
+        refuse('the %s in the zip names the executable %r, which is not a plain file name' % (bundle, exe))
+    if not os.path.exists(os.path.join(tmp, 'Contents', 'MacOS', exe)):
+        refuse('the %s in the zip has no executable named %s' % (bundle, exe))
     shutil.rmtree(dest, ignore_errors=True)
     os.replace(tmp, dest)
+    return exe, info.get('CFBundleIdentifier', '')
 
 
 def kext_entry(bundle, exe):
@@ -5634,8 +5855,14 @@ def attach(oc_dir):
         refuse('config.plist still has the NVIDIA (NullMoth) changes: ' + ', '.join(left) + '. '
                'Run nvidia-detach first.')
     kexts_dir = os.path.join(oc_dir, 'Kexts')
+    exes = {}
     for bundle, _exe, prefix in KEXTS:
-        unpack_kext(os.environ.get(prefix + '_ZIP', ''), os.environ.get(prefix + '_SHA256', ''), bundle, kexts_dir)
+        exes[bundle], ident = unpack_kext(os.environ.get(prefix + '_ZIP', ''), os.environ.get(prefix + '_SHA256', ''),
+                                          bundle, kexts_dir)
+        if bundle == 'WhateverXe.kext' and ident != WEX_BUNDLE_ID:
+            sys.stderr.write('WARN: this WhateverXe release has the bundle id %r, not %s. The first-boot check that '
+                             'WhateverXe is loaded may not find it, so the graphics package may not install.\n'
+                             % (ident, WEX_BUNDLE_ID))
     if not os.path.exists(backup):
         shutil.copyfile(path, backup)
     ours = [b for b, _e, _p in KEXTS]
@@ -5648,8 +5875,8 @@ def attach(oc_dir):
             pos = idx + 1
     if pos is None:
         refuse('config.plist has no Lilu.kext entry, so WhateverXe cannot be placed after it')
-    for bundle, exe, _p in KEXTS:
-        kexts.insert(pos, kext_entry(bundle, exe))
+    for bundle, _exe, _p in KEXTS:
+        kexts.insert(pos, kext_entry(bundle, exes[bundle]))
         pos += 1
     cfg['Kernel']['Add'] = kexts
     cfg.setdefault('ACPI', {}).setdefault('Quirks', {})['FadtEnableReset'] = True
@@ -5960,21 +6187,38 @@ not followed by a reset within GRACE seconds and the disks stay idle, the host s
 At most PANIC_MAX of those per PANIC_WINDOW seconds (counted while this process runs): a guest that panics at
 every boot is left stopped. A panic after macOS asked for a restart or shut down only finishes that request.
 
+Crash evidence (igpu_diag.py, installed next to this file): every byte of the serial console is copied to a
+rotated log under /var/log/osx-proxmox-next/<vmid>/, and right before the host stops a panicked or hung VM it
+saves an incident snapshot there (panic text, vCPU registers, iGPU ring and fault registers, host temperatures,
+vfio dmesg, config, versions). That takes at most about 8 seconds and a failure never keeps the VM from being
+recovered. `igpu-report <vmid>` bundles it. Only Tahoe (and a VM whose release is unknown) is stopped and
+restarted; on Ventura, Sonoma and Sequoia the watchdog records the crash and leaves the VM alone.
+
 The Python CLI and the standalone bash installer install this exact text (the bash script embeds it
 verbatim; tests/test_igpu_parity.py diffs the two). Standard library only.
 It disables its own unit and exits when the VM is gone or no longer has the iGPU and the serial port.
 """
+import collections
 import os
 import re
 import socket
 import subprocess
 import sys
 import time
+import urllib.parse
+
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import igpu_diag  # serial log copy and crash snapshots; the watchdog works without it
+except ImportError:
+    igpu_diag = None
 
 INTENT_RE = re.compile(r'Will be calling reboot\(2\) with flags: (0x[0-9a-fA-F]+)')
 RESET_RE = re.compile(r'BdsDxe: ')  # the firmware starting again
 BANNER_RE = re.compile(r'^Darwin Kernel Version ')  # a new kernel, unless a panic log repeats it under "Kernel version:"
-PANIC_RE = re.compile(r'panic\(cpu \d+ caller')
+# the panic line, or the first line of a nested panic (a panic while panicking prints no "panic(cpu" line; seen live
+# with a double fault from dtrace's panic())
+PANIC_RE = re.compile(r'panic\(cpu \d+ caller|Nested panic detected|^Double fault at')
 RB_HALT = 0x8
 PANIC_MAX = 3      # restarts after a panic within PANIC_WINDOW; past that the VM is stopped and left stopped
 PANIC_WINDOW = 3600
@@ -5992,6 +6236,8 @@ IGD_RE = re.compile(r'^hostpci\d+:\s*(host=)?(0000:)?00:02(\.0)?(,|$)', re.M)
 SERIAL_RE = re.compile(r'^serial0:\s*socket\s*$', re.M)
 OPS_RE = re.compile(r'^\s+(?:rd|wr)_operations:\s*(\d+)\s*$', re.M)
 PVE_READY = '/etc/pve/.version'  # present while the cluster file system is mounted
+MACOS_RE = re.compile(r'\b(ventura|sonoma|sequoia|tahoe)\b', re.I)
+RECENT_LINES = 400  # serial lines kept in memory for the crash snapshot
 
 
 def log(vmid, message):
@@ -6016,6 +6262,26 @@ def applies(conf_text):
     """True while the VM has the iGPU passed through and its serial port as a socket."""
     cur = main_section(conf_text)
     return bool(IGD_RE.search(cur)) and bool(SERIAL_RE.search(cur))
+
+
+def recovery_wanted(conf_text):
+    """False for a VM that is known to run Ventura, Sonoma or Sequoia: those restart and shut down normally with the
+    iGPU, and the host stepping in is only tested on Tahoe, so there the watchdog records crashes and leaves the VM
+    running. Tahoe and a VM whose release is unknown get the recovery."""
+    for line in main_section(conf_text).splitlines():
+        if line.startswith(('description:', 'name:')):
+            m = MACOS_RE.search(urllib.parse.unquote(line))
+            if m:
+                return m.group(1).lower() == 'tahoe'
+    return True
+
+
+def read_conf(vmid):
+    try:
+        with open(os.path.join(CONF_DIR, '%s.conf' % vmid)) as f:
+            return f.read()
+    except OSError:
+        return ''
 
 
 def io_ops(status_text):
@@ -6121,10 +6387,12 @@ def recover(vmid, intent, runner=run, clock=time.monotonic, sleep=time.sleep):
     return False
 
 
-def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep, history=None):
+def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep, history=None, recent=None, act=True):
     """Act on what the tracker says is due. Returns True when the host stopped (and maybe started) the VM.
 
-    history holds the clock() times of earlier panic restarts (see panic_allowed); step appends to it."""
+    history holds the clock() times of earlier panic restarts (see panic_allowed); step appends to it.
+    recent holds the last serial lines: they go into the crash snapshot taken before the VM is stopped.
+    act=False (a Ventura, Sonoma or Sequoia VM) takes the snapshot and leaves the VM running."""
     due = tracker.due(now)
     if due == 'check':
         if not vm_running(vmid, runner):
@@ -6150,6 +6418,11 @@ def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep,
             'is left alone' % (what, GRACE + QUIET, before, after))
         return False
     history = [] if history is None else history
+    snapshot(vmid, 'panic' if intent == 'panic' else 'hang-' + intent, what, recent, runner)
+    if not act:
+        log(vmid, '%s and then hung with no disk activity for %d s: the crash is recorded, and the VM is left '
+            'running because the host only steps in on macOS Tahoe' % (what, QUIET))
+        return False
     if intent == 'panic' and not panic_allowed(history, clock()):
         log(vmid, 'macOS panicked again, %d restarts after a panic within %d minutes: stopping it and leaving '
             'it stopped' % (PANIC_MAX, PANIC_WINDOW // 60))
@@ -6162,6 +6435,19 @@ def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep,
     done = 'restart' if intent == 'panic' else intent
     log(vmid, ('%s finished' % done) if ok else ('%s could not be finished' % done))
     return True
+
+
+def snapshot(vmid, kind, what, recent, runner=run):
+    """Save the crash evidence (igpu_diag.collect_incident, at most about 8 s) before the VM is stopped."""
+    if igpu_diag is None:
+        return None
+    try:
+        where = igpu_diag.collect_incident(vmid, kind, what, list(recent or ()), runner=runner)
+    except Exception as exc:  # recovery matters more than the evidence
+        log(vmid, 'could not save the crash snapshot: %s' % str(exc)[:200])
+        return None
+    log(vmid, 'saved the crash snapshot to %s' % where)
+    return where
 
 
 def disable(vmid, why):
@@ -6184,12 +6470,16 @@ def still_applies(vmid):
     return None
 
 
-def watch(vmid, sock_path, history=None):
-    """Read one QEMU run of the serial socket until it closes. history: see step."""
+def watch(vmid, sock_path, history=None, act=True):
+    """Read one QEMU run of the serial socket until it closes. history and act: see step."""
     s = socket.socket(socket.AF_UNIX)
     s.connect(sock_path)
     s.settimeout(POLL)
     tracker, buf = Tracker(), b''
+    recent = collections.deque(maxlen=RECENT_LINES)
+    copy = igpu_diag.SerialLog(vmid) if igpu_diag else None
+    if copy:
+        copy.mark('serial console connected')
     try:
         while True:
             try:
@@ -6198,10 +6488,13 @@ def watch(vmid, sock_path, history=None):
                     if tracker.intent:
                         log(vmid, 'powered off by itself' if tracker.intent == 'shutdown' else 'QEMU exited')
                     return
+                if copy:
+                    copy.write(data)
                 buf = (buf + data)[-MAX_LINE:]  # a line longer than this is not one the watch looks for
                 while b'\n' in buf:
                     raw, buf = buf.split(b'\n', 1)
                     line = raw.decode('utf-8', 'replace')
+                    recent.append(line)
                     if PANIC_RE.search(line):
                         # kept for whoever looks later; the tracker below decides whether the host steps in
                         log(vmid, 'kernel panic: ' + line.strip()[:300])
@@ -6214,10 +6507,12 @@ def watch(vmid, sock_path, history=None):
                         log(vmid, 'the guest reset by itself')
             except socket.timeout:
                 pass
-            if step(vmid, tracker, time.monotonic(), run, history=history):
+            if step(vmid, tracker, time.monotonic(), run, history=history, recent=recent, act=act):
                 return
     finally:
         s.close()
+        if copy:
+            copy.close()
 
 
 def main(argv):
@@ -6237,7 +6532,7 @@ def main(argv):
                 disable(vmid, why)
                 return 0
         try:
-            watch(vmid, sock_path, history)
+            watch(vmid, sock_path, history, recovery_wanted(read_conf(vmid)))
         except OSError:
             time.sleep(3)
 
@@ -6246,6 +6541,515 @@ if __name__ == '__main__':
     sys.exit(main(sys.argv))
 GPU_EMBED_IGPU_WATCHDOG_EOF
 # ── GPU embedded: igpu_power_watchdog.py end ──
+# ── GPU embedded: igpu_diag.py begin ──
+IFS= read -r -d '' GPU_EMBED_IGPU_DIAG <<'GPU_EMBED_IGPU_DIAG_EOF' || true
+#!/usr/bin/env python3
+"""osx-proxmox-next iGPU crash diagnostics (host side): serial log, incident snapshots, report bundle.
+
+Usage: igpu_diag.py report <vmid> [--out DIR]    bundle the latest incidents and versions into one tar.gz
+       igpu_diag.py incident <vmid> [reason]     take an incident snapshot of the running VM now
+       igpu_diag.py versions <vmid>              what is installed in the VM (WhateverXe, Graphics, AMFIPass)
+
+A hung macOS guest cannot tell anything, so everything is read from the host:
+
+* SerialLog keeps a size-capped, rotated copy of the VM's serial console (the macOS kernel log, boot-arg
+  serial=3) in /var/log/osx-proxmox-next/<vmid>/serial.log (10 MB, 5 files).
+* collect_incident is called by the power watchdog right before it stops a panicked or hung VM. It writes a
+  timestamped folder next to the serial log: the panic text, `info registers -a` of every vCPU (QMP), the iGPU's
+  ring and fault registers (read-only, from BAR0), host CPU temperature and throttle counters, the vfio related
+  dmesg tail, the VM config, the installed versions. It stays within BUDGET seconds and a few hundred KB.
+* build_report packs the latest incidents into one tar.gz and writes a plain summary the user can paste into a
+  WhateverXe issue. Nothing is ever sent anywhere.
+
+The Python CLI and the standalone bash installer use this exact text (the bash script embeds it verbatim;
+tests/test_igpu_parity.py diffs the two). Standard library only.
+"""
+import io
+import json
+import mmap
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.parse
+
+LOG_BASE = '/var/log/osx-proxmox-next'
+STATE_BASE = '/var/lib/osx-proxmox-next/igpu'
+SOCK_DIR = '/var/run/qemu-server'
+SYSFS = '/sys'
+IGD_BDF = '0000:00:02.0'
+SERIAL_MAX = 10 * 1024 * 1024   # bytes per serial log file
+SERIAL_FILES = 5                # serial.log plus four rotated files: 50 MB at most
+INCIDENT_KEEP = 10
+BUDGET = 8.0                    # seconds for a whole incident snapshot: recovery is never held up longer
+FILE_MAX = 256 * 1024           # bytes per text file in an incident
+SERIAL_TAIL = 192 * 1024
+REPORT_INCIDENTS = 3
+REPORT_SERIAL_TAIL = 1024 * 1024
+RECENT_LINES = 400
+ISSUES_URL = 'https://github.com/b00t0x/WhateverXe/issues'
+BAR0_SIZE = 16 << 20
+
+# Gen12 registers read from the host side of the passed-through iGPU's BAR0, read-only: ring state of the render
+# (RCS) and copy (BCS) engines, their reset control, the display plane, the TLB fault registers, interrupt state
+# and the power limit and frequency registers. The offsets are the ones the hang analysis of WhateverXe issue 62 used.
+IGPU_REGS = {
+    'RCS_HEAD': 0x2034, 'RCS_TAIL': 0x2030, 'RCS_CTL': 0x203C, 'RCS_ACTHD': 0x2074, 'RCS_IPEHR': 0x2068,
+    'RCS_MI_MODE': 0x209C, 'RCS_RESET_CTRL': 0x20D0, 'RCS_EXECLIST_STATUS_LO': 0x2234, 'RCS_EXECLIST_STATUS_HI': 0x2238,
+    'BCS_HEAD': 0x22034, 'BCS_TAIL': 0x22030, 'BCS_CTL': 0x2203C, 'BCS_ACTHD': 0x22074, 'BCS_IPEHR': 0x22068,
+    'BCS_INSTDONE': 0x2206C, 'BCS_MI_MODE': 0x2209C, 'BCS_RESET_CTRL': 0x220D0,
+    'BCS_EXECLIST_STATUS_LO': 0x22234, 'BCS_EXECLIST_STATUS_HI': 0x22238,
+    'PLANE_CTL_1_A': 0x70180, 'PLANE_SURF_1_A': 0x7019C, 'PLANE_CTL_1_B': 0x71180, 'PLANE_SURF_1_B': 0x7119C,
+    'TRANS_CONF_A': 0x70008, 'TRANS_CONF_B': 0x71008,
+    'FAULT_TLB_DATA0': 0xCEB8, 'FAULT_TLB_DATA1': 0xCEBC, 'RING_FAULT_REG': 0xCEC4,
+    'MASTER_IRQ': 0x190010, 'GEN11_GT_INTR_DW0': 0x190018, 'DISPLAY_INT_CTL': 0x44200,
+    'GT0_PERF_LIMIT_REASONS': 0x1381A8, 'RPSTAT1': 0xA01C, 'RPNSWREQ': 0xA008, 'RP_STATE_CAP': 0x145998,
+    'PWR_WELL_CTL2': 0x45404, 'DC_STATE_EN': 0x45504,
+}
+PANIC_RE = re.compile(r'panic\(cpu \d+ caller|Nested panic detected|^Double fault at')
+KERNEL_RE = re.compile(r'vfio|i915|\bxe\b|DMAR|IOMMU|thermal|throttl|\bMCE\b|mce:|machine check|kvm|AER|pcieport|BAR 0',
+                       re.I)
+MAC_RE = re.compile(r'(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}')
+MACOS_RE = re.compile(r'\b(ventura|sonoma|sequoia|tahoe)\b', re.I)
+
+
+def run(argv, timeout=5):
+    try:
+        res = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return res.returncode, (res.stdout or '') + (res.stderr or '')
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, str(exc)
+
+
+def now_stamp(clock=time.gmtime):
+    return time.strftime('%Y%m%dT%H%M%SZ', clock())
+
+
+def vm_dir(vmid, base=None):
+    return os.path.join(base or os.environ.get('IGPU_LOG_DIR') or LOG_BASE, str(int(vmid)))
+
+
+# ── serial log ───────────────────────────────────────────────────────
+
+class SerialLog:
+    """Append-only copy of the serial console, rotated at max_bytes, `files` files at most. Never raises: a
+    full disk must not take the watchdog down, it only stops the copy (failed becomes True)."""
+
+    def __init__(self, vmid, base=None, max_bytes=SERIAL_MAX, files=SERIAL_FILES):
+        self.dir = vm_dir(vmid, base)
+        self.path = os.path.join(self.dir, 'serial.log')
+        self.max_bytes, self.files = max_bytes, files
+        self.failed = False
+        self._fh = None
+        self._size = 0
+
+    def _open(self):
+        os.makedirs(self.dir, exist_ok=True)
+        self._fh = open(self.path, 'ab')
+        self._size = self._fh.tell()
+
+    def _rotate(self):
+        self._fh.close()
+        self._fh = None
+        for n in range(self.files - 1, 0, -1):
+            src = self.path if n == 1 else '%s.%d' % (self.path, n - 1)
+            if os.path.exists(src):
+                os.replace(src, '%s.%d' % (self.path, n))
+        self._open()
+
+    def write(self, data):
+        if self.failed or not data:
+            return
+        try:
+            if self._fh is None:
+                self._open()
+            if self._size + len(data) > self.max_bytes and self._size > 0:
+                self._rotate()
+            self._fh.write(data)
+            self._fh.flush()
+            self._size += len(data)
+        except OSError:
+            self.failed = True
+
+    def mark(self, text):
+        self.write(('--- osx-proxmox-next %s %s ---\n' % (now_stamp(), text)).encode())
+
+    def close(self):
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
+
+def tail_bytes(path, limit):
+    try:
+        with open(path, 'rb') as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(0, size - limit))
+            return f.read()
+    except OSError:
+        return b''
+
+
+# ── readers (every one is read-only and bounded) ─────────────────────
+
+def read_igpu_registers(sysfs=None):
+    """{name: value} from BAR0 of the iGPU, read-only. Raises OSError when it cannot be read."""
+    path = os.path.join(sysfs or os.environ.get('GPU_SYSFS') or SYSFS, 'bus/pci/devices', IGD_BDF, 'resource0')
+    fd = os.open(path, os.O_RDONLY | os.O_SYNC)
+    try:
+        size = min(os.fstat(fd).st_size or BAR0_SIZE, BAR0_SIZE)
+        m = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
+        try:
+            # 32-bit accesses: the iGPU's registers are not meant to be read a byte at a time
+            words = memoryview(m).cast('I')
+            try:
+                return {k: words[o // 4] for k, o in IGPU_REGS.items() if o + 4 <= size}
+            finally:
+                words.release()
+        finally:
+            m.close()
+    finally:
+        os.close(fd)
+
+
+def format_registers(regs):
+    lines = ['%-26s 0x%08x' % (k, v) for k, v in regs.items()]
+    if regs and all(v == 0xFFFFFFFF for v in regs.values()):
+        lines.append('ALL ONES: the iGPU did not answer (powered down or reset).')
+    return '\n'.join(lines) + '\n'
+
+
+def qmp_hmp(vmid, command, timeout, sock_dir=SOCK_DIR, clock=time.monotonic):
+    """The text a QEMU human monitor command prints, through the VM's QMP socket, within *timeout* seconds."""
+    deadline = clock() + timeout
+    s = socket.socket(socket.AF_UNIX)
+    try:
+        s.settimeout(max(0.1, timeout))
+        s.connect(os.path.join(sock_dir, '%s.qmp' % vmid))
+        buf = b''
+
+        def line():
+            """The next line from QEMU, within the deadline (events that keep arriving do not extend it)."""
+            nonlocal buf
+            while b'\n' not in buf:
+                if clock() >= deadline:
+                    raise OSError('QMP did not answer in time')
+                s.settimeout(max(0.1, deadline - clock()))
+                chunk = s.recv(65536)
+                if not chunk:
+                    raise OSError('QMP closed')
+                buf += chunk
+            text, buf = buf.split(b'\n', 1)
+            return json.loads(text)
+
+        def call(obj):
+            s.sendall((json.dumps(obj) + '\n').encode())
+            while True:
+                msg = line()
+                if 'return' in msg or 'error' in msg:
+                    return msg
+
+        line()  # the greeting
+        call({'execute': 'qmp_capabilities'})
+        res = call({'execute': 'human-monitor-command', 'arguments': {'command-line': command}})
+        if 'error' in res:
+            raise OSError(str(res['error'].get('desc', res['error'])))
+        return res['return']
+    finally:
+        s.close()
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def host_snapshot(sysfs=None, loadavg='/proc/loadavg', cpuinfo='/proc/cpuinfo'):
+    """Host CPU temperatures, throttle counters, frequency, load and the CPU and iGPU identity, as text."""
+    sysfs = sysfs or os.environ.get('GPU_SYSFS') or SYSFS
+    out = []
+    model = next((ln.split(':', 1)[1].strip() for ln in (_read(cpuinfo) or '').splitlines()
+                  if ln.startswith('model name')), 'unknown')
+    out.append('cpu: %s' % model)
+    out.append('igpu device id: 8086:%s' % (_read(os.path.join(sysfs, 'bus/pci/devices', IGD_BDF, 'device')) or '?').replace('0x', ''))
+    out.append('load average: %s' % (_read(loadavg) or '?'))
+    hw = os.path.join(sysfs, 'class/hwmon')
+    for name in sorted(os.listdir(hw)) if os.path.isdir(hw) else []:
+        d = os.path.join(hw, name)
+        chip = _read(os.path.join(d, 'name')) or name
+        for f in sorted(os.listdir(d)):
+            m = re.fullmatch(r'temp(\d+)_input', f)
+            raw = _read(os.path.join(d, f)) if m else None
+            if raw and raw.lstrip('-').isdigit():
+                label = _read(os.path.join(d, 'temp%s_label' % m.group(1))) or f
+                out.append('temperature %s %s: %.1f C' % (chip, label, int(raw) / 1000.0))
+    core = package = 0
+    cpus = os.path.join(sysfs, 'devices/system/cpu')
+    for name in sorted(os.listdir(cpus)) if os.path.isdir(cpus) else []:
+        if re.fullmatch(r'cpu\d+', name):
+            t = os.path.join(cpus, name, 'thermal_throttle')
+            c, p = _read(os.path.join(t, 'core_throttle_count')), _read(os.path.join(t, 'package_throttle_count'))
+            core += int(c) if c and c.isdigit() else 0
+            package = max(package, int(p)) if p and p.isdigit() else package
+    out.append('thermal throttle events: cores %d, package %d' % (core, package))
+    freq = _read(os.path.join(cpus, 'cpu0/cpufreq/scaling_cur_freq'))
+    out.append('cpu0 frequency: %s' % ('%d MHz' % (int(freq) // 1000) if freq and freq.isdigit() else 'unknown'))
+    return '\n'.join(out) + '\n'
+
+
+def redact_config(text):
+    """The VM's own config section with what identifies the machine blanked: MAC addresses, SMBIOS serial and
+    uuid, the OSK. Snapshot sections are dropped."""
+    main = re.split(r'^\[', text, maxsplit=1, flags=re.M)[0]
+    out = []
+    for line in main.splitlines():
+        key = line.split(':', 1)[0]
+        if key in ('smbios1', 'vmgenid', 'cipassword', 'sshkeys', 'cicustom') or key.startswith('ipconfig'):
+            line = key + ': (redacted)'
+        elif key == 'description':
+            m = MACOS_RE.search(urllib.parse.unquote(line))
+            line = 'description: macOS ' + m.group(1).capitalize() if m else 'description: (redacted)'
+        line = MAC_RE.sub('xx:xx:xx:xx:xx:xx', line)
+        line = re.sub(r'osk="[^"]*"', 'osk="redacted"', line)
+        line = re.sub(r'\b(serial|uuid)=[^,\s]+', r'\1=redacted', line)
+        out.append(line)
+    return '\n'.join(out) + '\n'
+
+
+def macos_of(config_text):
+    for line in config_text.splitlines():
+        if line.startswith(('description:', 'name:')):
+            m = MACOS_RE.search(urllib.parse.unquote(line))
+            if m:
+                return m.group(1).capitalize()
+    return 'unknown'
+
+
+def read_versions(vmid, base=None):
+    try:
+        with open(os.path.join(base or os.environ.get('IGPU_STATE_DIR') or STATE_BASE, '%d.json' % int(vmid))) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def describe_versions(state):
+    lines = []
+    for key, label in (('whateverxe', 'WhateverXe'), ('graphics', 'WhateverXe Graphics')):
+        if state.get(key + '_version'):
+            how = 'latest when installed' if state.get(key + '_source') == 'latest' else 'chosen by the user'
+            lines.append('%s %s (%s)' % (label, state[key + '_version'], how))
+    if state.get('amfipass_version'):
+        lines.append('AMFIPass %s (pinned)' % state['amfipass_version'])
+    return lines
+
+
+# ── incident snapshot ────────────────────────────────────────────────
+
+def panic_text(lines):
+    """From the first line of the last panic (a nested panic reports itself within a few hundred lines of the panic
+    it follows, so that one counts as part of it) to the end, at most 200 lines; else the last 60 lines."""
+    idx = [i for i, ln in enumerate(lines) if PANIC_RE.search(ln)]
+    if not idx:
+        return '\n'.join(ln.rstrip('\r\n') for ln in lines[-60:]) + '\n'
+    start = idx[-1]
+    for i in reversed(idx[:-1]):
+        if start - i <= 300:
+            start = i
+    return '\n'.join(ln.rstrip('\r\n') for ln in lines[start:][:200]) + '\n'
+
+
+def _cap(text):
+    data = text.encode('utf-8', 'replace')
+    return data if len(data) <= FILE_MAX else data[:FILE_MAX] + b'\n[cut]\n'
+
+
+def prune(parent, keep=INCIDENT_KEEP):
+    try:
+        names = sorted(os.listdir(parent))
+    except OSError:
+        return
+    for name in names[:-keep] if keep else names:
+        path = os.path.join(parent, name)
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def collect_incident(vmid, kind, reason, lines, base=None, runner=run, clock=time.monotonic, budget=BUDGET,
+                     sysfs=None, sock_dir=SOCK_DIR, stamp=None):
+    """Write the incident folder for a VM that is about to be stopped and return its path.
+
+    *kind* is panic, hang-restart or hang-shutdown, *reason* the watchdog's plain sentence, *lines* the last
+    serial lines. Each part is skipped (and listed under "skipped") once the budget is used up."""
+    started = clock()
+    deadline = started + budget
+    root = os.path.join(vm_dir(vmid, base), 'incidents')
+    path = os.path.join(root, '%s-%s' % (stamp or now_stamp(), kind))
+    os.makedirs(path, exist_ok=True)
+    done, skipped = [], []
+
+    def left():
+        return deadline - clock()
+
+    def put(name, content, binary=False):
+        with open(os.path.join(path, name), 'wb') as f:
+            f.write(content if binary else _cap(content))
+        done.append(name)
+
+    def part(name, fn, need=0.3):
+        if left() < need:
+            skipped.append(name + ': out of time')
+            return
+        try:
+            fn()
+        except Exception as exc:  # a failed read must never keep the VM from being recovered
+            skipped.append('%s: %s' % (name, str(exc)[:120]))
+
+    part('panic.txt', lambda: put('panic.txt', panic_text(lines)))
+    part('serial-tail.txt', lambda: put('serial-tail.txt', tail_bytes(os.path.join(vm_dir(vmid, base), 'serial.log'),
+                                                                        SERIAL_TAIL), binary=True))
+    part('igpu-registers.txt', lambda: put('igpu-registers.txt', format_registers(read_igpu_registers(sysfs))))
+    part('host.txt', lambda: put('host.txt', host_snapshot(sysfs)))
+    conf = {}
+
+    def config():
+        rc, out = runner(['qm', 'config', str(vmid)], max(0.5, min(2.0, left())))
+        if rc != 0:
+            raise OSError('qm config failed')
+        conf['text'] = out
+        put('vm.conf', redact_config(out))
+
+    part('vm.conf', config, need=1.0)
+
+    def dmesg():
+        rc, out = runner(['dmesg'], max(0.5, min(2.0, left())))
+        if rc != 0:
+            raise OSError('dmesg failed')
+        put('dmesg.txt', '\n'.join([ln for ln in out.splitlines() if KERNEL_RE.search(ln)][-300:]) + '\n')
+
+    part('dmesg.txt', dmesg, need=1.0)
+    state = read_versions(vmid)
+    part('versions.json', lambda: put('versions.json', json.dumps(
+        dict(state, macos_detected=macos_of(conf.get('text', ''))), indent=2, sort_keys=True) + '\n'))
+    # last: if QEMU's monitor is stuck behind a vCPU that cannot be kicked, the wait costs only what is left of
+    # the budget and everything above is already on disk
+    part('vcpu-registers.txt', lambda: put('vcpu-registers.txt', qmp_hmp(vmid, 'info registers -a', min(4.0, left()),
+                                                                          sock_dir, clock)), need=1.0)
+    meta = {'vmid': int(vmid), 'kind': kind, 'reason': reason, 'time': stamp or now_stamp(),
+            'seconds': round(clock() - started, 2), 'files': done, 'skipped': skipped}
+    put('incident.json', json.dumps(meta, indent=2, sort_keys=True) + '\n')
+    prune(root)
+    return path
+
+
+# ── report bundle ────────────────────────────────────────────────────
+
+def list_incidents(vmid, base=None):
+    root = os.path.join(vm_dir(vmid, base), 'incidents')
+    try:
+        return [os.path.join(root, n) for n in sorted(os.listdir(root))]
+    except OSError:
+        return []
+
+
+def _first_line(path):
+    text = (_read(path) or '').strip()
+    return text.splitlines()[0][:200] if text else ''
+
+
+def summarize(vmid, state, incidents, host_text, config_text, bundle=''):
+    """The plain text a user can paste into an issue."""
+    out = ['osx-proxmox-next iGPU report for VM %s' % vmid, 'macOS: %s' % (macos_of(config_text) if config_text else 'unknown')]
+    out += [ln for ln in host_text.splitlines() if ln.startswith(('cpu:', 'igpu device id:'))]
+    versions = describe_versions(state)
+    out.append('Installed: ' + ('; '.join(versions) if versions else 'unknown (this VM was set up before versions were recorded)'))
+    out.append('Crashes recorded: %d' % len(incidents))
+    for path in incidents[-REPORT_INCIDENTS:][::-1]:
+        meta = {}
+        try:
+            with open(os.path.join(path, 'incident.json')) as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            pass
+        out.append('  %s  %s: %s' % (os.path.basename(path), meta.get('kind', '?'), meta.get('reason', '')))
+        panic = next((ln.strip() for ln in (_read(os.path.join(path, 'panic.txt')) or '').splitlines()
+                      if PANIC_RE.search(ln)), '')
+        if panic:
+            out.append('    ' + panic[:240])
+    if not incidents:
+        out.append('No crash was recorded yet. The bundle still has the versions, the VM config and the end of the '
+                   'serial log.')
+    out += ['', 'Bundle: %s' % bundle,
+            'Look through it before you share it: the VM config has MAC addresses, serial numbers, the OSK and keys '
+            'blanked, but the serial log and the host kernel messages are copied as they are. Nothing was sent anywhere.',
+            'To report it, open an issue at %s, paste this summary and attach the file.' % ISSUES_URL]
+    return '\n'.join(out) + '\n'
+
+
+def _add(tar, name, data):
+    info = tarfile.TarInfo(name)
+    info.size, info.mtime = len(data), int(time.time())
+    tar.addfile(info, io.BytesIO(data))
+
+
+def build_report(vmid, out_dir=None, base=None, runner=run, sysfs=None, stamp=None):
+    """Pack the latest incidents, versions, config and serial tail into a tar.gz. Returns (path, summary)."""
+    vmid = int(vmid)
+    stamp = stamp or now_stamp()
+    out_dir = out_dir or vm_dir(vmid, base)
+    os.makedirs(out_dir, exist_ok=True)
+    top = 'igpu-report-%d-%s' % (vmid, stamp)
+    path = os.path.join(out_dir, top + '.tar.gz')
+    state = read_versions(vmid)
+    incidents = list_incidents(vmid, base)
+    rc, out = runner(['qm', 'config', str(vmid)], 5)
+    config_text = out if rc == 0 else ''
+    if not config_text and incidents:
+        config_text = _read(os.path.join(incidents[-1], 'vm.conf')) or ''
+    host_text = host_snapshot(sysfs)
+    with tarfile.open(path, 'w:gz') as tar:
+        _add(tar, top + '/versions.json', (json.dumps(state, indent=2, sort_keys=True) + '\n').encode())
+        _add(tar, top + '/vm.conf', redact_config(config_text).encode())
+        _add(tar, top + '/host.txt', host_text.encode())
+        _add(tar, top + '/serial-tail.txt', tail_bytes(os.path.join(vm_dir(vmid, base), 'serial.log'), REPORT_SERIAL_TAIL))
+        for inc in incidents[-REPORT_INCIDENTS:]:
+            for fn in sorted(os.listdir(inc)):
+                with open(os.path.join(inc, fn), 'rb') as f:
+                    _add(tar, '%s/incidents/%s/%s' % (top, os.path.basename(inc), fn), f.read())
+        summary = summarize(vmid, state, incidents, host_text, config_text, path)
+        _add(tar, top + '/summary.txt', summary.encode())
+    return path, summary
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ''
+    if cmd in ('report', 'incident', 'versions') and len(argv) >= 3 and argv[2].isdigit():
+        vmid = int(argv[2])
+        if cmd == 'report':
+            out = argv[4] if len(argv) == 5 and argv[3] == '--out' else None
+            path, summary = build_report(vmid, out)
+            sys.stdout.write(summary)
+            return 0
+        if cmd == 'incident':
+            sys.stdout.write(collect_incident(vmid, 'manual', ' '.join(argv[3:]) or 'taken by hand', []) + '\n')
+            return 0
+        sys.stdout.write('\n'.join(describe_versions(read_versions(vmid))) + '\n')
+        return 0
+    sys.stderr.write('usage: igpu_diag.py report <vmid> [--out DIR] | incident <vmid> [reason] | versions <vmid>\n')
+    return 64
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
+GPU_EMBED_IGPU_DIAG_EOF
+# ── GPU embedded: igpu_diag.py end ──
 # ── GPU embedded: osx-next-power-watchdog@.service begin ──
 IFS= read -r -d '' GPU_EMBED_IGPU_WATCHDOG_UNIT <<'GPU_EMBED_IGPU_WATCHDOG_UNIT_EOF' || true
 [Unit]
@@ -6275,6 +7079,7 @@ function gpu_engine_init() {
   printf '%s' "$GPU_EMBED_IGPU_STAGE" >"$GPU_ENGINE_DIR/igpu_stage.sh"
   printf '%s' "$GPU_EMBED_IGPU_PLIST" >"$GPU_ENGINE_DIR/igpu_launchd.plist"
   printf '%s' "$GPU_EMBED_IGPU_WATCHDOG" >"$GPU_ENGINE_DIR/igpu_power_watchdog.py"
+  printf '%s' "$GPU_EMBED_IGPU_DIAG" >"$GPU_ENGINE_DIR/igpu_diag.py"
   printf '%s' "$GPU_EMBED_IGPU_WATCHDOG_UNIT" >"$GPU_ENGINE_DIR/osx-next-power-watchdog@.service"
 }
 
@@ -6621,7 +7426,7 @@ function igpu_engine() { gpu_engine_init && python3 "$GPU_ENGINE_DIR/igpu_engine
 function igpu_pin() { igpu_engine pins | gpu_json "d['pins']['$1'][$2]"; }
 
 IGPU_CACHE="${IGPU_CACHE:-/var/lib/vz/template/iso}"
-IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load slows it. macOS Tahoe is experimental: a power watchdog on the host finishes its restarts and shut downs, which hang at the very end."
+IGPU_NOTICE="BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load slows it. macOS Tahoe is experimental: a watchdog on the host finishes its restarts and shut downs, which hang at the very end. The watchdog also records crashes of any macOS version: igpu-report bundles them."
 IGPU_SETUP_NOTE="Finish Setup Assistant on the monitor or HDMI dummy plug on the host's native HDMI port, or over Screen Sharing. The Proxmox console stays blank: the iGPU is the only display."
 IGPU_TAHOE_STAGE_NOTE="Staging stopped on macOS Tahoe, whose recovery Terminal can be slow to take input. The VM config was put back as it was; run the same command again. Tahoe is experimental."
 IGPU_TAHOE_NOTE="macOS Tahoe 26 is experimental with the iGPU: every restart and shut down from inside macOS hangs at the very end (WhateverXe issue 62). The power watchdog that igpu-finish installs on the host finishes them about a minute later. A VM set up before gets it with the igpu-watchdog command."
@@ -6690,15 +7495,46 @@ function igpu_vm_issues() {
   fi
 }
 
-# Download and verify the kext zips, the option ROM and the graphics package into $IGPU_CACHE.
-# Prints nothing; sets IGPU_WEX_ZIP IGPU_AMFI_ZIP IGPU_ROM_PATH IGPU_PKG. $1 = rom key.
+# Which WhateverXe and WhateverXe Graphics release to install: "latest" or a tag (igpu-versions lists them).
+IGPU_WEX_CHOICE="${IGPU_WEX_CHOICE:-latest}"
+IGPU_GFX_CHOICE="${IGPU_GFX_CHOICE:-latest}"
+IGPU_VERSIONS_CHOSEN="${IGPU_VERSIONS_CHOSEN:-no}"
+
+# Menu of the published releases of $1 (whateverxe|graphics), newest first, the latest preselected. Prints "latest" or
+# a tag. Mirrors igpu_finish.choose_release.
+function igpu_pick_release() {
+  local kind="$1" json latest tag
+  local -a items=()
+  json=$(igpu_engine releases "$kind") || return 1
+  latest=$(gpu_json 'next((r["tag"] for r in d if not r["prerelease"]), "")' <<<"$json")
+  mapfile -t items < <(gpu_json '"\n".join(r["tag"] + "\n" + r["published"][:10] + (" (latest)" if r["tag"] == next((x["tag"] for x in d if not x["prerelease"]), "") else "") + (" (pre-release)" if r["prerelease"] else "") for r in d)' <<<"$json")
+  tag=$(whiptail --backtitle "OSX Proxmox Next" --title "$([ "$kind" == whateverxe ] && echo WhateverXe || echo 'WhateverXe Graphics') version" \
+    --default-item "$latest" --menu "Which release to install? The latest is preselected; pick an older one if a new release causes trouble." \
+    22 70 12 "${items[@]}" 3>&1 1>&2 2>&3) || return 1
+  [ "$tag" == "$latest" ] && echo latest || echo "$tag"
+}
+
+# Ask for the two versions once on a terminal, unless the flags or the menu already did. Fills IGPU_*_CHOICE.
+function igpu_choose_versions() {
+  [ "$IGPU_VERSIONS_CHOSEN" == "yes" ] && return 0
+  IGPU_VERSIONS_CHOSEN=yes
+  gpu_use_ui || return 0
+  IGPU_WEX_CHOICE=$(igpu_pick_release whateverxe) || return 1
+  IGPU_GFX_CHOICE=$(igpu_pick_release graphics) || return 1
+}
+
+# Download the chosen releases (verified against GitHub's sha256 digest), the pinned AMFIPass and the option ROM into
+# $IGPU_CACHE. Sets IGPU_WEX_ZIP IGPU_AMFI_ZIP IGPU_ROM_PATH IGPU_PKG IGPU_ASSETS_JSON and the printed versions. $1 = rom key.
 function igpu_fetch_assets() {
   local rom_key="$1"
   mkdir -p "$IGPU_CACHE" || return 1
-  IGPU_WEX_ZIP=$(igpu_engine fetch pin:whateverxe "$IGPU_CACHE") || return 1
+  msg_info "Looking up the WhateverXe releases on GitHub"
+  IGPU_ASSETS_JSON=$(igpu_engine assets "$IGPU_CACHE" "$IGPU_WEX_CHOICE" "$IGPU_GFX_CHOICE") || return 1
+  IGPU_WEX_ZIP=$(gpu_json 'd["whateverxe"]["path"]' <<<"$IGPU_ASSETS_JSON")
+  IGPU_PKG=$(gpu_json 'd["graphics"]["path"]' <<<"$IGPU_ASSETS_JSON")
+  msg_ok "Using WhateverXe $(gpu_json 'd["whateverxe"]["version"]' <<<"$IGPU_ASSETS_JSON") and WhateverXe Graphics $(gpu_json 'd["graphics"]["version"]' <<<"$IGPU_ASSETS_JSON")"
   IGPU_AMFI_ZIP=$(igpu_engine fetch pin:amfipass "$IGPU_CACHE") || return 1
   IGPU_ROM_PATH=$(igpu_engine fetch "rom:${rom_key}" "$IGPU_CACHE") || return 1
-  IGPU_PKG=$(igpu_engine fetch pin:graphics "$IGPU_CACHE") || return 1
 }
 
 # Mount the VM's ide0 (OpenCore) disk, run the iGPU patcher, unmount.
@@ -6721,7 +7557,7 @@ function igpu_oc_patch() {
   if [ -b "${loop}p1" ] && mount "${loop}p1" "$mnt" 2>/dev/null; then
     nkept=$({ ls "$mnt"/EFI/OC/config.plist.pre-*.kept-* 2>/dev/null || true; } | wc -l)
     if [ "$action" == "attach" ]; then
-      IGPU_WEX_ZIP="$IGPU_WEX_ZIP" IGPU_WEX_SHA256="$(igpu_pin whateverxe 2)" \
+      IGPU_WEX_ZIP="$IGPU_WEX_ZIP" IGPU_WEX_SHA256="$(gpu_json 'd["whateverxe"]["sha256"]' <<<"$IGPU_ASSETS_JSON")" \
         IGPU_AMFI_ZIP="$IGPU_AMFI_ZIP" IGPU_AMFI_SHA256="$(igpu_pin amfipass 2)" \
         python3 - "$mnt/EFI/OC" "$action" <<<"$GPU_EMBED_OC_IGPU" && rc=0
     else
@@ -6986,6 +7822,7 @@ function igpu_finish() {
   nullmoth_print_findings
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
   echo -e "${INFO}${YW}${IGPU_NOTICE}${CL}"
+  igpu_choose_versions || { msg_error "Could not list the WhateverXe releases"; return 1; }
   igpu_fetch_assets "$IGPU_ROM_KEY" || { msg_error "Could not download or verify the iGPU files"; return 1; }
   storage=$(sed -n 's/^\(virtio0\|efidisk0\|ide0\): \([^:,]*\):.*/\2/p' <<<"$cfg" | head -1)
   [ -n "$storage" ] || { msg_error "Could not tell which storage the VM disks are on"; return 1; }
@@ -7017,12 +7854,12 @@ function igpu_finish() {
   restore_picker_timeout "$vmid" || msg_info "Could not restore the picker's auto-boot; run post-install afterwards"
   igpu_attach "$vmid" || { msg_error "Attaching the iGPU failed. Undo with: gpu-setup --undo"; return 1; }
   qm set "$vmid" --boot 'order=ide0;virtio0' >/dev/null
-  if [ "$ver" == "tahoe" ]; then
-    if igpu_watchdog_enable "$vmid"; then
-      msg_ok "Installed the power watchdog: restarts and shut downs from inside macOS Tahoe finish on their own"
-    else
-      echo -e "${INFO}${YW}Could not install the power watchdog, so restarts and shut downs from inside macOS Tahoe hang. Install it with: osx-proxmox-next.sh igpu-watchdog ${vmid}${CL}"
-    fi
+  printf '%s' "$IGPU_ASSETS_JSON" | igpu_engine state-record "$vmid" "$ver" 2>/dev/null || echo -e "${INFO}${YW}Could not record the installed versions; igpu-report will not list them.${CL}"
+  echo '{"package_installed": false}' | igpu_engine state-write "$vmid" >/dev/null 2>&1 || true
+  if igpu_watchdog_enable "$vmid"; then
+    msg_ok "Installed the watchdog: it records crashes and finishes the restarts and shut downs that hang on macOS Tahoe"
+  else
+    echo -e "${INFO}${YW}Could not install the watchdog, so crashes are not recorded and restarts and shut downs from inside macOS Tahoe hang. Install it with: osx-proxmox-next.sh igpu-watchdog ${vmid}${CL}"
   fi
   msg_info "First boot with the iGPU: the guest installs the graphics package and powers off"
   qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }
@@ -7035,6 +7872,7 @@ function igpu_finish() {
   result=$(igpu_engine result "$(pvesm path "$payload_ref" 2>/dev/null)" 2>/dev/null || true)
   igpu_drop_disk "$vmid" sata2
   rm -f "$payload"
+  printf '{"package_installed": %s, "package_result": %s}' "$([ "$result" == "installed" ] && echo true || echo false)" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$result")" | igpu_engine state-write "$vmid" >/dev/null 2>&1 || true
   if [ "$result" == "installed" ]; then
     igpu_oc_patch "$vmid" mark || echo -e "${INFO}${YW}Could not note the installed package on the OpenCore disk: gpu-setup --undo would remove WhateverXe, which the installed package needs.${CL}"
   fi
@@ -7140,24 +7978,32 @@ function igpu_finish_command() {
   local -a pos=()
   GPU_YES=no
   while [ $# -gt 0 ]; do
-    case "$1" in --yes) GPU_YES=yes ;; *) pos+=("$1") ;; esac
+    case "$1" in
+      --yes) GPU_YES=yes ;;
+      --wex-version) IGPU_WEX_CHOICE="${2:-}"; IGPU_VERSIONS_CHOSEN=yes; shift ;;
+      --graphics-version) IGPU_GFX_CHOICE="${2:-}"; IGPU_VERSIONS_CHOSEN=yes; shift ;;
+      *) pos+=("$1") ;;
+    esac
     shift
   done
-  [[ "${pos[0]:-}" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh igpu-finish <vmid> [macos] [--yes]"; return 1; }
+  [ -n "$IGPU_WEX_CHOICE" ] && [ -n "$IGPU_GFX_CHOICE" ] || { msg_error "--wex-version and --graphics-version need a release tag (osx-proxmox-next.sh igpu-versions lists them)"; return 1; }
+  [[ "${pos[0]:-}" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh igpu-finish <vmid> [macos] [--yes] [--wex-version TAG] [--graphics-version TAG]"; return 1; }
   echo -e "${INFO}${YW}${IGPU_NOTICE}${CL}"
   gpu_ui_yesno "Attach the iGPU" "VM ${pos[0]} boots macOS recovery once, then gets the iGPU. Continue?" || { echo "Nothing was changed. Confirm (or pass --yes) to attach the iGPU."; return 2; }
   igpu_finish "${pos[@]}"
 }
 
-# The host-side power watchdog of a Tahoe iGPU VM (data/gpu/igpu_power_watchdog.py as the systemd unit
-# osx-next-power-watchdog@<vmid>). The VM must be stopped. Mirrors igpu_watchdog.enable_steps.
+# The host-side watchdog and crash recorder of an iGPU VM (data/gpu/igpu_power_watchdog.py as the systemd unit
+# osx-next-power-watchdog@<vmid>, plus data/gpu/igpu_diag.py). The VM must be stopped. Mirrors igpu_watchdog.enable_steps.
 IGPU_WD_DAEMON=/usr/local/lib/osx-proxmox-next/igpu_power_watchdog.py
+IGPU_WD_DIAG=/usr/local/lib/osx-proxmox-next/igpu_diag.py
 IGPU_WD_UNIT=/etc/systemd/system/osx-next-power-watchdog@.service
-IGPU_WD_NOTE="macOS Tahoe hangs at the end of every restart and shut down while the iGPU is attached (WhateverXe issue 62). A power watchdog on the host finishes them: about a minute after macOS hangs, the host stops the VM, and starts it again when you chose Restart. It also restarts the VM when macOS panics and stays down. It reads the VM's serial port, so the Proxmox serial console of this VM stays busy."
+IGPU_WD_NOTE="A watchdog on the host reads the VM's serial port, so the Proxmox serial console of this VM stays busy. It keeps a copy of the kernel log in /var/log/osx-proxmox-next/<vmid>/ and, when macOS panics or hangs, saves the crash evidence there (igpu-report bundles it). On macOS Tahoe it also finishes what hangs: Tahoe hangs at the end of every restart and shut down while the iGPU is attached (WhateverXe issue 62), and about a minute after it hangs the host stops the VM, and starts it again when you chose Restart. It also restarts a Tahoe VM when macOS panics and stays down. Ventura, Sonoma and Sequoia VMs are only recorded, never stopped."
 function igpu_watchdog_enable() {
   local vmid="$1"
   gpu_engine_init || return 1
   install -D -m 755 "$GPU_ENGINE_DIR/igpu_power_watchdog.py" "$IGPU_WD_DAEMON" || return 1
+  install -D -m 644 "$GPU_ENGINE_DIR/igpu_diag.py" "$IGPU_WD_DIAG" || return 1
   install -D -m 644 "$GPU_ENGINE_DIR/osx-next-power-watchdog@.service" "$IGPU_WD_UNIT" || return 1
   systemctl daemon-reload || return 1
   if [ "$(qm config "$vmid" 2>/dev/null | sed -n 's/^serial0: //p')" != "socket" ]; then
@@ -7177,7 +8023,7 @@ function igpu_watchdog_disable() {
 
 # `osx-proxmox-next.sh igpu-watchdog <vmid> [--remove]`. Mirrors igpu_watchdog.prepare and igpu_cli.run_watchdog.
 function igpu_watchdog_command() {
-  local vmid="${1:-}" remove=no cfg ver line
+  local vmid="${1:-}" remove=no cfg line
   [ "${2:-}" != "--remove" ] || remove=yes
   [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh igpu-watchdog <vmid> [--remove]"; return 2; }
   GPU_ISSUES=()
@@ -7187,22 +8033,37 @@ function igpu_watchdog_command() {
     grep -q 'status: stopped' <<<"$(qm status "$vmid" 2>/dev/null)" || GPU_ISSUES+=("VM $vmid is running. Stop it first: qm stop $vmid")
     if [ "$remove" == "no" ]; then
       [[ "$(sed -n 's/^hostpci0: \([^,]*\).*/\1/p' <<<"$cfg")" == *00:02.0 ]] || GPU_ISSUES+=("VM $vmid does not have the iGPU on hostpci0. Set it up first: osx-proxmox-next.sh igpu-finish $vmid")
-      ver=$(nullmoth_detect_macos "$cfg" || true)
-      if [ -n "$ver" ] && [ "$ver" != "tahoe" ]; then
-        GPU_ISSUES+=("VM $vmid runs macOS ${ver^}, which restarts and shuts down normally with the iGPU. The watchdog is only for Tahoe.")
-      fi
     fi
   fi
   for line in "${GPU_ISSUES[@]}"; do echo "REFUSED: $line"; done
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 2
   if [ "$remove" == "yes" ]; then
     igpu_watchdog_disable "$vmid" || { echo "FAILED at: Take the kernel console off the serial port (boot-arg serial=3)"; return 4; }
-    echo "The power watchdog of VM $vmid is removed. Restarts and shut downs from inside macOS Tahoe hang again; stop the VM from Proxmox."
+    echo "The watchdog of VM $vmid is removed. Crashes are no longer recorded, and restarts and shut downs from inside macOS Tahoe hang again; stop the VM from Proxmox."
     return 0
   fi
   igpu_watchdog_enable "$vmid" || { echo "FAILED to install the power watchdog of VM $vmid"; return 4; }
-  echo "The power watchdog of VM $vmid is running. $IGPU_WD_NOTE"
+  echo "The watchdog of VM $vmid is running. $IGPU_WD_NOTE"
   echo "Its log: journalctl -u osx-next-power-watchdog@${vmid}.service"
+}
+
+# `osx-proxmox-next.sh igpu-versions`: the published releases, newest first. Mirrors igpu_cli.run_versions.
+function igpu_versions_command() {
+  local kind label json
+  for kind in whateverxe graphics; do
+    json=$(igpu_engine releases "$kind") || return 2
+    label=$([ "$kind" == whateverxe ] && echo WhateverXe || echo "WhateverXe Graphics")
+    echo "$label releases, newest first:"
+    gpu_json '"\n".join("  " + r["tag"] + "  " + r["published"][:10] + (" (latest)" if r["tag"] == next((x["tag"] for x in d if not x["prerelease"]), "") else "") + (" (pre-release)" if r["prerelease"] else "") for r in d)' <<<"$json"
+  done
+}
+
+# `osx-proxmox-next.sh igpu-report <vmid> [--out DIR]`: the crash bundle of a VM. Mirrors igpu_cli.run_report.
+function igpu_report_command() {
+  local vmid="${1:-}"
+  [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh igpu-report <vmid> [--out DIR]"; return 2; }
+  gpu_engine_init || return 2
+  python3 "$GPU_ENGINE_DIR/igpu_diag.py" report "$vmid" "${@:2}" || { echo "ERROR: could not write the report"; return 2; }
 }
 
 # `osx-proxmox-next.sh igpu-check`
@@ -7592,6 +8453,9 @@ function gpu_status() {
   chosen=$(gpu_state_get 'd["gpu"] and d["gpu"]["bdf"] or ""')
   [ -n "$chosen" ] || { echo "No setup in progress."; return 0; }
   echo "Chosen card: $(gpu_state_get 'd["gpu"]["name"]') ($chosen), VM: $(gpu_state_get 'd["vm"]')"
+  if [ -n "$(gpu_state_get 'd["vm"] or ""')" ]; then
+    igpu_engine state-show "$(gpu_state_get 'd["vm"]')" | sed '/^$/d; s/^/  Installed: /'
+  fi
   moved=$(gpu_chosen_target_raw | gpu_json 'd.get("mismatch", "")')
   if [ -n "$moved" ]; then echo "WARN: $moved"; return 2; fi
 }
@@ -8520,6 +9384,13 @@ if [ "${1:-}" == "igpu-finish" ]; then
   check_root
   if igpu_finish_command "${@:2}"; then exit 0; else exit 1; fi
 fi
+if [ "${1:-}" == "igpu-versions" ]; then
+  if igpu_versions_command; then exit 0; else exit $?; fi
+fi
+if [ "${1:-}" == "igpu-report" ]; then
+  check_root
+  if igpu_report_command "${@:2}"; then exit 0; else exit $?; fi
+fi
 if [ "${1:-}" == "igpu-watchdog" ]; then
   check_root
   if igpu_watchdog_command "${@:2}"; then exit 0; else exit $?; fi
@@ -8777,6 +9648,11 @@ function advanced_settings() {
     17 66 --defaultno 3>&1 1>&2 2>&3; then
     IGPU="yes"
     echo -e "${DGN}Intel iGPU passthrough (BETA): ${BGN}yes${CL}"
+    # which WhateverXe release goes in: the latest unless the user picks one (also checks GitHub before the long install)
+    if ! igpu_choose_versions; then
+      echo -e "${INFO}${YW}Could not list the WhateverXe releases (GitHub is unreachable or rate limited). iGPU passthrough is off: run the script again in a few minutes, or set GITHUB_TOKEN.${CL}"
+      IGPU="no"
+    fi
   fi
 
   if (whiptail --backtitle "OSX Proxmox Next" --title "ADVANCED SETTINGS COMPLETE" --yesno "Ready to create ${MACOS_LABELS[$MACOS_VER]} VM?" --no-button Do-Over 10 58); then

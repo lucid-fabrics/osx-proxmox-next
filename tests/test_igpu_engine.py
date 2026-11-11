@@ -312,7 +312,7 @@ def test_cli_commands(tmp_path):
     assert json.loads(cli("settings", "1342", "r.rom").stdout)["machine"] == "pc"
     assert cli("stage-command").stdout.strip() == eng.STAGE_COMMAND
     pins = json.loads(cli("pins").stdout)
-    assert pins["pins"]["graphics"][2] == eng.PINS["graphics"][2]
+    assert set(pins["pins"]) == {"amfipass"} and pins["pins"]["amfipass"][2] == eng.PINS["amfipass"][2]
     add = eng.vm_settings(1342, "r")["args_add"]
     merged = cli("merge-args", stdin=json.dumps({"args": "-x", "wanted": add})).stdout.strip()
     assert merged == eng.merge_args("-x", add)
@@ -324,9 +324,10 @@ def test_cli_commands(tmp_path):
 def test_main_in_process(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(eng, "fetch", lambda url, sha, dest: Path(dest))
     assert eng.main(["x", "fetch", "rom:adl-h", str(tmp_path)]) == 0
-    assert eng.main(["x", "fetch", "pin:whateverxe", str(tmp_path)]) == 0
+    assert eng.main(["x", "fetch", "pin:amfipass", str(tmp_path)]) == 0
+    assert eng.main(["x", "fetch", "pin:whateverxe", str(tmp_path)]) == 64  # WhateverXe is never pinned
     monkeypatch.setattr(eng, "fetch", lambda *a: (_ for _ in ()).throw(ValueError("bad")))
-    assert eng.main(["x", "fetch", "pin:graphics", str(tmp_path)]) == 1
+    assert eng.main(["x", "fetch", "pin:amfipass", str(tmp_path)]) == 1
     monkeypatch.setattr(eng, "build_payload", lambda p, o: (True, "ok"))
     assert eng.main(["x", "payload", "a", "b"]) == 0
     monkeypatch.setattr(eng, "build_payload", lambda p, o: (False, "no"))

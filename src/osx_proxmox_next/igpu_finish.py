@@ -34,13 +34,14 @@ from .igpu_attach import TAHOE_NOTE, TAHOE_STAGE_NOTE, oc_step, prepare_attach_i
 from .infrastructure import ProxmoxAdapter
 from .intel_host import check_intel_gpu
 from .nullmoth import detect_macos
+from .downloader import DownloadError
 from .oc_builder import ensure_igpu_assets
 from .planner import POST_INSTALL_BOOT_ORDER
 from .rollback import create_snapshot
 from .services import fetch_vm_info, get_proxmox_adapter
 from .unattended import QmConsole, UnattendedError, open_recovery_terminal
 
-__all__ = ["FinishError", "FinishResult", "finish", "wait_stopped"]
+__all__ = ["FinishError", "FinishResult", "choose_release", "finish", "wait_stopped"]
 
 STAGE_TIMEOUT = 900          # staging copies ~95 MB and halts
 STAGE_ATTEMPTS = 3           # the typed command is retyped when the script never reports "started"
@@ -66,7 +67,38 @@ class FinishResult:
     notes: list[str] = field(default_factory=list)
     accelerated: bool = False  # the host saw the guest use the GPU after the final boot
     accel_detail: str = ""
-    watchdog: bool = False     # the host-side power watchdog is installed (Tahoe)
+    watchdog: bool = False     # the host-side power watchdog is installed
+    versions: list[str] = field(default_factory=list)  # what was installed, one plain line per component
+
+
+def choose_release(kind: str, ask: Callable[[str], str], say: Callable[[str], None],
+                   get: Callable[[str], object] | None = None) -> str:
+    """Ask which published release of WhateverXe (kind "whateverxe") or its graphics package (kind "graphics")
+    to install: a list, newest first, with the latest preselected (Enter). Returns "latest" or a tag.
+    Raises igpu_engine.ReleaseError when GitHub cannot be asked."""
+    label = igpu_engine.RELEASE_KINDS[kind][2]
+    releases = igpu_engine.list_releases(kind, get)
+    latest = next((r["tag"] for r in releases if not r["prerelease"]), "")
+    say(f"{label} releases on GitHub, newest first:")
+    for n, rel in enumerate(releases, 1):
+        flags = (" (latest)" if rel["tag"] == latest else "") + (" (pre-release)" if rel["prerelease"] else "")
+        say(f"  {n}. {rel['tag']}  {rel['published'][:10]}{flags}")
+    for _attempt in range(5):
+        try:
+            answer = ask(f"{label} version, a number or a tag [Enter = latest]: ").strip()
+        except EOFError:
+            return igpu_engine.LATEST
+        tag = ""
+        if not answer:
+            return igpu_engine.LATEST
+        if answer.isdigit() and 1 <= int(answer) <= len(releases):
+            tag = releases[int(answer) - 1]["tag"]
+        elif any(answer in (r["tag"], r["version"]) for r in releases):
+            tag = next(r["tag"] for r in releases if answer in (r["tag"], r["version"]))
+        if tag:
+            return igpu_engine.LATEST if tag == latest else tag
+        say(f"{answer!r} is not in the list.")
+    raise igpu_engine.ReleaseError(f"No {label} release was picked. Pass --wex-version / --graphics-version, or press Enter for the latest.")
 
 
 def _storage_of(cfg: dict[str, str]) -> str:
@@ -160,6 +192,8 @@ def finish(
     sleep: Callable[[float], None] = time.sleep,
     macos: str = "",
     work_dir: Path | None = None,
+    wex: str = igpu_engine.LATEST,
+    graphics: str = igpu_engine.LATEST,
 ) -> FinishResult:
     """Run the whole finish for *vmid* (stopped, installed, i440fx). Raises FinishError when it cannot go on."""
     pve = pve or get_proxmox_adapter()
@@ -174,12 +208,21 @@ def finish(
     report = check_intel_gpu()
     if not report.ok:
         raise FinishError("The iGPU is not ready: " + " ".join(report.issues))
-    assets = ensure_igpu_assets(iso, report.engine["info"]["rom"])
+    on_event("Looking up the WhateverXe releases on GitHub")
+    try:
+        assets = ensure_igpu_assets(iso, report.engine["info"]["rom"], wex=wex, graphics=graphics)
+    except (igpu_engine.ReleaseError, DownloadError, OSError) as exc:
+        raise FinishError(str(exc)) from exc
+    picks = assets.picks
+    on_event("Using WhateverXe %s and WhateverXe Graphics %s" % (picks["whateverxe"]["version"], picks["graphics"]["version"]))
     # the same preflight the attach will run, so nothing is staged for a VM that could not take the card
-    plan = prepare_attach_igpu(vmid, assets["whateverxe"], assets["amfipass"], assets["rom"], adapter=pve)
+    plan = prepare_attach_igpu(vmid, assets["whateverxe"], assets["amfipass"], assets["rom"], adapter=pve,
+                                  wex_sha=picks["whateverxe"]["sha256"], amfi_sha=igpu_engine.PINS["amfipass"][2])
     if not plan.ok:
         raise FinishError("Cannot attach the iGPU: " + " ".join(plan.issues))
     result = FinishResult(notes=list(plan.warnings))
+    state = igpu_engine.picks_state(picks, version)
+    result.versions = igpu_engine.describe_state(state)
     storage = _storage_of(cfg)
     snapshot = create_snapshot(vmid, adapter=pve)
     on_event(f"Saved the VM config to {snapshot.path}")
@@ -227,7 +270,8 @@ def finish(
         result.notes.append(f"Could not restore the picker's auto-boot ({err}); run post-install afterwards.")
 
     on_event("Attaching the iGPU")
-    plan = prepare_attach_igpu(vmid, assets["whateverxe"], assets["amfipass"], assets["rom"], adapter=pve)
+    plan = prepare_attach_igpu(vmid, assets["whateverxe"], assets["amfipass"], assets["rom"], adapter=pve,
+                                  wex_sha=picks["whateverxe"]["sha256"], amfi_sha=igpu_engine.PINS["amfipass"][2])
     if not plan.ok:
         raise FinishError("Cannot attach the iGPU: " + " ".join(plan.issues))
     applied = apply_plan(plan.steps, execute=True, adapter=pve)
@@ -236,8 +280,8 @@ def finish(
         raise FinishError("Attaching the iGPU failed" + (f" at: {failed.title}" if failed else "")
                           + f". Log: {applied.log_path}. Undo with: gpu-setup --undo")
     pve.qm("set", str(vmid), "--boot", POST_INSTALL_BOOT_ORDER)
-    if igpu_watchdog.applies_to(version):
-        _enable_watchdog(pve, vmid, result, on_event)
+    _record_state(vmid, dict(state, package_installed=False), result)
+    _enable_watchdog(pve, vmid, result, on_event)
 
     on_event("First boot with the iGPU: the guest installs the graphics package and powers off")
     tahoe = version == "tahoe"
@@ -253,6 +297,7 @@ def finish(
         wait_stopped(pve, vmid, 120, clock, sleep)
     result.result = _read_payload_result(pve, payload_ref)
     result.installed = result.result == "installed"
+    _record_state(vmid, {"package_installed": result.installed, "package_result": result.result}, result)
     _drop_disk(pve, vmid, "sata2")
     payload.unlink(missing_ok=True)
     if result.installed and not apply_plan(
@@ -269,16 +314,25 @@ def finish(
     return result
 
 
+def _record_state(vmid: int, update: dict, result: FinishResult) -> None:
+    """Remember what was installed in this VM (igpu-report and the status output read it)."""
+    try:
+        igpu_engine.write_state(vmid, update)
+    except OSError as exc:
+        result.notes.append(f"Could not record the installed versions ({exc}); igpu-report will not list them.")
+
+
 def _enable_watchdog(pve: ProxmoxAdapter, vmid: int, result: FinishResult, on_event: Callable[[str], None]) -> None:
-    """Tahoe hangs at the end of every restart and shut down with the iGPU: the host-side watchdog finishes them."""
+    """The host-side watchdog: records crashes on every macOS version and finishes the Tahoe restarts and shut downs."""
     cfg = parse_config(pve.qm("config", str(vmid)).output)
     applied = apply_plan(igpu_watchdog.enable_steps(vmid, cfg), execute=True, adapter=pve)
     if applied.ok:
         result.watchdog = True
-        on_event("Installed the power watchdog: restarts and shut downs from inside macOS Tahoe finish on their own")
+        on_event("Installed the watchdog: it records crashes and finishes the restarts and shut downs that hang on macOS Tahoe")
     else:
-        result.notes.append(f"Could not install the power watchdog (log: {applied.log_path}), so restarts and shut "
-                            f"downs from inside macOS Tahoe hang. Install it with: osx-next-cli igpu-watchdog {vmid}")
+        result.notes.append(f"Could not install the watchdog (log: {applied.log_path}), so crashes are not recorded and "
+                            f"restarts and shut downs from inside macOS Tahoe hang. Install it with: "
+                            f"osx-next-cli igpu-watchdog {vmid}")
 
 
 def _put_back(pve: ProxmoxAdapter, vmid: int, original: dict[str, str | None]) -> None:

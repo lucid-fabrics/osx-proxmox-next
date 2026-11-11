@@ -27,6 +27,14 @@ def daemon():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _diag_in_tmp(tmp_path, monkeypatch):
+    """The crash snapshots and the serial copy go to a temp folder, never to /var/log."""
+    monkeypatch.setenv("IGPU_LOG_DIR", str(tmp_path / "log"))
+    monkeypatch.setenv("IGPU_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("GPU_SYSFS", str(tmp_path / "sys"))
+
+
 @pytest.mark.parametrize(
     ("line", "expected"),
     [
@@ -336,13 +344,6 @@ def test_daemon_main_rejects_invalid_arguments(daemon, capsys):
     assert "usage: igpu_power_watchdog.py <vmid>" in capsys.readouterr().err
 
 
-def test_watchdog_applies_only_to_tahoe():
-    assert igpu_watchdog.applies_to("tahoe") is True
-
-    for version in ("ventura", "sonoma", "sequoia", "Tahoe", None):
-        assert igpu_watchdog.applies_to(version) is False
-
-
 @pytest.mark.parametrize(
     ("cfg", "expect_serial_step"),
     [
@@ -374,6 +375,14 @@ def test_enable_steps_has_the_expected_commands_in_order(
             "755",
             str(tmp_path / igpu_watchdog.DAEMON_FILE),
             igpu_watchdog.DAEMON_PATH,
+        ],
+        [
+            "install",
+            "-D",
+            "-m",
+            "644",
+            str(tmp_path / igpu_watchdog.DIAG_FILE),
+            igpu_watchdog.DIAG_PATH,
         ],
         [
             "install",
@@ -442,11 +451,6 @@ def _patch_prepare_inputs(monkeypatch, config_raw, status, version):
         "fetch_vm_info",
         lambda vmid, adapter=None: info,
     )
-    monkeypatch.setattr(
-        igpu_watchdog,
-        "detect_macos",
-        lambda cfg: version,
-    )
 
 
 def test_prepare_reports_a_missing_VM(monkeypatch):
@@ -496,11 +500,11 @@ def test_prepare_refuses_a_VM_without_the_iGPU(monkeypatch):
 
 # ── hand-written from here on ──────────────────────────────────────────
 
-def test_prepare_refuses_a_release_that_restarts_normally(monkeypatch):
-    _patch_prepare_inputs(monkeypatch, config_raw=_vm_config(), status="stopped", version="sequoia")
-    issues, steps = igpu_watchdog.prepare(100, adapter=object())
-    assert issues == ["VM 100 runs macOS Sequoia, which restarts and shuts down normally with the iGPU. "
-                      "The watchdog is only for Tahoe."] and steps == []
+def test_prepare_accepts_every_macos_release_because_the_recorder_is_for_all(monkeypatch):
+    for version in ("sequoia", "ventura"):
+        _patch_prepare_inputs(monkeypatch, config_raw=_vm_config(), status="stopped", version=version)
+        issues, steps = igpu_watchdog.prepare(100, adapter=object())
+        assert issues == [] and steps
 
 
 @pytest.mark.parametrize("version", ["tahoe", None])
@@ -527,8 +531,8 @@ def _applied(ok, title="Start the power watchdog"):
 
 
 @pytest.mark.parametrize("remove,ok,code,text", [
-    (False, True, 0, "The power watchdog of VM 100 is running."),
-    (True, True, 0, "The power watchdog of VM 100 is removed."),
+    (False, True, 0, "The watchdog of VM 100 is running."),
+    (True, True, 0, "The watchdog of VM 100 is removed."),
     (False, False, 4, "FAILED at: Start the power watchdog. Log: /tmp/apply.log"),
 ])
 def test_run_watchdog_applies_the_plan_and_reports(monkeypatch, capsys, remove, ok, code, text):
@@ -857,3 +861,126 @@ def test_too_many_panics_in_an_hour_leave_the_vm_stopped(daemon, capsys):
                        clock=lambda: 1000.0, sleep=lambda _s: None, history=history) is True
     assert _actions(calls) == [["qm", "stop", "100"]] and len(history) == daemon.PANIC_MAX
     assert "leaving it stopped" in capsys.readouterr().out
+
+
+# ── crash evidence: the serial copy and the snapshot before the stop ──────────────────────────
+
+def _incidents(tmp_path, vmid="100"):
+    root = tmp_path / "log" / vmid / "incidents"
+    return sorted(p.name for p in root.iterdir()) if root.exists() else []
+
+
+def test_the_snapshot_is_saved_before_the_vm_is_stopped(daemon, tmp_path, capsys):
+    calls, state, seen = [], {"stopped": False}, []
+    inner = _panic_runner(calls, state)
+
+    def runner(argv, *a, **k):
+        if argv[:2] == ["qm", "stop"]:
+            seen.append(_incidents(tmp_path))  # what was on disk when the stop arrived
+        return inner(argv)
+    tracker = daemon.Tracker()
+    tracker.feed(PANIC, 100.0)
+    tracker.start_quiet(155, 100.0 + daemon.GRACE)
+    recent = ["boot", PANIC, "Backtrace"]
+    assert daemon.step("100", tracker, 100.0 + daemon.GRACE + daemon.QUIET, runner, clock=lambda: 1000.0,
+                       sleep=lambda _s: None, history=[], recent=recent) is True
+    assert len(seen[0]) == 1 and seen[0][0].endswith("-panic")
+    panic = (tmp_path / "log/100/incidents" / seen[0][0] / "panic.txt").read_text()
+    assert PANIC in panic and "Backtrace" in panic
+    assert "saved the crash snapshot to" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("intent_line,kind", [("0x0", "hang-restart"), ("0x8", "hang-shutdown")])
+def test_a_hung_restart_or_shutdown_is_snapshotted_with_its_kind(daemon, tmp_path, intent_line, kind):
+    calls, state = [], {"stopped": False}
+    tracker = daemon.Tracker()
+    tracker.feed("Will be calling reboot(2) with flags: " + intent_line, 100.0)
+    tracker.start_quiet(155, 100.0 + daemon.GRACE)
+    assert daemon.step("100", tracker, 100.0 + daemon.GRACE + daemon.QUIET, _panic_runner(calls, state),
+                       clock=lambda: 1000.0, sleep=lambda _s: None, history=[]) is True
+    assert _incidents(tmp_path)[0].endswith("-" + kind)
+
+
+def test_a_snapshot_that_fails_never_keeps_the_vm_from_being_recovered(daemon, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(daemon.igpu_diag, "collect_incident", boom)
+    calls, state = [], {"stopped": False}
+    tracker = daemon.Tracker()
+    tracker.feed(PANIC, 100.0)
+    tracker.start_quiet(155, 100.0 + daemon.GRACE)
+    assert daemon.step("100", tracker, 100.0 + daemon.GRACE + daemon.QUIET, _panic_runner(calls, state),
+                       clock=lambda: 1000.0, sleep=lambda _s: None, history=[]) is True
+    assert _actions(calls) == [["qm", "stop", "100"], ["qm", "start", "100"]]
+    assert "could not save the crash snapshot: disk full" in capsys.readouterr().out
+
+
+def test_without_the_recorder_module_the_watchdog_still_recovers(daemon, monkeypatch):
+    monkeypatch.setattr(daemon, "igpu_diag", None)
+    assert daemon.snapshot("100", "panic", "x", [], None) is None
+    calls, state = [], {"stopped": False}
+    tracker = daemon.Tracker()
+    tracker.feed(PANIC, 100.0)
+    tracker.start_quiet(155, 100.0 + daemon.GRACE)
+    assert daemon.step("100", tracker, 100.0 + daemon.GRACE + daemon.QUIET, _panic_runner(calls, state),
+                       clock=lambda: 1000.0, sleep=lambda _s: None, history=[]) is True
+
+
+def test_watch_keeps_a_copy_of_the_serial_console_on_the_host(daemon, monkeypatch, tmp_path):
+    monkeypatch.setattr(daemon, "run", lambda argv, timeout=120: pytest.fail(f"no command expected: {argv}"))
+    path, _ = _serve(["Darwin Kernel Version 25", "AppleIntelFramebuffer start", "Will be calling reboot(2) with flags: 0x0",
+                      "BdsDxe: loading"], keep_open=False)
+    daemon.watch("7", path)
+    text = (tmp_path / "log/7/serial.log").read_text()
+    assert "serial console connected" in text and "AppleIntelFramebuffer start" in text
+
+
+# ── only Tahoe is stopped and restarted ───────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("conf,wanted", [
+    ("name: macos-tahoe\n", True),
+    ("description: macOS%20Tahoe%2026%20VM\nname: x\n", True),
+    ("name: macos-sequoia\n", False),
+    ("description: macOS%20Ventura%2013%20VM\n", False),
+    ("name: macos-sonoma\n[snap]\nname: macos-tahoe\n", False),  # the snapshot sections are not the VM
+    ("name: mystery\n", True),  # release unknown: keep the recovery the watchdog always had
+    ("", True),
+])
+def test_recovery_is_only_for_tahoe_or_an_unknown_release(daemon, conf, wanted):
+    assert daemon.recovery_wanted(conf) is wanted
+
+
+def test_read_conf_returns_the_vm_config_or_nothing(daemon, monkeypatch, tmp_path):
+    monkeypatch.setattr(daemon, "CONF_DIR", str(tmp_path))
+    assert daemon.read_conf("7") == ""
+    (tmp_path / "7.conf").write_text("name: macos-tahoe\n")
+    assert daemon.read_conf("7") == "name: macos-tahoe\n"
+
+
+def test_a_hung_vm_that_is_not_tahoe_is_recorded_and_left_running(daemon, tmp_path, capsys):
+    calls, state = [], {"stopped": False}
+    tracker = daemon.Tracker()
+    tracker.feed(PANIC, 100.0)
+    tracker.start_quiet(155, 100.0 + daemon.GRACE)
+    assert daemon.step("100", tracker, 100.0 + daemon.GRACE + daemon.QUIET, _panic_runner(calls, state),
+                       clock=lambda: 1000.0, sleep=lambda _s: None, history=[], act=False) is False
+    assert not _actions(calls) and _incidents(tmp_path)[0].endswith("-panic")
+    assert "left running because the host only steps in on macOS Tahoe" in capsys.readouterr().out
+    assert tracker.intent is None  # not watched again for the same panic
+
+
+def test_the_watch_hands_the_recovery_choice_to_the_steps(daemon, monkeypatch):
+    seen = []
+    monkeypatch.setattr(daemon, "step", lambda *a, **k: seen.append(k["act"]) or True)
+    path, _ = _serve(["boot"], keep_open=True)
+    daemon.watch("7", path, act=False)
+    assert seen == [False]
+
+
+@pytest.mark.parametrize("line", ["Nested panic detected - entry count: 2 panic_caller: 0xffffff8002ed6794",
+                                  "Double fault at 0xffffff8004675c5e, registers:"])
+def test_a_nested_panic_is_a_panic_even_without_the_usual_panic_line(daemon, line):
+    """Seen live: dtrace's panic() double faulted, so the serial port never showed "panic(cpu N caller"."""
+    tracker = daemon.Tracker()
+    assert tracker.feed(line, 5.0) == "panic" and tracker.intent == "panic"
+    assert tracker.feed("Double fault at 0x1, registers:", 6.0) is None  # the same panic is not counted twice

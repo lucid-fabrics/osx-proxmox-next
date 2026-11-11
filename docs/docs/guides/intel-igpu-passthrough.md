@@ -30,7 +30,7 @@ The scan lists every graphics card in the host, each with a plain status for the
 1. **Host (once):** blacklists `i915`, binds the iGPU id to vfio-pci at boot and rebuilds the boot image. A host that already holds the iGPU on vfio-pci is left alone.
 2. **Checks:** the chip must be on the supported list, no running VM may hold it, and the memory layout must be usable.
 3. **VM shape:** i440fx (`machine: pc`), no emulated display, the iGPU on `hostpci0` in legacy IGD mode with a pinned option ROM from [intel-igpu-passthru](https://github.com/LongQT-sea/intel-igpu-passthru), and a `max-ram-below-4g` computed from the host's graphics memory so WhateverXe accepts the guest's memory layout. The recovery disk sits on `sata1`, because the IDE controller of i440fx has no macOS driver.
-4. **OpenCore:** adds WhateverXe 0.8.0 and AMFIPass, turns WhateverGreen off, sets `FadtEnableReset` and the boot-args `-allow3d -disablegfxfirmware -wex-tgl-hold-render-wake`. Every download is pinned and checked against a SHA-256.
+4. **OpenCore:** adds WhateverXe (the latest release unless you pick another, see [Which WhateverXe version](#which-whateverxe-version)) and AMFIPass, turns WhateverGreen off, sets `FadtEnableReset` and the boot-args `-allow3d -disablegfxfirmware -wex-tgl-hold-render-wake`. AMFIPass and the option ROM are pinned and checked against a SHA-256, WhateverXe and its graphics package against the digest GitHub stores for the release file.
 5. **Graphics package:** WhateverXe Graphics is copied into macOS from recovery, offline, and installed by a one-shot LaunchDaemon only after WhateverXe is loaded. Installing it earlier makes the guest panic at boot, so if WhateverXe never loads the package stays out and the VM keeps working unaccelerated (three tries at most). The package contains Apple binaries, so it is downloaded at setup time and never shipped with this project.
 
 ## Commands
@@ -40,19 +40,50 @@ osx-next-cli igpu-check                     # can this host do it, and what woul
 osx-next-cli igpu-install --vmid 996 --name igpu-seq --macos sequoia \
   --cores 4 --memory 8192 --disk 64 --bridge vmbr0 --storage local-lvm
 osx-next-cli igpu-finish 996                # an installed i440fx VM: attach the iGPU and install the package
-osx-next-cli igpu-watchdog 996              # Tahoe: add the power watchdog to a VM set up before (--remove takes it off)
+osx-next-cli igpu-finish 996 --wex-version 0.8.0   # an older WhateverXe release instead of the latest
+osx-next-cli igpu-versions                  # the published WhateverXe and graphics package releases
+osx-next-cli igpu-report 996                # bundle the crash records of a VM for a bug report
+osx-next-cli igpu-watchdog 996              # add the watchdog and crash recorder to a VM set up before (--remove takes it off)
 osx-next-cli gpu-setup --undo               # put the VM and the host back
 ```
 
-`igpu-install` creates the VM, installs macOS hands-off like [unattended install](unattended-install.md) and finishes the iGPU setup, 60 to 90 minutes in total. The same commands exist in the standalone script: `osx-proxmox-next.sh igpu-check`, `igpu-finish <vmid>` and `igpu-watchdog <vmid> [--remove]`, and the create-a-VM menu asks about the iGPU when the host is ready.
+`igpu-install` creates the VM, installs macOS hands-off like [unattended install](unattended-install.md) and finishes the iGPU setup, 60 to 90 minutes in total. The same commands exist in the standalone script: `osx-proxmox-next.sh igpu-check`, `igpu-finish <vmid>`, `igpu-versions`, `igpu-report <vmid>` and `igpu-watchdog <vmid> [--remove]`, and the create-a-VM menu asks about the iGPU when the host is ready.
 
 An already installed q35 VM is not converted: switching the machine type of an installed macOS has not been tested. Create a new VM instead.
+
+## Which WhateverXe version
+
+This tool installs the **latest published WhateverXe release** and the latest WhateverXe Graphics package. Only one Intel GPU was tested here and you have another, so the tool does not hold you to one tested version. It records what happened instead (see [When it crashes](#when-it-crashes)), and you send that upstream.
+
+- `igpu-install` and `igpu-finish` look the releases up on GitHub when they run. On a terminal they show the published releases, newest first, with the latest preselected: press Enter for it or pick an older one. The standalone script shows the same list as a menu.
+- Skip the question with a flag: `--wex-version <tag>` and `--graphics-version <tag>` (a tag from `osx-next-cli igpu-versions`, for example `0.8.0` or `v0.4.1`). Without a flag and without a terminal the latest is used. If a new release breaks things, run `igpu-finish` on a fresh VM with an older tag.
+- Every download is checked against the sha256 digest GitHub stores for the release file. A release without a digest, or a file that does not match, stops the setup with a clear message.
+- There is no fallback to an older version behind your back. If GitHub cannot be reached or answers with a rate limit, the setup stops and tells you to run it again in a few minutes. Set `GITHUB_TOKEN` to a GitHub token to raise the rate limit.
+- AMFIPass and the option ROMs stay pinned, they are not part of WhateverXe's release stream.
+- The tool needs the kext `WhateverXe.kext` (also inside one wrapping folder) and reads its executable name from the kext. A release laid out differently is refused with a message listing what the zip holds. If a release changed the kext's bundle id (`org.b00t0x.WhateverXe`) you get a warning, because the first-boot check that WhateverXe is loaded looks for that id and the graphics package then stays out.
+- The list of supported chips (`intel_devices.txt`) was built from WhateverXe 0.8.0. A newer release that adds a chip does not make this tool offer that chip until the list is updated.
+- The versions that went into a VM are written to `/var/lib/osx-proxmox-next/igpu/<vmid>.json`. `gpu-setup --status` and `igpu-report` show them.
+
+## When it crashes
+
+A hung macOS guest cannot tell you anything, so the host records it. Every iGPU VM, on any macOS version, gets the watchdog (the Tahoe section below describes what else it does). It runs as `osx-next-power-watchdog@<vmid>` and keeps two kinds of records under `/var/log/osx-proxmox-next/<vmid>/`:
+
+- `serial.log`: a copy of the macOS kernel log from the serial port (boot-arg `serial=3`), rotated at 10 MB with 5 files (50 MB at most).
+- `incidents/<time>-<kind>/`: one folder per crash, written right before the watchdog stops the VM. `kind` is `panic`, `hang-restart` or `hang-shutdown`. It holds `panic.txt` (the panic text from the serial port), `vcpu-registers.txt` (`info registers -a` of every vCPU), `igpu-registers.txt` (ring heads and tails, plane surface, TLB fault registers and power limit reasons, read from the iGPU's BAR0, read-only), `host.txt` (CPU temperatures, thermal throttle counters, load, CPU and iGPU id), `dmesg.txt` (the vfio, i915, IOMMU, thermal and MCE lines of the host log), `vm.conf` (with MAC addresses, SMBIOS serial and uuid and the OSK blanked), `versions.json` and `serial-tail.txt`. The snapshot takes under 8 seconds and every file is capped, so recovery is never held up. The newest 10 incidents are kept.
+
+To send a crash upstream:
+
+```bash
+osx-next-cli igpu-report 996
+```
+
+It packs the latest three incidents, the installed versions, the VM config and the end of the serial log into `igpu-report-996-<time>.tar.gz` (in `/var/log/osx-proxmox-next/996/`, or the folder of `--out`), and prints a short summary: macOS version, CPU and iGPU id, WhateverXe, Graphics and AMFIPass versions and the first panic line of each recorded crash. Look through the bundle, then [open an issue at WhateverXe](https://github.com/b00t0x/WhateverXe/issues), paste the summary and attach the file. **Nothing is ever posted or uploaded by this tool.**
 
 ## Restart and shut down on Tahoe
 
 With the iGPU attached, macOS Tahoe faults the GPU while it closes the desktop, and the kernel then waits for the GPU forever. The VM stays on with a black screen. This is a WhateverXe bug (issue 62) that the tool cannot fix, so it finishes the job from the host instead.
 
-For a Tahoe VM, `igpu-finish` installs a power watchdog: a systemd unit `osx-next-power-watchdog@<vmid>` that reads the VM's serial port. The VM gets `serial0: socket` and the boot-arg `serial=3`, which sends the macOS kernel console there. The watchdog acts only when all of this is true:
+`igpu-finish` installs the power watchdog for every VM, and on Tahoe it is what finishes these hangs: a systemd unit `osx-next-power-watchdog@<vmid>` that reads the VM's serial port. The VM gets `serial0: socket` and the boot-arg `serial=3`, which sends the macOS kernel console there. The watchdog acts only when all of this is true:
 
 1. macOS printed `Will be calling reboot(2) with flags: ...`. launchd prints that line once every app and service has quit, right before the kernel restarts or powers off. The flags say which one you chose.
 2. 60 seconds later the VM has neither powered off nor reset (a reset shows the firmware's `BdsDxe:` lines on the serial port within seconds).

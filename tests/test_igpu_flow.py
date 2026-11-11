@@ -116,12 +116,15 @@ def test_intel_host_adapters(tmp_path):
 # ── attach plan ──────────────────────────────────────────────────────
 
 def attach(root, vms, **kw):
-    return igpu_attach.prepare_attach_igpu(100, Path("/c/w.zip"), Path("/c/a.zip"), Path("/c/x.rom"), adapter=FakeQm(vms),
+    for name in ("w.zip", "a.zip"):
+        (root / name).write_bytes(name.encode())
+    return igpu_attach.prepare_attach_igpu(100, root / "w.zip", root / "a.zip", Path("/c/x.rom"), adapter=FakeQm(vms),
                                            root=root, run=FakeRun(REGS), **kw)
 
 
 def test_attach_plan_order_and_values(tmp_path):
-    plan = attach(host(tmp_path, igpu="vfio-pci"), {100: ("stopped", VM)})
+    root = host(tmp_path, igpu="vfio-pci")
+    plan = attach(root, {100: ("stopped", VM)})
     assert plan.ok, plan.issues
     titles = [s.title for s in plan.steps]
     assert titles[0] == "Verify VM is stopped" and titles[1].startswith("Record the original")
@@ -131,7 +134,13 @@ def test_attach_plan_order_and_values(tmp_path):
     assert "max-ram-below-4g=1342M" in by["Size the guest's low RAM for the iGPU memory layout"][-1]
     assert by["Turn the emulated display off (vga none)"][-2:] == ["--vga", "none"]
     oc = plan.steps[2].argv[2]
-    assert "IGPU_WEX_SHA256=" + igpu_engine.PINS["whateverxe"][2] in oc and "config.plist" in oc
+    assert "IGPU_WEX_SHA256=" + igpu_engine.sha256_file(root / "w.zip") in oc and "config.plist" in oc
+    assert "IGPU_AMFI_SHA256=" + igpu_engine.sha256_file(root / "a.zip") in oc
+
+
+def test_a_zip_that_is_not_downloaded_yet_gets_an_empty_hash_the_patcher_refuses(tmp_path):
+    script = igpu_attach.oc_igpu_script("100", "attach", tmp_path / "none.zip", tmp_path / "none2.zip")
+    assert "IGPU_WEX_SHA256= " in script and "IGPU_AMFI_SHA256= " in script
 
 
 def test_attach_stops_a_running_vm_only_when_allowed(tmp_path):
@@ -411,3 +420,10 @@ def test_undo_goes_through_the_intel_record(tmp_path, monkeypatch):
     from osx_proxmox_next import gpu_attach
     plan = gpu_attach.prepare_detach(5, adapter=FakeQm({}), missing_ok=True)
     assert plan.warnings and not plan.steps
+
+
+def test_the_expected_hashes_can_be_given_so_the_patcher_checks_the_files_against_the_downloads_hash(tmp_path):
+    root = host(tmp_path, igpu="vfio-pci")
+    plan = attach(root, {100: ("stopped", VM)}, wex_sha="9" * 64, amfi_sha="a" * 64)
+    oc = plan.steps[2].argv[2]
+    assert "IGPU_WEX_SHA256=" + "9" * 64 in oc and "IGPU_AMFI_SHA256=" + "a" * 64 in oc

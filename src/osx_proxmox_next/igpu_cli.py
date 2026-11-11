@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import igpu_attach, igpu_engine, igpu_finish, igpu_watchdog
+from . import igpu_attach, igpu_engine, igpu_finish, igpu_report, igpu_watchdog
 from .igpu_attach import SETUP_ASSISTANT_NOTE
 from .defaults import DEFAULT_ISO_DIR
 from .domain import MAX_VMID, MIN_VMID, SUPPORTED_MACOS
@@ -15,16 +15,27 @@ from .intel_host import check_intel_gpu
 
 TROUBLESHOOTING_URL = "https://github.com/lucid-fabrics/osx-proxmox-next/blob/main/docs/docs/guides/intel-igpu-passthrough.md"
 
-__all__ = ["add_parsers", "dispatch", "run_check", "run_finish", "run_install", "run_watchdog"]
+__all__ = ["add_parsers", "dispatch", "run_check", "run_finish", "run_install", "run_report", "run_versions",
+           "run_watchdog"]
 
 DOCS = "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/intel-igpu-passthrough"
 NOTICE = (
     "BETA. The host gives up its Intel graphics for good: the screen on the host stays dark and the Proxmox "
     "console works only over the network. The VM needs a monitor or an HDMI dummy plug on the host's native "
     "HDMI port (LSPCON HDMI and USB-C do not work). The iGPU shares the CPU's power budget, so heavy host load "
-    "slows it. macOS Tahoe is experimental: a power watchdog on the host finishes its restarts and shut downs, "
-    "which hang at the very end."
+    "slows it. macOS Tahoe is experimental: a watchdog on the host finishes its restarts and shut downs, "
+    "which hang at the very end. The watchdog also records crashes of any macOS version: igpu-report bundles them."
 )
+
+
+VERSION_HELP = ("WhateverXe release to install: a tag from igpu-versions (default: the latest release). "
+                "Ask on a terminal when not given.")
+GFX_HELP = "WhateverXe Graphics release to install: a tag from igpu-versions (default: the latest release)."
+
+
+def _add_version_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--wex-version", default="", metavar="TAG", help=VERSION_HELP)
+    parser.add_argument("--graphics-version", default="", metavar="TAG", help=GFX_HELP)
 
 
 def add_parsers(sub: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:
@@ -36,6 +47,7 @@ def add_parsers(sub: argparse._SubParsersAction, common: argparse.ArgumentParser
               "(gpu-setup)."),
     )
     install.add_argument("--yes", action="store_true", help="Skip the confirmation question")
+    _add_version_options(install)
     finish = sub.add_parser(
         "igpu-finish",
         help=("BETA: attach the Intel iGPU to an installed i440fx macOS VM and install the graphics package "
@@ -45,13 +57,23 @@ def add_parsers(sub: argparse._SubParsersAction, common: argparse.ArgumentParser
     finish.add_argument("vmid", type=int, help="VM ID (stopped, installed, machine type pc)")
     finish.add_argument("--macos", default="", help="ventura, sonoma, sequoia or tahoe, when it cannot be read from the VM")
     finish.add_argument("--iso-dir", default="", help="Directory for the downloads (default: the ISO storage)")
+    _add_version_options(finish)
     watchdog = sub.add_parser(
         "igpu-watchdog",
-        help=("BETA: install (or --remove) the host-side power watchdog of a macOS Tahoe VM with the iGPU, which "
-              "finishes restarts and shut downs that hang. igpu-finish installs it already. The VM must be stopped."),
+        help=("BETA: install (or --remove) the host-side watchdog of a macOS VM with the iGPU: it records crashes "
+              "and finishes the restarts and shut downs that hang on Tahoe. igpu-finish installs it already. "
+              "The VM must be stopped."),
     )
-    watchdog.add_argument("vmid", type=int, help="VM ID (stopped, Tahoe, iGPU on hostpci0)")
+    watchdog.add_argument("vmid", type=int, help="VM ID (stopped, iGPU on hostpci0)")
     watchdog.add_argument("--remove", action="store_true", help="Stop and remove the watchdog of this VM")
+    sub.add_parser("igpu-versions", help="BETA: list the published WhateverXe and WhateverXe Graphics releases, newest first")
+    rep = sub.add_parser(
+        "igpu-report",
+        help=("BETA: bundle the latest crash snapshots, the installed versions and the config of an iGPU VM into one "
+              "tar.gz and print a summary to paste into a WhateverXe issue. Nothing is sent anywhere."),
+    )
+    rep.add_argument("vmid", type=int, help="VM ID")
+    rep.add_argument("--out", default="", help="Directory for the bundle (default: /var/log/osx-proxmox-next/<vmid>)")
 
 
 def _print_report(report) -> None:
@@ -85,6 +107,8 @@ def _on_event(message: str) -> None:
 
 
 def _report_finish(vmid: int, result: igpu_finish.FinishResult) -> int:
+    for line in result.versions:
+        print(f"Installed: {line}")
     for note in result.notes:
         print(f"NOTE: {note}")
     if result.installed and result.accelerated:
@@ -102,6 +126,40 @@ def _report_finish(vmid: int, result: igpu_finish.FinishResult) -> int:
     return 1
 
 
+def _versions_from(args: argparse.Namespace, interactive: bool) -> tuple[str, str]:
+    """(WhateverXe, Graphics) choice from the flags; asked on a terminal for the ones not given."""
+    wex, gfx = args.wex_version or "", args.graphics_version or ""
+    if interactive and not args.yes:
+        wex = wex or igpu_finish.choose_release("whateverxe", input, print)
+        gfx = gfx or igpu_finish.choose_release("graphics", input, print)
+    return wex or igpu_engine.LATEST, gfx or igpu_engine.LATEST
+
+
+def run_versions() -> int:
+    try:
+        for kind in igpu_engine.RELEASE_KINDS:
+            releases = igpu_engine.list_releases(kind)
+            latest = next((r["tag"] for r in releases if not r["prerelease"]), "")
+            print(f"{igpu_engine.RELEASE_KINDS[kind][2]} releases, newest first:")
+            for rel in releases:
+                flags = (" (latest)" if rel["tag"] == latest else "") + (" (pre-release)" if rel["prerelease"] else "")
+                print(f"  {rel['tag']}  {rel['published'][:10]}{flags}")
+    except igpu_engine.ReleaseError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+    return 0
+
+
+def run_report(args: argparse.Namespace) -> int:
+    try:
+        path, summary = igpu_report.report(args.vmid, Path(args.out) if args.out else None)
+    except OSError as exc:
+        print(f"ERROR: could not write the report: {exc}")
+        return 2
+    print(summary, end="")
+    return 0
+
+
 def run_finish(args: argparse.Namespace) -> int:
     vmid = args.vmid
     if vmid < MIN_VMID or vmid > MAX_VMID:
@@ -113,9 +171,10 @@ def run_finish(args: argparse.Namespace) -> int:
         print("Nothing was changed. Confirm (or pass --yes) to attach the iGPU.")
         return 2
     try:
+        wex, gfx = _versions_from(args, sys.stdin.isatty())
         result = igpu_finish.finish(vmid, iso_dir=Path(args.iso_dir or DEFAULT_ISO_DIR), on_event=_on_event,
-                                    macos=args.macos)
-    except igpu_finish.FinishError as exc:
+                                    macos=args.macos, wex=wex, graphics=gfx)
+    except (igpu_finish.FinishError, igpu_engine.ReleaseError) as exc:
         print(f"ERROR: {exc}")
         return 2
     return _report_finish(vmid, result)
@@ -137,6 +196,14 @@ def run_install(args: argparse.Namespace) -> int:
     _print_report(report)
     if not report.ok:
         print("Nothing was changed. Prepare the host first: osx-next-cli gpu-setup")
+        return 2
+    try:
+        wex, gfx = _versions_from(args, sys.stdin.isatty())
+        if wex != igpu_engine.LATEST or gfx != igpu_engine.LATEST:
+            # fail now on a wrong tag or an unreachable GitHub, not after a 45 minute install
+            igpu_engine.select_assets(wex, gfx)
+    except igpu_engine.ReleaseError as exc:
+        print(f"ERROR: {exc}")
         return 2
     print(NOTICE)
     print(f"VM {config.vmid} ({config.macos}) will be created and its {config.disk_gb} GB disk ERASED by the install.")
@@ -174,7 +241,7 @@ def run_install(args: argparse.Namespace) -> int:
     print("macOS is installed. Setting up the iGPU ...")
     try:
         finished = igpu_finish.finish(config.vmid, console=console, pve=pve, macos=config.macos,
-                                      on_event=_on_event)
+                                      on_event=_on_event, wex=wex, graphics=gfx)
     except igpu_finish.FinishError as exc:
         print(f"ERROR: {exc}")
         print(f"macOS is installed. Fix the problem above, then run: osx-next-cli igpu-finish {config.vmid}")
@@ -198,10 +265,10 @@ def run_watchdog(args: argparse.Namespace) -> int:
         print("FAILED" + (f" at: {failed.title}" if failed else "") + f". Log: {result.log_path}")
         return 4
     if args.remove:
-        print(f"The power watchdog of VM {args.vmid} is removed. Restarts and shut downs from inside macOS Tahoe "
-              "hang again; stop the VM from Proxmox.")
+        print(f"The watchdog of VM {args.vmid} is removed. Crashes are no longer recorded, and restarts and shut downs "
+              "from inside macOS Tahoe hang again; stop the VM from Proxmox.")
     else:
-        print(f"The power watchdog of VM {args.vmid} is running. {igpu_watchdog.WATCHDOG_NOTE}")
+        print(f"The watchdog of VM {args.vmid} is running. {igpu_watchdog.WATCHDOG_NOTE}")
         print(f"Its log: journalctl -u {igpu_watchdog.unit_name(args.vmid)}")
     return 0
 
@@ -215,4 +282,8 @@ def dispatch(args: argparse.Namespace) -> int | None:
         return run_install(args)
     if args.cmd == "igpu-watchdog":
         return run_watchdog(args)
+    if args.cmd == "igpu-versions":
+        return run_versions()
+    if args.cmd == "igpu-report":
+        return run_report(args)
     return None

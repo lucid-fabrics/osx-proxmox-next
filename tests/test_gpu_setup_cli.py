@@ -458,3 +458,47 @@ def test_gpu_option_matches_the_whole_address(tmp_path):
     code, out = go(env, "--gpu", "1:00")
     assert code == 2
     assert go(env, "--gpu", "11:00", "--vm", "100", "--yes")[0] in (0, 2, 3, 4)
+
+
+# ── Intel iGPU: release choice and recorded versions ─────────────────
+
+def _intel_session(vm=100):
+    from types import SimpleNamespace
+    s = SimpleNamespace(state={"vm": vm}, pve=object(), begun=0, applied=0)
+    s.begin_attach = lambda: setattr(s, "begun", s.begun + 1)
+    s.vm_applied = lambda: setattr(s, "applied", s.applied + 1)
+    return s
+
+
+def test_the_intel_finish_asks_for_both_releases_on_a_terminal(monkeypatch):
+    from osx_proxmox_next import igpu_finish
+    seen, out, answers = [], [], iter(["2", ""])
+    monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: seen.append(k) or igpu_finish.FinishResult("installed", True))
+    io = gpu_setup_cli._Io(lambda prompt: next(answers), out.append, True)
+    assert gpu_setup_cli._finish_intel(_intel_session(), io) is None
+    assert (seen[0]["wex"], seen[0]["graphics"]) == ("0.8.0", "latest")
+    assert any("WhateverXe releases on GitHub" in line for line in out) and "Card attached." in out
+
+
+def test_the_intel_finish_takes_the_latest_without_a_terminal_and_reports_github_errors(monkeypatch):
+    from osx_proxmox_next import igpu_engine, igpu_finish
+    seen, out = [], []
+    monkeypatch.setattr(igpu_finish, "finish", lambda vmid, **k: seen.append(k) or igpu_finish.FinishResult("installed", True, ["n"]))
+    io = gpu_setup_cli._Io(lambda prompt: pytest.fail("no question without a terminal"), out.append, False)
+    assert gpu_setup_cli._finish_intel(_intel_session(), io) is None
+    assert (seen[0]["wex"], seen[0]["graphics"]) == ("latest", "latest") and "NOTE: n" in out
+
+    def boom(vmid, **k):
+        raise igpu_engine.ReleaseError("Could not reach GitHub (x). Check the network and run the command again.")
+    monkeypatch.setattr(igpu_finish, "finish", boom)
+    assert gpu_setup_cli._finish_intel(_intel_session(), io) == gpu_setup_cli.EXIT_FAIL
+    assert any("FAILED: Could not reach GitHub" in line for line in out)
+
+
+def test_the_status_lists_what_is_installed_in_the_chosen_vm(host, monkeypatch, tmp_path):
+    from osx_proxmox_next import igpu_engine
+    monkeypatch.setenv("IGPU_STATE_DIR", str(tmp_path / "igpu-state"))
+    igpu_engine.write_state(100, {"whateverxe_version": "0.9.0", "whateverxe_source": "latest"})
+    host.session().choose("06:00", 100, "gpu")
+    code, out = go(host, "--status")
+    assert code == 0 and "Installed: WhateverXe 0.9.0 (latest when installed)" in out

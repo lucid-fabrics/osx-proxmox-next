@@ -57,15 +57,24 @@ def _oc_source() -> str:
     return (resources.files("osx_proxmox_next") / "data/gpu/oc_igpu.py").read_text()
 
 
-def oc_igpu_script(vid: str, action: str, wex_zip: Path | None = None, amfi_zip: Path | None = None) -> str:
+def _sha(path: Path) -> str:
+    """SHA-256 of a downloaded zip; empty while the file is not there yet (a plan that is only previewed), which
+    the patcher refuses as a mismatch."""
+    return igpu_engine.sha256_file(path) if Path(path).is_file() else ""
+
+
+def oc_igpu_script(vid: str, action: str, wex_zip: Path | None = None, amfi_zip: Path | None = None,
+                   wex_sha: str = "", amfi_sha: str = "") -> str:
     """Bash that mounts the VM's OpenCore disk and runs the iGPU patcher (attach, restore, fadt, stage, unstage)."""
     source = _oc_source()
     assert _PYEOF not in source
     env = ""
     if wex_zip and amfi_zip:
-        wex, amfi = igpu_engine.PINS["whateverxe"], igpu_engine.PINS["amfipass"]
-        env = (f"IGPU_WEX_ZIP={shquote(str(wex_zip))} IGPU_WEX_SHA256={wex[2]} "
-               f"IGPU_AMFI_ZIP={shquote(str(amfi_zip))} IGPU_AMFI_SHA256={amfi[2]} ")
+        # the expected hashes are the ones the downloads were verified against (WhateverXe: its GitHub digest,
+        # AMFIPass: its pin), so the patcher's check right before it unpacks catches a file changed since. Without
+        # them (a preview) the hash of the file on disk is used.
+        env = (f"IGPU_WEX_ZIP={shquote(str(wex_zip))} IGPU_WEX_SHA256={wex_sha or _sha(wex_zip)} "
+               f"IGPU_AMFI_ZIP={shquote(str(amfi_zip))} IGPU_AMFI_SHA256={amfi_sha or _sha(amfi_zip)} ")
     return (
         mount_oc_disk_script(vid)
         + f"{env}python3 - \"$OC_MNT/EFI/OC\" {action} <<'{_PYEOF}' && sync\n"
@@ -75,8 +84,10 @@ def oc_igpu_script(vid: str, action: str, wex_zip: Path | None = None, amfi_zip:
     )
 
 
-def oc_step(vid: str, action: str, title: str, wex_zip: Path | None = None, amfi_zip: Path | None = None) -> PlanStep:
-    return PlanStep(title=title, argv=["bash", "-c", oc_igpu_script(vid, action, wex_zip, amfi_zip)], risk="action")
+def oc_step(vid: str, action: str, title: str, wex_zip: Path | None = None, amfi_zip: Path | None = None,
+            wex_sha: str = "", amfi_sha: str = "") -> PlanStep:
+    return PlanStep(title=title, argv=["bash", "-c", oc_igpu_script(vid, action, wex_zip, amfi_zip, wex_sha, amfi_sha)],
+                    risk="action")
 
 
 def profile_for(args_add: list[str]) -> GpuProfile:
@@ -116,6 +127,7 @@ def build_fresh_vm_steps(vmid: int, macos_label: str = "") -> list[PlanStep]:
 def build_attach_steps(
     vmid: int, bdf: str, current_args: str, settings: dict, record: AttachRecord, rom_path: Path,
     wex_zip: Path, amfi_zip: Path, stop_first: bool = False, replace_record: bool = False,
+    wex_sha: str = "", amfi_sha: str = "",
 ) -> list[PlanStep]:
     """Record first (a sidecar file only), then OpenCore (the step that can refuse), then the VM."""
     vid = str(vmid)
@@ -123,7 +135,7 @@ def build_attach_steps(
     steps.append(verify_stopped_step(vid))
     steps.append(record_step(record, replace=replace_record))
     steps.append(oc_step(vid, "attach", "Add WhateverXe, AMFIPass and the iGPU boot-args to OpenCore (backup first)",
-                         wex_zip, amfi_zip))
+                         wex_zip, amfi_zip, wex_sha, amfi_sha))
     steps.append(rom_step(rom_path, settings["hostpci0"].rsplit("romfile=", 1)[1]))
     steps.append(PlanStep(title="Attach the iGPU (hostpci0, legacy IGD mode)",
                           argv=["qm", "set", vid, "--hostpci0", settings["hostpci0"]], risk="action"))
@@ -160,6 +172,8 @@ def prepare_attach_igpu(
     adapter: ProxmoxAdapter | None = None,
     root: Path = Path("/"),
     run=igpu_engine.default_run,
+    wex_sha: str = "",
+    amfi_sha: str = "",
 ) -> AttachPlan:
     """Preflight an iGPU attach and, when it passes, build the plan."""
     plan = AttachPlan(vmid)
@@ -201,6 +215,6 @@ def prepare_attach_igpu(
                             settings["hostpci0"], vga_none=True, oc="igpu")
         plan.steps = build_attach_steps(
             vmid, report.bdf, cfg.get("args", ""), settings, record, rom_path, wex_zip, amfi_zip,
-            stop_first=running and allow_stop, replace_record=record_is_stale(record),
+            stop_first=running and allow_stop, replace_record=record_is_stale(record), wex_sha=wex_sha, amfi_sha=amfi_sha,
         )
     return plan

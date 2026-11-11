@@ -425,13 +425,12 @@ def test_the_bash_watchdog_removal_matches_python(bash, vm):
         "RUN systemctl disable --now osx-next-power-watchdog@100.service", "RUN oc unserial"]
     steps = igpu_watchdog.disable_steps(100)
     assert "systemctl disable --now osx-next-power-watchdog@100.service" in steps[0].argv[2] and "unserial" in steps[1].argv[2]
-    assert "The power watchdog of VM 100 is removed." in res.stdout
+    assert "The watchdog of VM 100 is removed." in res.stdout
 
 
 @pytest.mark.parametrize("cfg,status", [
     (WD_CFG, "running"),
     (WD_CFG.replace("hostpci0: 0000:00:02.0", "hostpci0: 0000:06:00"), "stopped"),
-    (WD_CFG.replace("macos-tahoe", "macos-sequoia"), "stopped"),
 ])
 def test_the_bash_watchdog_refusals_match_python(bash, vm, monkeypatch, cfg, status):
     from types import SimpleNamespace
@@ -444,8 +443,118 @@ def test_the_bash_watchdog_refusals_match_python(bash, vm, monkeypatch, cfg, sta
     assert [norm(ln[len("REFUSED: "):]) for ln in res.stdout.splitlines() if ln.startswith("REFUSED: ")] == issues and not steps
 
 
-def test_the_bash_finish_installs_the_watchdog_for_tahoe_between_attach_and_first_boot():
+def test_the_bash_finish_installs_the_watchdog_between_attach_and_first_boot():
     body = BLOCK[BLOCK.index("function igpu_finish() {"):BLOCK.index("function igpu_after_install()")]
     assert body.index('igpu_attach "$vmid"') < body.index('if igpu_watchdog_enable "$vmid"') < body.index('qm start "$vmid"')
-    assert 'if [ "$ver" == "tahoe" ]; then\n    if igpu_watchdog_enable "$vmid"' in body
+    assert 'if [ "$ver" == "tahoe" ]; then\n    if igpu_watchdog_enable "$vmid"' not in body  # every release records crashes
     assert 'if [ "${1:-}" == "igpu-watchdog" ]' in BASH
+
+
+# ── latest WhateverXe by default, any release on request, crash recorder ─────────────────────
+
+RELEASES = json.dumps([
+    {"tag": "1.0-rc1", "version": "1.0-rc1", "published": "2026-11-09T00:00:00Z", "prerelease": True},
+    {"tag": "0.9.0", "version": "0.9.0", "published": "2026-11-01T00:00:00Z", "prerelease": False},
+    {"tag": "0.8.0", "version": "0.8.0", "published": "2026-10-01T00:00:00Z", "prerelease": False}])
+ASSETS = json.dumps({"whateverxe": {"path": "/c/W.zip", "version": "0.9.0", "tag": "0.9.0", "sha256": "9" * 64, "source": "latest"},
+                     "graphics": {"path": "/c/G.pkg", "version": "0.4.1", "tag": "v0.4.1", "sha256": "4" * 64, "source": "latest"}})
+
+
+def test_the_bash_fetch_takes_the_chosen_releases_and_pins_only_amfipass(bash, tmp_path):
+    stub = ("igpu_engine() { case \"$1\" in assets) echo \"ASK $*\" >&2; printf '%s' \"$ASSETS\" ;; "
+            "fetch) echo \"/c/$2\" ;; esac; }; msg_info() { :; }; msg_ok() { echo \"OK $*\"; }; ")
+    res = bash(stub + 'IGPU_WEX_CHOICE=0.8.0; igpu_fetch_assets adl-h; echo "$IGPU_WEX_ZIP $IGPU_PKG $IGPU_AMFI_ZIP $IGPU_ROM_PATH"',
+               env={"ASSETS": ASSETS, "IGPU_CACHE": str(tmp_path / "cache")})
+    assert "ASK assets " + str(tmp_path / "cache") + " 0.8.0 latest" in res.stderr
+    assert "Using WhateverXe 0.9.0 and WhateverXe Graphics 0.4.1" in res.stdout
+    assert res.stdout.splitlines()[-1] == "/c/W.zip /c/G.pkg /c/pin:amfipass /c/rom:adl-h"
+
+
+def test_the_bash_fetch_fails_with_the_engines_message_when_github_cannot_be_asked(bash, tmp_path):
+    stub = 'igpu_engine() { echo "ERROR: Could not reach GitHub (x)." >&2; return 1; }; msg_info() { :; }; '
+    res = bash(stub + "igpu_fetch_assets adl-h", env={"IGPU_CACHE": str(tmp_path / "c")}, expect=1)
+    assert "Could not reach GitHub" in res.stderr
+
+
+def test_the_bash_finish_command_takes_the_version_flags(bash):
+    stub = 'igpu_finish() { echo "FINISH $IGPU_WEX_CHOICE $IGPU_GFX_CHOICE $*"; }; '
+    res = bash(stub + "igpu_finish_command 100 sequoia --wex-version 0.8.0 --graphics-version v0.4.0 --yes",
+               env={"GPU_YES": "yes"})
+    assert "FINISH 0.8.0 v0.4.0 100 sequoia" in res.stdout
+    res = bash(stub + "igpu_finish_command 100 --yes")
+    assert "FINISH latest latest 100" in res.stdout and "iGPU shares the CPU's power budget" in res.stdout
+    bash(stub + "igpu_finish_command 100 --wex-version", expect=1)
+
+
+def test_the_bash_versions_list_matches_the_python_list(bash, capsys, monkeypatch):
+    from osx_proxmox_next import igpu_cli
+    stub = 'igpu_engine() { printf "%s" "$RELEASES"; }; '
+    res = bash(stub + "igpu_versions_command", env={"RELEASES": RELEASES})
+    assert "WhateverXe releases, newest first:" in res.stdout and "WhateverXe Graphics releases, newest first:" in res.stdout
+    assert "  1.0-rc1  2026-11-09 (pre-release)" in res.stdout and "  0.9.0  2026-11-01 (latest)" in res.stdout
+    assert "  0.8.0  2026-10-01\n" in res.stdout
+    monkeypatch.setattr(igpu_engine, "list_releases", lambda kind, get=None: json.loads(RELEASES))
+    assert igpu_cli.run_versions() == 0
+    assert capsys.readouterr().out.splitlines()[:4] == res.stdout.splitlines()[:4]
+
+
+def test_the_bash_release_menu_marks_the_latest_and_answers_latest_for_it(bash, tmp_path):
+    log = tmp_path / "whiptail.args"
+    stub = ('igpu_engine() { printf "%s" "$RELEASES"; }; '
+            'whiptail() { printf "%s\\n" "$*" >"$ARGLOG"; printf "%s" "$PICK" >&2; }; ')
+    env = {"RELEASES": RELEASES, "ARGLOG": str(log)}
+    res = bash(stub + "igpu_pick_release whateverxe", env={**env, "PICK": "0.9.0"})
+    args = log.read_text()
+    assert res.stdout.strip() == "latest" and "--default-item 0.9.0" in args and "0.9.0 2026-11-01 (latest)" in args
+    assert "1.0-rc1 2026-11-09 (pre-release)" in args
+    res = bash(stub + "igpu_pick_release graphics", env={**env, "PICK": "0.8.0"})
+    assert res.stdout.strip() == "0.8.0"
+    bash(stub.replace('printf "%s" "$PICK" >&2;', "return 1;") + "igpu_pick_release whateverxe", env=env, expect=1)
+
+
+def test_the_bash_menu_is_skipped_without_a_terminal_and_when_flags_were_given(bash):
+    res = bash('igpu_pick_release() { echo asked; }; igpu_choose_versions; echo "$IGPU_WEX_CHOICE $IGPU_GFX_CHOICE"')
+    assert res.stdout.strip() == "latest latest"  # no terminal: no menu
+    res = bash('gpu_use_ui() { return 0; }; igpu_pick_release() { echo "t-$1"; }; igpu_choose_versions; echo "$IGPU_WEX_CHOICE $IGPU_GFX_CHOICE"')
+    assert res.stdout.strip() == "t-whateverxe t-graphics"
+    res = bash('gpu_use_ui() { return 0; }; igpu_pick_release() { echo asked; }; IGPU_VERSIONS_CHOSEN=yes; igpu_choose_versions; echo "$IGPU_WEX_CHOICE"')
+    assert res.stdout.strip() == "latest"
+
+
+def test_the_bash_report_runs_the_embedded_recorder(bash, tmp_path):
+    env = {"IGPU_LOG_DIR": str(tmp_path / "log"), "IGPU_STATE_DIR": str(tmp_path / "state"), "GPU_SYSFS": str(tmp_path / "sys")}
+    res = bash("igpu_report_command 100 --out " + str(tmp_path / "out"), env=env)
+    assert "iGPU report for VM 100" in res.stdout and "Nothing was sent anywhere" in res.stdout
+    assert list((tmp_path / "out").glob("igpu-report-100-*.tar.gz"))
+    bash("igpu_report_command abc", expect=2)
+
+
+def test_the_bash_installer_dispatches_the_new_commands_and_installs_the_recorder():
+    assert 'if [ "${1:-}" == "igpu-versions" ]' in BASH and 'if [ "${1:-}" == "igpu-report" ]' in BASH
+    assert 'install -D -m 644 "$GPU_ENGINE_DIR/igpu_diag.py" "$IGPU_WD_DIAG"' in BASH
+    from osx_proxmox_next import igpu_watchdog
+    assert f"IGPU_WD_DIAG={igpu_watchdog.DIAG_PATH}\n" in BASH
+
+
+def test_the_bash_records_the_chosen_versions_per_vm_and_shows_them_in_the_status():
+    body = BLOCK[BLOCK.index("function igpu_finish() {"):BLOCK.index("function igpu_after_install()")]
+    assert body.index("state-record") > body.index('igpu_attach "$vmid"') and 'state-write "$vmid"' in body
+    assert 'igpu_engine state-show' in BASH and "Installed: " in BASH
+
+
+def test_every_bash_pin_lookup_names_a_pin_that_exists():
+    names = set(re.findall(r"igpu_pin (\w+) \d", BASH))
+    assert names and names <= set(igpu_engine.PINS)  # WhateverXe and Graphics are not pins: they come from the releases
+
+
+def test_the_bash_attach_checks_the_kext_against_the_release_digest():
+    assert 'IGPU_WEX_SHA256="$(gpu_json \'d["whateverxe"]["sha256"]\' <<<"$IGPU_ASSETS_JSON")"' in BASH
+
+
+def test_a_release_tag_with_quotes_never_reaches_python_source_in_the_bash_menu(bash, tmp_path):
+    evil = 'x"+__import__("os").system("touch ' + str(tmp_path / "pwned") + '")+"'
+    releases = json.dumps([{"tag": evil, "version": evil, "published": "2026-11-09T00:00:00Z", "prerelease": False},
+                           {"tag": "0.8.0", "version": "0.8.0", "published": "2026-10-01T00:00:00Z", "prerelease": False}])
+    stub = ('igpu_engine() { printf "%s" "$RELEASES"; }; whiptail() { printf "%s" "$PICK" >&2; }; ')
+    res = bash(stub + "igpu_pick_release whateverxe", env={"RELEASES": releases, "PICK": "0.8.0"})
+    assert res.stdout.strip() == "0.8.0" and not (tmp_path / "pwned").exists()

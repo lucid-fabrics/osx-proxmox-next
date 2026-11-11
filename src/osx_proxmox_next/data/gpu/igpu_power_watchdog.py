@@ -22,21 +22,38 @@ not followed by a reset within GRACE seconds and the disks stay idle, the host s
 At most PANIC_MAX of those per PANIC_WINDOW seconds (counted while this process runs): a guest that panics at
 every boot is left stopped. A panic after macOS asked for a restart or shut down only finishes that request.
 
+Crash evidence (igpu_diag.py, installed next to this file): every byte of the serial console is copied to a
+rotated log under /var/log/osx-proxmox-next/<vmid>/, and right before the host stops a panicked or hung VM it
+saves an incident snapshot there (panic text, vCPU registers, iGPU ring and fault registers, host temperatures,
+vfio dmesg, config, versions). That takes at most about 8 seconds and a failure never keeps the VM from being
+recovered. `igpu-report <vmid>` bundles it. Only Tahoe (and a VM whose release is unknown) is stopped and
+restarted; on Ventura, Sonoma and Sequoia the watchdog records the crash and leaves the VM alone.
+
 The Python CLI and the standalone bash installer install this exact text (the bash script embeds it
 verbatim; tests/test_igpu_parity.py diffs the two). Standard library only.
 It disables its own unit and exits when the VM is gone or no longer has the iGPU and the serial port.
 """
+import collections
 import os
 import re
 import socket
 import subprocess
 import sys
 import time
+import urllib.parse
+
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import igpu_diag  # serial log copy and crash snapshots; the watchdog works without it
+except ImportError:
+    igpu_diag = None
 
 INTENT_RE = re.compile(r'Will be calling reboot\(2\) with flags: (0x[0-9a-fA-F]+)')
 RESET_RE = re.compile(r'BdsDxe: ')  # the firmware starting again
 BANNER_RE = re.compile(r'^Darwin Kernel Version ')  # a new kernel, unless a panic log repeats it under "Kernel version:"
-PANIC_RE = re.compile(r'panic\(cpu \d+ caller')
+# the panic line, or the first line of a nested panic (a panic while panicking prints no "panic(cpu" line; seen live
+# with a double fault from dtrace's panic())
+PANIC_RE = re.compile(r'panic\(cpu \d+ caller|Nested panic detected|^Double fault at')
 RB_HALT = 0x8
 PANIC_MAX = 3      # restarts after a panic within PANIC_WINDOW; past that the VM is stopped and left stopped
 PANIC_WINDOW = 3600
@@ -54,6 +71,8 @@ IGD_RE = re.compile(r'^hostpci\d+:\s*(host=)?(0000:)?00:02(\.0)?(,|$)', re.M)
 SERIAL_RE = re.compile(r'^serial0:\s*socket\s*$', re.M)
 OPS_RE = re.compile(r'^\s+(?:rd|wr)_operations:\s*(\d+)\s*$', re.M)
 PVE_READY = '/etc/pve/.version'  # present while the cluster file system is mounted
+MACOS_RE = re.compile(r'\b(ventura|sonoma|sequoia|tahoe)\b', re.I)
+RECENT_LINES = 400  # serial lines kept in memory for the crash snapshot
 
 
 def log(vmid, message):
@@ -78,6 +97,26 @@ def applies(conf_text):
     """True while the VM has the iGPU passed through and its serial port as a socket."""
     cur = main_section(conf_text)
     return bool(IGD_RE.search(cur)) and bool(SERIAL_RE.search(cur))
+
+
+def recovery_wanted(conf_text):
+    """False for a VM that is known to run Ventura, Sonoma or Sequoia: those restart and shut down normally with the
+    iGPU, and the host stepping in is only tested on Tahoe, so there the watchdog records crashes and leaves the VM
+    running. Tahoe and a VM whose release is unknown get the recovery."""
+    for line in main_section(conf_text).splitlines():
+        if line.startswith(('description:', 'name:')):
+            m = MACOS_RE.search(urllib.parse.unquote(line))
+            if m:
+                return m.group(1).lower() == 'tahoe'
+    return True
+
+
+def read_conf(vmid):
+    try:
+        with open(os.path.join(CONF_DIR, '%s.conf' % vmid)) as f:
+            return f.read()
+    except OSError:
+        return ''
 
 
 def io_ops(status_text):
@@ -183,10 +222,12 @@ def recover(vmid, intent, runner=run, clock=time.monotonic, sleep=time.sleep):
     return False
 
 
-def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep, history=None):
+def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep, history=None, recent=None, act=True):
     """Act on what the tracker says is due. Returns True when the host stopped (and maybe started) the VM.
 
-    history holds the clock() times of earlier panic restarts (see panic_allowed); step appends to it."""
+    history holds the clock() times of earlier panic restarts (see panic_allowed); step appends to it.
+    recent holds the last serial lines: they go into the crash snapshot taken before the VM is stopped.
+    act=False (a Ventura, Sonoma or Sequoia VM) takes the snapshot and leaves the VM running."""
     due = tracker.due(now)
     if due == 'check':
         if not vm_running(vmid, runner):
@@ -212,6 +253,11 @@ def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep,
             'is left alone' % (what, GRACE + QUIET, before, after))
         return False
     history = [] if history is None else history
+    snapshot(vmid, 'panic' if intent == 'panic' else 'hang-' + intent, what, recent, runner)
+    if not act:
+        log(vmid, '%s and then hung with no disk activity for %d s: the crash is recorded, and the VM is left '
+            'running because the host only steps in on macOS Tahoe' % (what, QUIET))
+        return False
     if intent == 'panic' and not panic_allowed(history, clock()):
         log(vmid, 'macOS panicked again, %d restarts after a panic within %d minutes: stopping it and leaving '
             'it stopped' % (PANIC_MAX, PANIC_WINDOW // 60))
@@ -224,6 +270,19 @@ def step(vmid, tracker, now, runner=run, clock=time.monotonic, sleep=time.sleep,
     done = 'restart' if intent == 'panic' else intent
     log(vmid, ('%s finished' % done) if ok else ('%s could not be finished' % done))
     return True
+
+
+def snapshot(vmid, kind, what, recent, runner=run):
+    """Save the crash evidence (igpu_diag.collect_incident, at most about 8 s) before the VM is stopped."""
+    if igpu_diag is None:
+        return None
+    try:
+        where = igpu_diag.collect_incident(vmid, kind, what, list(recent or ()), runner=runner)
+    except Exception as exc:  # recovery matters more than the evidence
+        log(vmid, 'could not save the crash snapshot: %s' % str(exc)[:200])
+        return None
+    log(vmid, 'saved the crash snapshot to %s' % where)
+    return where
 
 
 def disable(vmid, why):
@@ -246,12 +305,16 @@ def still_applies(vmid):
     return None
 
 
-def watch(vmid, sock_path, history=None):
-    """Read one QEMU run of the serial socket until it closes. history: see step."""
+def watch(vmid, sock_path, history=None, act=True):
+    """Read one QEMU run of the serial socket until it closes. history and act: see step."""
     s = socket.socket(socket.AF_UNIX)
     s.connect(sock_path)
     s.settimeout(POLL)
     tracker, buf = Tracker(), b''
+    recent = collections.deque(maxlen=RECENT_LINES)
+    copy = igpu_diag.SerialLog(vmid) if igpu_diag else None
+    if copy:
+        copy.mark('serial console connected')
     try:
         while True:
             try:
@@ -260,10 +323,13 @@ def watch(vmid, sock_path, history=None):
                     if tracker.intent:
                         log(vmid, 'powered off by itself' if tracker.intent == 'shutdown' else 'QEMU exited')
                     return
+                if copy:
+                    copy.write(data)
                 buf = (buf + data)[-MAX_LINE:]  # a line longer than this is not one the watch looks for
                 while b'\n' in buf:
                     raw, buf = buf.split(b'\n', 1)
                     line = raw.decode('utf-8', 'replace')
+                    recent.append(line)
                     if PANIC_RE.search(line):
                         # kept for whoever looks later; the tracker below decides whether the host steps in
                         log(vmid, 'kernel panic: ' + line.strip()[:300])
@@ -276,10 +342,12 @@ def watch(vmid, sock_path, history=None):
                         log(vmid, 'the guest reset by itself')
             except socket.timeout:
                 pass
-            if step(vmid, tracker, time.monotonic(), run, history=history):
+            if step(vmid, tracker, time.monotonic(), run, history=history, recent=recent, act=act):
                 return
     finally:
         s.close()
+        if copy:
+            copy.close()
 
 
 def main(argv):
@@ -299,7 +367,7 @@ def main(argv):
                 disable(vmid, why)
                 return 0
         try:
-            watch(vmid, sock_path, history)
+            watch(vmid, sock_path, history, recovery_wanted(read_conf(vmid)))
         except OSError:
             time.sleep(3)
 
