@@ -33,6 +33,10 @@ EMBEDS = {
     "igpu_firstboot.sh": ("GPU_EMBED_IGPU_FIRSTBOOT", PKG / "data/gpu/igpu_firstboot.sh"),
     "igpu_stage.sh": ("GPU_EMBED_IGPU_STAGE", PKG / "data/gpu/igpu_stage.sh"),
     "igpu_launchd.plist": ("GPU_EMBED_IGPU_PLIST", PKG / "data/gpu/igpu_launchd.plist"),
+    "nullmoth_engine.py": ("GPU_EMBED_NULLMOTH_ENGINE", PKG / "nullmoth_engine.py"),
+    "nm_stage.sh": ("GPU_EMBED_NM_STAGE", PKG / "data/nullmoth/nm_stage.sh"),
+    "nm_firstboot.sh": ("GPU_EMBED_NM_FIRSTBOOT", PKG / "data/nullmoth/nm_firstboot.sh"),
+    "nm_launchd.plist": ("GPU_EMBED_NM_PLIST", PKG / "data/nullmoth/nm_launchd.plist"),
     "igpu_power_watchdog.py": ("GPU_EMBED_IGPU_WATCHDOG", PKG / "data/gpu/igpu_power_watchdog.py"),
     "igpu_diag.py": ("GPU_EMBED_IGPU_DIAG", PKG / "data/gpu/igpu_diag.py"),
     "osx-next-power-watchdog@.service": ("GPU_EMBED_IGPU_WATCHDOG_UNIT", PKG / "data/gpu/osx-next-power-watchdog@.service"),
@@ -90,7 +94,8 @@ def test_embedded_engines_are_usable_standalone(bash, tmp_path):
     out = bash('gpu_engine_init; ls "$GPU_ENGINE_DIR"; python3 "$GPU_ENGINE_DIR/host_setup.py" bogus </dev/null', expect=None)
     assert set(out.stdout.split()) == {"bios_guide.py", "bios_paths.json", "host_setup.py", "igpu_engine.py", "intel_devices.txt",
                                        "igpu_firstboot.sh", "igpu_stage.sh", "igpu_launchd.plist",
-                                       "igpu_power_watchdog.py", "igpu_diag.py", "osx-next-power-watchdog@.service"}
+                                       "igpu_power_watchdog.py", "igpu_diag.py", "osx-next-power-watchdog@.service",
+                                       "nullmoth_engine.py", "nm_stage.sh", "nm_firstboot.sh", "nm_launchd.plist"}
     assert out.returncode == 64
 
 
@@ -432,7 +437,9 @@ def nvidia_env(tmp_path, vm_env) -> dict[str, str]:
             "GPU_SNAPSHOT_BASE": str(tmp_path / "snap"), "NULLMOTH_CACHE_DIR": str(tmp_path / "cache")}
 
 
-NV_STUBS = ("nullmoth_fetch_amfipass() { echo /cache/a.zip; }; nullmoth_oc_patch() { echo \"NMOC $*\"; }; ")
+NV_STUBS = ("nullmoth_fetch_amfipass() { echo /cache/a.zip; }; nullmoth_oc_patch() { echo \"NMOC $*\"; }; "
+            "nullmoth_choose_version() { echo \"${1:-latest}\"; }; nullmoth_stage() { echo \"NMSTAGE $*\"; }; "
+            "nullmoth_first_boot() { echo \"NMBOOT $*\"; }; ")
 
 
 def test_nvidia_attach_records_the_originals_and_snapshots(bash, vm, tmp_path):

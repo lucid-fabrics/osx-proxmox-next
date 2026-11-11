@@ -5,11 +5,11 @@ title: NVIDIA GPU (NullMoth, Beta)
 
 # NVIDIA GPU (NullMoth, Beta)
 
-The easiest way is the guided flow, [GPU passthrough (guided)](gpu-passthrough.md), which also configures the host and checks the BIOS. This page describes what is changed in the VM. This guide attaches an NVIDIA Turing-or-newer GPU to an installed macOS VM and prepares OpenCore for the NullMoth driver. This tool never installs the driver in the guest. You do that yourself.
+The easiest way is the guided flow, [GPU passthrough (guided)](gpu-passthrough.md), which also configures the host and checks the BIOS. This page describes what is changed in the VM. This guide attaches an NVIDIA Turing-or-newer GPU to an installed macOS VM, prepares OpenCore and installs the NullMoth driver in the guest for you. There is nothing to do inside macOS.
 
 > **NVIDIA GPU support (Beta)**
 >
-> This feature prepares your VM for the NullMoth NVIDIA driver, a third-party project that osx-proxmox-next does not make, review or support. You download and install that driver yourself, at your own risk. We are not responsible for the driver, its installation, or any damage, data loss or instability that follows.
+> This feature sets up your VM for the NullMoth NVIDIA driver, a third-party project that osx-proxmox-next does not make, review or support. The tool downloads the driver from its GitHub releases, checks its checksum and installs it in your VM for you, at your own risk. We are not responsible for the driver, its installation, or any damage, data loss or instability that follows.
 >
 > NullMoth only runs with core macOS security turned off: code-signing checks (AMFI) are bypassed, System Integrity Protection is relaxed and Secure Boot is disabled. This is a real security threat: malware has a much easier time on a VM set up this way. Only enable it on a VM you are prepared to treat as untrusted, and keep personal accounts and sensitive data off it.
 >
@@ -25,7 +25,7 @@ The easiest way is the guided flow, [GPU passthrough (guided)](gpu-passthrough.m
 
 ## Host requirements
 
-The command checks all of these and refuses with a clear message when one fails. `nvidia-attach` itself never writes host configuration; the guided flow does that part, with a preview and a backup.
+The command checks all of these and refuses with a clear message when one fails. `nvidia-attach` itself never writes host configuration; the guided flow does that part, with a preview and a backup. It does write files to the ISO storage (the driver, NVIDIA's firmware package and a temporary payload disk), so that storage needs about 1.5 GB free.
 
 - IOMMU on (VT-d or AMD-Vi), and the card in its own IOMMU group (bridges are fine, other devices are not).
 - Every function of the card (`01:00.*`) bound to `vfio-pci`. `nvidia` and `nouveau` must not hold it. When it is not bound, the command prints the `options vfio-pci ids=...` and `softdep` lines for `/etc/modprobe.d/vfio.conf`, then you run `update-initramfs -u -k all` and reboot.
@@ -37,16 +37,40 @@ The command checks all of these and refuses with a clear message when one fails.
 # Preview: preflight result and plan, nothing changes
 osx-next-cli nvidia-attach 106 --gpu 01:00 --dry-run
 
-# Apply (VM must be stopped; you must accept the notice)
+# Apply (VM must be stopped and installed; you must accept the notice).
+# On a terminal it lists the NullMoth releases and preselects the latest.
 osx-next-cli nvidia-attach 106 --gpu 01:00 --accept-nullmoth-risk
+
+# Pick the release up front (or --yes for the latest without asking)
+osx-next-cli nullmoth-versions
+osx-next-cli nvidia-attach 106 --gpu 01:00 --accept-nullmoth-risk --nullmoth-version v2.8.1
 
 # Undo: removes hostpci0, the MMIO window and the OpenCore changes
 osx-next-cli nvidia-detach 106
 ```
 
-The standalone script has the same two commands (`osx-proxmox-next.sh nvidia-attach <vmid> <pci-address>` and `nvidia-detach <vmid>`). It asks you to type `I accept`, or take `--accept-nullmoth-risk` for non-interactive use. In the TUI, open **Step 2 > GPU Passthrough** and pick the NVIDIA card: it goes through the same guided steps as an AMD card. The acknowledgement is typed (`I accept`) every time the screen opens, and the Choose button unlocks only when the phrase matches.
+The standalone script has the same commands (`osx-proxmox-next.sh nvidia-attach <vmid> <pci-address> [--nullmoth-version <tag>]`, `nullmoth-versions` and `nvidia-detach <vmid>`). It asks you to type `I accept`, or take `--accept-nullmoth-risk` for non-interactive use. In the TUI, open **Step 2 > GPU Passthrough** and pick the NVIDIA card: it goes through the same guided steps as an AMD card, and the VM step has a release picker with the latest release preselected. The acknowledgement is typed (`I accept`) every time the screen opens, and the Choose button unlocks only when the phrase matches.
 
-The VM must be stopped and must be a macOS VM made by this tool. The macOS release is read from the VM description or name; pass `--macos sequoia` or `--macos tahoe` when it cannot be read.
+The VM must be stopped, installed (no recovery disk attached) and made by this tool. The macOS release is read from the VM description or name; pass `--macos sequoia` or `--macos tahoe` when it cannot be read.
+
+## What happens
+
+After you accept the notice nothing else is asked. The setup takes about 15 minutes, most of it the driver's own installer.
+
+1. **Download and verify.** The host downloads the latest NullMoth release from GitHub (or the one you picked), and checks the tarball against the release's `SHA256SUMS.txt` and against the sha256 digest GitHub stores for the asset. A mismatch, a missing checksum or an unexpected download address stops everything. There is no pinned version and no silent fallback. NullMoth installs NVIDIA's GPU firmware from NVIDIA's own driver package; the host downloads that package (the address and checksum come from the release) so the guest needs no network.
+2. **Stage from recovery.** The VM boots macOS recovery once with the emulated display (the card is not attached yet), the recovery Terminal is driven by key presses, and one command copies the driver and a first-boot script into the installed macOS. It also runs `spctl kext-consent disable`, so macOS never asks you to approve the extensions in System Settings.
+3. **Attach and first boot.** The card is attached (OpenCore changes, `hostpci0`, MMIO window) and the VM boots normally. A one-shot LaunchDaemon in the guest turns on Remote Login and Screen Sharing, runs `pmset -a sleep 0`, checks the driver's checksum again and runs its `install.sh`. It then restarts, waits until the NullMoth extensions (4 or more) are loaded, tells the host and powers off.
+4. **Report.** The host drops the payload disk, starts the VM, finds its address from the neighbour table and prints the connection lines:
+
+```
+Done. VM 106: NullMoth v2.9 is installed and loaded (5 extensions).
+  ssh <user>@192.168.1.57
+  vnc://192.168.1.57
+```
+
+The only thing the tool cannot do is plug a monitor in. It reads the card's display from inside the guest (a monitor's EDID) and prints one line asking for a monitor or an HDMI/DisplayPort dummy plug only when none was seen. Without one, the Proxmox console and Screen Sharing both stay black; SSH always works.
+
+If the install fails, the report says why (the last lines of the driver's installer), the VM keeps running without the driver, and the log is `/var/log/osx-proxmox-next-nullmoth.log` in the guest. Remote Login, Screen Sharing and sleep 0 stay switched on and the extension approval prompt stays off. To retry, run `nvidia-detach <vmid>` first (the card is attached by then), then the same command: it stages again from scratch.
 
 ## What changes
 
@@ -65,24 +89,11 @@ On the OpenCore disk (`ide0`):
 - The SMBIOS model is set to `MacPro7,1` (the OpenCore template ships `iMacPro1,1`, which macOS 26 refuses).
 - `csr-active-config` must already include `0x0A43` and `SecureBootModel` must be `Disabled`; the command stops without changing anything if not.
 
-## Before applying: get a way into macOS
-
-Once the NullMoth driver loads, the Proxmox console goes black. The driver takes the display even with `vga std`, so the web console shows nothing. The card needs a display of its own: connect a monitor or an HDMI/DisplayPort dummy plug to it. Without one, both the Proxmox console and Screen Sharing stay black (Screen Sharing mirrors the display on the card). SSH always works. `vga std` stays set because the firmware and OpenCore screens and recovery still use it. Set up remote access in the guest **before** you attach the card:
-
-1. In macOS open System Settings > General > Sharing and turn on **Remote Login** and **Screen Sharing**.
-2. Note the VM's IP address.
-3. Connect with `ssh <user>@<ip>` or any VNC client pointed at the VM's IP (from a Mac: `open vnc://<ip>`).
-4. Connect a monitor or an HDMI/DisplayPort dummy plug to the card. The guided flow asks you to confirm this too.
-
-If `systemsetup -setremotelogin on` is refused because it needs Full Disk Access, run `sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist` instead. The guided flow asks you to confirm this checklist before it attaches the card.
-
 ## After applying
 
-1. Start the VM. Once the NullMoth driver loads, the Proxmox console goes black; to get a desktop, a monitor or an HDMI/DisplayPort dummy plug must be connected to the card (Screen Sharing then mirrors that display). SSH always works.
-2. Download the NullMoth release from https://github.com/nullmoth/nvidia-macos-driver/releases, check it with `shasum -a 256 -c SHA256SUMS`, then run `sudo ./install.sh` in the guest.
-3. Approve the extensions in System Settings > Privacy & Security and reboot the guest.
-4. Verify with `kmutil showloaded --list-only | grep -i nullmoth`. Expect 4 or more lines (NVRM, NVAccel, NVRMFB, NVRMAGDC; newer releases add more, for example NMXAudio in 2.7.2).
-5. Turn off system sleep: `sudo pmset -a sleep 0`.
+Once the NullMoth driver loads, the Proxmox console goes black. The driver takes the display even with `vga std`. Use the `ssh` or `vnc://` line the command printed, or the monitor on the card. `vga std` stays set because the firmware and OpenCore screens and recovery still use it.
+
+To check by hand: `kmutil showloaded --list-only | grep -i nullmoth` in the guest should list 4 or more lines (NVRM, NVAccel, NVRMFB, NVRMAGDC; newer releases add more, for example NMXAudio in 2.7.2).
 
 Escape hatches: add `-nvoff` to the boot-args, or run `gpu-setup --undo` (or `nvidia-detach <vmid>`, the same code path and record) on the host, which removes `hostpci0`, the MMIO window and restores the saved `config.plist`.
 
@@ -92,4 +103,4 @@ The NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore 
 
 ## Status
 
-Beta. NullMoth is a community project, and its compatibility is tested by its community, not by us. This tool only prepares the VM so the driver can be installed. We do not make, ship or support the driver, and we take no responsibility for installing it or for what it does.
+Beta. NullMoth is a community project, and its compatibility is tested by its community, not by us. This tool downloads the driver from its GitHub releases, verifies it and installs it for you, but we do not make, ship or support the driver, and we take no responsibility for installing it or for what it does.

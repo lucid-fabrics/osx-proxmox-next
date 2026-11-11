@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterable
 
-from . import amd_host, bios_guide, gpu, gpu_attach, host_setup, igpu_attach, intel_host, nullmoth, nvidia_host
+from . import amd_host, bios_guide, gpu, gpu_attach, host_setup, igpu_attach, intel_host, nullmoth, nullmoth_finish, nvidia_host
 from .gpu import AttachRecord, load_record, parse_config
 from .host_setup import STEPS, default_run
 from .infrastructure import ProxmoxAdapter
@@ -40,13 +40,13 @@ DISPLAY_OPTIONS = (
     ("console", "Keep the Proxmox console", "The card speeds up apps and you keep using the web console."),
 )
 # NVIDIA has no such choice (the console always goes black), so it gets this note instead
-NVIDIA_DISPLAY_NOTE = ("NVIDIA: the Proxmox console goes black once the driver loads. Turn on Remote Login and Screen "
-                       "Sharing first, and plug a monitor or a dummy plug into the card.")
+NVIDIA_DISPLAY_NOTE = ("NVIDIA: the Proxmox console goes black once the driver loads. Everything inside macOS is done "
+                       "for you, including Remote Login and Screen Sharing. Plug a monitor or a dummy plug into the card.")
 DOCS_ROOT = "https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/"
 NULLMOTH_DOC = DOCS_ROOT + "nvidia-nullmoth"
 SUPPORTED_DOC = DOCS_ROOT + "gpu-passthrough#supported-cards"
-NEXT_NVIDIA = (f"Next, in macOS: install the NullMoth driver yourself (guide: {NULLMOTH_DOC}). "
-               "We do not ship or support it.")
+NEXT_NVIDIA = (f"Next: nothing to do in macOS, the driver is installed and the VM is running (guide: {NULLMOTH_DOC}). "
+               "We do not ship or support the driver.")
 NEXT_AMD = "Next: start the VM. macOS uses the card with its own driver."
 INTEL_DISPLAY_NOTE = ("Intel iGPU: the host gives it up for good (no local console), and the VM needs a monitor or an "
                       "HDMI dummy plug on the host's native HDMI port. LSPCON HDMI and USB-C ports do not work.")
@@ -217,7 +217,7 @@ def verdict(vendor: str, device_id: int, name: str = "") -> tuple[str, str, str]
         return intel_host.verdict(device_id)
     if nvidia_host.is_supported_device(device_id):
         return ("nullmoth", "Works with NullMoth (beta) on macOS 15.5 to 26",
-                "Needs the third-party NullMoth driver, which you install yourself.")
+                "Needs the third-party NullMoth driver, which this tool installs for you.")
     return "unsupported", "Not supported by macOS", _PRE_TURING
 
 
@@ -688,6 +688,11 @@ class Session:
             vmid, cache / "WhateverXe-RELEASE.zip", cache / AMFIPASS_MOD.filename, cache / rom_file,
             allow_stop=allow_stop, adapter=self.pve, root=Path(self.root), run=self.run)
 
+    def finish_nvidia(self, choice: str, on_event: Callable[[str], None]) -> nullmoth_finish.FinishResult:
+        """Download the driver, stage it from recovery, attach the card and run the first boot (nullmoth_finish)."""
+        return nullmoth_finish.finish(self.state["vm"], self.state["gpu"]["bdf"], choice, pve=self.pve,
+                                      on_event=on_event, sysfs_root=self.sysfs)
+
     def begin_attach(self) -> None:
         """Remember the VM before touching it, so --undo can find a half-done attach.
 
@@ -707,10 +712,10 @@ class Session:
     def first_boot_text(self) -> str:
         chosen = self.state["gpu"]
         if chosen["vendor"] == "nvidia":
-            lines = [nullmoth.NEXT_STEPS[0],
-                     "Checklist inside macOS (take a photo of this or scan the QR code):"]
-            lines += [f"  {i}. {s}" for i, s in enumerate(nullmoth.NEXT_STEPS[1:], start=1)]
-            lines += [f"Driver releases: {nullmoth.NULLMOTH_URL}/releases", f"Our guide: {NULLMOTH_DOC}"]
+            lines = ["The NullMoth driver is installed and loaded, and Remote Login and Screen Sharing are on.",
+                     "Once the driver loads, the Proxmox console goes black: use ssh or vnc://<ip> to the VM, or a "
+                     "monitor or HDMI/DisplayPort dummy plug on the card.", nullmoth.NOTES[0], nullmoth.NOTES[1],
+                     f"Our guide: {NULLMOTH_DOC}"]
             return "\n".join(lines)
         if chosen["vendor"] == "intel":
             return "\n".join(igpu_attach.IGPU_NEXT_STEPS)

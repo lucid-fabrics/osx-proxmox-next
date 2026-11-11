@@ -12,7 +12,7 @@ import pytest
 
 from gpu_fakes import add_card, write
 from nullmoth_fakes import MAC_CFG
-from osx_proxmox_next import cli, gpu, gpu_attach, gpu_setup, gpu_setup_cli, nullmoth
+from osx_proxmox_next import cli, gpu, gpu_attach, gpu_setup, gpu_setup_cli, nullmoth, nullmoth_finish
 from test_gpu_parity import BASH, MAC, NV_STUBS, bash, block_file, nvidia_env, vm  # noqa: F401
 from test_gpu_setup import SEQUOIA, Env
 from test_gpu_setup import _no_real_vm_listing  # noqa: F401
@@ -171,14 +171,11 @@ def test_undo_with_nothing_recorded_points_at_nvidia_detach_when_markers_exist(t
 
 # ── 3. console copy ──
 
-def test_every_nvidia_text_says_the_console_goes_black_and_asks_for_remote_access():
-    first = nullmoth.NEXT_STEPS[0]
-    assert "console goes black" in first and "Once the NullMoth driver loads" in first
-    assert "stays on the emulated display" not in "\n".join(nullmoth.NEXT_STEPS)
-    prep = "\n".join(nullmoth.GUEST_PREP)
-    assert "Remote Login" in prep and "Screen Sharing" in prep and "System Settings > General > Sharing" in prep
-    assert "open vnc://<ip>" in prep and "launchctl load -w /System/Library/LaunchDaemons/ssh.plist" in prep
-    assert "4 or more lines" in nullmoth.NEXT_STEPS[3] and "grep -i nullmoth" in nullmoth.NEXT_STEPS[3]
+def test_every_nvidia_text_says_the_console_goes_black_and_nothing_is_left_to_the_user():
+    assert "console goes black" in nullmoth.DISPLAY_LINE and "dummy plug" in nullmoth.DISPLAY_LINE
+    assert "Screen Sharing" in nullmoth.DISPLAY_LINE and "-nvoff" in nullmoth.NOTES[0]
+    for gone in ("NEXT_STEPS", "GUEST_PREP", "GUEST_PREP_CONFIRM", "GUEST_PREP_TITLE"):
+        assert not hasattr(nullmoth, gone), gone
 
 
 def test_first_boot_text_and_the_vm_step_checklist(tmp_path):
@@ -188,22 +185,43 @@ def test_first_boot_text_and_the_vm_step_checklist(tmp_path):
     assert "stays on the Proxmox console" not in s.first_boot_text() and "goes black" in s.first_boot_text()
 
 
-def test_vm_step_asks_the_guest_checklist_before_attaching(tmp_path, monkeypatch):
+def test_vm_step_has_no_guest_checklist_and_runs_the_whole_setup(tmp_path, monkeypatch):
     env = nvidia_env_host(tmp_path)
     s = env.session()
     s.choose("06:00", 100, "console", ack=True, share_ok=True)
     s.goto(7)
-    applied = []
-    monkeypatch.setattr("osx_proxmox_next.executor.apply_plan", lambda *a, **k: applied.append(1))
-    monkeypatch.setattr("osx_proxmox_next.rollback.create_snapshot", lambda vmid: None)
-    monkeypatch.setattr("osx_proxmox_next.oc_builder.ensure_amfipass", lambda d: None)
+    seen = []
     monkeypatch.setattr(gpu_setup.Session, "vm_plan", lambda self, allow_stop=False: nullmoth.AttachPlan(100))
+    monkeypatch.setattr(gpu_setup.Session, "finish_nvidia", lambda self, choice, on_event: seen.append(choice) or on_event("working") or
+                        nullmoth_finish.FinishResult(version="v2.9", verified=True, kexts=5, display="yes", ip="10.0.0.2"))
     out: list[str] = []
-    ns = parse("--vm", "100")
+    ns = parse("--vm", "100", "--yes", "--nullmoth-version", "v2.8")
     code = gpu_setup_cli._step_vm(s, gpu_setup_cli._Io(lambda p: "", out.append, False), ns)
     text = "\n".join(out)
-    assert "Before you attach (required)" in text and "Remote Login and Screen Sharing" in text
-    assert code == gpu_setup_cli.EXIT_REFUSED and applied == [] and "Nothing was changed" in text
+    assert "Before you attach (required)" not in text and "Remote Login" not in text
+    assert "downloads the NullMoth release" in text and "  working" in text and "ssh <user>@10.0.0.2" in text
+    assert code is None and seen == ["v2.8"] and s.state["done"].count(7) == 1
+
+
+def test_vm_step_stops_on_a_failed_nvidia_setup(tmp_path, monkeypatch):
+    env = nvidia_env_host(tmp_path)
+    s = env.session()
+    s.choose("06:00", 100, "console", ack=True, share_ok=True)
+    s.goto(7)
+    monkeypatch.setattr(gpu_setup.Session, "vm_plan", lambda self, allow_stop=False: nullmoth.AttachPlan(100))
+    results = iter([nullmoth_finish.FinishResult(verified=False, detail="STOP"), nullmoth_finish.FinishError("VM is running")])
+
+    def finish(self, choice, on_event):
+        item = next(results)
+        if isinstance(item, Exception):
+            raise item
+        return item
+    monkeypatch.setattr(gpu_setup.Session, "finish_nvidia", finish)
+    out: list[str] = []
+    io = gpu_setup_cli._Io(lambda p: "", out.append, False)
+    assert gpu_setup_cli._step_vm(s, io, parse("--vm", "100", "--yes")) == gpu_setup_cli.EXIT_FAIL
+    assert gpu_setup_cli._step_vm(s, io, parse("--vm", "100", "--yes")) == gpu_setup_cli.EXIT_FAIL
+    assert "FAILED: VM is running" in "\n".join(out) and 7 not in s.state["done"]
 
 
 # ── 4. host console label ──
@@ -272,13 +290,15 @@ def test_bash_host_console_follows_the_python_rule(bash, vm, tmp_path):
     assert "host console" in bash('gpu_scan; gpu_card_text "${GPU_CARDS[0]}"', env=env).stdout
 
 
-def test_bash_nvidia_attach_prints_the_checklist_and_the_shared_wording(bash, vm, tmp_path):
+def test_bash_nvidia_attach_runs_the_setup_and_prints_the_shared_wording(bash, vm, tmp_path):
     vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
     vm(101, "stopped", "hostpci0: 0000:01:00,pcie=0\n")
     res = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk --yes", env=nvidia_env(tmp_path, vm.env))
-    assert "Before you attach (required)" in res.stdout and "Remote Login and Screen Sharing" in res.stdout
+    assert "Before you attach (required)" not in res.stdout and "Remote Login" not in res.stdout
     assert gpu.shared_note(101) in res.stdout
-    assert "the Proxmox console goes black" in res.stdout and "4 or more lines" in res.stdout
+    assert "NMSTAGE 100 latest tahoe" in res.stdout and "NMBOOT 100" in res.stdout
+    assert res.stdout.index("NMSTAGE") < res.stdout.index("NMOC 100 attach") < res.stdout.index("NMBOOT")
+    assert vm.calls()[-1] == "qm set 100 --boot order=ide0;virtio0"
 
 
 def test_bash_gpu_setup_undo_reverts_an_nvidia_attach_exactly(bash, vm, tmp_path):
@@ -325,6 +345,7 @@ def test_docs_and_readme_copy():
     for rel in ("docs/docs/guides/gpu-passthrough.md", "docs/docs/guides/nvidia-nullmoth.md"):
         doc = (root / rel).read_text()
         assert "console goes black" in doc and "Remote Login" in doc and "Screen Sharing" in doc, rel
+        assert "release yourself" not in doc and "sudo ./install.sh" not in doc, rel
         assert "stays on the emulated display" not in doc
     assert "4 or more lines" in (root / "docs/docs/guides/nvidia-nullmoth.md").read_text()
     assert "console goes black" in (root / "README.md").read_text()
@@ -388,23 +409,19 @@ def test_tui_two_click_keys_follow_the_card_and_the_vm():
     assert d._gp_confirm_click(M._gp_share_key(b), "x", "w") is True
 
 
-# ── standalone nvidia-attach asks the Screen Sharing question ──
+# ── standalone nvidia-attach: the risk notice is the only question ──
 
-def test_nvidia_attach_asks_the_guest_question_and_yes_answers_only_that(monkeypatch, tmp_path, capsys):
+def test_nvidia_attach_asks_only_the_risk_notice_and_yes_never_answers_it(monkeypatch, tmp_path, capsys):
     from test_nullmoth import patch_cli
     applied = patch_cli(monkeypatch, tmp_path)
-    monkeypatch.setattr("sys.stdin", type("T", (), {"isatty": lambda self: False})())
-    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 2
-    assert "Nothing was changed" in capsys.readouterr().out and not applied
+    ran = []
+    monkeypatch.setattr(nullmoth_finish, "finish", lambda *a, **k: ran.append(a) or nullmoth_finish.FinishResult(verified=True))
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00"]) == 2
+    assert "Nothing was changed" in capsys.readouterr().out and not applied and not ran
     assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--yes"]) == 2  # --yes never gives the risk ack
-    assert not applied
-    monkeypatch.setattr("sys.stdin", type("T", (), {"isatty": lambda self: True})())
-    monkeypatch.setattr("builtins.input", lambda prompt: "y")
-    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 0
-    assert applied
-    monkeypatch.setattr("builtins.input", lambda prompt: "n")
-    applied.clear()
-    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk"]) == 2 and not applied
+    assert not ran
+    assert cli.run_cli(["nvidia-attach", "100", "--gpu", "01:00", "--accept-nullmoth-risk", "--yes"]) == 0
+    assert len(ran) == 1
 
 
 def test_bash_undo_skips_the_record_of_a_recreated_vm(bash, vm, tmp_path):
@@ -422,11 +439,12 @@ def test_bash_undo_skips_the_record_of_a_recreated_vm(bash, vm, tmp_path):
     assert not (state_dir / "gpu-attach-100.json").exists() and list(state_dir.glob("gpu-attach-100.json.stale-*"))
 
 
-def test_bash_nvidia_attach_asks_the_guest_question(bash, vm, tmp_path):
+def test_bash_nvidia_attach_asks_only_the_risk_notice(bash, vm, tmp_path):
     vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
     env = nvidia_env(tmp_path, vm.env)
-    out = bash(NV_STUBS + "nvidia_attach 100 01:00 --accept-nullmoth-risk", env=env, expect=2)
+    out = bash(NV_STUBS + "nvidia_attach 100 01:00 --yes </dev/null", env=env, expect=1)
     assert "Nothing was changed" in out.stdout + out.stderr and vm.calls() == []
+    assert "NMSTAGE" not in out.stdout
 
 
 # ── check 5 follow-ups: config read failure, standalone detach fingerprint, no-console re-plan ──

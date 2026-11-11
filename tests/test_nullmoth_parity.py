@@ -1,14 +1,17 @@
 """Python/bash parity for the NullMoth NVIDIA beta (the repo's parity rule)."""
 from __future__ import annotations
 
+import json
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from nullmoth_fakes import add_dev, good_card
-from osx_proxmox_next import gpu, nullmoth, nvidia_host, oc_builder
+from osx_proxmox_next import gpu, nullmoth, nullmoth_cli, nullmoth_finish, nvidia_host, oc_builder
 
 REPO = Path(__file__).resolve().parent.parent
 BASH = (REPO / "scripts/bash/osx-proxmox-next.sh").read_text()
@@ -21,6 +24,12 @@ def var(name: str) -> str:
     m = re.search(rf'^{name}=(["\'])(.*?)\1$', BLOCK, re.M)
     assert m, name
     return m.group(2)
+
+
+def var_num(name: str) -> int:
+    m = re.search(rf"^{name}=(\d+)", BLOCK, re.M)
+    assert m, name
+    return int(m.group(1))
 
 
 def run_bash(snippet: str, env: dict[str, str] | None = None) -> str:
@@ -57,16 +66,61 @@ def test_embedded_patcher_is_the_data_file():
     assert nullmoth._oc_patch_source() == PATCHER
 
 
-def test_next_steps_match():
-    for step in nullmoth.NEXT_STEPS:
-        words = step.split(" ")[:6]
-        assert " ".join(words) in BLOCK, step
-
-
-def test_first_boot_checklist_points_at_undo_not_the_alias():
-    text = "\n".join(nullmoth.NEXT_STEPS)
-    assert "gpu-setup --undo" in nullmoth.NEXT_STEPS[5] and "nvidia-detach" not in text
+def test_closing_lines_match():
+    assert var("NULLMOTH_DISPLAY_LINE") == nullmoth.DISPLAY_LINE
+    for note in nullmoth.NOTES:
+        assert f'"{note}"' in BLOCK
     assert "gpu-setup --undo on the host" in BLOCK and "run nvidia-detach on the host" not in BLOCK
+    assert not hasattr(nullmoth, "NEXT_STEPS") and not hasattr(nullmoth, "GUEST_PREP")
+    assert "Download the NullMoth release yourself" not in BASH and "sudo ./install.sh" not in BLOCK
+
+
+def test_timeouts_match_the_python_module():
+    for name, value in (("FIRSTBOOT_TIMEOUT", nullmoth_finish.FIRSTBOOT_TIMEOUT), ("RESULT_POLL", nullmoth_finish.RESULT_POLL),
+                        ("RESULT_GRACE", nullmoth_finish.RESULT_GRACE), ("REBOOT_GRACE", nullmoth_finish.REBOOT_GRACE),
+                        ("HALT_WAIT", nullmoth_finish.HALT_WAIT), ("IP_TIMEOUT", nullmoth_finish.IP_TIMEOUT),
+                        ("IP_POLL", nullmoth_finish.IP_POLL)):
+        assert var_num(f"NULLMOTH_{name}") == value, name
+
+
+@pytest.mark.parametrize("releases", [
+    [{"tag": "v3.0-rc1", "prerelease": True, "published": "2026-11-05T00:00:00Z"},
+     {"tag": "v2.9", "prerelease": False, "published": "2026-11-01T00:00:00Z"},
+     {"tag": "v2.8", "prerelease": False, "published": "2026-10-01T00:00:00Z"}],
+    [], [{"tag": "v1", "prerelease": True, "published": "2026-01-01T00:00:00Z"}],
+])
+def test_version_lines_match(releases):
+    out = run_bash("nullmoth_version_lines <<<\"$J\"", env={"J": json.dumps({"releases": releases})})
+    assert out.splitlines() == nullmoth_cli.version_lines(releases)
+
+
+def test_bash_choose_version_rules():
+    stubs = "nullmoth_engine() { echo '{\"releases\": []}'; }; "
+    assert run_bash(stubs + "nullmoth_choose_version v2.8 no").strip() == "v2.8"
+    assert run_bash(stubs + "nullmoth_choose_version '' yes").strip() == "latest"
+    assert run_bash(stubs + "nullmoth_choose_version '' no </dev/null").strip() == "latest"
+
+
+def test_the_engine_runs_from_the_embedded_files(tmp_path):
+    """The bash installer writes the embedded engines into one folder and runs them as scripts."""
+    for name in ("nullmoth_engine.py", "igpu_engine.py"):
+        shutil.copy(REPO / "src/osx_proxmox_next" / name, tmp_path / name)
+    for name in ("nm_stage.sh", "nm_firstboot.sh", "nm_launchd.plist"):
+        shutil.copy(REPO / "src/osx_proxmox_next/data/nullmoth" / name, tmp_path / name)
+    res = subprocess.run([sys.executable, str(tmp_path / "nullmoth_engine.py"), "parse-result", "verified: kexts=5 display=no ip=1.2.3.4"],
+                         capture_output=True, text=True, cwd=tmp_path)
+    assert res.returncode == 0 and json.loads(res.stdout)["kexts"] == 5
+    assert subprocess.run([sys.executable, str(tmp_path / "nullmoth_engine.py")], capture_output=True, text=True).returncode == 64
+    sys.path.insert(0, str(tmp_path))
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("nullmoth_engine_flat", tmp_path / "nullmoth_engine.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.data_dir() == tmp_path and "stage.sh" in mod.payload_files(tmp_path / "nm_stage.sh", "a" * 64)
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("igpu_engine", None)
 
 
 def test_bar_note_matches_in_both():
@@ -76,7 +130,8 @@ def test_bar_note_matches_in_both():
 def test_bash_dispatch_and_commands_exist():
     assert 'if [ "${1:-}" == "nvidia-attach" ]' in BASH and 'if [ "${1:-}" == "nvidia-detach" ]' in BASH
     assert BASH.index('"nvidia-attach"') < BASH.index("This will create a new macOS VM")
-    for flag in ("--accept-nullmoth-risk", "--dry-run", "--macos"):
+    assert 'if [ "${1:-}" == "nullmoth-versions" ]' in BASH
+    for flag in ("--accept-nullmoth-risk", "--dry-run", "--macos", "--nullmoth-version"):
         assert flag in BLOCK
 
 

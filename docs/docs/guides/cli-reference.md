@@ -379,8 +379,9 @@ The guided GPU passthrough walkthrough for AMD and NVIDIA cards: scan, choose, B
 ## nvidia-attach / nvidia-detach (Beta)
 
 ```bash
-osx-next-cli nvidia-attach <vmid> --gpu <pci-address> --accept-nullmoth-risk [--dry-run] [--macos sequoia|tahoe]
+osx-next-cli nvidia-attach <vmid> --gpu <pci-address> --accept-nullmoth-risk [--dry-run] [--macos sequoia|tahoe] [--nullmoth-version <tag>] [--yes]
+osx-next-cli nullmoth-versions
 osx-next-cli nvidia-detach <vmid> [--dry-run]
 ```
 
-Attach an NVIDIA Turing-or-newer GPU to a stopped macOS VM and prepare OpenCore for the third-party NullMoth driver, or undo it (`nvidia-detach` is the same code path as `gpu-setup --undo` for one VM and also undoes an AMD attach). `nvidia-attach` writes the same record `gpu-setup` does, so `gpu-setup --undo` undoes it too. Turn on Remote Login and Screen Sharing in macOS first: the Proxmox console goes black once the driver loads, and a monitor or HDMI/DisplayPort dummy plug must be connected to the card to get a desktop (Screen Sharing mirrors it; SSH always works). Without `--accept-nullmoth-risk` nothing changes; `--dry-run` prints the preflight result and the plan without it. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).
+Attach an NVIDIA Turing-or-newer GPU to a stopped, installed macOS VM and install the third-party NullMoth driver in it with no steps inside macOS: the host downloads the latest release (or `--nullmoth-version <tag>`; on a terminal you pick from the list, latest preselected, and `--yes` takes the latest), verifies it against `SHA256SUMS` and the GitHub digest, stages it from recovery and lets the first boot install it, then prints the `ssh` and `vnc://` lines. `nullmoth-versions` lists the releases. Undo it (`nvidia-detach` is the same code path as `gpu-setup --undo` for one VM and also undoes an AMD attach). `nvidia-attach` writes the same record `gpu-setup` does, so `gpu-setup --undo` undoes it too. The Proxmox console goes black once the driver loads, and a monitor or HDMI/DisplayPort dummy plug must be connected to the card to get a desktop (the command says so only when it sees no display; Screen Sharing mirrors it and SSH always works). Without `--accept-nullmoth-risk` nothing changes; `--dry-run` prints the preflight result and the plan without it. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).

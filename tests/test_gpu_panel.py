@@ -577,14 +577,22 @@ def test_vm_step_messages_and_undo(tmp_path, monkeypatch):
     run(go)
 
 
-def test_nvidia_vm_step_downloads_amfipass(tmp_path, monkeypatch):
+def test_nvidia_vm_step_picks_a_release_and_runs_the_whole_setup(tmp_path, monkeypatch):
+    from osx_proxmox_next import nullmoth_finish
     env = Env(tmp_path)
     add_card(env.root, bdf="0000:01:00", vendor=0x10DE, device=0x2504, audio=0x228E, group=3)
-    fetched = []
-    monkeypatch.setattr("osx_proxmox_next.oc_builder.ensure_amfipass", lambda d: fetched.append(d))
-    monkeypatch.setattr("osx_proxmox_next.rollback.create_snapshot", lambda vmid: None)
-    monkeypatch.setattr("osx_proxmox_next.executor.apply_plan",
-                        lambda *a, **k: ApplyResult(True, [StepResult("s", "c", True, 0, "")], Path("/tmp/log")))
+    releases = [{"tag": "v3.0-rc1", "prerelease": True, "published": "2026-11-05T00:00:00Z"},
+                {"tag": "v2.9", "prerelease": False, "published": "2026-11-01T00:00:00Z"},
+                {"tag": "v2.8", "prerelease": False, "published": "2026-10-01T00:00:00Z"}]
+    monkeypatch.setattr(nullmoth_finish, "versions", lambda: releases)
+    chosen = []
+
+    def finish(self, choice, on_event):
+        chosen.append(choice)
+        on_event("Building the payload disk")
+        return nullmoth_finish.FinishResult(version="v2.8", verified=True, kexts=5, display="no", ip="10.0.0.2",
+                                            notes=["a note"])
+    monkeypatch.setattr(gpu_setup.Session, "finish_nvidia", finish)
 
     async def go():
         app = NextApp()
@@ -597,18 +605,52 @@ def test_nvidia_vm_step_downloads_amfipass(tmp_path, monkeypatch):
             await _advance_to_step(pilot, app, 2)
             await pilot.click("#mode_gpu")
             await settle(pilot, lambda: "Step 7" in text(app, "#gp_title"))
+            await settle(pilot, lambda: shown(app, "#gp_nm_select") and app.query_one("#gp_nm_select").value == "v2.9")
+            app.query_one("#gp_nm_select").value = "v2.8"  # an older release instead of the preselected latest
             await press(pilot, app, "#gp_primary_btn")
             await settle(pilot, lambda: label(app, "#gp_primary_btn") == "Attach the card now")
-            assert "Remote Login and Screen Sharing" in text(app, "#gp_body")  # the required guest checklist
-            await press(pilot, app, "#gp_primary_btn")  # first click only asks whether the guest is ready
-            await settle(pilot, lambda: "Remote Login" in text(app, "#gp_result"))
-            assert not fetched and "Step 7" in text(app, "#gp_title")
-            await press(pilot, app, "#gp_primary_btn")
+            assert "Remote Login" not in text(app, "#gp_body") and "downloads the NullMoth release" in text(app, "#gp_body")
+            await press(pilot, app, "#gp_primary_btn")  # one click: there is no guest checklist to confirm any more
             await settle(pilot, lambda: "Step 8" in text(app, "#gp_title"))
-            assert fetched and "kmutil showloaded" in text(app, "#gp_body") and app._gp.first_boot_qr()
+            assert chosen == ["v2.8"] and "installed and loaded" in text(app, "#gp_body") and app._gp.first_boot_qr()
+            result = text(app, "#gp_result")
+            assert "NullMoth v2.8 is installed and loaded (5 extensions)" in result and "vnc://10.0.0.2" in result
+            assert "a note" in result and "dummy plug" in result  # no display was seen on the card
             assert label(app, "#gp_primary_btn") == "Done"
             await press(pilot, app, "#gp_primary_btn")
             assert "Setup finished" in text(app, "#gp_title")
+    run(go)
+
+
+def test_nvidia_vm_step_offline_and_failed_setup(tmp_path, monkeypatch):
+    from osx_proxmox_next import nullmoth_finish
+    env = Env(tmp_path)
+    add_card(env.root, bdf="0000:01:00", vendor=0x10DE, device=0x2504, audio=0x228E, group=3)
+
+    def offline():
+        raise nullmoth_finish.FinishError("offline")
+    monkeypatch.setattr(nullmoth_finish, "versions", offline)
+    monkeypatch.setattr(gpu_setup.Session, "finish_nvidia", lambda self, choice, on_event: nullmoth_finish.FinishResult(
+        verified=False, detail="the driver installer stopped: STOP"))
+
+    async def go():
+        app = NextApp()
+        async with app.run_test(size=(140, 70)) as pilot:
+            await pilot.pause()
+            s = env.session()
+            s.choose("01:00", 100, "console", ack=True)
+            s.goto(7)
+            app._gp = s
+            await _advance_to_step(pilot, app, 2)
+            await pilot.click("#mode_gpu")
+            await settle(pilot, lambda: "Step 7" in text(app, "#gp_title"))
+            await settle(pilot, lambda: shown(app, "#gp_nm_select"))
+            assert app._gp_release_choice() == "latest"  # offline: the install resolves "latest" itself
+            await press(pilot, app, "#gp_primary_btn")
+            await settle(pilot, lambda: label(app, "#gp_primary_btn") == "Attach the card now")
+            await press(pilot, app, "#gp_primary_btn")
+            await settle(pilot, lambda: "not confirmed" in text(app, "#gp_result"))
+            assert "STOP" in text(app, "#gp_result") and "Step 7" in text(app, "#gp_title")
     run(go)
 
 

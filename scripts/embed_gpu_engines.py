@@ -2,7 +2,7 @@
 """Refresh the verbatim copies of the Python GPU engines inside the bash installer.
 
 Run after changing host_setup.py, bios_guide.py, data/gpu/bios_paths.json,
-data/gpu/amd_devices.txt, data/gpu/oc_boot_args.py, data/nullmoth/oc_patch.py or any iGPU
+data/gpu/amd_devices.txt, data/gpu/oc_boot_args.py, data/nullmoth/oc_patch.py, nullmoth_engine.py, data/nullmoth/nm_* or any iGPU
 file (igpu_engine.py, data/gpu/intel_devices.txt, oc_igpu.py, igpu_*.sh, igpu_launchd.plist, igpu_power_watchdog.py, igpu_diag.py, osx-next-power-watchdog@.service):
 
     python3 scripts/embed_gpu_engines.py
@@ -30,6 +30,10 @@ EMBEDS = (
     ("igpu_firstboot.sh", "GPU_EMBED_IGPU_FIRSTBOOT", PKG / "data/gpu/igpu_firstboot.sh"),
     ("igpu_stage.sh", "GPU_EMBED_IGPU_STAGE", PKG / "data/gpu/igpu_stage.sh"),
     ("igpu_launchd.plist", "GPU_EMBED_IGPU_PLIST", PKG / "data/gpu/igpu_launchd.plist"),
+    ("nullmoth_engine.py", "GPU_EMBED_NULLMOTH_ENGINE", PKG / "nullmoth_engine.py"),
+    ("nm_stage.sh", "GPU_EMBED_NM_STAGE", PKG / "data/nullmoth/nm_stage.sh"),
+    ("nm_firstboot.sh", "GPU_EMBED_NM_FIRSTBOOT", PKG / "data/nullmoth/nm_firstboot.sh"),
+    ("nm_launchd.plist", "GPU_EMBED_NM_PLIST", PKG / "data/nullmoth/nm_launchd.plist"),
     ("igpu_power_watchdog.py", "GPU_EMBED_IGPU_WATCHDOG", PKG / "data/gpu/igpu_power_watchdog.py"),
     ("igpu_diag.py", "GPU_EMBED_IGPU_DIAG", PKG / "data/gpu/igpu_diag.py"),
     ("osx-next-power-watchdog@.service", "GPU_EMBED_IGPU_WATCHDOG_UNIT", PKG / "data/gpu/osx-next-power-watchdog@.service"),

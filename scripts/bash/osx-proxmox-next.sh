@@ -1340,7 +1340,7 @@ function gpu_users() {
 NULLMOTH_URL="https://github.com/nullmoth/nvidia-macos-driver"
 NULLMOTH_NOTICE_TITLE="NVIDIA GPU support (Beta)"
 read -r -d '' NULLMOTH_NOTICE_BODY <<'NULLMOTH_NOTICE' || true
-This feature prepares your VM for the NullMoth NVIDIA driver, a third-party project that osx-proxmox-next does not make, review or support. You download and install that driver yourself, at your own risk. We are not responsible for the driver, its installation, or any damage, data loss or instability that follows.
+This feature sets up your VM for the NullMoth NVIDIA driver, a third-party project that osx-proxmox-next does not make, review or support. The tool downloads the driver from its GitHub releases, checks its checksum and installs it in your VM for you, at your own risk. We are not responsible for the driver, its installation, or any damage, data loss or instability that follows.
 
 NullMoth only runs with core macOS security turned off: code-signing checks (AMFI) are bypassed, System Integrity Protection is relaxed and Secure Boot is disabled. This is a real security threat: malware has a much easier time on a VM set up this way. Only enable it on a VM you are prepared to treat as untrusted, and keep personal accounts and sensitive data off it.
 
@@ -1699,35 +1699,198 @@ function nullmoth_fetch_amfipass() {
   echo "$dest"
 }
 
-function nullmoth_print_next_steps() {
-  echo -e "\n${INFO}${YW}NullMoth next steps:${CL}"
-  echo "  1. Start the VM. Once the NullMoth driver loads, the Proxmox console goes black (the driver takes the display"
-  echo "     even with vga std). To get a desktop, connect a monitor or an HDMI/DisplayPort dummy plug to the card;"
-  echo "     Screen Sharing then mirrors that display. SSH always works."
-  echo "  2. Download the NullMoth release yourself from ${NULLMOTH_URL}/releases and check it with"
-  echo "     shasum -a 256 -c SHA256SUMS, then run sudo ./install.sh in the guest."
-  echo "  3. Approve the extensions in System Settings > Privacy & Security, then reboot the guest."
-  echo "  4. Verify with: kmutil showloaded --list-only | grep -i nullmoth. Expect 4 or more lines"
-  echo "     (NVRM, NVAccel, NVRMFB, NVRMAGDC, newer releases add more)."
-  echo "  5. Turn off system sleep in the guest: sudo pmset -a sleep 0"
-  echo "  6. Escape hatch: add -nvoff to the boot-args, or run gpu-setup --undo on the host."
-  echo "  7. Warning: the NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore"
-  echo "     disk with this tool later (or running gpu-setup --undo) wipes those edits."
+NULLMOTH_DISPLAY_LINE="The card has no display yet: connect a monitor or an HDMI/DisplayPort dummy plug to it. Once the driver loads, the Proxmox console goes black and Screen Sharing mirrors the display on the card."
+NULLMOTH_FAILED_NOTE="The VM is usable without the driver. Remote Login, Screen Sharing and sleep 0 were switched on in the guest and the extension approval prompt was turned off; the guest log is /var/log/osx-proxmox-next-nullmoth.log. To try again, run nvidia-detach first (the card is attached by now), then the same command."
+NULLMOTH_NOTES=("Escape hatch: add -nvoff to the boot-args, or run gpu-setup --undo on the host."
+  "Warning: the NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore disk with this tool later (or running gpu-setup --undo) wipes those edits.")
+NULLMOTH_FIRSTBOOT_TIMEOUT=2700
+NULLMOTH_RESULT_POLL=30
+NULLMOTH_RESULT_GRACE=15
+NULLMOTH_REBOOT_GRACE=420
+NULLMOTH_HALT_WAIT=90
+NULLMOTH_IP_TIMEOUT=300
+NULLMOTH_IP_POLL=15
+NM_RESULT=""; NM_TAG=""; NM_PAYLOAD_REF=""; NM_PAYLOAD_FILE=""; NM_IP=""; NM_SSH_UP=no; NM_VNC_UP=no
+
+# nullmoth_engine.py (embedded below, the same file the Python package imports): releases, downloads, payload, guest lookup.
+function nullmoth_engine() { gpu_engine_init && python3 "$GPU_ENGINE_DIR/nullmoth_engine.py" "$@"; }
+
+# One line per release from the releases JSON on stdin; the first stable one is the default. Mirrors nullmoth_cli.version_lines.
+function nullmoth_version_lines() {
+  python3 -c '
+import json, sys
+rel = json.load(sys.stdin)["releases"]
+default = next((r["tag"] for r in rel if not r["prerelease"]), "")
+for r in rel:
+    print(r["tag"] + (" (latest)" if r["tag"] == default else "") + (" (pre-release)" if r["prerelease"] else "") + "  " + r["published"][:10])
+'
 }
 
-# Required in the guest BEFORE the card is attached: once the driver loads, the Proxmox console goes black.
-NULLMOTH_GUEST_PREP_TITLE="Before you attach (required): get a way into macOS that does not need the Proxmox console"
-NULLMOTH_GUEST_PREP_CONFIRM="Remote Login and Screen Sharing are on, I can reach the VM over the network, and a monitor or dummy plug is connected to the card."
-function nullmoth_print_guest_prep() {
-  echo "${NULLMOTH_GUEST_PREP_TITLE}:"
-  echo "  1. In macOS open System Settings > General > Sharing and turn on Remote Login and Screen Sharing."
-  echo "  2. Note the VM's IP address (shown in the Sharing pane, or in your router)."
-  echo "  3. You will connect with ssh <user>@<ip>, or with any VNC client pointed at the VM's IP"
-  echo "     (from a Mac: open vnc://<ip>)."
-  echo "  4. If Remote Login will not switch on from the command line (systemsetup needs Full Disk Access), run:"
-  echo "     sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist"
-  echo "  5. Connect a monitor or an HDMI/DisplayPort dummy plug to the card. Without one the card has no display, so the"
-  echo "     Proxmox console and Screen Sharing both stay black. Screen Sharing mirrors the display on the card; SSH always works."
+# `osx-proxmox-next.sh nullmoth-versions`
+function nullmoth_versions_command() {
+  local json
+  json=$(nullmoth_engine releases) || return 1
+  nullmoth_version_lines <<<"$json"
+}
+
+# The release to install: the requested tag, else the user's pick on a terminal (Enter = latest), else latest.
+# $1 requested tag, $2 yes|no. Mirrors nullmoth_cli.choose_version.
+function nullmoth_choose_version() {
+  local want="$1" yes="$2" reply json
+  [ -z "$want" ] || { echo "$want"; return 0; }
+  if [ "$yes" == "yes" ] || [ ! -t 0 ]; then echo latest; return 0; fi
+  json=$(nullmoth_engine releases) || return 1
+  { echo "NullMoth releases (newest first):"; nullmoth_version_lines <<<"$json" | sed 's/^/  /'; } >&2
+  read -r -p "Release to install [latest]: " reply
+  echo "${reply:-latest}"
+}
+
+function nullmoth_payload_result() { nullmoth_engine result "$(pvesm path "$1" 2>/dev/null)" 2>/dev/null || true; }
+
+# Download and verify the driver, build the payload disk, boot recovery and stage it inside macOS.
+# $1 vmid $2 release (latest or a tag) $3 macos. Sets NM_TAG, NM_PAYLOAD_REF, NM_PAYLOAD_FILE. Mirrors the first half of nullmoth_finish.finish.
+function nullmoth_stage() {
+  local vmid="$1" choice="$2" ver="$3" cfg storage dir info tarball sha fwinfo fw="" fwsha="" recovery_src rec_ref rc=0 orig_vga orig_args orig_boot
+  dir="${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/iso}/nullmoth"
+  info=$(nullmoth_engine fetch "$choice" "$dir") || { msg_error "Could not download or verify the NullMoth release"; return 1; }
+  NM_TAG=$(gpu_json 'd["tag"]' <<<"$info"); tarball=$(gpu_json 'd["path"]' <<<"$info"); sha=$(gpu_json 'd["sha256"]' <<<"$info")
+  msg_ok "NullMoth ${NM_TAG}: downloaded, sha256 ${sha:0:16}... matches SHA256SUMS and the GitHub digest"
+  if fwinfo=$(nullmoth_engine fw-fetch "$tarball" "$dir"); then
+    fw=$(gpu_json 'd["path"]' <<<"$fwinfo"); fwsha=$(gpu_json 'd["sha256"]' <<<"$fwinfo")
+  else
+    echo -e "${INFO}${YW}NVIDIA's firmware package could not be fetched here, so the guest downloads it itself.${CL}"
+  fi
+  cfg=$(qm config "$vmid" 2>/dev/null) || { msg_error "VM $vmid not found."; return 1; }
+  storage=$(sed -n 's/^\(virtio0\|efidisk0\|ide0\): \([^:,]*\):.*/\2/p' <<<"$cfg" | head -1)
+  [ -n "$storage" ] || { msg_error "Could not tell which storage the VM disks are on"; return 1; }
+  NM_PAYLOAD_FILE="$TEMP_DIR/nullmoth-payload-${vmid}.img"
+  msg_info "Building the payload disk (driver, first-boot script)"
+  if [ -n "$fw" ]; then nullmoth_engine payload "$NM_PAYLOAD_FILE" "$tarball" "$sha" "$fw" "$fwsha"
+  else nullmoth_engine payload "$NM_PAYLOAD_FILE" "$tarball" "$sha"; fi || { msg_error "Could not build the payload disk"; return 1; }
+  recovery_src="$TEMP_DIR/nullmoth-recovery-${vmid}.img"
+  download_recovery "$ver" "$recovery_src" || { msg_error "Could not download the $ver recovery image"; return 1; }
+  NM_PAYLOAD_REF=$(igpu_import_disk "$vmid" "$NM_PAYLOAD_FILE" "$storage") || { msg_error "Could not import the payload disk"; return 1; }
+  rec_ref=$(igpu_import_disk "$vmid" "$recovery_src" "$storage") || { msg_error "Could not import the recovery disk"; igpu_drop_disk_ref "$vmid" "$NM_PAYLOAD_REF"; return 1; }
+  orig_vga=$(sed -n 's/^vga: //p' <<<"$cfg"); orig_args=$(sed -n 's/^args: //p' <<<"$cfg"); orig_boot=$(sed -n 's/^boot: //p' <<<"$cfg")
+  qm set "$vmid" --sata1 "$rec_ref,media=disk" --sata2 "$NM_PAYLOAD_REF,media=disk" --boot 'order=sata1;virtio0;ide0' >/dev/null || rc=1
+  if [ "$rc" == 0 ]; then
+    [ -z "$orig_vga" ] || [ "$orig_vga" == "std" ] || qm set "$vmid" --vga std >/dev/null
+    igpu_stage "$vmid" "$NM_PAYLOAD_REF" "" || rc=1
+  fi
+  igpu_drop_disk "$vmid" sata1
+  igpu_oc_patch "$vmid" unstage || true
+  if [ "$rc" != 0 ]; then
+    igpu_drop_disk "$vmid" sata2
+    rm -f "$NM_PAYLOAD_FILE"
+    igpu_put_back "$vmid" vga "$orig_vga"; igpu_put_back "$vmid" args "$orig_args"; igpu_put_back "$vmid" boot "$orig_boot"
+    restore_picker_timeout "$vmid" || true
+    return 1
+  fi
+  restore_picker_timeout "$vmid" || msg_info "Could not restore the picker's auto-boot; run post-install afterwards"
+}
+
+# A failure after staging: stop the VM if it runs, drop the payload disk and delete the image. The card, if it was
+# attached, stays (undo with nvidia-detach). Mirrors nullmoth_finish._cleanup.
+function nullmoth_cleanup() {
+  local vmid="$1"
+  if ! qm status "$vmid" 2>/dev/null | grep -q 'status: stopped'; then
+    qm stop "$vmid" >/dev/null 2>&1 || true
+    igpu_wait_stopped "$vmid" 120 || true
+  fi
+  igpu_drop_disk "$vmid" sata2
+  rm -f "$NM_PAYLOAD_FILE"
+}
+
+# Wait for the guest's final report (verified or failed). After "installed" the guest restarts by itself; a restart that
+# hangs is ended once by stopping and starting the VM. Sets NM_RESULT. $1 vmid $2 payload volume. Mirrors nullmoth_finish._wait_result.
+function nullmoth_wait_result() {
+  local vmid="$1" ref="$2" t0 res="" seen="" kicked=no final
+  t0=$(date +%s)
+  NM_RESULT=""
+  while (( $(date +%s) - t0 < NULLMOTH_FIRSTBOOT_TIMEOUT )); do
+    res=$(nullmoth_payload_result "$ref")
+    case "$res" in
+      verified*|failed:*)
+        sleep "$NULLMOTH_RESULT_GRACE"
+        final=$(nullmoth_payload_result "$ref")
+        NM_RESULT="${final:-$res}"
+        return 0 ;;
+    esac
+    NM_RESULT="$res"
+    if [ "$res" == "installed" ] && [ -z "$seen" ]; then
+      seen=$(date +%s)
+      msg_info "The driver is installed. The guest restarts to load it"
+    fi
+    if [ "$res" == "verifying" ] && [ -n "$seen" ]; then seen=""; kicked=yes; fi  # the restart worked: never kick the driver load
+    if [ -n "$seen" ] && [ "$kicked" == no ] && (( $(date +%s) - seen > NULLMOTH_REBOOT_GRACE )); then
+      msg_info "The restart hung; stopping and starting the VM"
+      qm stop "$vmid" >/dev/null 2>&1 || true
+      igpu_wait_stopped "$vmid" 120 || true
+      qm start "$vmid" >/dev/null 2>&1 || true
+      kicked=yes
+    fi
+    sleep "$NULLMOTH_RESULT_POLL"
+  done
+}
+
+# The guest's address (what it reported, else the host's neighbour table) and whether SSH and Screen Sharing answer.
+# Sets NM_IP, NM_SSH_UP, NM_VNC_UP. $1 vmid $2 reported address. Mirrors nullmoth_finish._guest_address.
+function nullmoth_guest_address() {
+  local vmid="$1" reported="$2" mac t0 ip
+  mac=$(qm config "$vmid" 2>/dev/null | nullmoth_engine vm-mac)
+  t0=$(date +%s)
+  while :; do
+    ip=$(nullmoth_engine find-ip "$mac" 2>/dev/null || true)
+    ip="${ip:-$reported}"
+    if [ -n "$ip" ]; then
+      NM_IP="$ip"
+      if nullmoth_engine port "$ip" 22; then NM_SSH_UP=yes; else NM_SSH_UP=no; fi
+      if nullmoth_engine port "$ip" 5900; then NM_VNC_UP=yes; else NM_VNC_UP=no; fi
+      [ "$NM_SSH_UP" == yes ] && return 0
+    fi
+    (( $(date +%s) - t0 >= NULLMOTH_IP_TIMEOUT )) && return 0
+    sleep "$NULLMOTH_IP_POLL"
+  done
+}
+
+# First boot with the card attached: wait for the guest's report, drop the payload disk, start the VM again and print
+# how to reach it. rc 1 when the driver is not confirmed. $1 vmid. Mirrors the second half of nullmoth_finish.finish and nullmoth_cli.report.
+function nullmoth_first_boot() {
+  local vmid="$1" parsed state detail kexts display ip note
+  msg_info "First boot with the card: the guest turns on remote access, installs the driver and restarts (about 10 minutes)"
+  qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; nullmoth_cleanup "$vmid"; return 1; }
+  nullmoth_wait_result "$vmid" "$NM_PAYLOAD_REF"
+  parsed=$(nullmoth_engine parse-result "$NM_RESULT")
+  case "$NM_RESULT" in
+    verified*|failed:*) ;;
+    *) echo -e "${INFO}${YW}The guest gave no final report within $((NULLMOTH_FIRSTBOOT_TIMEOUT / 60)) minutes (last report: ${NM_RESULT:-none}), so the VM was restarted without the payload disk. The first-boot job in the guest finishes on its own when the driver loads.${CL}" ;;
+  esac
+  qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || igpu_wait_stopped "$vmid" "$NULLMOTH_HALT_WAIT" || true
+  if ! qm status "$vmid" 2>/dev/null | grep -q 'status: stopped'; then
+    qm stop "$vmid" >/dev/null 2>&1 || true   # the guest's own power off can hang with the card; its result was read already
+    igpu_wait_stopped "$vmid" 120 || true
+  fi
+  igpu_drop_disk "$vmid" sata2
+  rm -f "$NM_PAYLOAD_FILE"
+  state=$(gpu_json 'd["state"]' <<<"$parsed"); detail=$(gpu_json 'd["detail"]' <<<"$parsed")
+  kexts=$(gpu_json 'd["kexts"]' <<<"$parsed"); display=$(gpu_json 'd["display"]' <<<"$parsed"); ip=$(gpu_json 'd["ip"]' <<<"$parsed")
+  qm start "$vmid" >/dev/null 2>&1 || true
+  if [ "$state" != "verified" ]; then
+    echo -e "${INFO}${YW}The NullMoth driver is not confirmed in VM ${vmid}: ${detail:-${NM_RESULT:-the guest reported nothing}}.${CL}"
+    echo "$NULLMOTH_FAILED_NOTE"
+    return 1
+  fi
+  msg_info "Started the VM again; looking for its address"
+  nullmoth_guest_address "$vmid" "$ip"
+  msg_ok "Done. VM ${vmid}: NullMoth ${NM_TAG} is installed and loaded (${kexts} extensions)."
+  if [ -n "$NM_IP" ]; then
+    echo "  ssh <user>@${NM_IP}$([ "$NM_SSH_UP" == yes ] || echo '   (not answering yet)')"
+    echo "  vnc://${NM_IP}$([ "$NM_VNC_UP" == yes ] || echo '   (not answering yet)')"
+  else
+    echo "  The guest's address was not found yet: see your router or 'ip neigh' on the host."
+  fi
+  [ "$display" == "yes" ] || echo "$NULLMOTH_DISPLAY_LINE"
+  for note in "${NULLMOTH_NOTES[@]}"; do echo "$note"; done
 }
 
 function nullmoth_print_findings() {
@@ -1750,17 +1913,17 @@ function nullmoth_vm_check() {
   fi
 }
 
-# `osx-proxmox-next.sh nvidia-attach <vmid> <bdf> [--accept-nullmoth-risk] [--dry-run] [--macos <release>]`
+# `osx-proxmox-next.sh nvidia-attach <vmid> <bdf> [--accept-nullmoth-risk] [--yes] [--dry-run] [--macos <release>] [--nullmoth-version <tag>]`
 function nvidia_attach() {
-  local vmid="${1:-}" gpu="${2:-}" accept=no dry=no macos="" confirmed=no yes=no bdf args zip new_args version line
+  local vmid="${1:-}" gpu="${2:-}" accept=no dry=no macos="" nm_version="" choice yes=no bdf args zip new_args version line
   shift 2 2>/dev/null || shift $#
   while [ $# -gt 0 ]; do
     case "$1" in
       --accept-nullmoth-risk) accept=yes ;;
       --yes|-y) yes=yes ;;
-      --guest-confirmed) confirmed=yes ;;  # internal: the walkthrough already asked
       --dry-run) dry=yes ;;
       --macos) macos="${2:-}"; shift ;;
+      --nullmoth-version) nm_version="${2:-}"; shift ;;
       *) msg_error "Unknown option: $1"; return 1 ;;
     esac
     shift
@@ -1770,14 +1933,6 @@ function nvidia_attach() {
     msg_error "Usage: osx-proxmox-next.sh nvidia-attach <vmid> <pci-address> [--accept-nullmoth-risk] [--yes] [--dry-run]"; return 1; }
   if [ "$dry" == "yes" ]; then nullmoth_show_notice; else nullmoth_acknowledge "$accept" || return 1; fi
   echo
-  nullmoth_print_guest_prep
-  echo
-  if [ "$dry" != "yes" ] && [ "$confirmed" != "yes" ]; then
-    # --yes answers this question only; the NullMoth acknowledgement above is never answered by it.
-    local GPU_YES="$yes"
-    gpu_ui_yesno "Before you attach" "${NULLMOTH_GUEST_PREP_CONFIRM}" || { msg_error "Nothing was changed. Turn Remote Login and Screen Sharing on in macOS first, then run again (--yes answers this question)."; return 2; }
-  fi
-
   nullmoth_vm_check "$vmid" || true
   if [ -n "$NM_CFG" ]; then
     grep -q '^ide2:' <<<"$NM_CFG" && GPU_ISSUES+=("VM $vmid still has the recovery disk attached, so the install is not finished. Finish it, run post-install, then attach the card.")
@@ -1801,6 +1956,9 @@ function nvidia_attach() {
     hp0=$(sed -n 's/^hostpci0: //p' <<<"$NM_CFG")
     if [ -n "$hp0" ] && ! grep -qE "^(host=)?(0000:)?${bdf#0000:}(\.[0-7])?(,|;|\$)" <<<"$hp0"; then
       GPU_ISSUES+=("hostpci0 is already in use on this VM (${hp0}). Remove it first or run nvidia-detach.")
+    elif [ -n "$hp0" ]; then
+      # the card is on the VM already: the setup stages from recovery first, which needs the VM without it
+      GPU_ISSUES+=("VM $vmid already has a PCI device on hostpci0. Run nvidia-detach (or gpu-setup --undo) first, then try again.")
     fi
     if [ "$gpu_ok" == "yes" ]; then
       local -a stopped_others=()
@@ -1820,6 +1978,7 @@ function nvidia_attach() {
   new_args=$(gpu_with_mmio_arg "$args")
   if [ "$dry" == "yes" ]; then
     echo -e "\nDRY RUN - nothing is changed. Plan:"
+    echo "  0. Download the NullMoth release, verify it against SHA256SUMS, boot macOS recovery once to stage it inside macOS; the first boot after the attach installs it by itself (about 15 minutes)"
     echo "  1. Verify VM $vmid is stopped"
     echo "  2. Prepare OpenCore for NullMoth on the ide0 disk (backup config.plist.pre-nullmoth, AMFIPass.kext, boot-args, IONDRVSupport block)"
     echo "  3. qm set $vmid --hostpci0 ${bdf},pcie=0"
@@ -1830,21 +1989,24 @@ function nvidia_attach() {
 
   zip=$(nullmoth_fetch_amfipass "${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/iso}") || { msg_error "Could not download AMFIPass"; return 1; }
   qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || { msg_error "VM $vmid is no longer stopped"; return 1; }
+  choice=$(nullmoth_choose_version "$nm_version" "$yes") || { msg_error "Could not list the NullMoth releases"; return 1; }
   gpu_snapshot "$vmid" >/dev/null || { msg_error "Could not save the VM config snapshot"; return 1; }
+  nullmoth_stage "$vmid" "$choice" "$version" || return 1
   # The record goes first: it only writes a sidecar file, and a failure later on still finds it.
-  gpu_record_write "$vmid" "$bdf" nvidia "${bdf},pcie=0" "$GPU_MMIO_ARG" no nullmoth || { msg_error "Could not record the original VM settings"; return 1; }
+  gpu_record_write "$vmid" "$bdf" nvidia "${bdf},pcie=0" "$GPU_MMIO_ARG" no nullmoth || { msg_error "Could not record the original VM settings"; nullmoth_cleanup "$vmid"; return 1; }
   if nullmoth_oc_patch "$vmid" attach "$zip"; then
     msg_ok "OpenCore prepared for NullMoth (backup: config.plist.pre-nullmoth)"
   else
-    msg_error "Could not prepare the OpenCore disk; the VM was not changed"; return 1
+    msg_error "Could not prepare the OpenCore disk; the VM was not changed"; nullmoth_cleanup "$vmid"; return 1
   fi
-  qm set "$vmid" --hostpci0 "${bdf},pcie=0" >/dev/null || { msg_error "qm set --hostpci0 failed"; return 1; }
+  qm set "$vmid" --hostpci0 "${bdf},pcie=0" >/dev/null || { msg_error "qm set --hostpci0 failed"; nullmoth_cleanup "$vmid"; return 1; }
   msg_ok "Attached ${bdf} (all functions) as hostpci0"
   if [ "$new_args" != "$args" ]; then
-    qm set "$vmid" --args "$new_args" >/dev/null || { msg_error "qm set --args failed"; return 1; }
+    qm set "$vmid" --args "$new_args" >/dev/null || { msg_error "qm set --args failed"; nullmoth_cleanup "$vmid"; return 1; }
     msg_ok "Added the 64-bit MMIO window to args"
   fi
-  nullmoth_print_next_steps
+  qm set "$vmid" --boot 'order=ide0;virtio0' >/dev/null
+  nullmoth_first_boot "$vmid"
 }
 
 # `osx-proxmox-next.sh nvidia-detach <vmid> [--dry-run]`
@@ -6161,6 +6323,674 @@ IFS= read -r -d '' GPU_EMBED_IGPU_PLIST <<'GPU_EMBED_IGPU_PLIST_EOF' || true
 </plist>
 GPU_EMBED_IGPU_PLIST_EOF
 # ── GPU embedded: igpu_launchd.plist end ──
+# ── GPU embedded: nullmoth_engine.py begin ──
+IFS= read -r -d '' GPU_EMBED_NULLMOTH_ENGINE <<'GPU_EMBED_NULLMOTH_ENGINE_EOF' || true
+#!/usr/bin/env python3
+"""NullMoth driver releases, the payload disk and the guest lookup. Standard library only.
+
+The Python package imports this module and the bash installer embeds it verbatim (tests/test_nullmoth_parity.py
+diffs the two), so there is one implementation. NullMoth is never pinned: the newest published release is the
+default and the user may pick any older one. A release is only used when its tarball matches the SHA256SUMS file
+of the release and, when GitHub stores one, the sha256 digest of the asset. There is no silent fallback.
+"""
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+try:
+    from . import igpu_engine as _gpu
+except ImportError:  # run as a script from the bash installer: both engines sit in one folder
+    import igpu_engine as _gpu
+
+REPO = "nullmoth/nvidia-macos-driver"
+GITHUB_API = "https://api.github.com/repos/" + REPO + "/"
+DOWNLOAD_PREFIX = "https://github.com/" + REPO + "/releases/download/"
+LATEST = "latest"
+TARBALL_RE = re.compile(r"^nullmoth-nvidia-.+\.tar\.gz$")
+SUMS_NAME = "SHA256SUMS.txt"
+TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# file names end up inside root shell scripts and paths: plain characters only
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+FW_URL_RE = re.compile(r"^https://download\.nvidia\.com/XFree86/Linux-x86_64/[0-9][0-9.]*/[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# The installer fetches NVIDIA's GPU firmware from this host; the host fetches it first so the guest needs no network.
+NVIDIA_HOST = "https://download.nvidia.com/"
+FW_SCRIPT = "fw_fetch.sh"
+PAYLOAD_LABEL = _gpu.PAYLOAD_LABEL
+LAUNCHD_PLIST = "com.osxproxmoxnext.nullmoth-firstboot.plist"
+MB = 1024 * 1024
+PAYLOAD_MIN_MB = 64
+PAYLOAD_SLACK_MB = 32
+RESULT_FINAL = ("verified", "failed:")
+SWEEP_MAX_HOSTS = 1024
+SWEEP_BATCH = 64
+
+
+class ReleaseError(Exception):
+    """GitHub could not be asked, or a release cannot be used. The message says what to do next."""
+
+
+def data_dir():
+    here = Path(__file__).resolve().parent
+    return here / "data" / "nullmoth" if (here / "data" / "nullmoth").is_dir() else here
+
+
+# ── releases ─────────────────────────────────────────────────────────
+
+def github_get(url):
+    """The JSON GitHub returns for *url*. GITHUB_TOKEN, when set, raises the rate limit."""
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "osx-proxmox-next"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as resp:  # noqa: S310
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 429):
+            raise ReleaseError("GitHub refused the request (rate limit reached). Wait a few minutes and run the "
+                               "command again, or set GITHUB_TOKEN to a GitHub token to raise the limit.") from exc
+        if exc.code == 404:
+            raise ReleaseError("GitHub has no such release.") from exc
+        raise ReleaseError("GitHub answered HTTP %d for %s. Try again in a few minutes." % (exc.code, url)) from exc
+    except (OSError, ValueError) as exc:
+        raise ReleaseError("Could not reach GitHub (%s). Check the network and run the command again." % exc) from exc
+
+
+def _read_url(url, limit=1 << 20):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "osx-proxmox-next"}),  # noqa: S310
+                                    timeout=30) as resp:
+            return resp.read(limit).decode("utf-8", "replace")
+    except (OSError, ValueError) as exc:
+        raise ReleaseError("Could not download %s (%s)." % (url, exc)) from exc
+
+
+def _pick(rel):
+    """The usable data of one GitHub release, or None when it has no NullMoth tarball with a SHA256SUMS file."""
+    assets = rel.get("assets") or []
+    tarballs = [a for a in assets if TARBALL_RE.match(a.get("name") or "")]
+    sums = [a for a in assets if a.get("name") == SUMS_NAME]
+    if len(tarballs) != 1 or len(sums) != 1:
+        return None
+    tar = tarballs[0]
+    m = DIGEST_RE.match(tar.get("digest") or "")
+    tag = rel.get("tag_name") or ""
+    if not TAG_RE.match(tag) or not NAME_RE.match(tar["name"]):
+        return None
+    return {"tag": tag, "version": tag[1:] if tag[:1] in "vV" else tag, "name": tar["name"],
+            "url": tar.get("browser_download_url") or "", "sums_url": sums[0].get("browser_download_url") or "",
+            "digest": m.group(1) if m else "", "size": int(tar.get("size") or 0),
+            "prerelease": bool(rel.get("prerelease")), "published": rel.get("published_at") or ""}
+
+
+def list_releases(get=github_get):
+    """Every published release that carries the driver tarball and its SHA256SUMS, newest first."""
+    data = get(GITHUB_API + "releases?per_page=30")
+    picks = [_pick(r) for r in data if not r.get("draft")]
+    return sorted((p for p in picks if p), key=lambda p: p["published"], reverse=True)
+
+
+def _usable(pick):
+    for key in ("url", "sums_url"):
+        if not pick[key].startswith(DOWNLOAD_PREFIX):
+            raise ReleaseError("NullMoth %s points at an unexpected download address, refused." % pick["tag"])
+    return pick
+
+
+def resolve(choice=LATEST, get=github_get):
+    """The release picked by *choice* ("latest" or a tag), with `source` set to latest or chosen."""
+    choice = choice or LATEST
+    if choice == LATEST:
+        found = [p for p in list_releases(get) if not p["prerelease"]]
+        if not found:
+            raise ReleaseError("No published NullMoth release has the driver tarball this tool needs.")
+        return dict(_usable(found[0]), source=LATEST)
+    if not TAG_RE.match(choice):
+        raise ReleaseError("%r is not a release tag." % choice)
+    want = choice.lstrip("vV")
+    for pick in list_releases(get):
+        if pick["tag"] == choice or pick["version"] == want:
+            return dict(_usable(pick), source="chosen")
+    try:
+        pick = _pick(get(GITHUB_API + "releases/tags/" + choice))
+    except ReleaseError as exc:
+        raise ReleaseError("NullMoth has no release tagged %s (%s). See the list with: nullmoth-versions" % (choice, exc)) from exc
+    if pick is None:
+        raise ReleaseError("NullMoth %s has no driver tarball this tool can use." % choice)
+    return dict(_usable(pick), source="chosen")
+
+
+def parse_sums(text, name):
+    """The sha256 listed for *name* in a SHA256SUMS file ('' when it is not listed). Every line must be well formed."""
+    found = ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        m = re.match(r"^([0-9a-fA-F]{64}) [ *](.+)$", line.strip())
+        if not m:
+            raise ReleaseError("The SHA256SUMS file of the release is malformed, refused.")
+        if m.group(2) == name:
+            found = m.group(1).lower()
+    return found
+
+
+def expected_sha256(pick, read=_read_url):
+    """The sha256 the tarball of *pick* must have: from SHA256SUMS, and equal to the GitHub asset digest when there is one."""
+    listed = parse_sums(read(pick["sums_url"]), pick["name"])
+    if not listed:
+        raise ReleaseError("SHA256SUMS of NullMoth %s does not list %s, so the download cannot be verified and is "
+                           "refused." % (pick["tag"], pick["name"]))
+    if pick["digest"] and pick["digest"] != listed:
+        raise ReleaseError("SHA256SUMS and the GitHub digest of NullMoth %s disagree, refused." % pick["tag"])
+    return listed
+
+
+def sha256_file(path):
+    return _gpu.sha256_file(path)
+
+
+def download(url, dest, sha256, prefix=""):
+    """Download *url* to *dest* unless a file with *sha256* is already there. Raises ReleaseError on a mismatch."""
+    dest = Path(dest)
+    if prefix and not url.startswith(prefix):
+        raise ReleaseError("Refusing to download from %s." % url)
+    if dest.exists() and sha256_file(dest) == sha256:
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "osx-proxmox-next"}),  # noqa: S310
+                                    timeout=60) as resp, open(part, "wb") as out:
+            shutil.copyfileobj(resp, out)
+    except (OSError, ValueError) as exc:
+        part.unlink(missing_ok=True)
+        raise ReleaseError("Could not download %s (%s)." % (url, exc)) from exc
+    got = sha256_file(part)
+    if got != sha256:
+        part.unlink()
+        raise ReleaseError("Checksum mismatch for %s: expected %s, got %s. The file was deleted." % (url, sha256, got))
+    part.replace(dest)
+    return dest
+
+
+def fetch_release(pick, dest_dir, read=_read_url, fetch=download):
+    """Download and verify the tarball of *pick* into *dest_dir*; returns (path, sha256)."""
+    sha = expected_sha256(pick, read)
+    return fetch(pick["url"], Path(dest_dir) / pick["name"], sha, DOWNLOAD_PREFIX), sha
+
+
+# ── GPU firmware (NVIDIA's own package, read by the driver's installer) ──
+
+def _member_text(tarball, suffix):
+    with tarfile.open(tarball, "r:gz") as tf:
+        for member in tf:
+            if member.isfile() and member.name.lstrip("./").endswith(suffix) and member.size < 1 << 20:
+                handle = tf.extractfile(member)
+                return handle.read().decode("utf-8", "replace") if handle else ""
+    return ""
+
+
+def firmware_pins(tarball):
+    """{version, url, sha256, name} the release's fw_fetch.sh pins for NVIDIA's driver package, or None."""
+    try:
+        text = _member_text(tarball, "/" + FW_SCRIPT)
+    except (OSError, tarfile.TarError):
+        return None
+    ver = re.search(r'^VER=([0-9][0-9.]*)\s*$', text, re.M)
+    sha = re.search(r'^SHA_RUN=([0-9a-f]{64})\s*$', text, re.M)
+    url = re.search(r'^URL_RUN="([^"]+)"\s*$', text, re.M)
+    if not (ver and sha and url):
+        return None
+    address = url.group(1).replace("$VER", ver.group(1))
+    if not FW_URL_RE.match(address):
+        return None
+    name = address.rsplit("/", 1)[1]
+    if not NAME_RE.match(name) or ".." in name:
+        return None
+    return {"version": ver.group(1), "url": address, "sha256": sha.group(1), "name": name}
+
+
+def fetch_firmware(pins, dest_dir, fetch=download):
+    return fetch(pins["url"], Path(dest_dir) / pins["name"], pins["sha256"], NVIDIA_HOST)
+
+
+# ── payload disk ─────────────────────────────────────────────────────
+
+def render(name, values):
+    """A payload script with its @PLACEHOLDERS@ filled in."""
+    text = (data_dir() / name).read_text()
+    for key, value in values.items():
+        text = text.replace("@%s@" % key, value)
+    return text
+
+
+def payload_files(tarball, tar_sha, firmware=None, fw_sha=""):
+    """name on the payload disk -> ("copy", path) or ("text", content)."""
+    values = {"TARBALL": Path(tarball).name, "TARBALL_SHA256": tar_sha,
+              "FW_RUN": Path(firmware).name if firmware else "", "FW_RUN_SHA256": fw_sha if firmware else ""}
+    files = {"stage.sh": ("text", render("nm_stage.sh", values)),
+             "firstboot.sh": ("text", render("nm_firstboot.sh", values)),
+             LAUNCHD_PLIST: ("text", render("nm_launchd.plist", values)),
+             Path(tarball).name: ("copy", str(tarball))}
+    if firmware:
+        files[Path(firmware).name] = ("copy", str(firmware))
+    return files
+
+
+def payload_mb(files):
+    total = sum(os.path.getsize(v) if k == "copy" else len(v.encode()) for k, v in files.values())
+    return max(PAYLOAD_MIN_MB, total // MB + 1 + (total // MB) // 50 + PAYLOAD_SLACK_MB)
+
+
+def build_payload(out, files, run=_gpu.default_run):
+    """A GPT disk with one FAT32 partition (label OSXPNIGPU) holding *files*. Returns (ok, message)."""
+    out = Path(out)
+    try:
+        size_mb = payload_mb(files)
+    except OSError as exc:
+        return False, "could not read a payload file: %s" % exc
+    with open(out, "wb") as f:
+        f.truncate(size_mb * MB)
+    for argv in (["sgdisk", "-Z", str(out)],
+                 ["sgdisk", "-n", "1:0:0", "-t", "1:0700", "-c", "1:" + PAYLOAD_LABEL, str(out)]):
+        code, msg = run(argv, 60)
+        if code != 0:
+            return False, "sgdisk failed: " + msg.strip()
+    loop, part = _gpu._attach_loop(out, run)
+    if not loop:
+        return False, part
+    code, msg = run(["mkfs.vfat", "-F", "32", "-n", PAYLOAD_LABEL, part], 120)
+    if code != 0:
+        run(["losetup", "-d", loop], 20)
+        return False, "mkfs.vfat failed: " + msg.strip()
+    mnt = tempfile.mkdtemp(prefix="nullmoth-payload-")
+    code, msg = run(["mount", part, mnt], 60)
+    if code != 0:
+        os.rmdir(mnt)
+        run(["losetup", "-d", loop], 20)
+        return False, "could not mount the payload image: " + msg.strip()
+    try:
+        for name, (kind, value) in files.items():
+            if kind == "copy":
+                shutil.copyfile(value, os.path.join(mnt, name))
+            else:
+                Path(mnt, name).write_text(value)
+    except OSError as exc:
+        return False, "could not fill the payload image: %s" % exc
+    finally:
+        run(["sync"], 300)
+        _gpu._release(mnt, loop, run)
+    return True, "payload disk built (%d MB)" % size_mb
+
+
+def read_result(img, run=_gpu.default_run):
+    return _gpu.read_result(img, run)
+
+
+def parse_result(text):
+    """{state, detail, kexts, display, ip} from the guest's last line. state is verified, failed, installed or ''."""
+    text = (text or "").strip()
+    out = {"state": "", "detail": "", "kexts": 0, "display": "", "ip": ""}
+    if text in ("installed", "verifying"):
+        out["state"] = text
+    elif text.startswith("failed:"):
+        # text from the guest is shown to the user: plain printable characters only, no backslash escapes
+        out.update(state="failed", detail=re.sub(r"[^\x20-\x7e]|\\", "", text[len("failed:"):]).strip()[:300])
+    elif text.startswith("verified"):
+        out["state"] = "verified"
+        for key, value in re.findall(r"\b(kexts|display|ip)=(\S+)", text):
+            if key == "kexts":
+                out[key] = int(value) if value.isdigit() else 0
+            elif key == "display":
+                out[key] = value if value in ("yes", "no") else ""
+            else:
+                out[key] = value if IPV4_RE.match(value) else ""
+    return out
+
+
+def is_final(text):
+    return (text or "").startswith(RESULT_FINAL)
+
+
+# ── the guest from the host ──────────────────────────────────────────
+
+def vm_mac(cfg):
+    """The MAC address of net0 from a `qm config` mapping (model=MAC,bridge=...), lower case, or ''."""
+    m = re.match(r"^[a-z0-9_-]+=((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})", cfg.get("net0", ""))
+    return m.group(1).lower() if m else ""
+
+
+def parse_neighbours(text, mac):
+    """The IPv4 address the neighbour table lists for *mac* (`ip -4 neigh show` output), or ''."""
+    for line in text.splitlines():
+        parts = line.split()
+        if "lladdr" in parts and parts[parts.index("lladdr") + 1].lower() == mac and parts[-1] not in ("FAILED", "INCOMPLETE"):
+            return parts[0]
+    return ""
+
+
+def _sweep(run):
+    """Ping every address of the host's subnets once so the neighbour table learns the guest."""
+    import ipaddress
+    code, out = run(["ip", "-4", "-o", "addr", "show", "scope", "global"], 10)
+    procs = []
+
+    def reap():
+        for p in procs:
+            try:
+                p.wait(timeout=5)
+            except subprocess.SubprocessError:
+                p.kill()
+        del procs[:]
+    for line in out.splitlines() if code == 0 else []:
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", line)
+        if not m or "vmbr" not in line.split()[1]:
+            continue
+        iface = ipaddress.ip_interface(m.group(1))
+        net = iface.network
+        if net.num_addresses > SWEEP_MAX_HOSTS:
+            continue
+        for ip in net.hosts():
+            if ip == iface.ip:
+                continue
+            try:
+                procs.append(subprocess.Popen(["ping", "-c", "1", "-W", "1", str(ip)],
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            except OSError:
+                reap()
+                return
+            if len(procs) >= SWEEP_BATCH:
+                reap()
+    reap()
+
+
+def find_guest_ip(mac, run=_gpu.default_run, sweep=_sweep):
+    """The guest's IPv4 address from the host's neighbour table, sweeping the bridge subnets once when it is not there."""
+    if not mac:
+        return ""
+
+    def lookup():
+        code, out = run(["ip", "-4", "neigh", "show"], 10)
+        return parse_neighbours(out, mac) if code == 0 else ""
+    ip = lookup()
+    if ip:
+        return ip
+    sweep(run)
+    return lookup()
+
+
+def port_open(ip, port, timeout=3):
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+# ── command line (used by the bash installer) ────────────────────────
+
+def _emit(obj):
+    sys.stdout.write(json.dumps(obj, indent=2, sort_keys=True) + "\n")
+
+
+def _usage():
+    sys.stderr.write("usage: nullmoth_engine.py releases|resolve <latest|tag>|fetch <latest|tag> <dir>|fw-pins <tarball>|"
+                     "fw-fetch <tarball> <dir>|payload <img> <tarball> <sha256> [firmware sha256]|result <img>|"
+                     "parse-result <text>|vm-mac|find-ip <mac>|port <ip> <port>\n")
+    return 64
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    try:
+        if cmd == "releases":
+            _emit({"releases": list_releases()})
+        elif cmd == "resolve" and len(argv) == 3:
+            _emit(resolve(argv[2]))
+        elif cmd == "fetch" and len(argv) == 4:
+            pick = resolve(argv[2])
+            path, sha = fetch_release(pick, argv[3])
+            _emit(dict(pick, path=str(path), sha256=sha))
+        elif cmd == "fw-pins" and len(argv) == 3:
+            _emit(firmware_pins(argv[2]) or {})
+        elif cmd == "fw-fetch" and len(argv) == 4:
+            pins = firmware_pins(argv[2])
+            if pins is None:
+                sys.stderr.write("the release pins no firmware package\n")
+                return 1
+            _emit(dict(pins, path=str(fetch_firmware(pins, argv[3]))))
+        elif cmd == "payload" and len(argv) in (5, 7):
+            fw = argv[5] if len(argv) == 7 else None
+            ok, msg = build_payload(argv[2], payload_files(argv[3], argv[4], fw, argv[6] if fw else ""))
+            sys.stderr.write(msg + "\n")
+            return 0 if ok else 1
+        elif cmd == "result" and len(argv) == 3:
+            sys.stdout.write(read_result(argv[2]) + "\n")
+        elif cmd == "parse-result" and len(argv) == 3:
+            _emit(parse_result(argv[2]))
+        elif cmd == "vm-mac":
+            cfg = dict(line.split(": ", 1) for line in sys.stdin.read().splitlines() if ": " in line)
+            sys.stdout.write(vm_mac(cfg) + "\n")
+        elif cmd == "find-ip" and len(argv) == 3:
+            sys.stdout.write(find_guest_ip(argv[2].lower()) + "\n")
+        elif cmd == "port" and len(argv) == 4:
+            return 0 if port_open(argv[2], int(argv[3])) else 1
+        else:
+            return _usage()
+    except (ReleaseError, OSError) as exc:
+        sys.stderr.write("ERROR: %s\n" % exc)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+GPU_EMBED_NULLMOTH_ENGINE_EOF
+# ── GPU embedded: nullmoth_engine.py end ──
+# ── GPU embedded: nm_stage.sh begin ──
+IFS= read -r -d '' GPU_EMBED_NM_STAGE <<'GPU_EMBED_NM_STAGE_EOF' || true
+#!/bin/sh
+# osx-proxmox-next: runs in the macOS recovery Terminal, from the payload disk (volume OSXPNIGPU).
+# Copies the NullMoth driver package, the first-boot script and its LaunchDaemon into the installed macOS
+# (offline), turns off the "allow this extension" prompt, writes result.txt next to this script and powers off.
+SRC="$(cd "$(dirname "$0")" && pwd)"
+TARBALL="@TARBALL@"
+FW_RUN="@FW_RUN@"
+# tells the host the typed command arrived intact (it retypes when it never sees this)
+echo started >"$SRC/result.txt"; sync
+say() { echo "osx-proxmox-next: $*"; }
+fail() { say "FAILED: $*"; echo "failed: $*" >"$SRC/result.txt"; sync; /sbin/halt; exit 1; }
+
+diskutil mount "MACOS - Data" >/dev/null 2>&1
+D="/Volumes/MACOS - Data"
+[ -d "$D/Library" ] || D="/Volumes/Data"
+[ -d "$D/Library" ] || fail "the installed macOS data volume is not mounted"
+
+BASE="$D/Library/Application Support/OSXProxmoxNext/nullmoth"
+PLIST="com.osxproxmoxnext.nullmoth-firstboot.plist"
+mkdir -p "$BASE" "$D/Library/LaunchDaemons" || fail "cannot create the target folders"
+rm -f "$BASE/state"
+cp "$SRC/$TARBALL" "$BASE/$TARBALL" || fail "cannot copy the driver package"
+[ -z "$FW_RUN" ] || cp "$SRC/$FW_RUN" "$BASE/$FW_RUN" || fail "cannot copy NVIDIA's firmware package"
+cp "$SRC/firstboot.sh" "$BASE/firstboot.sh" || fail "cannot copy the first-boot script"
+cp "$SRC/$PLIST" "$D/Library/LaunchDaemons/$PLIST" || fail "cannot copy the LaunchDaemon"
+chmod 755 "$BASE/firstboot.sh"
+chmod 644 "$BASE/$TARBALL" "$D/Library/LaunchDaemons/$PLIST"
+[ -z "$FW_RUN" ] || chmod 644 "$BASE/$FW_RUN"
+chown -R 0:0 "$BASE" "$D/Library/LaunchDaemons/$PLIST"
+
+# The payload disk was built from the verified download. Compare the copies with it (byte for byte where cmp
+# exists, by size otherwise); firstboot.sh checks the SHA-256 again inside the full macOS.
+size_of() { ls -ln "$1" | awk '{print $5}'; }
+same() {
+  if command -v cmp >/dev/null 2>&1; then cmp -s "$1" "$2"; else [ "$(size_of "$1")" = "$(size_of "$2")" ]; fi
+}
+same "$SRC/$TARBALL" "$BASE/$TARBALL" || fail "the copied driver package differs from the original"
+[ -z "$FW_RUN" ] || same "$SRC/$FW_RUN" "$BASE/$FW_RUN" || fail "the copied firmware package differs from the original"
+
+# macOS must load the extensions without asking the user to allow them in System Settings.
+spctl kext-consent disable >"$BASE/kext-consent.log" 2>&1 || fail "could not turn off the extension approval prompt ($(tr '\n' ' ' <"$BASE/kext-consent.log" | cut -c1-120))"
+
+say "staged OK"
+# flush the copied files first: the host stops the VM as soon as it reads "staged" (the halt below can wedge Tahoe's recovery)
+sync
+echo "staged" >"$SRC/result.txt"
+sync
+/sbin/halt
+GPU_EMBED_NM_STAGE_EOF
+# ── GPU embedded: nm_stage.sh end ──
+# ── GPU embedded: nm_firstboot.sh begin ──
+IFS= read -r -d '' GPU_EMBED_NM_FIRSTBOOT <<'GPU_EMBED_NM_FIRSTBOOT_EOF' || true
+#!/bin/sh
+# osx-proxmox-next: first boots of a macOS guest that has an NVIDIA card passed through (NullMoth driver).
+# A LaunchDaemon (root) runs this on every boot until it is done:
+#   install: turn on Remote Login and Screen Sharing, keep the Mac awake, install the driver, restart
+#   verify:  wait for the driver to load, report to the host, remove itself and power off
+# Every result goes to result.txt on the payload disk, where the host reads it. One attempt only: a failed
+# install is reported and left alone (the driver's own installer rolls itself back).
+BASE="/Library/Application Support/OSXProxmoxNext/nullmoth"
+STATE="$BASE/state"
+PLIST="/Library/LaunchDaemons/com.osxproxmoxnext.nullmoth-firstboot.plist"
+LOG="/var/log/osx-proxmox-next-nullmoth.log"
+TARBALL="@TARBALL@"
+WANT_SHA256="@TARBALL_SHA256@"
+FW_RUN="@FW_RUN@"
+PAYLOAD_LABEL="OSXPNIGPU"
+MIN_KEXTS=4
+LOAD_WAIT=300
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
+
+# hand a result to the host through the payload disk; true when the disk is attached
+write_result() {
+  log "result: $1"
+  vol="/Volumes/$PAYLOAD_LABEL"
+  [ -d "$vol" ] || diskutil mount "$PAYLOAD_LABEL" >/dev/null 2>&1
+  [ -d "$vol" ] || return 1
+  echo "$1" >"$vol/result.txt"
+  sync
+  diskutil unmount "$vol" >/dev/null 2>&1
+  return 0
+}
+
+# report, then end this run; $2 = halt|restart. Only a host that is waiting for the report (the payload disk is
+# attached) gets a power off: without it nobody is watching, so the guest stays up. A restart is needed to load the
+# driver either way.
+report() {
+  if write_result "$1"; then waiting=yes; else waiting=no; fi
+  case "$2" in
+    halt) [ "$waiting" = yes ] && /sbin/shutdown -h now >/dev/null 2>&1 ;;
+    restart) /sbin/shutdown -r now >/dev/null 2>&1 ;;
+  esac
+  exit 0
+}
+
+# a failure ends the job for good
+fail() {
+  log "failed: $*"
+  rm -f "$PLIST"
+  echo failed >"$STATE"
+  report "failed: $*" halt
+}
+
+# keep the log tail of the driver installer on one short line for the host
+tail_line() { tail -n 3 "$LOG" | tr '\n"' '  ' | cut -c1-300; }
+
+remote_access() {
+  /bin/launchctl enable system/com.openssh.sshd >>"$LOG" 2>&1
+  /bin/launchctl load -w /System/Library/LaunchDaemons/ssh.plist >>"$LOG" 2>&1
+  /bin/launchctl enable system/com.apple.screensharing >>"$LOG" 2>&1
+  /bin/launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist >>"$LOG" 2>&1
+  /usr/bin/pmset -a sleep 0 >>"$LOG" 2>&1
+  /usr/bin/pmset -a disksleep 0 >>"$LOG" 2>&1
+}
+
+guest_ip() {
+  for i in en0 en1 en2 en3; do
+    ip=$(/usr/sbin/ipconfig getifaddr "$i" 2>/dev/null) && [ -n "$ip" ] && { echo "$ip"; return; }
+  done
+}
+
+install_driver() {
+  /usr/sbin/ioreg -r -c IOPCIDevice -d 1 | grep -q '"vendor-id" = <de100000>' || fail "macOS does not see the NVIDIA card"
+  got=$(/usr/bin/shasum -a 256 "$BASE/$TARBALL" 2>/dev/null | awk '{print $1}')
+  [ "$got" = "$WANT_SHA256" ] || fail "the driver package checksum does not match"
+  remote_access
+  work=$(mktemp -d /var/tmp/nullmoth-pkg.XXXXXX) || fail "cannot create a work folder"
+  /usr/bin/tar -xzf "$BASE/$TARBALL" -C "$work" >>"$LOG" 2>&1 || fail "cannot unpack the driver package"
+  [ -f "$work/pkgroot/install.sh" ] || fail "the driver package has no installer"
+  if [ -n "$FW_RUN" ] && [ -f "$BASE/$FW_RUN" ]; then
+    NULLMOTH_FW_RUN="$BASE/$FW_RUN"; export NULLMOTH_FW_RUN
+  fi
+  log "running the NullMoth installer"
+  if /bin/bash "$work/pkgroot/install.sh" >>"$LOG" 2>&1; then
+    rm -rf "$work" "${BASE:?}/$TARBALL"
+    [ -z "$FW_RUN" ] || rm -f "$BASE/$FW_RUN"
+    echo verify >"$STATE"
+    report "installed" restart
+  fi
+  rm -rf "$work"
+  fail "the driver installer stopped: $(tail_line)"
+}
+
+verify_driver() {
+  write_result "verifying" || true   # tells the host the restart worked, so it does not stop the VM while the driver loads
+  waited=0
+  kexts=0
+  while [ "$waited" -lt "$LOAD_WAIT" ]; do
+    kexts=$(/usr/bin/kmutil showloaded --list-only 2>/dev/null | grep -ci nullmoth)
+    [ "$kexts" -ge "$MIN_KEXTS" ] && break
+    sleep 10
+    waited=$((waited + 10))
+  done
+  if [ "$kexts" -lt "$MIN_KEXTS" ]; then
+    fail "the driver did not load after the restart (kexts loaded: $kexts, needed $MIN_KEXTS)"
+  fi
+  displays=$(/usr/sbin/ioreg -l -w0 2>/dev/null | grep -c IODisplayEDID)
+  shown=no; [ "$displays" -gt 0 ] && shown=yes
+  rm -f "$PLIST"
+  echo "done" >"$STATE"
+  report "verified: kexts=$kexts display=$shown ip=$(guest_ip)" halt
+}
+
+case "$(cat "$STATE" 2>/dev/null)" in
+  verify) verify_driver ;;
+  done|failed) rm -f "$PLIST" ;;
+  *) install_driver ;;
+esac
+GPU_EMBED_NM_FIRSTBOOT_EOF
+# ── GPU embedded: nm_firstboot.sh end ──
+# ── GPU embedded: nm_launchd.plist begin ──
+IFS= read -r -d '' GPU_EMBED_NM_PLIST <<'GPU_EMBED_NM_PLIST_EOF' || true
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.osxproxmoxnext.nullmoth-firstboot</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>/Library/Application Support/OSXProxmoxNext/nullmoth/firstboot.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>
+GPU_EMBED_NM_PLIST_EOF
+# ── GPU embedded: nm_launchd.plist end ──
 # ── GPU embedded: igpu_power_watchdog.py begin ──
 IFS= read -r -d '' GPU_EMBED_IGPU_WATCHDOG <<'GPU_EMBED_IGPU_WATCHDOG_EOF' || true
 #!/usr/bin/env python3
@@ -7078,6 +7908,10 @@ function gpu_engine_init() {
   printf '%s' "$GPU_EMBED_IGPU_FIRSTBOOT" >"$GPU_ENGINE_DIR/igpu_firstboot.sh"
   printf '%s' "$GPU_EMBED_IGPU_STAGE" >"$GPU_ENGINE_DIR/igpu_stage.sh"
   printf '%s' "$GPU_EMBED_IGPU_PLIST" >"$GPU_ENGINE_DIR/igpu_launchd.plist"
+  printf '%s' "$GPU_EMBED_NULLMOTH_ENGINE" >"$GPU_ENGINE_DIR/nullmoth_engine.py"
+  printf '%s' "$GPU_EMBED_NM_STAGE" >"$GPU_ENGINE_DIR/nm_stage.sh"
+  printf '%s' "$GPU_EMBED_NM_FIRSTBOOT" >"$GPU_ENGINE_DIR/nm_firstboot.sh"
+  printf '%s' "$GPU_EMBED_NM_PLIST" >"$GPU_ENGINE_DIR/nm_launchd.plist"
   printf '%s' "$GPU_EMBED_IGPU_WATCHDOG" >"$GPU_ENGINE_DIR/igpu_power_watchdog.py"
   printf '%s' "$GPU_EMBED_IGPU_DIAG" >"$GPU_ENGINE_DIR/igpu_diag.py"
   printf '%s' "$GPU_EMBED_IGPU_WATCHDOG_UNIT" >"$GPU_ENGINE_DIR/osx-next-power-watchdog@.service"
@@ -7173,7 +8007,7 @@ function gpu_verdict() {
   elif [ "$vendor" == "intel" ]; then
     igpu_verdict "$dev"
   elif nullmoth_supported_device "$dev"; then
-    echo "nullmoth|Works with NullMoth (beta) on macOS 15.5 to 26|Needs the third-party NullMoth driver, which you install yourself."
+    echo "nullmoth|Works with NullMoth (beta) on macOS 15.5 to 26|Needs the third-party NullMoth driver, which this tool installs for you."
   else
     echo "unsupported|Not supported by macOS|${GPU_PRE_TURING_REASON}"
   fi
@@ -8409,6 +9243,7 @@ function gpu_setup() {
       --display) display="${2:-}"; shift ;;
       --macos) GPU_MACOS_FLAG="${2:-}"; shift ;;
       --accept-nullmoth-risk) accept=yes ;;
+      --nullmoth-version) GPU_NULLMOTH_VERSION="${2:-}"; shift ;;
       --stop-vm) stop=yes ;;
       *) msg_error "Unknown option: $1"; return 2 ;;
     esac
@@ -8475,7 +9310,7 @@ if vm:
     out.append("  VM: " + vm + (" " + vmname if vmname else ""))
 out += ["  Changed: " + c["path"] for c in d["host_changes"] if not c.get("reverted")]
 if d["gpu"]:
-    nxt = {"nvidia": "Next, in macOS: install the NullMoth driver yourself (guide: " + doc + "). We do not ship or support it.",
+    nxt = {"nvidia": "Next: nothing to do in macOS, the driver is installed and the VM is running (guide: " + doc + "). We do not ship or support the driver.",
            "intel": "Next: plug a monitor or an HDMI dummy plug into the native HDMI port and start the VM. The graphics package installs itself on the first boot."}
     out += ["", nxt.get(d["gpu"]["vendor"], "Next: start the VM. macOS uses the card with its own driver."), ""]
 out.append("  Undo everything with: gpu-setup --undo")
@@ -8837,15 +9672,12 @@ function gpu_step_vm() {
     gpu_say "REFUSED: The NullMoth notice has not been acknowledged. Run the scan again: $GPU_RESUME_CMD"
     return 2
   fi
-  if [ "$vendor" == "nvidia" ]; then
-    nullmoth_print_guest_prep
-    gpu_ui_yesno "Before you attach" "${NULLMOTH_GUEST_PREP_CONFIRM}" || { gpu_say "Nothing was changed. Turn them on in macOS, then run: $GPU_RESUME_CMD"; return 2; }
-  fi
   gpu_ui_yesno "Attach the card" "Attach the card to VM ${vmid} now? A snapshot of its config is saved first." || { gpu_say "Nothing was changed."; return 0; }
   gpu_chosen_target >/dev/null || return $?   # last check before anything is written
   gpu_state_save "$(gpu_state_get 'json.dumps({"vm_records": d["vm_records"] + ([d["vm"]] if d["vm"] not in d["vm_records"] else [])})')"
   if [ "$vendor" == "nvidia" ]; then
-    nvidia_attach "$vmid" "$bdf" --accept-nullmoth-risk --guest-confirmed || return 1
+    gpu_say "Before the attach, the VM boots macOS recovery once to stage the NullMoth driver inside macOS, so the first boot with the card installs it by itself. This takes about 15 minutes."
+    nvidia_attach "$vmid" "$bdf" --accept-nullmoth-risk ${GPU_YES:+--yes} ${GPU_NULLMOTH_VERSION:+--nullmoth-version "$GPU_NULLMOTH_VERSION"} || return 1
   elif [ "$vendor" == "intel" ]; then
     gpu_say "Before the attach, the VM boots macOS recovery once to put the graphics package inside macOS, so the first boot with the iGPU installs it by itself. This takes about 15 minutes."
     igpu_finish "$vmid" || { [ "$IGPU_PKG_INSTALLED" == yes ] || gpu_say "The graphics package is not installed yet; see above."; }
@@ -8867,10 +9699,7 @@ function gpu_step_first_boot() {
     echo "The Proxmox console stays blank: the iGPU is the only display."
     echo "The first boot installs the graphics package by itself and restarts once. Metal is active afterwards."
   elif [ "$vendor" == "nvidia" ]; then
-    echo "Start the VM. Once the NullMoth driver loads, the Proxmox console goes black. Connect a monitor or an HDMI/DisplayPort dummy plug to the card to get a desktop (Screen Sharing mirrors it); SSH always works."
-    echo "Checklist inside macOS:"
-    nullmoth_print_next_steps
-    echo "Driver releases: ${NULLMOTH_URL}/releases"
+    echo "The driver is installed and loaded. Once it loads, the Proxmox console goes black: use ssh or Screen Sharing (vnc://<ip>), or a monitor or HDMI/DisplayPort dummy plug on the card."
     echo "Our guide: ${GPU_DOCS_ROOT}nvidia-nullmoth"
     command -v qrencode >/dev/null 2>&1 && qrencode -t ANSIUTF8 "${GPU_DOCS_ROOT}nvidia-nullmoth"
   else
@@ -9401,6 +10230,9 @@ fi
 if [ "${1:-}" == "nvidia-attach" ]; then
   check_root
   if nvidia_attach "${@:2}"; then exit 0; else exit 1; fi
+fi
+if [ "${1:-}" == "nullmoth-versions" ]; then
+  if nullmoth_versions_command; then exit 0; else exit 1; fi
 fi
 if [ "${1:-}" == "nvidia-detach" ]; then
   check_root

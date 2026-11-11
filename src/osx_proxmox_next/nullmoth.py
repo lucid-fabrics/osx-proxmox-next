@@ -1,7 +1,7 @@
 """Attach an NVIDIA Turing-or-newer GPU to an installed macOS VM (beta).
 
-Prepares the VM and its OpenCore disk for the third-party NullMoth driver.
-The driver itself is never downloaded, bundled or installed by this tool.
+Prepares the VM and its OpenCore disk for the third-party NullMoth driver. nullmoth_finish.py then downloads
+the driver, verifies it and installs it inside macOS with no step for the user. The driver is never bundled.
 The notice text below is used verbatim by the CLI, the TUI, the bash
 installer and the docs; tests/test_nullmoth_parity.py diffs the bash copy.
 """
@@ -31,12 +31,11 @@ from .services import fetch_vm_info, get_proxmox_adapter
 __all__ = [
     "ACK_LABEL",
     "ACK_PHRASE",
-    "GUEST_PREP",
-    "GUEST_PREP_CONFIRM",
-    "GUEST_PREP_TITLE",
     "AttachPlan",
     "MMIO_ARG",
-    "NEXT_STEPS",
+    "NOTES",
+    "DISPLAY_LINE",
+    "FAILED_NOTE",
     "NOTICE_BODY",
     "NOTICE_TITLE",
     "NULLMOTH_URL",
@@ -53,10 +52,11 @@ __all__ = [
 NULLMOTH_URL = "https://github.com/nullmoth/nvidia-macos-driver"
 NOTICE_TITLE = "NVIDIA GPU support (Beta)"
 NOTICE_BODY = (
-    "This feature prepares your VM for the NullMoth NVIDIA driver, a third-party project that "
-    "osx-proxmox-next does not make, review or support. You download and install that driver "
-    "yourself, at your own risk. We are not responsible for the driver, its installation, or any "
-    "damage, data loss or instability that follows.\n"
+    "This feature sets up your VM for the NullMoth NVIDIA driver, a third-party project that "
+    "osx-proxmox-next does not make, review or support. The tool downloads the driver from its "
+    "GitHub releases, checks its checksum and installs it in your VM for you, at your own risk. We "
+    "are not responsible for the driver, its installation, or any damage, data loss or instability "
+    "that follows.\n"
     "\n"
     "NullMoth only runs with core macOS security turned off: code-signing checks (AMFI) are "
     "bypassed, System Integrity Protection is relaxed and Secure Boot is disabled. This is a real "
@@ -77,31 +77,12 @@ _PYEOF = "NULLMOTH_PY"
 # The only Proxmox report of NullMoth ran with a 256 MiB BAR1 (nullmoth issue #275).
 _BAR_NOTE = " NullMoth's one Proxmox report (nullmoth issue #275) ran at 256 MiB."
 
-# Required in the guest BEFORE the card is attached: once the driver loads, the Proxmox console goes black.
-GUEST_PREP_TITLE = "Before you attach (required): get a way into macOS that does not need the Proxmox console"
-GUEST_PREP = (
-    "In macOS open System Settings > General > Sharing and turn on Remote Login and Screen Sharing.",
-    "Note the VM's IP address (shown in the Sharing pane, or in your router).",
-    "You will connect with ssh <user>@<ip>, or with any VNC client pointed at the VM's IP "
-    "(from a Mac: open vnc://<ip>).",
-    "If Remote Login will not switch on from the command line (systemsetup needs Full Disk Access), run: "
-    "sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist",
-    "Connect a monitor or an HDMI/DisplayPort dummy plug to the card. Without one the card has no display, so the "
-    "Proxmox console and Screen Sharing both stay black. Screen Sharing mirrors the display on the card; SSH always works.",
-)
-GUEST_PREP_CONFIRM = ("Remote Login and Screen Sharing are on, I can reach the VM over the network, and a monitor "
-                      "or dummy plug is connected to the card.")
-
-NEXT_STEPS = (
-    "Start the VM. Once the NullMoth driver loads, the Proxmox console goes black (the driver takes the display "
-    "even with vga std). To get a desktop, connect a monitor or an HDMI/DisplayPort dummy plug to the card; "
-    "Screen Sharing then mirrors that display. SSH always works.",
-    f"Download the NullMoth release yourself from {NULLMOTH_URL}/releases and check it with "
-    "shasum -a 256 -c SHA256SUMS, then run sudo ./install.sh in the guest.",
-    "Approve the extensions in System Settings > Privacy & Security, then reboot the guest.",
-    "Verify with: kmutil showloaded --list-only | grep -i nullmoth. Expect 4 or more lines "
-    "(NVRM, NVAccel, NVRMFB, NVRMAGDC, newer releases add more).",
-    "Turn off system sleep in the guest: sudo pmset -a sleep 0",
+DISPLAY_LINE = ("The card has no display yet: connect a monitor or an HDMI/DisplayPort dummy plug to it. Once the "
+                "driver loads, the Proxmox console goes black and Screen Sharing mirrors the display on the card.")
+FAILED_NOTE = ("The VM is usable without the driver. Remote Login, Screen Sharing and sleep 0 were switched on in the guest and "
+               "the extension approval prompt was turned off; the guest log is /var/log/osx-proxmox-next-nullmoth.log. "
+               "To try again, run nvidia-detach first (the card is attached by now), then the same command.")
+NOTES = (
     "Escape hatch: add -nvoff to the boot-args, or run gpu-setup --undo on the host.",
     "Warning: the NullMoth 1401 app edits the OpenCore config itself. Rebuilding the OpenCore "
     "disk with this tool later (or running gpu-setup --undo) wipes those edits.",

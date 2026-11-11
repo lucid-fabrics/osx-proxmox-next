@@ -154,7 +154,8 @@ def test_undo_can_stop_a_running_vm_when_asked(bash, vm, tmp_path):
 def test_a_refused_nvidia_attach_leaves_a_record_that_undo_can_finish(bash, vm, tmp_path):
     vm(100, "stopped", MAC.replace("sequoia", "tahoe"))
     env = nvidia_env(tmp_path, vm.env)
-    bash("nullmoth_fetch_amfipass() { echo /cache/a.zip; }; nullmoth_oc_patch() { return 1; }; nvidia_attach 100 01:00 --accept-nullmoth-risk --yes",
+    bash("nullmoth_fetch_amfipass() { echo /cache/a.zip; }; nullmoth_oc_patch() { return 1; }; nullmoth_choose_version() { echo latest; }; "
+         "nullmoth_stage() { return 0; }; nullmoth_cleanup() { echo NMCLEAN; }; nvidia_attach 100 01:00 --accept-nullmoth-risk --yes",
          env=env, expect=1)
     assert (tmp_path / "state/gpu-attach-100.json").exists() and vm.calls() == []
     out = bash(NV_STUBS + "gpu_detach_record 100", env=env).stdout

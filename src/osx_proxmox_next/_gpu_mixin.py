@@ -12,7 +12,7 @@ from textual.widgets.option_list import Option
 
 from . import bios_guide, host_setup
 from .gpu_setup import DISPLAY_OPTIONS, TROUBLESHOOTING, CardChanged, Session, VmOption, card_text
-from . import nullmoth
+from . import nullmoth, nullmoth_cli, nullmoth_finish
 from .nullmoth import ACK_PHRASE
 from .screens.gpu_panel import CONFIRM_PHRASE
 
@@ -22,7 +22,7 @@ __all__ = ["GpuSetupMixin", "pack_fields", "qr_spans"]
 
 _ALL_INPUTS = ("gp_gpu_select", "gp_vm_label", "gp_vm_list", "gp_display_label", "gp_display_radio",
                "gp_display_note", "gp_notice_title", "gp_notice", "gp_ack_label", "gp_ack_in", "gp_confirm_label", "gp_confirm_in",
-               "gp_stop_cb")
+               "gp_stop_cb", "gp_nm_select")
 _LATER, _CREATE = "later", "create"
 
 
@@ -522,8 +522,10 @@ class GpuSetupMixin:
 
     def _gp_vm(self) -> None:
         s = self._gp_session()
-        self._gp_show("gp_vm_label", "gp_vm_list", "gp_stop_cb")
         vendor = s.state["gpu"]["vendor"]
+        self._gp_show("gp_vm_label", "gp_vm_list", "gp_stop_cb", *(("gp_nm_select",) if vendor == "nvidia" else ()))
+        if vendor == "nvidia":
+            self._gp_fill_releases()
         self._gp_set("Step 7: attach the card to the VM",
                      "Pick the macOS VM that gets the card. It must have finished its install.", "Preview", back=True,
                      primary_disabled=True)
@@ -538,6 +540,32 @@ class GpuSetupMixin:
             self._gp_validate()
 
         self._gp_async_quiet(lambda: s.vm_options(vendor), done)
+
+    def _gp_fill_releases(self) -> None:
+        """The NullMoth release picker: newest first, the latest stable one preselected. Offline it holds "latest" only."""
+        select = self.query_one("#gp_nm_select", Select)  # type: ignore[attr-defined]
+
+        def work() -> list[dict]:
+            return nullmoth_finish.versions()
+
+        def fill(found: list[dict] | None) -> None:
+            lines = nullmoth_cli.version_lines(found or [])
+            options = [(line, r["tag"]) for line, r in zip(lines, found or [])] or [("Latest", "latest")]
+            select.set_options(options)
+            select.value = next((r["tag"] for r in found or [] if not r["prerelease"]), options[0][1])
+
+        def runner() -> None:
+            try:
+                found = work()
+            except Exception:  # noqa: BLE001 - no network: the install still resolves "latest" itself and reports the error
+                found = None
+            self.call_from_thread(fill, found)  # type: ignore[attr-defined]
+
+        Thread(target=runner, daemon=True).start()
+
+    def _gp_release_choice(self) -> str:
+        value = self.query_one("#gp_nm_select", Select).value  # type: ignore[attr-defined]
+        return value if isinstance(value, str) and value else "latest"
 
     def _gp_vm_preview(self) -> None:
         s = self._gp_session()
@@ -555,11 +583,12 @@ class GpuSetupMixin:
                 lines += ["", f"This is what will change on VM {s.state['vm']} (a config snapshot is saved first):"]
                 lines += [f"  {i:02d}. {st.title}" for i, st in enumerate(plan.steps, start=1)]
                 if s.state["gpu"]["vendor"] == "nvidia":
-                    lines += ["", nullmoth.GUEST_PREP_TITLE + ":"]
-                    lines += [f"  {i}. {t}" for i, t in enumerate(nullmoth.GUEST_PREP, start=1)]
+                    lines += ["", "Before that the tool downloads the NullMoth release and verifies it, boots macOS recovery "
+                              "once to stage it inside macOS, and the first boot installs it by itself (about 15 minutes)."]
             self._gp_set("Step 7: attach the card to the VM", "\n".join(lines), "Attach the card now" if plan.ok else "Preview",
                          back=True)
-            self._gp_show("gp_vm_label", "gp_vm_list", "gp_stop_cb")
+            self._gp_show("gp_vm_label", "gp_vm_list", "gp_stop_cb",
+                          *(("gp_nm_select",) if s.state["gpu"]["vendor"] == "nvidia" else ()))
 
         self._gp_async(lambda: s.vm_plan(allow_stop=stop), done, "Checking the VM and the card...")
 
@@ -569,23 +598,26 @@ class GpuSetupMixin:
         if plan is None or not plan.ok:
             self._gp_vm_preview()
             return
-        if s.state["gpu"]["vendor"] == "nvidia" and not self._gp_confirm_click(
-                self._gp_guest_key(s), "Attach the card now", nullmoth.GUEST_PREP_CONFIRM + " Press the button again to attach."):
-            return
+        nvidia = s.state["gpu"]["vendor"] == "nvidia"
+        choice = self._gp_release_choice() if nvidia else ""
+        note = "Setting up the NVIDIA card (about 15 minutes)..."
+
+        def progress(message: str) -> None:
+            self.call_from_thread(lambda: self.query_one("#gp_body", Static).update(note + "\n\n" + message))  # type: ignore[attr-defined]
 
         def work() -> Any:
-            from pathlib import Path
-            from .defaults import DEFAULT_ISO_DIR
             from .executor import apply_plan
-            from .oc_builder import ensure_amfipass
             from .rollback import create_snapshot
             s.begin_attach()  # the card must still be the chosen one: raises CardChanged before anything is written
-            if s.state["gpu"]["vendor"] == "nvidia":
-                ensure_amfipass(Path(DEFAULT_ISO_DIR))
+            if nvidia:
+                return s.finish_nvidia(choice, progress)
             create_snapshot(s.state["vm"])
             return apply_plan(plan.steps, execute=True)
 
         def done(result: Any) -> None:
+            if nvidia:
+                self._gp_nvidia_done(s, result)
+                return
             if not result.ok:
                 self._gp_result(f"Attaching failed. Log: {result.log_path}", fail=True)
                 return
@@ -594,6 +626,23 @@ class GpuSetupMixin:
             self._gp_render()
 
         self._gp_async(work, done, "Attaching the card...")
+
+    def _gp_nvidia_done(self, s: Session, result: nullmoth_finish.FinishResult) -> None:
+        notes = ["Note: " + n for n in result.notes]
+        if not result.verified:
+            reason = result.detail or result.result or "the guest reported nothing"
+            self._gp_result("\n".join(notes + [f"The NullMoth driver is not confirmed: {reason}. "
+                                              + nullmoth.FAILED_NOTE]), fail=True)
+            return
+        lines = notes + [f"NullMoth {result.version} is installed and loaded ({result.kexts} extensions)."]
+        if result.ip:
+            lines += [f"ssh <user>@{result.ip}", f"vnc://{result.ip}"]
+        if result.display != "yes":
+            lines.append(nullmoth.DISPLAY_LINE)
+        s.vm_applied()
+        self._gp_vm_plan = None
+        self._gp_render()
+        self._gp_result("\n".join(lines))
 
     def _gp_first_boot(self) -> None:
         s = self._gp_session()
