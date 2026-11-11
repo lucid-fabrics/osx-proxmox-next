@@ -73,7 +73,7 @@ class FirstBoot:
                          ('PLIST="/Library/LaunchDaemons/', f'PLIST="{tmp}/'), ('LOG="/var/log/osx-proxmox-next-nullmoth.log"', f'LOG="{tmp}/guest.log"'),
                          ("/bin/launchctl", "launchctl"), ("/usr/bin/pmset", "pmset"), ("/usr/sbin/ioreg", "ioreg"),
                          ("/usr/bin/kmutil", "kmutil"), ("/usr/sbin/ipconfig", "ipconfig"), ("/sbin/shutdown", "shutdown"),
-                         ("/usr/bin/shasum -a 256", "shasum -a 256"), ("/bin/bash ", "bash "), ('vol="/Volumes/$PAYLOAD_LABEL"', f'vol="{self.sb.payload}"'),
+                         ("/usr/bin/shasum -a 256", "shasum -a 256"), ("/bin/bash ", "bash "),
                          ("LOAD_WAIT=300", "LOAD_WAIT=5")):
             assert old in text, old
             text = text.replace(old, new)
@@ -82,8 +82,10 @@ class FirstBoot:
         self.plist = tmp / "com.osxproxmoxnext.nullmoth-firstboot.plist"
         self.plist.write_text("plist")
         sb = self.sb
-        for name in ("launchctl", "pmset", "diskutil", "shutdown"):
+        for name in ("launchctl", "pmset", "shutdown"):
             sb.stub(name, "exit 0")
+        # diskutil info reports the mount point only while the payload disk is attached
+        sb.stub("diskutil", f'[ "$1" = info ] && [ -d "{sb.payload}" ] && echo "   Mount Point:               {sb.payload}"; exit 0')
         sb.stub("ioreg", f"printf '{CARD}' " if card else "exit 0")
         sb.stub("kmutil", "".join(f"echo com.nullmoth.K{i}\n" for i in range(kexts)) + "exit 0")
         sb.stub("ipconfig", 'case "$2" in en1) echo 10.0.0.9;; *) exit 1;; esac')
@@ -161,6 +163,16 @@ def test_a_driver_that_does_not_load_fails_the_verification(tmp_path):
     fb.run()
     assert fb.result == "failed: the driver did not load after the restart (kexts loaded: 2, needed 4)"
     assert fb.state == "failed" and not fb.plist.exists()
+
+
+def test_a_leftover_volumes_folder_is_not_taken_for_the_payload_disk(tmp_path):
+    fb = FirstBoot(tmp_path)
+    leftover = tmp_path / "Volumes" / "OSXPNIGPU"
+    leftover.mkdir(parents=True)
+    fb.sb.stub("diskutil", f'[ "$1" = info ] && echo "   Mount Point:               {fb.sb.payload}"; exit 0')
+    fb.run()
+    assert fb.result == "installed"  # written through the reported mount point, nowhere else
+    assert not any(leftover.iterdir())
 
 
 def test_without_a_payload_disk_nothing_is_reported_and_nothing_is_powered_off(tmp_path):

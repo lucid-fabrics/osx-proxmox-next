@@ -21,9 +21,13 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
 # hand a result to the host through the payload disk; true when the disk is attached
 write_result() {
   log "result: $1"
-  vol="/Volumes/$PAYLOAD_LABEL"
-  [ -d "$vol" ] || diskutil mount "$PAYLOAD_LABEL" >/dev/null 2>&1
-  [ -d "$vol" ] || return 1
+  # the real mount point of the payload disk: a leftover /Volumes/OSXPNIGPU folder on the system volume is no disk
+  vol=$(diskutil info "$PAYLOAD_LABEL" 2>/dev/null | sed -n 's/^ *Mount Point: *//p')
+  if [ -z "$vol" ]; then
+    diskutil mount "$PAYLOAD_LABEL" >/dev/null 2>&1
+    vol=$(diskutil info "$PAYLOAD_LABEL" 2>/dev/null | sed -n 's/^ *Mount Point: *//p')
+  fi
+  [ -n "$vol" ] && [ -d "$vol" ] || return 1
   echo "$1" >"$vol/result.txt"
   sync
   diskutil unmount "$vol" >/dev/null 2>&1
