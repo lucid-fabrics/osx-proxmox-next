@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -32,10 +33,10 @@ IGD_BDF = "0000:" + IGD_SLOT
 KVM_DIR = "/usr/share/kvm"
 MB = 1024 * 1024
 
-# Pinned downloads. Every file is checked against its SHA-256 before use and never replaced
-# silently: a mismatch is an error. Keep the URLs on tags or commits, never on a moving branch.
+# Pinned downloads (option ROMs, AMFIPass). Every file is checked against its SHA-256 before use and never
+# replaced silently: a mismatch is an error. Keep the URLs on tags or commits, never on a moving branch.
+# WhateverXe and WhateverXe Graphics are not pinned: they come from the GitHub releases (see "releases" below).
 _LONGQT = "https://github.com/LongQT-sea/intel-igpu-passthru/releases/download/v0.1/"
-_WEX = "https://github.com/b00t0x/WhateverXe/releases/download/0.8.0/"
 _WEX_GFX = "https://github.com/b00t0x/WhateverXe-Graphics/"
 _WEX_GFX_COMMIT = "88d64a340e6f0d52e3f32a136c920d190ac43c53"
 ROMS = {
@@ -46,16 +47,12 @@ ROMS = {
     "adl-n": ("ADL-N_TWL_GOPv21_igd.rom", _LONGQT + "ADL-N_TWL_GOPv21_igd.rom",
               "2d2343fccbbeaf3d7df2280dd25a5f60a0aaf4b8e8ded15997b444d23afe0c3a"),
 }
-WEX_VERSION = "0.8.0"
 PINS = {
-    "whateverxe": ("WhateverXe-0.8.0-RELEASE.zip", _WEX + "WhateverXe-0.8.0-RELEASE.zip",
-                   "5b71e14ce10c673f6baba276183f268d7f04766d298cd34f1df0bb96f11c8e4b"),
     "amfipass": ("AMFIPass-v1.4.1-Mod-RELEASE.zip",
                  _WEX_GFX + "raw/" + _WEX_GFX_COMMIT + "/extras/AMFIPass-v1.4.1-Mod-RELEASE.zip",
                  "71f41de42e355d2a83e6f093ef34a5b24d0a9c9a9085830b2317f1b874f56250"),
-    "graphics": ("WhateverXe-Graphics-0.4.1.pkg", _WEX_GFX + "releases/download/v0.4.1/WhateverXe-Graphics-0.4.1.pkg",
-                 "7f7ce3b924ad421cff0c4f30534598858474b8c9539c4b889a461bc1d5fed02c"),
 }
+AMFIPASS_VERSION = "1.4.1-Mod"
 
 # Memory layout. OVMF puts a constant 65 MB of its own allocations above the guest's graphics
 # memory (measured on pve-edk2-firmware, PVE 9.2), WhateverXe compares the guest graphics memory
@@ -360,6 +357,170 @@ def rom_for_family(family, text=None):
     return ROMS[families[family][1]]
 
 
+# ── WhateverXe releases (GitHub) ─────────────────────────────────────
+
+# WhateverXe and WhateverXe Graphics are never pinned: the newest published release is the default and the user
+# may pick any older one. The file of a release is verified against the sha256 `digest` GitHub stores for the
+# asset; a release without a digest, or a download that does not match, is an error. There is no silent fallback.
+GITHUB_API = "https://api.github.com/repos/"
+LATEST = "latest"
+RELEASE_KINDS = {
+    "whateverxe": ("b00t0x/WhateverXe", re.compile(r"^WhateverXe-.+-RELEASE\.zip$"), "WhateverXe"),
+    "graphics": ("b00t0x/WhateverXe-Graphics", re.compile(r"^WhateverXe-Graphics-.+\.pkg$"), "WhateverXe Graphics"),
+}
+TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+STATE_FIELDS = ("whateverxe", "graphics")
+
+
+class ReleaseError(Exception):
+    """GitHub could not be asked, or a release cannot be used. The message says what to do next."""
+
+
+def github_get(url):
+    """The JSON GitHub returns for *url*. GITHUB_TOKEN, when set, raises the rate limit."""
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "osx-proxmox-next"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as resp:  # noqa: S310
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 429):
+            raise ReleaseError("GitHub refused the request (rate limit reached). Wait a few minutes and run the "
+                               "command again, or set GITHUB_TOKEN to a GitHub token to raise the limit.") from exc
+        if exc.code == 404:
+            raise ReleaseError("GitHub has no such release.") from exc
+        raise ReleaseError("GitHub answered HTTP %d for %s. Try again in a few minutes." % (exc.code, url)) from exc
+    except (OSError, ValueError) as exc:
+        raise ReleaseError("Could not reach GitHub (%s). Check the network and run the command again." % exc) from exc
+
+
+def _pick(kind, rel):
+    """The download of release *rel* for *kind* (None when the release does not carry the file)."""
+    repo, rx, _label = RELEASE_KINDS[kind]
+    assets = [a for a in rel.get("assets") or [] if rx.match(a.get("name") or "")]
+    if len(assets) != 1:
+        return None
+    asset = assets[0]
+    tag = rel.get("tag_name") or ""
+    if os.path.basename(asset["name"]) != asset["name"] or not TAG_RE.match(tag):
+        return None  # a name or tag that is not a plain word is never put on a path or a command line
+    m = DIGEST_RE.match(asset.get("digest") or "")
+    return {"kind": kind, "tag": tag, "version": tag[1:] if tag[:1] in "vV" else tag, "name": asset["name"],
+            "url": asset.get("browser_download_url") or "", "sha256": m.group(1) if m else "",
+            "prerelease": bool(rel.get("prerelease")), "published": rel.get("published_at") or ""}
+
+
+def list_releases(kind, get=None):
+    """Every published release of *kind* that has the file, newest first."""
+    repo = RELEASE_KINDS[kind][0]
+    data = (get or github_get)("%s%s/releases?per_page=30" % (GITHUB_API, repo))
+    picks = [_pick(kind, r) for r in data if not r.get("draft")]
+    return sorted((p for p in picks if p), key=lambda p: p["published"], reverse=True)
+
+
+def _usable(pick):
+    """The pick itself, or ReleaseError when it cannot be verified or does not come from the project."""
+    label = RELEASE_KINDS[pick["kind"]][2]
+    repo = RELEASE_KINDS[pick["kind"]][0]
+    if not pick["sha256"]:
+        raise ReleaseError("%s %s has no sha256 digest on GitHub, so its download cannot be verified and is "
+                           "refused. Pick another release." % (label, pick["tag"]))
+    if not pick["url"].startswith("https://github.com/%s/releases/download/" % repo):
+        raise ReleaseError("%s %s points at an unexpected download address, refused." % (label, pick["tag"]))
+    return pick
+
+
+def resolve(kind, choice=LATEST, get=None):
+    """The release picked by *choice* ("latest" or a tag) with `source` set to latest or chosen."""
+    label = RELEASE_KINDS[kind][2]
+    choice = choice or LATEST
+    if choice == LATEST:
+        found = [p for p in list_releases(kind, get) if not p["prerelease"]]
+        if not found:
+            raise ReleaseError("No published release of %s has the file this tool needs." % label)
+        return dict(_usable(found[0]), source=LATEST)
+    if not TAG_RE.match(choice):
+        raise ReleaseError("%r is not a release tag." % choice)
+    want = choice.lstrip("vV")
+    for pick in list_releases(kind, get):
+        if pick["tag"] == choice or pick["version"] == want:
+            return dict(_usable(pick), source="chosen")
+    try:
+        pick = _pick(kind, (get or github_get)("%s%s/releases/tags/%s" % (GITHUB_API, RELEASE_KINDS[kind][0], choice)))
+    except ReleaseError as exc:
+        raise ReleaseError("%s has no release tagged %s (%s). See the list with: igpu-versions" % (label, choice, exc)) from exc
+    if pick is None:
+        raise ReleaseError("%s %s has no download this tool can use." % (label, choice))
+    return dict(_usable(pick), source="chosen")
+
+
+def select_assets(wex=LATEST, graphics=LATEST, get=None):
+    """{"whateverxe": pick, "graphics": pick}; a ReleaseError names the one that failed."""
+    return {"whateverxe": resolve("whateverxe", wex, get), "graphics": resolve("graphics", graphics, get)}
+
+
+def fetch_release(pick, dest_dir, fetcher=None):
+    """Download *pick* into *dest_dir* (a cached file with the right hash is reused) and return its path."""
+    return (fetcher or fetch)(pick["url"], pick["sha256"], Path(dest_dir) / pick["name"])
+
+
+# ── what is installed, per VM ────────────────────────────────────────
+
+STATE_DIR = "/var/lib/osx-proxmox-next/igpu"
+
+
+def state_path(vmid, base=None):
+    return Path(base or os.environ.get("IGPU_STATE_DIR") or STATE_DIR) / ("%s.json" % int(vmid))
+
+
+def read_state(vmid, base=None):
+    try:
+        data = json.loads(state_path(vmid, base).read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_state(vmid, update, base=None):
+    """Merge *update* into the VM's record (versions, sources, package state) and return the record."""
+    import time
+    path = state_path(vmid, base)
+    data = read_state(vmid, base)
+    data.update(update)
+    data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+    return data
+
+
+def picks_state(picks, macos=""):
+    """The state fields that name the chosen downloads (see write_state)."""
+    out = {"amfipass_version": AMFIPASS_VERSION, "macos": macos}
+    for key in STATE_FIELDS:
+        if key in picks:
+            p = picks[key]
+            out.update({key + "_version": p["version"], key + "_tag": p["tag"], key + "_sha256": p["sha256"],
+                        key + "_source": p["source"]})
+    return out
+
+
+def describe_state(state):
+    """One plain line per installed component, for reports and status output."""
+    lines = []
+    for key, label in (("whateverxe", "WhateverXe"), ("graphics", "WhateverXe Graphics")):
+        if state.get(key + "_version"):
+            lines.append("%s %s (%s)" % (label, state[key + "_version"],
+                                         "latest when installed" if state.get(key + "_source") == LATEST else "chosen by the user"))
+    if state.get("amfipass_version"):
+        lines.append("AMFIPass %s (pinned)" % state["amfipass_version"])
+    return lines
+
+
 # ── payload disk ─────────────────────────────────────────────────────
 
 def render_payload_file(name, pkg_sha256):
@@ -518,7 +679,8 @@ def _emit(obj):
 
 def _usage():
     sys.stderr.write("usage: igpu_engine.py check|verdict <id>|lookup <id>|settings <mb> <rom>|merge-args|strip-args|"
-                     "fetch <rom:KEY|pin:NAME> <dir>|payload <pkg> <img>|result <img>|accel-check [seconds]|stage-command|pins\n")
+                     "fetch <rom:KEY|pin:NAME> <dir>|assets <dir> [wex] [graphics]|releases <whateverxe|graphics>|"
+                     "state-write <vmid>|state-record <vmid> <macos>|state-show <vmid>|payload <pkg> <img>|result <img>|accel-check [seconds]|stage-command|pins\n")
     return 64
 
 
@@ -554,6 +716,32 @@ def main(argv):
             sys.stderr.write("ERROR: %s\n" % exc)
             return 1
         sys.stdout.write(str(path) + "\n")
+        return 0
+    if cmd == "assets" and len(argv) in (3, 4, 5):
+        try:
+            picks = select_assets(*argv[3:])
+            out = {k: dict(p, path=str(fetch_release(p, argv[2]))) for k, p in picks.items()}
+        except (ReleaseError, OSError, ValueError) as exc:
+            sys.stderr.write("ERROR: %s\n" % exc)
+            return 1
+        _emit(out)
+        return 0
+    if cmd == "releases" and len(argv) == 3 and argv[2] in RELEASE_KINDS:
+        try:
+            _emit(list_releases(argv[2]))
+        except ReleaseError as exc:
+            sys.stderr.write("ERROR: %s\n" % exc)
+            return 1
+        return 0
+    if cmd == "state-write" and len(argv) == 3:
+        _emit(write_state(argv[2], json.loads(sys.stdin.read())))
+        return 0
+    if cmd == "state-record" and len(argv) == 4:
+        picks = json.loads(sys.stdin.read())
+        write_state(argv[2], picks_state(picks, argv[3]))
+        return 0
+    if cmd == "state-show" and len(argv) == 3:
+        sys.stdout.write("\n".join(describe_state(read_state(argv[2]))) + "\n")
         return 0
     if cmd == "payload" and len(argv) == 4:
         ok, msg = build_payload(argv[2], argv[3])

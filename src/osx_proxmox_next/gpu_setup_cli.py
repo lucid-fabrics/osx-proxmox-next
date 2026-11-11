@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
-from . import bios_guide, gpu, host_setup, igpu_finish, nullmoth
+from . import bios_guide, gpu, host_setup, igpu_engine, igpu_finish, nullmoth
 from . import gpu_setup
 from .gpu_setup import DISPLAY_OPTIONS, INTEL_DISPLAY_NOTE, NVIDIA_DISPLAY_NOTE, SUPPORTED_DOC, TROUBLESHOOTING, CardChanged, Session, card_text, render_rail
 
@@ -383,8 +383,10 @@ def _finish_intel(s: Session, io: _Io) -> int | None:
     """Stage the graphics package, attach the iGPU and run the first boot (igpu_finish does all of it)."""
     s.begin_attach()
     try:
-        result = igpu_finish.finish(s.state["vm"], pve=s.pve, on_event=lambda m: io.say("  " + m))
-    except igpu_finish.FinishError as exc:
+        wex = igpu_finish.choose_release("whateverxe", io.ask, io.say) if io.interactive else igpu_engine.LATEST
+        gfx = igpu_finish.choose_release("graphics", io.ask, io.say) if io.interactive else igpu_engine.LATEST
+        result = igpu_finish.finish(s.state["vm"], pve=s.pve, on_event=lambda m: io.say("  " + m), wex=wex, graphics=gfx)
+    except (igpu_finish.FinishError, igpu_engine.ReleaseError) as exc:
         io.say("FAILED: " + str(exc))
         return EXIT_FAIL
     for note in result.notes:
@@ -431,6 +433,9 @@ def _status(s: Session, io: _Io) -> int:
         io.say("No setup in progress.")
         return EXIT_OK
     io.say(f"Chosen card: {s.state['gpu']['name']} ({s.state['gpu']['bdf']}), VM: {s.state['vm']}")
+    if s.state["vm"] is not None:
+        for line in igpu_engine.describe_state(igpu_engine.read_state(s.state["vm"])):
+            io.say(f"  Installed: {line}")
     try:
         s.target()
     except CardChanged as exc:

@@ -9,7 +9,8 @@ Standard library only.
 attach   Backs up config.plist to config.plist.pre-igpu (kept if it already exists), unpacks
          WhateverXe.kext and AMFIPass.kext from the two zips named in the environment
          (IGPU_WEX_ZIP / IGPU_WEX_SHA256 and IGPU_AMFI_ZIP / IGPU_AMFI_SHA256, each checked
-         against its pinned SHA-256 first) into Kexts/, lists both right after Lilu, turns
+         against its expected SHA-256 first; the kext is found by name, also inside one wrapping folder,
+         and its executable is read from its Info.plist) into Kexts/, lists both right after Lilu, turns
          WhateverGreen off, sets ACPI > Quirks > FadtEnableReset and adds the boot-args
          -allow3d -disablegfxfirmware -wex-tgl-hold-render-wake. Running it twice changes
          nothing the second time. Refuses when config.plist still carries the NVIDIA
@@ -48,6 +49,7 @@ BOOT_ARGS = ('-allow3d', '-disablegfxfirmware', '-wex-tgl-hold-render-wake')
 NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 NULLMOTH_ARGS = ('nvfb', 'nvaccel', 'nvfbheads', '-nvkmsnosmooth')
 IONDRV = 'com.apple.iokit.IONDRVSupport'
+WEX_BUNDLE_ID = 'org.b00t0x.WhateverXe'
 
 
 def refuse(message, code=2):
@@ -82,8 +84,23 @@ def merge_boot_args(current, wanted):
     return ' '.join(kept + list(wanted))
 
 
+def find_bundle(names, bundle):
+    """The path inside the zip that holds *bundle*, up to and including the .kext folder (at most two folders
+    deep, so a release that wraps the kext in a folder still works). Exactly one match, else None."""
+    base = bundle[:-len('.kext')].lower()
+    exact, loose = set(), set()
+    for name in names:
+        parts = name.split('/')
+        for i, part in enumerate(parts[:-1]):
+            if i <= 2 and part.endswith('.kext'):
+                (exact if part == bundle else loose if base in part.lower() else set()).add('/'.join(parts[:i + 1]))
+    found = exact or loose
+    return found.pop() if len(found) == 1 else None
+
+
 def unpack_kext(zip_path, expected_sha, bundle, kexts_dir):
-    """Unpack *bundle* from a verified zip into kexts_dir, replacing an older copy."""
+    """Unpack *bundle* from a verified zip into kexts_dir, replacing an older copy.
+    Returns the kext's executable name and bundle identifier from its Info.plist."""
     if not zip_path or not os.path.exists(zip_path):
         refuse('the %s zip is missing (%s)' % (bundle, zip_path or 'not set'))
     actual = file_sha(zip_path)
@@ -94,21 +111,37 @@ def unpack_kext(zip_path, expected_sha, bundle, kexts_dir):
     shutil.rmtree(tmp, ignore_errors=True)
     count = 0
     with zipfile.ZipFile(zip_path) as z:
+        prefix = find_bundle([i.filename for i in z.infolist()], bundle)
+        if prefix is None:
+            kexts = sorted(set(n.split('/')[0] for n in z.namelist() if '.kext' in n.split('/')[0]))
+            refuse('no %s inside the %s zip (found: %s). This release is laid out differently than the tool '
+                   'expects; pick another release.' % (bundle, os.path.basename(zip_path), ', '.join(kexts) or 'no kext'))
         for info in z.infolist():
             name = info.filename
-            if info.is_dir() or not name.startswith(bundle + '/'):
+            if info.is_dir() or not name.startswith(prefix + '/'):
                 continue
             if name.startswith('/') or '..' in name.split('/'):
                 refuse('unsafe path in the %s zip: %s' % (bundle, name))
-            out = os.path.join(tmp, name[len(bundle) + 1:])
+            out = os.path.join(tmp, name[len(prefix) + 1:])
             os.makedirs(os.path.dirname(out), exist_ok=True)
             with z.open(info) as src, open(out, 'wb') as dst:
                 shutil.copyfileobj(src, dst)
             count += 1
     if count == 0:
         refuse('no %s inside the zip' % bundle)
+    try:
+        with open(os.path.join(tmp, 'Contents', 'Info.plist'), 'rb') as f:
+            info = plistlib.load(f)
+    except (OSError, ValueError):
+        refuse('the %s in the zip has no readable Contents/Info.plist' % bundle)
+    exe = info.get('CFBundleExecutable') or bundle[:-len('.kext')]
+    if os.path.basename(exe) != exe or exe in ('.', '..'):
+        refuse('the %s in the zip names the executable %r, which is not a plain file name' % (bundle, exe))
+    if not os.path.exists(os.path.join(tmp, 'Contents', 'MacOS', exe)):
+        refuse('the %s in the zip has no executable named %s' % (bundle, exe))
     shutil.rmtree(dest, ignore_errors=True)
     os.replace(tmp, dest)
+    return exe, info.get('CFBundleIdentifier', '')
 
 
 def kext_entry(bundle, exe):
@@ -139,8 +172,14 @@ def attach(oc_dir):
         refuse('config.plist still has the NVIDIA (NullMoth) changes: ' + ', '.join(left) + '. '
                'Run nvidia-detach first.')
     kexts_dir = os.path.join(oc_dir, 'Kexts')
+    exes = {}
     for bundle, _exe, prefix in KEXTS:
-        unpack_kext(os.environ.get(prefix + '_ZIP', ''), os.environ.get(prefix + '_SHA256', ''), bundle, kexts_dir)
+        exes[bundle], ident = unpack_kext(os.environ.get(prefix + '_ZIP', ''), os.environ.get(prefix + '_SHA256', ''),
+                                          bundle, kexts_dir)
+        if bundle == 'WhateverXe.kext' and ident != WEX_BUNDLE_ID:
+            sys.stderr.write('WARN: this WhateverXe release has the bundle id %r, not %s. The first-boot check that '
+                             'WhateverXe is loaded may not find it, so the graphics package may not install.\n'
+                             % (ident, WEX_BUNDLE_ID))
     if not os.path.exists(backup):
         shutil.copyfile(path, backup)
     ours = [b for b, _e, _p in KEXTS]
@@ -153,8 +192,8 @@ def attach(oc_dir):
             pos = idx + 1
     if pos is None:
         refuse('config.plist has no Lilu.kext entry, so WhateverXe cannot be placed after it')
-    for bundle, exe, _p in KEXTS:
-        kexts.insert(pos, kext_entry(bundle, exe))
+    for bundle, _exe, _p in KEXTS:
+        kexts.insert(pos, kext_entry(bundle, exes[bundle]))
         pos += 1
     cfg['Kernel']['Add'] = kexts
     cfg.setdefault('ACPI', {}).setdefault('Quirks', {})['FadtEnableReset'] = True

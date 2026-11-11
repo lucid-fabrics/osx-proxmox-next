@@ -16,10 +16,12 @@ from osx_proxmox_next import igpu_engine
 SCRIPT = Path(igpu_engine.__file__).parent / "data/gpu/oc_igpu.py"
 
 
-def make_zip(path: Path, bundle: str, exe: str, extra: dict[str, bytes] | None = None) -> str:
+def make_zip(path: Path, bundle: str, exe: str, extra: dict[str, bytes] | None = None, folder: str = "",
+             ident: str = "org.b00t0x.WhateverXe", plist_exe: str | None = None) -> str:
+    plist = plistlib.dumps({"CFBundleExecutable": plist_exe or exe, "CFBundleIdentifier": ident})
     with zipfile.ZipFile(path, "w") as z:
-        z.writestr(f"{bundle}/Contents/Info.plist", "<plist/>")
-        z.writestr(f"{bundle}/Contents/MacOS/{exe}", b"bin")
+        z.writestr(f"{folder}{bundle}/Contents/Info.plist", plist)
+        z.writestr(f"{folder}{bundle}/Contents/MacOS/{exe}", b"bin")
         z.writestr(f"{bundle}.dSYM/Contents/Info.plist", "ignored")
         for name, data in (extra or {}).items():
             z.writestr(name, data)
@@ -231,3 +233,65 @@ def test_serial_leaves_the_checksum_of_a_user_edited_config_alone(oc, zips):
     (oc / "config.plist").write_bytes(plistlib.dumps(cfg))
     run(oc, "serial")
     assert run(oc, "restore").stderr.startswith("KEPT:")
+
+
+def env_for(tmp_path, **wex):
+    w, a = tmp_path / "w2.zip", tmp_path / "a2.zip"
+    return {"IGPU_WEX_ZIP": str(w), "IGPU_WEX_SHA256": make_zip(w, "WhateverXe.kext", **wex),
+            "IGPU_AMFI_ZIP": str(a), "IGPU_AMFI_SHA256": make_zip(a, "AMFIPass.kext", "AMFIPass")}
+
+
+def test_a_release_that_wraps_the_kext_in_a_folder_still_installs(oc, tmp_path):
+    res = run(oc, "attach", env_for(tmp_path, exe="WhateverXe", folder="WhateverXe-0.9.0-RELEASE/"))
+    assert res.returncode == 0, res.stderr
+    assert (oc / "Kexts/WhateverXe.kext/Contents/MacOS/WhateverXe").exists()
+
+
+def test_the_executable_name_comes_from_the_kext_plist(oc, tmp_path):
+    assert run(oc, "attach", env_for(tmp_path, exe="WEX", plist_exe="WEX")).returncode == 0
+    entry = next(k for k in cfg_of(oc)["Kernel"]["Add"] if k["BundlePath"] == "WhateverXe.kext")
+    assert entry["ExecutablePath"] == "Contents/MacOS/WEX"
+
+
+def test_a_kext_with_a_missing_executable_is_refused_clearly(oc, tmp_path):
+    before = (oc / "config.plist").read_bytes()
+    res = run(oc, "attach", env_for(tmp_path, exe="Other", plist_exe="WhateverXe"))
+    assert res.returncode == 2 and "has no executable named WhateverXe" in res.stderr
+    assert (oc / "config.plist").read_bytes() == before
+
+
+def test_a_zip_without_the_kext_lists_what_it_has(oc, tmp_path):
+    w = tmp_path / "w3.zip"
+    with zipfile.ZipFile(w, "w") as z:
+        z.writestr("Other.kext/Contents/Info.plist", "x")
+    env = env_for(tmp_path, exe="WhateverXe")
+    env["IGPU_WEX_ZIP"], env["IGPU_WEX_SHA256"] = str(w), hashlib.sha256(w.read_bytes()).hexdigest()
+    res = run(oc, "attach", env)
+    assert res.returncode == 2 and "no WhateverXe.kext inside" in res.stderr and "Other.kext" in res.stderr
+
+
+def test_a_kext_with_an_unreadable_info_plist_is_refused(oc, tmp_path):
+    w = tmp_path / "w4.zip"
+    with zipfile.ZipFile(w, "w") as z:
+        z.writestr("WhateverXe.kext/Contents/MacOS/WhateverXe", b"bin")
+    env = env_for(tmp_path, exe="WhateverXe")
+    env["IGPU_WEX_ZIP"], env["IGPU_WEX_SHA256"] = str(w), hashlib.sha256(w.read_bytes()).hexdigest()
+    res = run(oc, "attach", env)
+    assert res.returncode == 2 and "no readable Contents/Info.plist" in res.stderr
+
+
+def test_a_changed_bundle_id_warns_but_installs(oc, tmp_path):
+    res = run(oc, "attach", env_for(tmp_path, exe="WhateverXe", ident="org.b00t0x.WhateverXeNext"))
+    assert res.returncode == 0 and "WARN: this WhateverXe release has the bundle id" in res.stderr
+
+
+@pytest.mark.parametrize("exe", ["../evil", "a/b", ".."])
+def test_a_kext_that_names_an_executable_outside_itself_is_refused(oc, tmp_path, exe):
+    w = tmp_path / "w5.zip"
+    with zipfile.ZipFile(w, "w") as z:
+        z.writestr("WhateverXe.kext/Contents/Info.plist", plistlib.dumps({"CFBundleExecutable": exe}))
+        z.writestr("WhateverXe.kext/Contents/MacOS/WhateverXe", b"bin")
+    env = env_for(tmp_path, exe="WhateverXe")
+    env["IGPU_WEX_ZIP"], env["IGPU_WEX_SHA256"] = str(w), hashlib.sha256(w.read_bytes()).hexdigest()
+    res = run(oc, "attach", env)
+    assert res.returncode == 2 and "not a plain file name" in res.stderr

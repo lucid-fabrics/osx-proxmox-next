@@ -43,3 +43,36 @@ def _reset_event_loop_policy():
 def _private_gpu_state_dir(monkeypatch, tmp_path_factory):
     """Keep the GPU attach records of a real host (or another test) out of every test."""
     monkeypatch.setattr("osx_proxmox_next.gpu.STATE_DIR", tmp_path_factory.mktemp("gpu-state"))
+
+
+GITHUB_FAKE = {
+    "b00t0x/WhateverXe": [
+        ("0.9.0", False, "WhateverXe-0.9.0-RELEASE.zip", "2026-11-01T00:00:00Z", "9" * 64),
+        ("0.8.0", False, "WhateverXe-0.8.0-RELEASE.zip", "2026-10-01T00:00:00Z", "8" * 64),
+    ],
+    "b00t0x/WhateverXe-Graphics": [
+        ("v0.4.1", False, "WhateverXe-Graphics-0.4.1.pkg", "2026-10-02T00:00:00Z", "4" * 64),
+    ],
+}
+
+
+def fake_github_releases(repo: str) -> list[dict]:
+    """The releases API payload for *repo* from GITHUB_FAKE, with a digest on every asset."""
+    return [{"tag_name": tag, "prerelease": pre, "draft": False, "published_at": when,
+             "assets": [{"name": name, "digest": "sha256:" + sha,
+                         "browser_download_url": f"https://github.com/{repo}/releases/download/{tag}/{name}"},
+                        {"name": "SHA256SUMS", "digest": "sha256:" + "0" * 64,
+                         "browser_download_url": f"https://github.com/{repo}/releases/download/{tag}/SHA256SUMS"}]}
+            for tag, pre, name, when, sha in GITHUB_FAKE[repo]]
+
+
+@pytest.fixture(autouse=True)
+def _no_github(monkeypatch):
+    """No test reaches GitHub: the release lookups answer from GITHUB_FAKE unless a test passes its own `get`."""
+    def fake(url: str):
+        if "/releases/tags/" in url:
+            from osx_proxmox_next.igpu_engine import ReleaseError
+            raise ReleaseError("GitHub has no such release.")
+        repo = url.split("/repos/")[1].split("/releases")[0]
+        return fake_github_releases(repo)
+    monkeypatch.setattr("osx_proxmox_next.igpu_engine.github_get", fake)

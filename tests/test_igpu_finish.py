@@ -1,6 +1,7 @@
 """igpu_finish: stage the graphics package from recovery, attach the iGPU, first boot, restart."""
 from __future__ import annotations
 
+import json
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from osx_proxmox_next import igpu_attach, igpu_finish
 from osx_proxmox_next.executor import ApplyResult, StepResult
 from osx_proxmox_next.infrastructure import CommandResult
 from osx_proxmox_next.nullmoth import AttachPlan
+from osx_proxmox_next.oc_builder import IgpuAssets
 from osx_proxmox_next.unattended import UnattendedError
 
 @pytest.fixture(autouse=True)
@@ -122,10 +124,15 @@ def env(tmp_path, monkeypatch):
                         watchdog_ok=True)
     for name in ("w.zip", "a.zip", "x.rom", "g.pkg", "rec.img"):
         (tmp_path / name).write_bytes(b"x")
-    assets = {"whateverxe": tmp_path / "w.zip", "amfipass": tmp_path / "a.zip", "rom": tmp_path / "x.rom", "graphics": tmp_path / "g.pkg"}
+    assets = IgpuAssets({"whateverxe": tmp_path / "w.zip", "amfipass": tmp_path / "a.zip", "rom": tmp_path / "x.rom",
+                         "graphics": tmp_path / "g.pkg"})
+    assets.picks = {"whateverxe": {"version": "0.9.0", "tag": "0.9.0", "sha256": "9" * 64, "source": "latest"},
+                    "graphics": {"version": "0.4.1", "tag": "v0.4.1", "sha256": "4" * 64, "source": "chosen"}}
+    e.asked = []
+    monkeypatch.setenv("IGPU_STATE_DIR", str(tmp_path / "state"))
     report = SimpleNamespace(ok=True, issues=[], engine={"info": {"rom": "adl-h"}})
     monkeypatch.setattr(igpu_finish, "check_intel_gpu", lambda: report)
-    monkeypatch.setattr(igpu_finish, "ensure_igpu_assets", lambda iso, key: assets)
+    monkeypatch.setattr(igpu_finish, "ensure_igpu_assets", lambda iso, key, **k: e.asked.append(k) or assets)
     monkeypatch.setattr(igpu_finish.igpu_engine, "build_payload", lambda pkg, out: (True, ""))
     monkeypatch.setattr(igpu_finish.igpu_engine, "read_result", lambda path: (e.results[0] if len(e.results) == 1 else e.results.popleft()) if e.results else "")
     monkeypatch.setattr(igpu_finish, "resolve_recovery_or_installer_path", lambda cfg: tmp_path / "rec.img")
@@ -176,6 +183,7 @@ def test_the_whole_finish(env):
     assert ("start", "9") == pve.calls[-1]  # the last thing is the restart
     assert [t[0] for t in env.applied if t] == ["Make the OpenCore picker show recovery only and wait for a key",
                                            "Show every volume in the OpenCore picker again",
+                                           "Install the power watchdog on the host",
                                            "Note in OpenCore that the graphics package is installed"]
     assert not (env.tmp / "igpu-payload-9.img").exists()
     assert any("First boot" in e for e in events) and "Started the VM again" in events
@@ -443,7 +451,7 @@ def test_tahoe_gets_the_power_watchdog_right_after_the_attach(env):
     res, pve, events = go(env, pve=Pve({**CFG, "name": "macos-tahoe"}, halts=(1, 10**6)))
     titles = [t[0] for t in env.applied if t]
     assert res.watchdog and titles.index("Install the power watchdog on the host") == len(titles) - 2  # before "mark"
-    assert any("power watchdog" in ev for ev in events)
+    assert any("Installed the watchdog" in ev for ev in events)
     watchdog = next(t for t in env.applied if t and t[0] == "Install the power watchdog on the host")
     assert "Give the VM a serial port (socket) for the kernel console" in watchdog  # the test VM has no serial0
 
@@ -455,6 +463,64 @@ def test_a_failed_watchdog_install_is_a_note_not_a_failure(env):
     assert any("osx-next-cli igpu-watchdog 9" in n for n in res.notes)
 
 
-def test_other_releases_get_no_watchdog(env):
+def test_every_release_gets_the_watchdog_that_records_crashes(env):
+    res, _pve, _ = go(env)  # the default test VM is not Tahoe
+    assert res.watchdog and any(t and "power watchdog" in t[0] for t in env.applied)
+
+
+def test_the_chosen_releases_reach_the_download_and_the_state_file(env):
+    res, _pve, events = go(env, wex="0.8.0", graphics="latest")
+    assert env.asked == [{"wex": "0.8.0", "graphics": "latest"}]
+    assert any("Using WhateverXe 0.9.0 and WhateverXe Graphics 0.4.1" in e for e in events)
+    state = json.loads((env.tmp / "state/9.json").read_text())
+    assert state["whateverxe_version"] == "0.9.0" and state["whateverxe_source"] == "latest"
+    assert state["graphics_source"] == "chosen" and state["package_installed"] is True and state["macos"] == "sequoia"
+    assert res.versions[0] == "WhateverXe 0.9.0 (latest when installed)"
+
+
+def test_an_unreachable_github_is_a_finish_error_with_the_advice(env, monkeypatch):
+    def boom(iso, key, **k):
+        raise igpu_finish.igpu_engine.ReleaseError("Could not reach GitHub (x). Check the network and run the command again.")
+    monkeypatch.setattr(igpu_finish, "ensure_igpu_assets", boom)
+    with pytest.raises(igpu_finish.FinishError, match="Could not reach GitHub"):
+        go(env)
+
+
+def test_an_unwritable_state_file_is_a_note(env, monkeypatch):
+    monkeypatch.setenv("IGPU_STATE_DIR", "/proc/nope/state")
     res, _pve, _ = go(env)
-    assert not res.watchdog and not any(t and "power watchdog" in t[0] for t in env.applied)
+    assert res.installed and any("Could not record the installed versions" in n for n in res.notes)
+
+
+def test_choose_release_lists_newest_first_and_returns_latest_or_a_tag():
+    said: list[str] = []
+    ask = iter(["", "2", "0.9.0", "v0.4.1", "x", "9", "", ])
+    assert igpu_finish.choose_release("whateverxe", lambda p: next(ask), said.append) == "latest"
+    assert said[0].startswith("WhateverXe releases") and "1. 0.9.0" in said[1] and "(latest)" in said[1]
+    assert igpu_finish.choose_release("whateverxe", lambda p: next(ask), said.append) == "0.8.0"
+    assert igpu_finish.choose_release("whateverxe", lambda p: next(ask), said.append) == "latest"  # the latest tag typed
+    assert igpu_finish.choose_release("graphics", lambda p: next(ask), said.append) == "latest"
+    assert igpu_finish.choose_release("whateverxe", lambda p: next(ask), said.append) == "latest"  # "x" is refused, "9" too, then Enter
+    assert sum("is not in the list" in m for m in said) == 2
+
+
+def test_choose_release_gives_up_after_five_wrong_answers_and_handles_end_of_input():
+    with pytest.raises(igpu_finish.igpu_engine.ReleaseError, match="No WhateverXe release was picked"):
+        igpu_finish.choose_release("whateverxe", lambda p: "nope", lambda m: None)
+
+    def eof(prompt):
+        raise EOFError
+    assert igpu_finish.choose_release("whateverxe", eof, lambda m: None) == "latest"
+
+
+def test_the_attach_is_checked_against_the_github_digest_and_the_amfipass_pin(env, monkeypatch):
+    seen = []
+
+    def plan(*a, **k):
+        seen.append(k)
+        p = AttachPlan(9)
+        p.steps = []
+        return p
+    monkeypatch.setattr(igpu_finish, "prepare_attach_igpu", plan)
+    go(env)
+    assert seen and all(k["wex_sha"] == "9" * 64 and k["amfi_sha"] == igpu_finish.igpu_engine.PINS["amfipass"][2] for k in seen)

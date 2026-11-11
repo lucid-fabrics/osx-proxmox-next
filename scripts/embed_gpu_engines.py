@@ -3,7 +3,7 @@
 
 Run after changing host_setup.py, bios_guide.py, data/gpu/bios_paths.json,
 data/gpu/amd_devices.txt, data/gpu/oc_boot_args.py, data/nullmoth/oc_patch.py or any iGPU
-file (igpu_engine.py, data/gpu/intel_devices.txt, oc_igpu.py, igpu_*.sh, igpu_launchd.plist, igpu_power_watchdog.py, osx-next-power-watchdog@.service):
+file (igpu_engine.py, data/gpu/intel_devices.txt, oc_igpu.py, igpu_*.sh, igpu_launchd.plist, igpu_power_watchdog.py, igpu_diag.py, osx-next-power-watchdog@.service):
 
     python3 scripts/embed_gpu_engines.py
 
@@ -31,6 +31,7 @@ EMBEDS = (
     ("igpu_stage.sh", "GPU_EMBED_IGPU_STAGE", PKG / "data/gpu/igpu_stage.sh"),
     ("igpu_launchd.plist", "GPU_EMBED_IGPU_PLIST", PKG / "data/gpu/igpu_launchd.plist"),
     ("igpu_power_watchdog.py", "GPU_EMBED_IGPU_WATCHDOG", PKG / "data/gpu/igpu_power_watchdog.py"),
+    ("igpu_diag.py", "GPU_EMBED_IGPU_DIAG", PKG / "data/gpu/igpu_diag.py"),
     ("osx-next-power-watchdog@.service", "GPU_EMBED_IGPU_WATCHDOG_UNIT", PKG / "data/gpu/osx-next-power-watchdog@.service"),
 )
 

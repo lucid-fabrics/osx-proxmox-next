@@ -680,12 +680,12 @@ class Session:
     def intel_plan(self, vmid: int, allow_stop: bool = False) -> nullmoth.AttachPlan:
         """The iGPU attach preflight and plan. The downloads are not done here; the plan names where they go."""
         from .defaults import DEFAULT_ISO_DIR
-        from .oc_builder import AMFIPASS_MOD, WHATEVERXE
+        from .oc_builder import AMFIPASS_MOD
         info = intel_host.lookup(self.state["gpu"]["device"])
         cache = Path(DEFAULT_ISO_DIR)
         rom_file = info["rom_file"] if info else ""
         return igpu_attach.prepare_attach_igpu(
-            vmid, cache / WHATEVERXE.filename, cache / AMFIPASS_MOD.filename, cache / rom_file,
+            vmid, cache / "WhateverXe-RELEASE.zip", cache / AMFIPASS_MOD.filename, cache / rom_file,
             allow_stop=allow_stop, adapter=self.pve, root=Path(self.root), run=self.run)
 
     def begin_attach(self) -> None:
