@@ -220,3 +220,14 @@ nullmoth_first_boot 100; echo "RC=$?"
 '''
     res = run(bash, snippet)
     assert "RC=1" in res.stdout and "Could not start VM 100" in res.stdout and "drop 100 sata2" in calls(tmp_path)
+
+
+def test_an_interrupt_while_waiting_cleans_up(bash, tmp_path):
+    snippet = r'''
+nullmoth_wait_result() { kill -INT $$; sleep 1; }
+NM_PAYLOAD_REF=ref; NM_PAYLOAD_FILE="$TMPDIR/p.img"
+nullmoth_first_boot 100
+'''
+    res = run(bash, snippet, env={"QM_STATUS": "running"}, expect=130)
+    log = calls(tmp_path)
+    assert "qm stop 100" in log and "drop 100 sata2" in log

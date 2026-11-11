@@ -292,8 +292,9 @@ def finish(
     report = engine.parse_result(last)
     if not engine.is_final(last):
         result.notes.append(f"The guest gave no final report within {FIRSTBOOT_TIMEOUT // 60} minutes "
-                            f"(last report: {last or 'none'}), so the VM was restarted without the payload disk. The "
-                            "first-boot job in the guest finishes on its own when the driver loads.")
+                            f"(last report: {last or 'none'}), so the VM was restarted without the payload disk. Whether the driver "
+                            "installed is not known: check `kmutil showloaded --list-only | grep -i nullmoth` in the guest "
+                            "(its first-boot job may run the installer once more).")
     if "stopped" not in pve.qm("status", str(vmid)).output:
         wait_stopped(pve, vmid, HALT_WAIT, clock, sleep)
     if "stopped" not in pve.qm("status", str(vmid)).output:

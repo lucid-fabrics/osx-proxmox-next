@@ -137,7 +137,7 @@ def test_a_failed_install_is_reported_with_the_reason(env):
 def test_no_final_report_is_noted_and_the_vm_is_stopped(env):
     env.guest = deque(["installed"])
     res, pve = go(env, pve=Pve(halts=(1, 10**6, 1)))
-    assert not res.verified and any("no final report" in n and "installed" in n for n in res.notes)
+    assert not res.verified and any("no final report" in n and "installed" in n and "kmutil showloaded" in n for n in res.notes)
     assert ("stop", "9") in pve.calls
 
 

@@ -1856,14 +1856,19 @@ function nullmoth_guest_address() {
 # First boot with the card attached: wait for the guest's report, drop the payload disk, start the VM again and print
 # how to reach it. rc 1 when the driver is not confirmed. $1 vmid. Mirrors the second half of nullmoth_finish.finish and nullmoth_cli.report.
 function nullmoth_first_boot() {
-  local vmid="$1" parsed state detail kexts display ip note
+  local vmid="$1" parsed state detail kexts display ip note old_trap
   msg_info "First boot with the card: the guest turns on remote access, installs the driver and restarts (about 10 minutes)"
   qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; nullmoth_cleanup "$vmid"; return 1; }
+  old_trap=$(trap -p INT TERM)
+  # shellcheck disable=SC2064
+  trap "nullmoth_cleanup '$vmid'; exit 130" INT TERM
   nullmoth_wait_result "$vmid" "$NM_PAYLOAD_REF"
+  trap - INT TERM
+  [ -z "$old_trap" ] || eval "$old_trap"
   parsed=$(nullmoth_engine parse-result "$NM_RESULT")
   case "$NM_RESULT" in
     verified*|failed:*) ;;
-    *) echo -e "${INFO}${YW}The guest gave no final report within $((NULLMOTH_FIRSTBOOT_TIMEOUT / 60)) minutes (last report: ${NM_RESULT:-none}), so the VM was restarted without the payload disk. The first-boot job in the guest finishes on its own when the driver loads.${CL}" ;;
+    *) echo -e "${INFO}${YW}The guest gave no final report within $((NULLMOTH_FIRSTBOOT_TIMEOUT / 60)) minutes (last report: ${NM_RESULT:-none}), so the VM was restarted without the payload disk. Whether the driver installed is not known: check kmutil showloaded --list-only | grep -i nullmoth in the guest (its first-boot job may run the installer once more).${CL}" ;;
   esac
   qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' || igpu_wait_stopped "$vmid" "$NULLMOTH_HALT_WAIT" || true
   if ! qm status "$vmid" 2>/dev/null | grep -q 'status: stopped'; then

@@ -631,7 +631,7 @@ def test_nvidia_vm_step_offline_and_failed_setup(tmp_path, monkeypatch):
         raise nullmoth_finish.FinishError("offline")
     monkeypatch.setattr(nullmoth_finish, "versions", offline)
     monkeypatch.setattr(gpu_setup.Session, "finish_nvidia", lambda self, choice, on_event: nullmoth_finish.FinishResult(
-        verified=False, detail="the driver installer stopped: STOP"))
+        verified=False, detail="the driver installer stopped: [/x] STOP"))
 
     async def go():
         app = NextApp()
@@ -650,7 +650,7 @@ def test_nvidia_vm_step_offline_and_failed_setup(tmp_path, monkeypatch):
             await settle(pilot, lambda: label(app, "#gp_primary_btn") == "Attach the card now")
             await press(pilot, app, "#gp_primary_btn")
             await settle(pilot, lambda: "not confirmed" in text(app, "#gp_result"))
-            assert "STOP" in text(app, "#gp_result") and "Step 7" in text(app, "#gp_title")
+            assert "[/x] STOP" in text(app, "#gp_result") and "Step 7" in text(app, "#gp_title")
     run(go)
 
 
