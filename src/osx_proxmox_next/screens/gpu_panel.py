@@ -51,6 +51,8 @@ def compose_gpu_panel() -> ComposeResult:
         yield Static(f"Type '{CONFIRM_PHRASE}' to continue:", id="gp_confirm_label", classes="hidden",
                      markup=False)
         yield Input(value="", id="gp_confirm_in", placeholder="type the phrase here", classes="hidden")
+        yield Select([("Latest", "latest")], prompt="NullMoth release (latest is preselected)", id="gp_nm_select", classes="hidden",
+                     allow_blank=False)
         yield Checkbox("Stop the VM first if it is running", value=False, id="gp_stop_cb", classes="hidden")
         yield Static("", id="gp_result", classes="hidden", markup=False)
         with Horizontal(classes="action_row"):

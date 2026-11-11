@@ -362,7 +362,7 @@ def test_first_boot_text_and_finish(tmp_path):
     assert "in the Proxmox console" in amd_s.first_boot_text()
     nv = chosen(env, vendor_bdf="01:00")
     text = nv.first_boot_text()
-    assert "kmutil showloaded" in text and "nvidia-macos-driver/releases" in text and "gpu-passthrough".split("-")[0] or True
+    assert "installed and loaded" in text and "Remote Login and Screen Sharing are on" in text
     assert "nvidia-nullmoth" in text and nv.first_boot_qr()
     nv.finish()
     assert nv.state["finished"] and not (env.root / "etc/profile.d/osx-proxmox-next-gpu.sh").exists()

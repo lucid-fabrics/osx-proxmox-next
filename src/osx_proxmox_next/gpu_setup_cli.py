@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
-from . import bios_guide, gpu, host_setup, igpu_engine, igpu_finish, nullmoth
+from . import bios_guide, gpu, host_setup, igpu_engine, igpu_finish, nullmoth, nullmoth_cli, nullmoth_finish
 from . import gpu_setup
 from .gpu_setup import DISPLAY_OPTIONS, INTEL_DISPLAY_NOTE, NVIDIA_DISPLAY_NOTE, SUPPORTED_DOC, TROUBLESHOOTING, CardChanged, Session, card_text, render_rail
 
@@ -32,6 +32,8 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--accept-nullmoth-risk", action="store_true", dest="accept_risk",
                    help="NVIDIA: acknowledge the NullMoth notice")
     p.add_argument("--stop-vm", action="store_true", dest="stop_vm", help="Stop the VM first if it is running")
+    p.add_argument("--nullmoth-version", default="", dest="nullmoth_version",
+                   help="NVIDIA: NullMoth release tag to install (default: ask, latest preselected; see nullmoth-versions)")
 
 
 class _Io:
@@ -342,16 +344,12 @@ def _step_vm(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     _print_findings(io, plan)
     if not plan.ok:
         return EXIT_REFUSED
-    if s.state["gpu"]["vendor"] == "nvidia":
-        io.say(nullmoth.GUEST_PREP_TITLE + ":")
-        for idx, line in enumerate(nullmoth.GUEST_PREP, start=1):
-            io.say(f"  {idx}. {line}")
-        if not io.confirm(nullmoth.GUEST_PREP_CONFIRM, args.yes):
-            io.say("Nothing was changed. Turn them on in macOS, then run: " + s.pause())
-            return EXIT_REFUSED
     io.say("This is what will change on VM %s (a snapshot of its config is saved first):" % s.state["vm"])
     for idx, step in enumerate(plan.steps, start=1):
         io.say(f"  {idx:02d}. {step.title}")
+    if s.state["gpu"]["vendor"] == "nvidia":
+        io.say("Before that the tool downloads the NullMoth release and verifies it, boots macOS recovery once to stage it "
+               "inside macOS, and the first boot installs it by itself (about 15 minutes).")
     if s.state["gpu"]["vendor"] == "intel":
         io.say("Before that, the VM boots macOS recovery once to put the graphics package inside macOS, "
                "so the first boot with the iGPU installs it by itself. This takes about 15 minutes.")
@@ -360,13 +358,10 @@ def _step_vm(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         return EXIT_OK
     if s.state["gpu"]["vendor"] == "intel":
         return _finish_intel(s, io)
+    if s.state["gpu"]["vendor"] == "nvidia":
+        return _finish_nvidia(s, io, args)
     from .executor import apply_plan
     from .rollback import create_snapshot
-    if s.state["gpu"]["vendor"] == "nvidia":
-        from pathlib import Path
-        from .defaults import DEFAULT_ISO_DIR
-        from .oc_builder import ensure_amfipass
-        ensure_amfipass(Path(DEFAULT_ISO_DIR))
     create_snapshot(s.state["vm"])
     s.begin_attach()
     result = apply_plan(plan.steps, execute=True)
@@ -376,6 +371,21 @@ def _step_vm(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         return EXIT_FAIL
     s.vm_applied()
     io.say("Card attached.")
+    return None
+
+
+def _finish_nvidia(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
+    """Download and verify NullMoth, stage it from recovery, attach the card and run the first boot."""
+    try:
+        choice = nullmoth_cli.choose_version(args, ask=io.ask)
+        s.begin_attach()
+        result = s.finish_nvidia(choice, lambda m: io.say("  " + m))
+    except nullmoth_finish.FinishError as exc:
+        io.say("FAILED: " + str(exc))
+        return EXIT_FAIL
+    if nullmoth_cli.report(s.state["vm"], result, io.say) != 0:
+        return EXIT_FAIL
+    s.vm_applied()
     return None
 
 

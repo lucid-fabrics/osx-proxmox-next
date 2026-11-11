@@ -10,7 +10,7 @@ One guided flow takes you from "there is a graphics card in my Proxmox server" t
 ![Guided GPU passthrough: scan, BIOS card, host setup, attach](/img/demo-gpu.gif)
 
 :::caution Beta
-NVIDIA support relies on NullMoth, a community driver tested by its own community: we added support for preparing the VM, but we take no responsibility for the driver or its install. AMD cards and the host setup steps (kernel command line, vfio binding, host reboot) are covered by tests but not yet tried on real hardware. Every change is previewed, confirmed, backed up and undoable, but read the preview before you confirm it.
+NVIDIA support relies on NullMoth, a community driver tested by its own community: this tool downloads the driver, verifies it and installs it for you, but we take no responsibility for the driver or its install. AMD cards and the host setup steps (kernel command line, vfio binding, host reboot) are covered by tests but not yet tried on real hardware. Every change is previewed, confirmed, backed up and undoable, but read the preview before you confirm it.
 :::
 
 ## Start it
@@ -40,7 +40,7 @@ Steps that this host does not need show as `skipped`. Detection comes first: the
 4. **Host.** Kernel arguments (GRUB or systemd-boot, detected from what really booted), the VFIO modules, early binding of the card to `vfio-pci`, and for the AMD cards with the reset bug the `vendor-reset` module. You see the exact diff, every file is backed up with a timestamp, and an error rolls everything back.
 5. **Reboot.** The tool never reboots the host by itself in an unattended run. It lists the VMs that will stop.
 6. **Verify.** IOMMU and interrupt remapping, the card on `vfio-pci`, the IOMMU group, the reset method, the BAR size. Each failure points to the step that fixes it.
-7. **VM.** The card is attached to the VM after the macOS install is finished, never during it. The VM config and the OpenCore config are saved first. For NVIDIA you first confirm a required checklist: turn on Remote Login and Screen Sharing in macOS (System Settings > General > Sharing). Once the driver loads the Proxmox console goes black, and you also confirm that a monitor or an HDMI/DisplayPort dummy plug is connected to the card: without one, the console and Screen Sharing both stay black (Screen Sharing mirrors the display on the card). SSH always works. To connect: connect with any VNC client to the VM's IP, or `open vnc://<ip>` from a Mac. If `systemsetup -setremotelogin on` is refused (it needs Full Disk Access), run `sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist`.
+7. **VM.** The card is attached to the VM after the macOS install is finished, never during it. The VM config and the OpenCore config are saved first. For NVIDIA the tool does the rest by itself, with nothing to do inside macOS: it downloads the latest NullMoth release (you can pick an older one from a list, latest preselected), verifies it against the release's `SHA256SUMS` and GitHub's digest, boots recovery once to stage it, turns off the extension approval prompt, and the first boot installs it, turns on Remote Login and Screen Sharing and keeps the Mac awake. It then prints the `ssh` and `vnc://` lines for the VM. Once the driver loads the Proxmox console goes black; the tool asks for a monitor or an HDMI/DisplayPort dummy plug on the card only when none was detected.
 8. **First boot.** For NVIDIA, a checklist for inside macOS (with a QR code). For AMD, the question "Do you see the macOS desktop on your monitor?" with a fix for each way it can go wrong.
 
 ## Supported cards
@@ -87,7 +87,7 @@ AMD cards are placed on a PCI Express port (`pcie=1`) and the VM gets `-global I
 
 > **NVIDIA GPU support (Beta)**
 >
-> This feature prepares your VM for the NullMoth NVIDIA driver, a third-party project that osx-proxmox-next does not make, review or support. You download and install that driver yourself, at your own risk. We are not responsible for the driver, its installation, or any damage, data loss or instability that follows.
+> This feature sets up your VM for the NullMoth NVIDIA driver, a third-party project that osx-proxmox-next does not make, review or support. The tool downloads the driver from its GitHub releases, checks its checksum and installs it in your VM for you, at your own risk. We are not responsible for the driver, its installation, or any damage, data loss or instability that follows.
 >
 > NullMoth only runs with core macOS security turned off: code-signing checks (AMFI) are bypassed, System Integrity Protection is relaxed and Secure Boot is disabled. This is a real security threat: malware has a much easier time on a VM set up this way. Only enable it on a VM you are prepared to treat as untrusted, and keep personal accounts and sensitive data off it.
 >
@@ -141,4 +141,4 @@ The tool remembers the card by its address, its vendor and device id, its subsys
 
 **Works once, then fails until the host reboots.** This is the AMD reset bug. Polaris, Vega and Navi 10 and 14 need `vendor-reset`; let the Host step install it. Shut the VM down from inside macOS, not with `qm stop`. If it still fails, reboot the host between runs.
 
-**NVIDIA.** Turn on Remote Login and Screen Sharing first: the Proxmox console goes black once the driver loads, and a monitor or HDMI/DisplayPort dummy plug must be connected to the card to get a desktop (Screen Sharing then mirrors it; SSH always works). In the guest: download the NullMoth release yourself, check `SHA256SUMS`, run `sudo ./install.sh`, approve the extensions, reboot, then verify with `kmutil showloaded --list-only | grep -i nullmoth` (4 or more lines: NVRM, NVAccel, NVRMFB, NVRMAGDC, and newer releases add more) and run `sudo pmset -a sleep 0`. If the guest will not boot, add `-nvoff` to the boot-args or run `gpu-setup --undo`.
+**NVIDIA.** Nothing to do in macOS: the driver, Remote Login, Screen Sharing and the sleep setting are done for you, and the command prints the `ssh` and `vnc://` lines. The Proxmox console goes black once the driver loads, and a monitor or HDMI/DisplayPort dummy plug must be connected to the card to get a desktop (the tool says so when it sees no display). If the install failed, the report shows why and the log is `/var/log/osx-proxmox-next-nullmoth.log` in the guest. If the guest will not boot, add `-nvoff` to the boot-args or run `gpu-setup --undo`.

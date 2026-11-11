@@ -204,7 +204,7 @@ def test_the_summary_names_the_vm_and_says_what_comes_next(tmp_path, monkeypatch
     assert "  VM: 106 tahoe-gpu" in text_ and NEXT_AMD in text_ and "Next, in macOS" not in text_
     s.state["gpu"]["vendor"] = "nvidia"
     text_ = s.summary()
-    assert NEXT_NVIDIA in text_ and NULLMOTH_DOC in text_ and "We do not ship or support it." in text_
+    assert NEXT_NVIDIA in text_ and NULLMOTH_DOC in text_ and "We do not ship or support the driver." in text_
     s.state["vm"] = 999  # not in the list: the id alone
     assert re.search(r"VM: 999$", s.summary(), re.M)
     monkeypatch.setattr(gpu_setup, "list_macos_vms", lambda: (_ for _ in ()).throw(OSError("no qm")))

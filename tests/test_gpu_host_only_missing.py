@@ -285,22 +285,20 @@ def test_undo_of_an_empty_record_does_not_say_nothing_to_undo(tmp_path):
 def test_nvidia_guidance_says_a_monitor_or_dummy_plug_is_required():
     from osx_proxmox_next import gpu_setup, nullmoth
     need = ("monitor or an HDMI/DisplayPort dummy plug", "Screen Sharing", "SSH always works")
-    first = nullmoth.NEXT_STEPS[0]
-    assert all(n in first for n in need) and "vga std" in first
-    prep = "\n".join(nullmoth.GUEST_PREP)
-    assert "dummy plug" in prep and "stay black" in prep
-    assert "dummy plug" in nullmoth.GUEST_PREP_CONFIRM and "monitor" in nullmoth.GUEST_PREP_CONFIRM
+    assert all(n in nullmoth.DISPLAY_LINE for n in ("monitor or an HDMI/DisplayPort dummy plug", "Screen Sharing"))
+    assert "Proxmox console goes black" in nullmoth.DISPLAY_LINE
     assert "dummy plug" in gpu_setup.NVIDIA_DISPLAY_NOTE
 
 
 def test_nvidia_guidance_is_in_docs_readme_and_bash():
+    from osx_proxmox_next import nullmoth
     root = Path(__file__).resolve().parent.parent
     for rel in ("README.md", "docs/docs/guides/gpu-passthrough.md", "docs/docs/guides/nvidia-nullmoth.md",
                 "docs/docs/guides/cli-reference.md", "scripts/bash/osx-proxmox-next.sh"):
         text = (root / rel).read_text()
         assert "dummy plug" in text, rel
     sh = (root / "scripts/bash/osx-proxmox-next.sh").read_text()
-    assert "a monitor or dummy plug is connected to the card." in sh and "Screen Sharing then mirrors that display" in sh
+    assert nullmoth.DISPLAY_LINE in sh
     assert "Removed an empty setup record; nothing else to undo." in sh
     assert "Write the boot-time binding anyway? (optional)" in sh
 

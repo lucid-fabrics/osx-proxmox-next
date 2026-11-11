@@ -376,7 +376,7 @@ def test_vm_step_refusal_decline_and_failure(host, monkeypatch):
     assert "FAILED. Log:" in go(host, "--yes", session=s)[1]
 
 
-def test_nvidia_attach_downloads_amfipass(tmp_path, monkeypatch):
+def test_nvidia_attach_runs_the_whole_setup_and_reports(tmp_path, monkeypatch):
     env = Env(tmp_path)
     add_card(env.root, bdf="0000:01:00", vendor=0x10DE, device=0x2504, audio=0x228E, group=3)
     ready(env)
@@ -384,11 +384,12 @@ def test_nvidia_attach_downloads_amfipass(tmp_path, monkeypatch):
     s = env.session()
     s.choose("01:00", 100, "console", ack=True)
     s.goto(7)
-    fetched = []
-    monkeypatch.setattr("osx_proxmox_next.oc_builder.ensure_amfipass", lambda d: fetched.append(d))
-    patch_executor(monkeypatch)
+    from osx_proxmox_next import nullmoth_finish
+    seen = []
+    monkeypatch.setattr(type(s), "finish_nvidia", lambda self, choice, on_event: seen.append(choice) or nullmoth_finish.FinishResult(
+        version="v2.9", verified=True, kexts=5, display="yes", ip="10.0.0.2"))
     code, out = go(env, "--yes", session=s)
-    assert code == 0 and fetched and "kmutil showloaded" in out and "Our guide:" in out
+    assert code == 0 and seen == ["latest"] and "installed and loaded" in out and "Our guide:" in out
     assert env.session().state["finished"]
 
 
