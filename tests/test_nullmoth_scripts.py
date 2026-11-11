@@ -175,6 +175,16 @@ def test_a_leftover_volumes_folder_is_not_taken_for_the_payload_disk(tmp_path):
     assert not any(leftover.iterdir())
 
 
+def test_the_payload_disk_that_shows_up_late_is_waited_for(tmp_path):
+    fb = FirstBoot(tmp_path)
+    count = tmp_path / "info-count"
+    count.write_text("0")
+    fb.sb.stub("diskutil", f'''if [ "$1" = info ]; then n=$(cat "{count}"); echo $((n + 1)) >"{count}"
+  [ "$n" -ge 6 ] && echo "   Mount Point:               {fb.sb.payload}"; fi; exit 0''')
+    fb.run()
+    assert fb.result == "installed" and int(count.read_text()) >= 6
+
+
 def test_without_a_payload_disk_nothing_is_reported_and_nothing_is_powered_off(tmp_path):
     fb = FirstBoot(tmp_path, card=False)
     (fb.sb.payload).rmdir()

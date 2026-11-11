@@ -6850,19 +6850,29 @@ FW_RUN="@FW_RUN@"
 PAYLOAD_LABEL="OSXPNIGPU"
 MIN_KEXTS=4
 LOAD_WAIT=300
+DISK_TRIES=24
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
 
-# hand a result to the host through the payload disk; true when the disk is attached
+# The payload disk's real mount point (a leftover /Volumes/OSXPNIGPU folder on the system volume is no disk), or nothing.
+payload_mount_point() { diskutil info "$PAYLOAD_LABEL" 2>/dev/null | sed -n 's/^ *Mount Point: *//p'; }
+
+# hand a result to the host through the payload disk; true when the disk is attached. Early in a boot the disk is not
+# there yet (the first-boot job starts before macOS has found it), so it is waited for.
 write_result() {
   log "result: $1"
-  # the real mount point of the payload disk: a leftover /Volumes/OSXPNIGPU folder on the system volume is no disk
-  vol=$(diskutil info "$PAYLOAD_LABEL" 2>/dev/null | sed -n 's/^ *Mount Point: *//p')
-  if [ -z "$vol" ]; then
-    diskutil mount "$PAYLOAD_LABEL" >/dev/null 2>&1
-    vol=$(diskutil info "$PAYLOAD_LABEL" 2>/dev/null | sed -n 's/^ *Mount Point: *//p')
-  fi
-  [ -n "$vol" ] && [ -d "$vol" ] || return 1
+  tries=0
+  while :; do
+    vol=$(payload_mount_point)
+    if [ -z "$vol" ]; then
+      diskutil mount "$PAYLOAD_LABEL" >/dev/null 2>&1
+      vol=$(payload_mount_point)
+    fi
+    [ -n "$vol" ] && [ -d "$vol" ] && break
+    tries=$((tries + 1))
+    [ "$tries" -ge "$DISK_TRIES" ] && { log "no payload disk after $DISK_TRIES tries"; return 1; }
+    sleep 5
+  done
   echo "$1" >"$vol/result.txt"
   sync
   diskutil unmount "$vol" >/dev/null 2>&1
