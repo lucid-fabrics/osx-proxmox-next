@@ -120,12 +120,12 @@ def test_download_verifies_caches_and_deletes_a_bad_file(tmp_path, monkeypatch):
     data = b"driver bytes"
     sha = hashlib.sha256(data).hexdigest()
     calls = []
-    monkeypatch.setattr(eng.urllib.request, "urlopen", lambda req, timeout=0: calls.append(req.full_url) or Resp(data))
+    monkeypatch.setattr(eng.urllib.request, "urlopen", lambda req, timeout=0: calls.append(getattr(req, "full_url", req)) or Resp(data))
     dest = tmp_path / "sub" / "t.tar.gz"
     assert eng.download(BASE + "x", dest, sha, BASE) == dest and dest.read_bytes() == data
     assert eng.download(BASE + "x", dest, sha, BASE) == dest and len(calls) == 1  # cached: not fetched again
     bad = tmp_path / "bad.tar.gz"
-    with pytest.raises(eng.ReleaseError, match="Checksum mismatch"):
+    with pytest.raises(eng.ReleaseError, match="(?i)checksum mismatch"):
         eng.download(BASE + "x", bad, "0" * 64, BASE)
     assert not bad.exists() and not (tmp_path / "bad.tar.gz.part").exists()
     with pytest.raises(eng.ReleaseError, match="Refusing"):

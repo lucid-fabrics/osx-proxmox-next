@@ -25,17 +25,17 @@ except ImportError:  # run as a script from the bash installer: both engines sit
     import igpu_engine as _gpu
 
 REPO = "nullmoth/nvidia-macos-driver"
-GITHUB_API = "https://api.github.com/repos/" + REPO + "/"
+GITHUB_API = _gpu.GITHUB_API + REPO + "/"
 DOWNLOAD_PREFIX = "https://github.com/" + REPO + "/releases/download/"
-LATEST = "latest"
+LATEST = _gpu.LATEST
 TARBALL_RE = re.compile(r"^nullmoth-nvidia-.+\.tar\.gz$")
 SUMS_NAME = "SHA256SUMS.txt"
-TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+TAG_RE = _gpu.TAG_RE
 # file names end up inside root shell scripts and paths: plain characters only
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 FW_URL_RE = re.compile(r"^https://download\.nvidia\.com/XFree86/Linux-x86_64/[0-9][0-9.]*/[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
-DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+DIGEST_RE = _gpu.DIGEST_RE
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # The installer fetches NVIDIA's GPU firmware from this host; the host fetches it first so the guest needs no network.
 NVIDIA_HOST = "https://download.nvidia.com/"
@@ -50,8 +50,9 @@ SWEEP_MAX_HOSTS = 1024
 SWEEP_BATCH = 64
 
 
-class ReleaseError(Exception):
-    """GitHub could not be asked, or a release cannot be used. The message says what to do next."""
+# the release error and the GitHub call are the iGPU engine's (one implementation, one rate-limit message)
+ReleaseError = _gpu.ReleaseError
+github_get = _gpu.github_get
 
 
 def data_dir():
@@ -60,25 +61,6 @@ def data_dir():
 
 
 # ── releases ─────────────────────────────────────────────────────────
-
-def github_get(url):
-    """The JSON GitHub returns for *url*. GITHUB_TOKEN, when set, raises the rate limit."""
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "osx-proxmox-next"}
-    token = os.environ.get("GITHUB_TOKEN")
-    if token:
-        headers["Authorization"] = "Bearer " + token
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as resp:  # noqa: S310
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code in (403, 429):
-            raise ReleaseError("GitHub refused the request (rate limit reached). Wait a few minutes and run the "
-                               "command again, or set GITHUB_TOKEN to a GitHub token to raise the limit.") from exc
-        if exc.code == 404:
-            raise ReleaseError("GitHub has no such release.") from exc
-        raise ReleaseError("GitHub answered HTTP %d for %s. Try again in a few minutes." % (exc.code, url)) from exc
-    except (OSError, ValueError) as exc:
-        raise ReleaseError("Could not reach GitHub (%s). Check the network and run the command again." % exc) from exc
 
 
 def _read_url(url, limit=1 << 20):
@@ -175,27 +157,17 @@ def sha256_file(path):
 
 
 def download(url, dest, sha256, prefix=""):
-    """Download *url* to *dest* unless a file with *sha256* is already there. Raises ReleaseError on a mismatch."""
-    dest = Path(dest)
+    """Download *url* to *dest* unless a file with *sha256* is already there (the iGPU engine's verified fetch).
+    Raises ReleaseError on a mismatch or a network error."""
     if prefix and not url.startswith(prefix):
         raise ReleaseError("Refusing to download from %s." % url)
-    if dest.exists() and sha256_file(dest) == sha256:
-        return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_name(dest.name + ".part")
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "osx-proxmox-next"}),  # noqa: S310
-                                    timeout=60) as resp, open(part, "wb") as out:
-            shutil.copyfileobj(resp, out)
-    except (OSError, ValueError) as exc:
-        part.unlink(missing_ok=True)
+        return _gpu.fetch(url, sha256, dest)
+    except ValueError as exc:  # checksum mismatch: the shared fetch deleted the file
+        raise ReleaseError(str(exc)) from exc
+    except OSError as exc:
+        Path(str(dest) + ".part").unlink(missing_ok=True)
         raise ReleaseError("Could not download %s (%s)." % (url, exc)) from exc
-    got = sha256_file(part)
-    if got != sha256:
-        part.unlink()
-        raise ReleaseError("Checksum mismatch for %s: expected %s, got %s. The file was deleted." % (url, sha256, got))
-    part.replace(dest)
-    return dest
 
 
 def fetch_release(pick, dest_dir, read=_read_url, fetch=download):
