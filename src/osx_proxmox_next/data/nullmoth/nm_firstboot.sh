@@ -103,11 +103,19 @@ verify_driver() {
   if [ "$kexts" -lt "$MIN_KEXTS" ]; then
     fail "the driver did not load after the restart (kexts loaded: $kexts, needed $MIN_KEXTS)"
   fi
+  # the network comes up a little after the extensions: give the guest up to a minute to get its address
+  ip=$(guest_ip)
+  tries=0
+  while [ -z "$ip" ] && [ "$tries" -lt 12 ]; do
+    sleep 5
+    tries=$((tries + 1))
+    ip=$(guest_ip)
+  done
   displays=$(/usr/sbin/ioreg -l -w0 2>/dev/null | grep -c IODisplayEDID)
   shown=no; [ "$displays" -gt 0 ] && shown=yes
   rm -f "$PLIST"
   echo "done" >"$STATE"
-  report "verified: kexts=$kexts display=$shown ip=$(guest_ip)" halt
+  report "verified: kexts=$kexts display=$shown ip=$ip" halt
 }
 
 case "$(cat "$STATE" 2>/dev/null)" in

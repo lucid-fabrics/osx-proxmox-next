@@ -390,9 +390,11 @@ def test_the_sweep_survives_ping_failures(monkeypatch):
     eng._sweep(lambda argv, timeout=20: (0, "2: vmbr0    inet 10.0.0.1/30 scope global vmbr0\n"))
 
 
-def test_read_result_hands_over_to_the_shared_reader(monkeypatch):
-    monkeypatch.setattr(eng._gpu, "read_result", lambda img, run: "staged " + img)
-    assert eng.read_result("/dev/x", object()) == "staged /dev/x"
+def test_read_result_drops_the_cached_blocks_before_reading(monkeypatch):
+    order = []
+    monkeypatch.setattr(eng._gpu, "read_result", lambda img, run: order.append("read") or "staged " + img)
+    assert eng.read_result("/dev/x", lambda argv, timeout=20: order.append(argv) or (0, "")) == "staged /dev/x"
+    assert order == [["blockdev", "--flushbufs", "/dev/x"], "read"]
 
 
 def test_port_probe():

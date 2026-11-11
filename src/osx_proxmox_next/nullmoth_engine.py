@@ -309,6 +309,9 @@ def build_payload(out, files, run=_gpu.default_run):
 
 
 def read_result(img, run=_gpu.default_run):
+    """The guest's last report from the payload disk. The guest writes around the host's page cache, so the cached
+    blocks of the disk are dropped first: without it a report that changed after an earlier read is not seen."""
+    run(["blockdev", "--flushbufs", str(img)], 20)
     return _gpu.read_result(img, run)
 
 

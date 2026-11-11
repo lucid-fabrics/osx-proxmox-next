@@ -32,7 +32,7 @@ from .executor import apply_plan
 from .gpu import parse_config
 from .igpu_attach import oc_step
 from .igpu_finish import (
-    FinishError, _drop_disk, _import_disk, _put_back, _read_payload_result, _stage, _storage_of, wait_stopped,
+    FinishError, _drop_disk, _import_disk, _put_back, _stage, _storage_of, wait_stopped,
 )
 from .infrastructure import ProxmoxAdapter
 from .oc_builder import ensure_amfipass
@@ -65,6 +65,11 @@ class FinishResult:
     ssh_up: bool = False
     vnc_up: bool = False
     notes: list[str] = field(default_factory=list)
+
+
+def _read_payload_result(pve: ProxmoxAdapter, ref: str) -> str:
+    path = pve.pvesm("path", ref).output.strip()
+    return engine.read_result(path) if path else ""
 
 
 def versions(get: Callable = engine.github_get) -> list[dict]:

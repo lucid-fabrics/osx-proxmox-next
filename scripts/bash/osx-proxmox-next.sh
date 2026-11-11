@@ -6641,6 +6641,9 @@ def build_payload(out, files, run=_gpu.default_run):
 
 
 def read_result(img, run=_gpu.default_run):
+    """The guest's last report from the payload disk. The guest writes around the host's page cache, so the cached
+    blocks of the disk are dropped first: without it a report that changed after an earlier read is not seen."""
+    run(["blockdev", "--flushbufs", str(img)], 20)
     return _gpu.read_result(img, run)
 
 
@@ -6963,11 +6966,19 @@ verify_driver() {
   if [ "$kexts" -lt "$MIN_KEXTS" ]; then
     fail "the driver did not load after the restart (kexts loaded: $kexts, needed $MIN_KEXTS)"
   fi
+  # the network comes up a little after the extensions: give the guest up to a minute to get its address
+  ip=$(guest_ip)
+  tries=0
+  while [ -z "$ip" ] && [ "$tries" -lt 12 ]; do
+    sleep 5
+    tries=$((tries + 1))
+    ip=$(guest_ip)
+  done
   displays=$(/usr/sbin/ioreg -l -w0 2>/dev/null | grep -c IODisplayEDID)
   shown=no; [ "$displays" -gt 0 ] && shown=yes
   rm -f "$PLIST"
   echo "done" >"$STATE"
-  report "verified: kexts=$kexts display=$shown ip=$(guest_ip)" halt
+  report "verified: kexts=$kexts display=$shown ip=$ip" halt
 }
 
 case "$(cat "$STATE" 2>/dev/null)" in

@@ -51,7 +51,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "fetch_firmware", fw)
     monkeypatch.setattr(engine, "build_payload", lambda out, files: e.built.append(sorted(files)) or (e.payload_ok, "disk full"))
 
-    def reader(path):
+    def reader(path, run=None):
         starts = sum(1 for c in e.pve.calls if c[:2] == ("start", "9"))
         if starts <= 1:
             return e.stage
