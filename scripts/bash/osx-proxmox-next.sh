@@ -4990,14 +4990,20 @@ GPU_EMBED_OC_BOOT_ARGS_EOF
 # ── GPU embedded: oc_boot_args.py end ──
 # ── GPU embedded: intel_devices.txt begin ──
 IFS= read -r -d '' GPU_EMBED_INTEL_DEVICES <<'GPU_EMBED_INTEL_DEVICES_EOF' || true
-# Intel iGPU allowlist for macOS guests (PCI vendor 8086, WhateverXe).
+# Intel iGPU list for macOS guests (PCI vendor 8086, WhateverXe): the OFFLINE FALLBACK and the base metadata.
+# The tool derives the real list from the WhateverXe release it will install (igpu_engine.device_list: the
+# DeviceTable of kern_xelp_devices.hpp at the release tag, cached per tag on the host). This file is used
+# only when GitHub cannot be reached, and every message built on it says so. It also supplies what upstream
+# does not say: the option ROM per family and which chip was tested through this tool.
 # The Python package (igpu_engine.py) reads this file and the bash installer embeds it
 # verbatim; tests/test_igpu_parity.py diffs the two. Change the file, then run
 # scripts/embed_gpu_engines.py.
 #
-# Source: WhateverXe 0.8.0 kern_xelp_devices.hpp (github.com/b00t0x/WhateverXe, tag 0.8.0),
-# whose ids were checked against Linux v6.12 i915_pciids.h.
+# Snapshot: WhateverXe 0.8.0 kern_xelp_devices.hpp (github.com/b00t0x/WhateverXe, tag 0.8.0; the same table is in
+# 0.8.2), whose ids were checked against Linux v6.12 i915_pciids.h.
 #
+# version|<WhateverXe version this list was built from>
+version|0.8.0
 # family|key|label|rom
 #   rom: key of the pinned option ROM in igpu_engine.ROMS (LongQT-sea/intel-igpu-passthru v0.1)
 # device|id|family|status|model
@@ -5187,11 +5193,19 @@ def parse_devices(text):
         if not line.strip() or line.startswith("#"):
             continue
         parts = line.split("|")
-        if parts[0] == "family":
+        if parts[0] == "family" and len(parts) == 4:
             families[parts[1]] = (parts[2], parts[3])
-        else:
+        elif parts[0] == "device" and len(parts) == 5:
             devices[int(parts[1], 16)] = (parts[2], parts[3], parts[4])
     return families, devices
+
+
+def list_version(text):
+    """The WhateverXe version a device list was built from (its `version|` line), or "unknown"."""
+    for line in text.splitlines():
+        if line.startswith("version|"):
+            return line.split("|", 1)[1].strip() or "unknown"
+    return "unknown"
 
 
 def lookup(device_id, text=None):
@@ -5203,25 +5217,233 @@ def lookup(device_id, text=None):
     family, status, model = entry
     label, rom = families[family]
     return {"device": device_id, "family": family, "family_label": label, "status": status,
-            "model": model, "rom": rom, "rom_file": ROMS[rom][0]}
+            "model": model, "rom": rom, "rom_file": ROMS[rom][0] if rom in ROMS else ""}
 
 
-def verdict(device_id, text=None):
-    """(kind, headline, detail): kind is intel, intel-untested or unsupported."""
+def basis(devices):
+    """One plain sentence naming the WhateverXe release a verdict rests on. *devices* is a device_list() result."""
+    if devices["source"] == "fallback":
+        return "Based on WhateverXe %s, could not check %s." % (devices["version"], devices["wanted"] or "the newest release")
+    if devices["version"] == "unknown":
+        return "Checked against a custom device list."
+    return "Checked against WhateverXe %s." % devices["version"]
+
+
+def verdict(device_id, text=None, devices=None):
+    """(kind, headline, detail): kind is intel, intel-untested or unsupported. *devices* (a device_list() result)
+    names the release the verdict rests on; without it the built-in list is used and labelled as such."""
+    if text is None and devices is not None:
+        text = devices["text"]
     info = lookup(device_id, text)
+    note = basis(devices if devices is not None else _builtin() if text is None else _override(text))
     if info is None:
         return ("unsupported", "Not supported by macOS",
                 "WhateverXe has no driver support for this Intel graphics chip (it covers Tiger Lake and "
-                "Alder, Raptor Lake; older chips use Apple's own drivers and are not offered here).")
+                "Alder, Raptor Lake; older chips use Apple's own drivers and are not offered here). " + note)
     if info["status"] == "nobackend":
         return ("unsupported", "Not supported yet",
-                "%s is listed by WhateverXe but has no working backend yet." % info["family_label"])
+                "%s is listed by WhateverXe but has no working backend this tool can use yet. %s"
+                % (info["family_label"], note))
     if info["status"] == "tested":
         return ("intel", "Works with WhateverXe (beta) on macOS 13 to 15, Tahoe 26 experimental",
-                "%s (%s). Tested end to end." % (info["model"], info["family_label"]))
+                "%s (%s). Tested end to end. %s" % (info["model"], info["family_label"], note))
     return ("intel-untested", "Should work with WhateverXe (beta), untested on this chip",
-            "%s (%s). Only Alder Lake-P 8086:46a6 has been tested through this tool." % (info["model"],
-                                                                                         info["family_label"]))
+            "%s (%s). Only Alder Lake-P 8086:46a6 has been tested through this tool. %s"
+            % (info["model"], info["family_label"], note))
+
+
+# ── device list of a WhateverXe release ──────────────────────────────
+
+# The list of supported chips is not in the release zip (its Info.plist matches on IOResources, not on PCI ids, so
+# there is no IOPCIMatch to read). It is the DeviceTable in WhateverXe/kern_xelp_devices.hpp of the release tag:
+# exact ids, family, whether an automatic backend exists, and the display name. docs/device-selection.md carries the
+# same ids in a human table (ranges like `46D0`-`46D4`, no names, Rocket Lake only in prose), so the header is the
+# more reliable source. The header was the same file in every release checked.
+# The list is derived per release tag and cached on the host. The bundled intel_devices.txt (a snapshot of an older release) supplies
+# what upstream does not say (option ROM per family, the chip tested through this tool) and is the offline fallback.
+WEX_REPO = "b00t0x/WhateverXe"
+WEX_DEVICES_URL = "https://raw.githubusercontent.com/%s/%%s/WhateverXe/kern_xelp_devices.hpp" % WEX_REPO
+DEVICES_CACHE_DIR = "/var/lib/osx-proxmox-next/igpu/devices"
+LATEST_TTL = 600
+UPSTREAM_FAMILIES = {"TigerLake": "tgl", "AlderLakeN": "adl-n", "RocketLake": "rkl", "AlderLakeS": "adl-s",
+                     "AlderLakeP": "adl-p", "RaptorLakeS": "rpl-s", "RaptorLakeP": "rpl-p"}
+_ENTRY_RE = re.compile(r'\{\s*0x([0-9A-Fa-f]{4})\s*,\s*Family::(\w+)\s*,\s*Display::\w+\s*,\s*GT::(\w+)\s*,'
+                       r'\s*"([^"|\\\r\n]*)"\s*\}')
+
+
+def parse_header(header):
+    """[[device id, upstream family, has backend, model], ...] from kern_xelp_devices.hpp. [] when nothing parses."""
+    entries = []
+    for m in _ENTRY_RE.finditer(header):
+        entries.append([int(m.group(1), 16), m.group(2), m.group(3) != "Unknown", m.group(4)])
+    return entries
+
+
+def _family_label(name):
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
+
+
+def derive_text(entries, version, base_text=None):
+    """intel_devices.txt text for a release: *entries* (parse_header) for the ids, models and backend, the base list
+    for the option ROM per family and the chip tested through this tool."""
+    base = base_text if base_text is not None else devices_text()
+    families, devices = parse_devices(base)
+    tested = {d for d, (_f, status, _m) in devices.items() if status == "tested"}
+    lines = ["version|" + version]
+    seen_families = set()
+    rows = []
+    for device, name, backend, model in entries:
+        key = UPSTREAM_FAMILIES.get(name) or "new-" + name.lower()
+        if key not in families:
+            families[key] = (_family_label(name), "")
+        status = "nobackend" if not backend or not families[key][1] else ("tested" if device in tested else "untested")
+        seen_families.add(key)
+        rows.append("device|%04X|%s|%s|%s" % (device, key, status, model))
+    for key in sorted(seen_families):
+        lines.append("family|%s|%s|%s" % (key, families[key][0], families[key][1]))
+    return "\n".join(lines + rows) + "\n"
+
+
+def _builtin():
+    """The bundled list as a device_list() result, labelled as a fallback."""
+    body = devices_text()
+    return {"text": body, "version": list_version(body), "tag": "", "source": "fallback", "wanted": "the newest release"}
+
+
+def _override(text):
+    """A device list handed in by the caller (a test, IGPU_DEVICES) as a device_list() result."""
+    return {"text": text, "version": list_version(text), "tag": "", "source": "override", "wanted": ""}
+
+
+def _cache_dir(cache_dir):
+    return Path(cache_dir or os.environ.get("IGPU_DEVICES_CACHE") or DEVICES_CACHE_DIR)
+
+
+def _read_json(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(path, data):
+    try:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(path)
+    except OSError:
+        pass  # a read-only host only loses the cache
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def latest_tag_from_redirect(opener=None):
+    """The tag github.com/<repo>/releases/latest points at. Not part of the REST API, so the API rate limit (which a
+    whole network shares when it has one public address) does not apply. ReleaseError when it does not answer."""
+    url = "https://github.com/%s/releases/latest" % WEX_REPO
+    request = urllib.request.Request(url, headers={"User-Agent": "osx-proxmox-next"})
+    try:
+        (opener or urllib.request.build_opener(_NoRedirect).open)(request, timeout=10)
+    except urllib.error.HTTPError as exc:
+        m = re.search(r"/releases/tag/([^/?#]+)$", exc.headers.get("Location") or "")
+        if m and TAG_RE.match(m.group(1)):
+            return m.group(1)
+    except (OSError, ValueError):
+        pass
+    raise ReleaseError("Could not find the newest WhateverXe release on GitHub.")
+
+
+def release_tag(choice="latest", get=None, cache_dir=None, now=None, redirect=None):
+    """The release tag a device list is for: the newest published WhateverXe for "latest" (asked of GitHub, the
+    answer is remembered for LATEST_TTL seconds), else the tag or version the user picked. ReleaseError offline."""
+    import time
+    choice = choice or LATEST
+    if choice != LATEST:
+        if not TAG_RE.match(choice):
+            raise ReleaseError("%r is not a release tag." % choice)
+        want = choice.lstrip("vV")
+        try:
+            for pick in list_releases("whateverxe", get):
+                if choice in (pick["tag"], pick["version"]) or pick["version"] == want:
+                    return pick["tag"]
+        except ReleaseError:
+            pass  # the API is rate limited or down: the tag as given is tried, a wrong one just fails to download
+        return choice
+    stamp = _cache_dir(cache_dir) / "latest.json"
+    clock = now if now is not None else time.time()
+    seen = _read_json(stamp)
+    if (isinstance(seen, dict) and isinstance(seen.get("tag"), str) and TAG_RE.match(seen["tag"])
+            and isinstance(seen.get("at"), (int, float)) and 0 <= clock - seen["at"] < LATEST_TTL):
+        return seen["tag"]
+    try:
+        found = [p for p in list_releases("whateverxe", get) if not p["prerelease"]]
+        if not found:
+            raise ReleaseError("No published release of WhateverXe has the file this tool needs.")
+        tag = found[0]["tag"]
+    except ReleaseError:
+        tag = (redirect or latest_tag_from_redirect)()  # the API is rate limited or down: the release page still answers
+    _write_json(stamp, {"tag": tag, "at": clock})
+    return tag
+
+
+def fetch_header(tag, opener=None):
+    """kern_xelp_devices.hpp of release *tag* as text. ReleaseError when it cannot be read."""
+    url = WEX_DEVICES_URL % tag
+    try:
+        with (opener or urllib.request.urlopen)(urllib.request.Request(url, headers={"User-Agent": "osx-proxmox-next"}),
+                                                timeout=20) as resp:  # noqa: S310 - fixed https host, tag is validated
+            return resp.read().decode("utf-8")
+    except (OSError, ValueError) as exc:
+        raise ReleaseError("Could not read the device list of WhateverXe %s (%s)." % (tag, exc)) from exc
+
+
+def _entry_ok(entry):
+    """A cached [device id, upstream family, has backend, model] row of the right types (a hand-edited cache is refetched)."""
+    return (isinstance(entry, list) and len(entry) == 4 and isinstance(entry[0], int) and isinstance(entry[1], str)
+            and entry[1].isidentifier() and isinstance(entry[2], bool) and isinstance(entry[3], str)
+            and "|" not in entry[3] and "\n" not in entry[3] and "\r" not in entry[3])
+
+
+def release_entries(tag, cache_dir=None, header_get=None):
+    """The parsed device table of release *tag*: from the host cache, else fetched once and cached per tag."""
+    if not TAG_RE.match(tag):
+        raise ReleaseError("%r is not a release tag." % tag)
+    path = _cache_dir(cache_dir) / ("%s.json" % tag)
+    cached = _read_json(path)
+    if isinstance(cached, list) and cached and all(_entry_ok(e) for e in cached):
+        return cached
+    entries = parse_header((header_get or fetch_header)(tag))
+    if not entries:
+        raise ReleaseError("The device list of WhateverXe %s has a layout this tool does not know." % tag)
+    _write_json(path, entries)
+    return entries
+
+
+def device_list(wex="latest", get=None, header_get=None, cache_dir=None, now=None, redirect=None):
+    """The supported chips of the WhateverXe release that will be installed ("latest" or a tag), never raising.
+
+    {"text", "version", "tag", "source": release|fallback|override, "wanted"}. When GitHub cannot be asked the bundled
+    list comes back with source "fallback" so every message built on it says which release it is based on.
+    IGPU_DEVICES (a file) overrides everything, for tests and for support."""
+    override = os.environ.get("IGPU_DEVICES")
+    if override:
+        return _override(Path(override).read_text())
+    try:
+        if os.environ.get("IGPU_DEVICES_OFFLINE"):
+            raise ReleaseError("offline by request (IGPU_DEVICES_OFFLINE)")
+        tag = release_tag(wex, get, cache_dir, now, redirect)
+        entries = release_entries(tag, cache_dir, header_get)
+    except ReleaseError:
+        out = _builtin()
+        out["wanted"] = "the newest release" if (wex or LATEST) == LATEST else "release %s" % wex
+        return out
+    version = tag[1:] if tag[:1] in "vV" else tag
+    return {"text": derive_text(entries, version), "version": version, "tag": tag, "source": "release", "wanted": ""}
 
 
 # ── memory layout ────────────────────────────────────────────────────
@@ -5358,10 +5580,11 @@ def bound_driver(root="/"):
     return link.resolve().name if link.exists() else None
 
 
-def check(root="/", run=default_run, text=None):
-    """Every host-side readiness check for the iGPU: issues refuse, warnings inform."""
+def check(root="/", run=default_run, text=None, wex="latest", devices=None):
+    """Every host-side readiness check for the iGPU: issues refuse, warnings inform. The chip is judged against the
+    device list of WhateverXe *wex* ("latest" or a tag), see device_list; report["devices"] says which release."""
     report = {"ok": False, "issues": [], "warnings": [], "hints": [], "device": None, "info": None,
-              "layout": None, "driver": None}
+              "layout": None, "driver": None, "devices": None, "basis": "", "verdict": None}
     dev = _p(root, "/sys/bus/pci/devices/%s" % IGD_BDF)
     if not dev.exists():
         report["issues"].append("There is no PCI device at %s. The Intel iGPU must sit at 00:02.0." % IGD_SLOT)
@@ -5375,16 +5598,24 @@ def check(root="/", run=default_run, text=None):
         return report
     device = _hex(dev / "device") or 0
     report["device"] = device
+    if devices is None:
+        devices = _override(text) if text is not None else device_list(wex)
+    text = devices["text"]
+    report["devices"] = {k: devices[k] for k in ("version", "tag", "source", "wanted")}
+    report["basis"] = basis(devices)
     info = lookup(device, text)
     report["info"] = info
-    kind, _head, detail = verdict(device, text)
+    kind, head, detail = verdict(device, text, devices)
+    report["verdict"] = [kind, head, detail]
     if kind == "unsupported":
         report["issues"].append("Intel %04x: %s" % (device, detail))
         return report
+    if devices["source"] == "fallback":
+        report["warnings"].append("The supported-chip list could not be checked against GitHub. %s" % report["basis"])
     if kind == "intel-untested":
         report["warnings"].append(
             "%s (8086:%04x) has not been tested through this tool. Only Alder Lake-P 8086:46a6 has. It should "
-            "work: WhateverXe lists it." % (info["family_label"], device))
+            "work: WhateverXe lists it. %s" % (info["family_label"], device, report["basis"]))
     report["driver"] = bound_driver(root)
     if report["driver"] != "vfio-pci":
         report["issues"].append(
@@ -5447,7 +5678,7 @@ RELEASE_KINDS = {
     "whateverxe": ("b00t0x/WhateverXe", re.compile(r"^WhateverXe-.+-RELEASE\.zip$"), "WhateverXe"),
     "graphics": ("b00t0x/WhateverXe-Graphics", re.compile(r"^WhateverXe-Graphics-.+\.pkg$"), "WhateverXe Graphics"),
 }
-TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
 STATE_FIELDS = ("whateverxe", "graphics")
 
@@ -5757,7 +5988,7 @@ def _emit(obj):
 
 
 def _usage():
-    sys.stderr.write("usage: igpu_engine.py check|verdict <id>|lookup <id>|settings <mb> <rom>|merge-args|strip-args|"
+    sys.stderr.write("usage: igpu_engine.py check [wex]|verdict <id> [wex]|lookup <id> [wex]|devices [wex]|settings <mb> <rom>|merge-args|strip-args|"
                      "fetch <rom:KEY|pin:NAME> <dir>|assets <dir> [wex] [graphics]|releases <whateverxe|graphics>|"
                      "state-write <vmid>|state-record <vmid> <macos>|state-show <vmid>|payload <pkg> <img>|result <img>|accel-check [seconds]|stage-command|pins\n")
     return 64
@@ -5766,14 +5997,20 @@ def _usage():
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     root = os.environ.get("GPU_ROOT", "/")
-    if cmd == "check":
-        _emit(check(root))
+    if cmd == "check" and len(argv) in (2, 3):
+        _emit(check(root, wex=argv[2] if len(argv) == 3 else "latest"))
         return 0
-    if cmd == "verdict" and len(argv) == 3:
-        _emit(dict(zip(("kind", "headline", "detail"), verdict(int(argv[2], 16)))))
+    if cmd == "verdict" and len(argv) in (3, 4):
+        devices = device_list(argv[3] if len(argv) == 4 else "latest")
+        _emit(dict(zip(("kind", "headline", "detail"), verdict(int(argv[2], 16), devices["text"], devices))))
         return 0
-    if cmd == "lookup" and len(argv) == 3:
-        _emit(lookup(int(argv[2], 16)) or {})
+    if cmd == "lookup" and len(argv) in (3, 4):
+        devices = device_list(argv[3] if len(argv) == 4 else "latest")
+        _emit(lookup(int(argv[2], 16), devices["text"]) or {})
+        return 0
+    if cmd == "devices" and len(argv) in (2, 3):
+        devices = device_list(argv[2] if len(argv) == 3 else "latest")
+        _emit(dict({k: v for k, v in devices.items() if k != "text"}, basis=basis(devices)))
         return 0
     if cmd == "settings" and len(argv) == 4:
         _emit(vm_settings(int(argv[2]), argv[3]))
@@ -8290,8 +8527,8 @@ function igpu_ready_quiet() {
 # Mirrors intel_host.check_intel_gpu.
 function igpu_check() {
   local out
-  IGPU_MB=""; IGPU_ROM_FILE=""; IGPU_ROM_KEY=""; IGPU_DEVICE=""
-  out=$(igpu_engine check | python3 -c '
+  IGPU_MB=""; IGPU_ROM_FILE=""; IGPU_ROM_KEY=""; IGPU_DEVICE=""; IGPU_VERDICT=""
+  out=$(igpu_engine check "$IGPU_WEX_CHOICE" | python3 -c '
 import json, shlex, sys
 d = json.load(sys.stdin)
 for i in d["issues"]:
@@ -8307,13 +8544,15 @@ if d["info"]:
     print("IGPU_MODEL=%s" % shlex.quote(d["info"]["model"]))
 if d["device"] is not None:
     print("IGPU_DEVICE=%d" % d["device"])
+if d.get("verdict"):
+    print("IGPU_VERDICT=%s" % shlex.quote("|".join(d["verdict"])))
 ') || return 1
   eval "$out"
 }
 
 # kind|headline|detail for an Intel device id (decimal). Mirrors intel_host.verdict.
 function igpu_verdict() {
-  igpu_engine verdict "$(printf '%x' "$1")" | gpu_json 'd["kind"] + "|" + d["headline"] + "|" + d["detail"]'
+  igpu_engine verdict "$(printf '%x' "$1")" "$IGPU_WEX_CHOICE" | gpu_json 'd["kind"] + "|" + d["headline"] + "|" + d["detail"]'
 }
 
 # 0 when the VM config ($1) names a machine other than pc, or has recovery attached. Fills GPU_ISSUES.
@@ -8659,6 +8898,13 @@ function igpu_finish() {
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
   echo -e "${INFO}${YW}${IGPU_NOTICE}${CL}"
   igpu_choose_versions || { msg_error "Could not list the WhateverXe releases"; return 1; }
+  if [ "$IGPU_WEX_CHOICE" != "latest" ]; then
+    # the chip is judged against the release that gets installed, so judge it again for a release picked from the list
+    GPU_ISSUES=(); GPU_WARNS=(); GPU_HINTS=()
+    igpu_check
+    nullmoth_print_findings
+    [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
+  fi
   igpu_fetch_assets "$IGPU_ROM_KEY" || { msg_error "Could not download or verify the iGPU files"; return 1; }
   storage=$(sed -n 's/^\(virtio0\|efidisk0\|ide0\): \([^:,]*\):.*/\2/p' <<<"$cfg" | head -1)
   [ -n "$storage" ] || { msg_error "Could not tell which storage the VM disks are on"; return 1; }
@@ -8745,7 +8991,7 @@ function igpu_drop_disk_ref() {
 function igpu_detected_line() {
   local device driver model reboot=" One host reboot needed."
   IFS='|' read -r _ _ device _ _ _ _ _ driver _ <<<"$1"
-  model=$(igpu_engine lookup "$(printf '%x' "$device")" | gpu_json 'd.get("model", "")')
+  model=$(igpu_engine lookup "$(printf '%x' "$device")" "$IGPU_WEX_CHOICE" | gpu_json 'd.get("model", "")')
   [ "$driver" != "vfio-pci" ] || reboot=""
   printf '%s (%04x) detected: full macOS acceleration. The host gives up its local screen.%s' "${model:-Intel graphics}" "$device" "$reboot"
 }
@@ -8907,7 +9153,7 @@ function igpu_check_command() {
   GPU_ISSUES=(); GPU_WARNS=(); GPU_HINTS=()
   igpu_check
   if [ -n "${IGPU_DEVICE:-}" ]; then
-    IFS='|' read -r _ head detail <<<"$(igpu_verdict "$IGPU_DEVICE")"
+    IFS='|' read -r _ head detail <<<"${IGPU_VERDICT:-$(igpu_verdict "$IGPU_DEVICE")}"
     printf '%s (8086:%04x)\n%s\n%s\n' "${IGPU_MODEL:-Intel graphics}" "$IGPU_DEVICE" "$head" "$detail"
   fi
   nullmoth_print_findings
@@ -10209,6 +10455,11 @@ fi
 # `osx-proxmox-next.sh igpu-check` / `igpu-finish <vmid> [macos]`: BETA, Intel iGPU passthrough.
 if [ "${1:-}" == "igpu-check" ]; then
   check_root
+  case "${2:-}" in
+    --wex-version) IGPU_WEX_CHOICE="${3:-}" ;;
+    --wex-version=*) IGPU_WEX_CHOICE="${2#--wex-version=}" ;;
+  esac
+  [ -n "$IGPU_WEX_CHOICE" ] || { msg_error "--wex-version needs a release tag (osx-proxmox-next.sh igpu-versions lists them)"; exit 1; }
   if igpu_check_command; then exit 0; else exit 2; fi
 fi
 if [ "${1:-}" == "igpu-finish" ]; then
@@ -10485,6 +10736,9 @@ function advanced_settings() {
     # which WhateverXe release goes in: the latest unless the user picks one (also checks GitHub before the long install)
     if ! igpu_choose_versions; then
       echo -e "${INFO}${YW}Could not list the WhateverXe releases (GitHub is unreachable or rate limited). iGPU passthrough is off: run the script again in a few minutes, or set GITHUB_TOKEN.${CL}"
+      IGPU="no"
+    elif [ "$IGPU_WEX_CHOICE" != "latest" ] && ! igpu_ready_quiet; then
+      echo -e "${INFO}${YW}This host's Intel chip is not ready for WhateverXe ${IGPU_WEX_CHOICE} (run igpu-check --wex-version ${IGPU_WEX_CHOICE}). iGPU passthrough is off.${CL}"
       IGPU="no"
     fi
   fi

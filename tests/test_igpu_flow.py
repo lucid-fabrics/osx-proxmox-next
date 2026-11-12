@@ -113,6 +113,40 @@ def test_intel_host_adapters(tmp_path):
     assert not bad.ok and bad.rom_file == ""
 
 
+def test_scan_names_the_release_the_chip_was_checked_against(tmp_path, monkeypatch):
+    root = host(tmp_path, igpu="vfio-pci")
+    only = {"text": "version|0.9.0\nfamily|adl-p|Alder Lake-P|adl-h\ndevice|46A6|adl-p|tested|Iris\n",
+            "version": "0.9.0", "tag": "0.9.0", "source": "release", "wanted": ""}
+    monkeypatch.setattr(intel_host, "device_list", lambda wex="latest": only)
+    card = session(root).scan()[0]
+    assert card.kind == "intel" and "Checked against WhateverXe 0.9.0." in card.detail
+    dropped = dict(only, text="version|0.9.0\nfamily|adl-p|Alder Lake-P|adl-h\n")
+    monkeypatch.setattr(intel_host, "device_list", lambda wex="latest": dropped)
+    card = session(root).scan()[0]
+    assert card.kind == "unsupported" and "Checked against WhateverXe 0.9.0." in card.why_not
+
+
+def test_scan_offline_says_which_release_the_answer_is_based_on(tmp_path):
+    card = session(host(tmp_path, igpu="vfio-pci")).scan()[0]
+    assert card.kind == "intel"
+    assert "Based on WhateverXe 0.8.0, could not check the newest release." in card.detail
+    shown = " ".join(w for w in gpu_setup.card_text(card).split() if w not in ("|", ">>"))
+    assert "Based on WhateverXe 0.8.0, could not check the newest release." in shown
+
+
+def test_attach_plan_asks_the_release_list_for_the_option_rom(tmp_path, monkeypatch):
+    root = host(tmp_path, igpu="vfio-pci")
+    chip = {"text": "version|0.9.0\nfamily|adl-p|Alder Lake-P|adl-h\ndevice|46A6|adl-p|tested|Iris\n",
+            "version": "0.9.0", "tag": "0.9.0", "source": "release", "wanted": ""}
+    monkeypatch.setattr(intel_host, "device_list", lambda wex="latest": chip)
+    s = session(root)
+    s.state["gpu"] = {"device": 0x46A6, "bdf": IGD, "vendor": "intel"}
+    seen = {}
+    monkeypatch.setattr(igpu_attach, "prepare_attach_igpu", lambda vmid, w, a, rom, **kw: seen.setdefault("rom", rom.name))
+    s.intel_plan(100)
+    assert seen["rom"] == "ADL-H_RPL-H_GOPv21_igd.rom"
+
+
 # ── attach plan ──────────────────────────────────────────────────────
 
 def attach(root, vms, **kw):

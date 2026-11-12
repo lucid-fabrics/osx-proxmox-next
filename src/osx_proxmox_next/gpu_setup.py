@@ -203,8 +203,9 @@ def version_status(vendor: str, device_id: int, kind: str, macos: str, laptop: b
     return True, f"works with {name}"
 
 
-def verdict(vendor: str, device_id: int, name: str = "") -> tuple[str, str, str]:
-    """(kind, headline, detail) for one card. The headline is the plain-words verdict."""
+def verdict(vendor: str, device_id: int, name: str = "", intel_devices: dict | None = None) -> tuple[str, str, str]:
+    """(kind, headline, detail) for one card. The headline is the plain-words verdict. *intel_devices* is the
+    WhateverXe device list an Intel card is judged against (intel_host.device_list); the detail names its release."""
     if is_laptop_nvidia(vendor, name):
         return "unsupported", "Not supported (laptop NVIDIA)", _LAPTOP_NVIDIA
     if vendor == "amd":
@@ -214,7 +215,8 @@ def verdict(vendor: str, device_id: int, name: str = "") -> tuple[str, str, str]
         span = "macOS 13 to 26" if fam.tahoe == "ok" else "macOS 13 to 15 (26 not confirmed)"
         return "native", f"Works natively on {span}", fam.label
     if vendor == "intel":
-        return intel_host.verdict(device_id)
+        devices = intel_devices if intel_devices is not None else intel_host.device_list()
+        return intel_host.verdict(device_id, None, devices)
     if nvidia_host.is_supported_device(device_id):
         return ("nullmoth", "Works with NullMoth (beta) on macOS 15.5 to 26",
                 "Needs the third-party NullMoth driver, which this tool installs for you.")
@@ -392,6 +394,7 @@ class Session:
         devices = {d["bdf"]: d for d in facts["pci"]}
         seen: list[str] = []
         cards: list[GpuCard] = []
+        intel_devices: dict | None = None  # asked of GitHub once per scan, and only when an Intel card is there
         for disp in facts["displays"]:
             bdf = disp["bdf"].rsplit(".", 1)[0]
             vendor = {0x1002: "amd", 0x10DE: "nvidia", 0x8086: "intel"}.get(disp["vendor"])
@@ -399,7 +402,9 @@ class Session:
                 continue
             seen.append(bdf)
             lname = self._lspci_name(bdf)
-            kind, headline, detail = verdict(vendor, disp["device"], lname)
+            if vendor == "intel" and intel_devices is None:
+                intel_devices = intel_host.device_list()
+            kind, headline, detail = verdict(vendor, disp["device"], lname, intel_devices)
             funcs = sorted(b for b in devices if b.startswith(bdf + "."))
             first = devices.get(bdf + ".0", disp)
             shares, risky = [], []
@@ -410,7 +415,7 @@ class Session:
                         if (other["class"] or 0) >> 16 in (0x01, 0x02):
                             risky.append(other["bdf"])
             containers = [(c, n) for c, n in host_setup.lxc_gpu_users(self.root) if n == "/dev/dri" or vendor == "nvidia"]
-            info = intel_host.lookup(disp["device"]) if vendor == "intel" else None
+            info = intel_host.lookup(disp["device"], intel_devices["text"]) if vendor == "intel" and intel_devices else None
             cards.append(GpuCard(
                 model=info["model"] if info else "",
                 bdf=bdf, vendor=vendor, device_id=disp["device"], name=lname or f"{vendor.upper()} GPU",
@@ -681,7 +686,7 @@ class Session:
         """The iGPU attach preflight and plan. The downloads are not done here; the plan names where they go."""
         from .defaults import DEFAULT_ISO_DIR
         from .oc_builder import AMFIPASS_MOD
-        info = intel_host.lookup(self.state["gpu"]["device"])
+        info = intel_host.lookup(self.state["gpu"]["device"], intel_host.device_list()["text"])
         cache = Path(DEFAULT_ISO_DIR)
         rom_file = info["rom_file"] if info else ""
         return igpu_attach.prepare_attach_igpu(

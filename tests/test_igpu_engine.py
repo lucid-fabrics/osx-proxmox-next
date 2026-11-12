@@ -133,7 +133,7 @@ def test_recovery_bus():
 
 def test_check_passes_on_the_tested_host(tmp_path):
     igd(tmp_path)
-    rep = eng.check(str(tmp_path), regs())
+    rep = eng.check(str(tmp_path), regs(), text=eng.devices_text())  # a list handed in: no offline fallback warning
     assert rep["ok"] and rep["layout"]["max_ram_below_4g_mb"] == 1342 and not rep["warnings"]
     assert rep["info"]["rom_file"] == "ADL-H_RPL-H_GOPv21_igd.rom"
 
@@ -141,7 +141,7 @@ def test_check_passes_on_the_tested_host(tmp_path):
 def test_check_warns_about_an_untested_chip(tmp_path):
     igd(tmp_path, device=0x9A49)
     rep = eng.check(str(tmp_path), regs())
-    assert rep["ok"] and "not been tested" in rep["warnings"][0]
+    assert rep["ok"] and any("not been tested" in w for w in rep["warnings"])
 
 
 @pytest.mark.parametrize("kw,text", [
