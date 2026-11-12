@@ -15,6 +15,7 @@ from osx_proxmox_next.unattended import UnattendedError
 
 def report(ok=True, issues=(), layout=True):
     engine = {"info": {"device": 0x46A6, "model": "Intel Iris Xe Graphics", "family_label": "Alder Lake-P"},
+              "verdict": ["intel", "Works with WhateverXe", "Tested end to end. Checked against WhateverXe 0.8.2."],
               "layout": {"ok": True, "host_top": 0x4F800000, "max_ram_below_4g_mb": 1342} if layout else None}
     return SimpleNamespace(ok=ok, issues=list(issues), warnings=["careful"], hints=["hint"], engine=engine,
                            layout=engine["layout"], rom_file="x.rom")
@@ -30,17 +31,26 @@ def test_parsers_exist():
 
 
 def test_check_command(monkeypatch, capsys):
-    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda: report())
+    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda **_kw: report())
     assert cli.run_cli(["igpu-check"]) == 0
     out = capsys.readouterr().out
     assert "Intel Iris Xe Graphics (8086:46a6, Alder Lake-P)" in out and "max-ram-below-4g=1342M" in out and "The host is ready." in out
-    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda: report(False, ["driver: i915"], layout=False))
+    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda **_kw: report(False, ["driver: i915"], layout=False))
     assert cli.run_cli(["igpu-check"]) == 2
     assert "REFUSED: driver: i915" in capsys.readouterr().out
     bare = report(False, ["no device"], layout=False)
     bare.engine["info"] = None
-    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda: bare)
+    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda **_kw: bare)
     assert cli.run_cli(["igpu-check"]) == 2
+
+
+def test_check_command_judges_the_chip_against_the_chosen_release_and_prints_its_verdict(monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda **kw: seen.append(kw) or report())
+    assert cli.run_cli(["igpu-check", "--wex-version", "0.8.0"]) == 0
+    assert cli.run_cli(["igpu-check"]) == 0
+    assert seen == [{"wex": "0.8.0"}, {"wex": "latest"}]
+    assert "Checked against WhateverXe 0.8.2." in capsys.readouterr().out
 
 
 def test_finish_asks_unless_yes(monkeypatch, capsys):
@@ -92,7 +102,7 @@ class Pve:
 def install(monkeypatch):
     s = SimpleNamespace(applied=[], unattended=None, finished=None, fetched=None, saved=None)
     monkeypatch.setattr(cli, "_validate_and_fetch_assets", lambda args, config: s.fetched)
-    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda: report())
+    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda **_kw: report())
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "build_plan", lambda config: [PlanStep("Create VM shell", ["true"]), PlanStep("Start VM", ["qm", "start", "9"])])
     monkeypatch.setattr("osx_proxmox_next.rollback.create_snapshot", lambda vmid: SimpleNamespace(path="snap"))
@@ -158,7 +168,7 @@ def test_install_stops_early(install, monkeypatch, capsys):
     install.fetched = 3
     assert cli.run_cli(ARGV) == 3
     install.fetched = None
-    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda: report(False, ["driver: i915"]))
+    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda **_kw: report(False, ["driver: i915"]))
     assert cli.run_cli(ARGV) == 2 and install.applied == [] and "Prepare the host first" in capsys.readouterr().out
 
 
@@ -245,6 +255,20 @@ def test_install_checks_a_chosen_release_before_the_long_install(install, capsys
     assert cli.run_cli(ARGV + ["--wex-version", "9.9.9"]) == 2
     assert "no release tagged 9.9.9" in capsys.readouterr().out and install.applied == []
     assert cli.run_cli(ARGV + ["--wex-version", "0.8.0"]) == 0 and install.applied  # a real tag goes through
+
+
+def test_install_checks_the_chip_again_for_a_release_picked_from_the_list(install, monkeypatch, capsys):
+    seen = []
+    ok = report()
+    monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda **kw: seen.append(kw["wex"]) or ok)
+    monkeypatch.setattr(igpu_cli, "_versions_from", lambda args, interactive: ("0.7.0", "latest"))
+    monkeypatch.setattr(igpu_engine, "select_assets", lambda wex, gfx: None)
+    assert cli.run_cli(ARGV) == 0
+    assert seen == ["latest", "0.7.0"]
+    seen.clear()
+    monkeypatch.setattr(igpu_cli, "check_intel_gpu",
+                        lambda **kw: seen.append(kw["wex"]) or (ok if kw["wex"] == "latest" else report(False, ["not in 0.7.0"])))
+    assert cli.run_cli(ARGV) == 2 and "Pick another WhateverXe release" in capsys.readouterr().out
 
 
 def test_install_hands_the_choice_to_finish(install, monkeypatch):

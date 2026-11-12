@@ -39,7 +39,9 @@ def _add_version_options(parser: argparse.ArgumentParser) -> None:
 
 
 def add_parsers(sub: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:
-    sub.add_parser("igpu-check", help="BETA: check whether this host can pass its Intel iGPU to a macOS VM")
+    check = sub.add_parser("igpu-check", help="BETA: check whether this host can pass its Intel iGPU to a macOS VM")
+    check.add_argument("--wex-version", default="", metavar="TAG",
+                       help="Judge the chip against this WhateverXe release (default: the latest release)")
     install = sub.add_parser(
         "igpu-install", parents=[common],
         help=("BETA: create a macOS VM with the Intel iGPU passed through and install macOS hands-off, "
@@ -85,11 +87,11 @@ def _print_report(report) -> None:
         print(f"WARN: {line}")
 
 
-def run_check() -> int:
-    report = check_intel_gpu()
+def run_check(wex: str = igpu_engine.LATEST) -> int:
+    report = check_intel_gpu(wex=wex)
     info = report.engine["info"]
     if info:
-        kind, head, detail = igpu_engine.verdict(info["device"])
+        kind, head, detail = report.engine["verdict"]
         print(f"{info['model']} (8086:{info['device']:04x}, {info['family_label']})\n{head}\n{detail}")
     _print_report(report)
     layout = report.layout
@@ -192,13 +194,19 @@ def run_install(args: argparse.Namespace) -> int:
     rc = cli._validate_and_fetch_assets(args, config)
     if rc is not None:
         return rc
-    report = check_intel_gpu()
+    report = check_intel_gpu(wex=getattr(args, "wex_version", "") or igpu_engine.LATEST)
     _print_report(report)
     if not report.ok:
         print("Nothing was changed. Prepare the host first: osx-next-cli gpu-setup")
         return 2
     try:
         wex, gfx = _versions_from(args, sys.stdin.isatty())
+        if wex != igpu_engine.LATEST and wex != getattr(args, "wex_version", ""):
+            report = check_intel_gpu(wex=wex)  # picked from the list: judge the chip against that release
+            _print_report(report)
+            if not report.ok:
+                print("Nothing was changed. Pick another WhateverXe release or prepare the host: osx-next-cli gpu-setup")
+                return 2
         if wex != igpu_engine.LATEST or gfx != igpu_engine.LATEST:
             # fail now on a wrong tag or an unreachable GitHub, not after a 45 minute install
             igpu_engine.select_assets(wex, gfx)
@@ -275,7 +283,7 @@ def run_watchdog(args: argparse.Namespace) -> int:
 
 def dispatch(args: argparse.Namespace) -> int | None:
     if args.cmd == "igpu-check":
-        return run_check()
+        return run_check(getattr(args, "wex_version", "") or igpu_engine.LATEST)
     if args.cmd == "igpu-finish":
         return run_finish(args)
     if args.cmd == "igpu-install":

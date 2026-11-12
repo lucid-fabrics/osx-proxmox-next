@@ -131,7 +131,7 @@ def env(tmp_path, monkeypatch):
     e.asked = []
     monkeypatch.setenv("IGPU_STATE_DIR", str(tmp_path / "state"))
     report = SimpleNamespace(ok=True, issues=[], engine={"info": {"rom": "adl-h"}})
-    monkeypatch.setattr(igpu_finish, "check_intel_gpu", lambda: report)
+    monkeypatch.setattr(igpu_finish, "check_intel_gpu", lambda **_kw: report)
     monkeypatch.setattr(igpu_finish, "ensure_igpu_assets", lambda iso, key, **k: e.asked.append(k) or assets)
     monkeypatch.setattr(igpu_finish.igpu_engine, "build_payload", lambda pkg, out: (True, ""))
     monkeypatch.setattr(igpu_finish.igpu_engine, "read_result", lambda path: (e.results[0] if len(e.results) == 1 else e.results.popleft()) if e.results else "")
@@ -269,7 +269,7 @@ def test_a_running_vm_and_a_missing_vm_are_refused(env):
 
 
 def test_an_unready_host_or_plan_stops_before_anything_changes(env, monkeypatch):
-    monkeypatch.setattr(igpu_finish, "check_intel_gpu", lambda: SimpleNamespace(ok=False, issues=["driver: i915"], engine={}))
+    monkeypatch.setattr(igpu_finish, "check_intel_gpu", lambda **_kw: SimpleNamespace(ok=False, issues=["driver: i915"], engine={}))
     pve = Pve()
     with pytest.raises(igpu_finish.FinishError, match="not ready"):
         go(env, pve=pve)
@@ -466,6 +466,17 @@ def test_a_failed_watchdog_install_is_a_note_not_a_failure(env):
 def test_every_release_gets_the_watchdog_that_records_crashes(env):
     res, _pve, _ = go(env)  # the default test VM is not Tahoe
     assert res.watchdog and any(t and "power watchdog" in t[0] for t in env.applied)
+
+
+def test_the_chip_is_checked_against_the_release_that_gets_installed(env, monkeypatch):
+    seen = []
+    report = SimpleNamespace(ok=True, issues=[], engine={"info": {"rom": "adl-h"}})
+    monkeypatch.setattr(igpu_finish, "check_intel_gpu", lambda **kw: seen.append(kw) or report)
+    plans = []
+    real = igpu_finish.prepare_attach_igpu
+    monkeypatch.setattr(igpu_finish, "prepare_attach_igpu", lambda *a, **kw: plans.append(kw["wex"]) or real(*a, **kw))
+    go(env, wex="0.8.0")
+    assert seen == [{"wex": "0.8.0"}] and plans == ["0.8.0", "0.8.0"]
 
 
 def test_the_chosen_releases_reach_the_download_and_the_state_file(env):

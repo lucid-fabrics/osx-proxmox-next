@@ -174,6 +174,7 @@ def prepare_attach_igpu(
     run=igpu_engine.default_run,
     wex_sha: str = "",
     amfi_sha: str = "",
+    wex: str = igpu_engine.LATEST,
 ) -> AttachPlan:
     """Preflight an iGPU attach and, when it passes, build the plan."""
     plan = AttachPlan(vmid)
@@ -192,7 +193,7 @@ def prepare_attach_igpu(
     elif version == "tahoe":
         plan.warnings.append(TAHOE_NOTE)
 
-    report = check_intel_gpu(root, run)
+    report = check_intel_gpu(root, run, wex)
     plan.issues += report.issues
     plan.warnings += report.warnings
     plan.hints += report.hints

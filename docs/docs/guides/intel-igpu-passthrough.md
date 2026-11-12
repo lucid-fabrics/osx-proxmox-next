@@ -28,7 +28,7 @@ The scan lists every graphics card in the host, each with a plain status for the
 ## What the tool does
 
 1. **Host (once):** blacklists `i915`, binds the iGPU id to vfio-pci at boot and rebuilds the boot image. A host that already holds the iGPU on vfio-pci is left alone.
-2. **Checks:** the chip must be on the supported list, no running VM may hold it, and the memory layout must be usable.
+2. **Checks:** the chip must be on the supported list of the WhateverXe release that gets installed (see [Which chips are supported](#which-chips-are-supported)), no running VM may hold it, and the memory layout must be usable.
 3. **VM shape:** i440fx (`machine: pc`), no emulated display, the iGPU on `hostpci0` in legacy IGD mode with a pinned option ROM from [intel-igpu-passthru](https://github.com/LongQT-sea/intel-igpu-passthru), and a `max-ram-below-4g` computed from the host's graphics memory so WhateverXe accepts the guest's memory layout. The recovery disk sits on `sata1`, because the IDE controller of i440fx has no macOS driver.
 4. **OpenCore:** adds WhateverXe (the latest release unless you pick another, see [Which WhateverXe version](#which-whateverxe-version)) and AMFIPass, turns WhateverGreen off, sets `FadtEnableReset` and the boot-args `-allow3d -disablegfxfirmware -wex-tgl-hold-render-wake`. AMFIPass and the option ROM are pinned and checked against a SHA-256, WhateverXe and its graphics package against the digest GitHub stores for the release file.
 5. **Graphics package:** WhateverXe Graphics is copied into macOS from recovery, offline, and installed by a one-shot LaunchDaemon only after WhateverXe is loaded. Installing it earlier makes the guest panic at boot, so if WhateverXe never loads the package stays out and the VM keeps working unaccelerated (three tries at most). The package contains Apple binaries, so it is downloaded at setup time and never shipped with this project.
@@ -37,6 +37,7 @@ The scan lists every graphics card in the host, each with a plain status for the
 
 ```bash
 osx-next-cli igpu-check                     # can this host do it, and what would the VM get
+osx-next-cli igpu-check --wex-version 0.8.0 # the same, judged against an older WhateverXe release
 osx-next-cli igpu-install --vmid 996 --name igpu-seq --macos sequoia \
   --cores 4 --memory 8192 --disk 64 --bridge vmbr0 --storage local-lvm
 osx-next-cli igpu-finish 996                # an installed i440fx VM: attach the iGPU and install the package
@@ -61,8 +62,18 @@ This tool installs the **latest published WhateverXe release** and the latest Wh
 - There is no fallback to an older version behind your back. If GitHub cannot be reached or answers with a rate limit, the setup stops and tells you to run it again in a few minutes. Set `GITHUB_TOKEN` to a GitHub token to raise the rate limit.
 - AMFIPass and the option ROMs stay pinned, they are not part of WhateverXe's release stream.
 - The tool needs the kext `WhateverXe.kext` (also inside one wrapping folder) and reads its executable name from the kext. A release laid out differently is refused with a message listing what the zip holds. If a release changed the kext's bundle id (`org.b00t0x.WhateverXe`) you get a warning, because the first-boot check that WhateverXe is loaded looks for that id and the graphics package then stays out.
-- The list of supported chips (`intel_devices.txt`) was built from WhateverXe 0.8.0. A newer release that adds a chip does not make this tool offer that chip until the list is updated.
+- The chip is judged against the release you install, see [Which chips are supported](#which-chips-are-supported).
 - The versions that went into a VM are written to `/var/lib/osx-proxmox-next/igpu/<vmid>.json`. `gpu-setup --status` and `igpu-report` show them.
+
+## Which chips are supported
+
+The list of supported chips comes from the WhateverXe release that will be installed, the latest unless you pick another. A release does not carry the list in its zip (the kext matches on `IOResources`, there is no `IOPCIMatch`), so the tool reads the device table of that release's source, `WhateverXe/kern_xelp_devices.hpp` at the release tag: exact PCI ids, chip family, whether an automatic backend exists, and the display name. The human table in WhateverXe's `docs/device-selection.md` lists the same ids as ranges without names, so the table in the source is the one that can be parsed exactly. The list is fetched once per release and cached in `/var/lib/osx-proxmox-next/igpu/devices/`; the newest tag is looked up again after ten minutes.
+
+- Every verdict names the release it was checked against, for example "Checked against WhateverXe 0.8.2." A chip that a newer release adds is offered as soon as that release is the latest, and a chip a release drops is refused for it.
+- A chip of a family the tool has no option ROM for is shown as listed by WhateverXe but not supported yet, with the release that lists it.
+- When GitHub cannot be reached the tool falls back to the list built into this version (WhateverXe 0.8.0, `intel_devices.txt`) and says so: "Based on WhateverXe 0.8.0, could not check the newest release." That answer can be out of date in both directions. Run the scan again once the network is back. `IGPU_DEVICES_OFFLINE=1` forces the built-in list.
+- `igpu-check --wex-version <tag>`, `igpu-finish --wex-version <tag>` and `igpu-install --wex-version <tag>` judge the chip against that release instead of the latest. A chip the latest release dropped is refused by a plain `igpu-install`, so pass the older tag up front.
+- GitHub's API allows 60 anonymous requests an hour per address. When it refuses, the tool reads the newest tag from the release page instead, so the scan keeps working.
 
 ## When it crashes
 
