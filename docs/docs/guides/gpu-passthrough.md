@@ -47,9 +47,9 @@ Steps that this host does not need show as `skipped`. Detection comes first: the
 
 ### AMD: native drivers, no third-party software
 
-macOS ships its own AMD drivers, so nothing is installed in the guest. These families work on macOS Ventura 13, Sonoma 14, Sequoia 15 and Tahoe 26 (the *Tahoe* column says whether a Mac that Tahoe supports uses this family).
+macOS ships its own AMD drivers, so nothing is installed in the guest. These families work on macOS Monterey 12, Ventura 13, Sonoma 14, Sequoia 15 and Tahoe 26 (the *Tahoe* column says whether a Mac that Tahoe supports uses this family).
 
-| Family | Ventura to Sequoia | Tahoe 26 | Reset bug handling | Extra boot-arg |
+| Family | Monterey to Sequoia | Tahoe 26 | Reset bug handling | Extra boot-arg |
 |--------|--------------------|----------|--------------------|----------------|
 | Polaris 10/20/30 (RX 470/480/570/580/590, WX 5100/7100) | Yes | Yes | vendor-reset module | `none` |
 | Polaris 11/21 (RX 460/560, WX 4100, Pro 560X) | Yes | Not confirmed | vendor-reset module | `none` |
@@ -83,7 +83,7 @@ AMD cards are placed on a PCI Express port (`pcie=1`) and the VM gets `-global I
 | Turing and newer (RTX 20 / 30 / 40 / 50 series) | Yes, on macOS Sequoia 15.5+ and Tahoe 26 |
 | Kepler, Maxwell, Pascal, Volta (GTX 600 to GTX 10, Titan V) | No. Older than the RTX 20 series: NVIDIA's macOS drivers stopped at High Sierra and NullMoth needs Turing or newer. |
 | Laptop (mobile) NVIDIA GPUs of any generation | No. The scan marks them "not supported (laptop NVIDIA)", so on a machine with an Intel iGPU the iGPU is recommended instead. A card counts as a laptop part when its lspci name says Laptop, Mobile or Max-Q, or its chip name ends in M (for example AD107M). The name comes from the host's PCI ID list, so run `update-pciids` if a new laptop card shows up as just "Device". |
-| Ventura 13, Sonoma 14 guests | No |
+| Monterey 12, Ventura 13, Sonoma 14 guests | No |
 
 > **NVIDIA GPU support (Beta)**
 >

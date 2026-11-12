@@ -24,7 +24,7 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--undo", action="store_true", help="Restore every file and VM setting this setup changed")
     p.add_argument("--yes", action="store_true", help="Answer the confirmations (never the BIOS, reboot or risk notices)")
     p.add_argument("--vm", type=int, default=None, help="VM ID of the macOS VM that gets the card")
-    p.add_argument("--macos", default="", choices=("", "ventura", "sonoma", "sequoia", "tahoe"),
+    p.add_argument("--macos", default="", choices=("", "monterey", "ventura", "sonoma", "sequoia", "tahoe"),
                    help="macOS release the card is for (default: the --vm release, else sequoia). Decides which card is recommended")
     p.add_argument("--gpu", default="", help="PCI address of the card, e.g. 06:00 or 0000:06:00.0")
     p.add_argument("--display", choices=("gpu", "console"), default="",

@@ -181,6 +181,7 @@ def test_notice_copy_is_verbatim():
 @pytest.mark.parametrize("cfg,want", [
     ({"description": "%3Ch2%3EmacOS%20Sequoia%2015%20VM%3C%2Fh2%3E"}, "sequoia"),
     ({"name": "macos-tahoe"}, "tahoe"),
+    ({"name": "macos-monterey"}, "monterey"),
     ({"description": "Ventura", "name": "macos-tahoe"}, "ventura"),
     ({"name": "mac"}, None),
 ])

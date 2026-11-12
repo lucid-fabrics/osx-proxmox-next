@@ -189,6 +189,9 @@ def run_install(args: argparse.Namespace) -> int:
     from .unattended import QmConsole, UnattendedError, run_unattended_install
 
     config = cli._config_from_args(args)
+    if config.macos in igpu_attach.UNSUPPORTED_MACOS:
+        print(f"ERROR: {igpu_attach.UNSUPPORTED_NOTE}")
+        return 2
     rc = cli._validate_and_fetch_assets(args, config)
     if rc is not None:
         return rc

@@ -501,7 +501,7 @@ def test_scan_and_card_text(bash, tmp_path, vm):
     lspci.chmod(0o755)
     out = bash('gpu_scan; for l in "${GPU_CARDS[@]}"; do echo "$l"; gpu_card_selectable "$l" && echo SELECTABLE; gpu_card_text "$l"; done',
                env={**vm.env, "GPU_SYSFS": str(root / "sys")}).stdout
-    assert "0000:06:00|amd|29695|Test Vendor Card|native|Works natively on macOS 13 to 26|" in out
+    assert "0000:06:00|amd|29695|Test Vendor Card|native|Works natively on macOS 12 to 26|" in out
     assert "|unsupported|Not supported by macOS|" in out and "Navi 22" in out
     assert "|nullmoth|Works with NullMoth (beta) on macOS 15.5 to 26|" in out and "120:running" in out
     assert out.count("SELECTABLE") == 1

@@ -192,7 +192,7 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
 
 def _add_download_subparser(sub: argparse._SubParsersAction) -> None:
     dl = sub.add_parser("download", help="Download OpenCore ISOs and macOS recovery images")
-    dl.add_argument("--macos", type=str, required=True, help="macOS target (ventura, sonoma, sequoia, tahoe)")
+    dl.add_argument("--macos", type=str, required=True, help="macOS target (monterey, ventura, sonoma, sequoia, tahoe)")
     dl.add_argument("--dest", type=str, default=DEFAULT_ISO_DIR, help="Destination directory")
     dl.add_argument("--opencore-only", action="store_true", help="Only download OpenCore ISO")
     dl.add_argument("--recovery-only", action="store_true", help="Only download recovery image")
