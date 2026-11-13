@@ -933,3 +933,27 @@ def test_a_terminal_that_never_opens_stops_before_typing() -> None:
     with pytest.raises(UnattendedError, match="Terminal never opened"):
         open_recovery_terminal(console, lambda m: None, clock.monotonic, clock.sleep)
     assert console.typed == []
+
+
+def test_qmconsole_screendumps_run_without_a_controlling_terminal(tmp_path: Path) -> None:
+    """qm monitor reads /dev/tty when it has one, so a run from a terminal hung on the keyboard."""
+    seen: list[dict] = []
+
+    def runner(command, **kwargs):
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(command, 0)
+
+    console = QmConsole(995, runner=runner, sleep=lambda s: None)
+    console._probe = str(tmp_path / "frame.ppm")
+    console.frame_size()
+    console.save_frame(str(tmp_path / "stall.png"))
+    assert len(seen) == 3  # one probe dump, then the png and the ppm fallback
+    assert all(k.get("start_new_session") is True for k in seen)
+
+
+def test_bash_pipes_into_qm_monitor_through_setsid() -> None:
+    """The bash twin of the test above: every `| qm monitor` goes through setsid."""
+    script = (Path(__file__).resolve().parent.parent / "scripts" / "bash" / "osx-proxmox-next.sh").read_text()
+    piped = [line for line in script.splitlines() if "| " in line and "qm monitor" in line and "echo" in line]
+    assert len(piped) >= 4
+    assert all("| setsid -w qm monitor" in line for line in piped)
