@@ -156,6 +156,6 @@ def check_amd_gpu(bdf: str, root: Path = Path("/sys"), cmdline_path: Path | None
         report.warnings.append(_VEGA20_WARNING)
     if fam is not None and fam.tahoe == "unverified":
         report.warnings.append(
-            f"{fam.label}: no report of this family on macOS Tahoe 26 yet. Ventura to Sequoia are fine."
+            f"{fam.label}: no report of this family on macOS Tahoe 26 yet. Monterey to Sequoia are fine."
         )
     return report

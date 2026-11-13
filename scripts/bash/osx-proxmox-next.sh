@@ -57,24 +57,28 @@ ADVANCED="${TAB}🧩${TAB}${CL}"
 
 # ── macOS version definitions ──
 declare -A MACOS_LABELS=(
+  ["monterey"]="macOS Monterey 12"
   ["ventura"]="macOS Ventura 13"
   ["sonoma"]="macOS Sonoma 14"
   ["sequoia"]="macOS Sequoia 15"
   ["tahoe"]="macOS Tahoe 26"
 )
 declare -A MACOS_BOARD_IDS=(
+  ["monterey"]="Mac-FFE5EF870D7BA81A"
   ["ventura"]="Mac-4B682C642B45593E"
   ["sonoma"]="Mac-827FAC58A8FDFA22"
   ["sequoia"]="Mac-27AD2F918AE68F61"
   ["tahoe"]="Mac-27AD2F918AE68F61"
 )
 declare -A MACOS_OS_TYPE=(
+  ["monterey"]="default"
   ["ventura"]="default"
   ["sonoma"]="default"
   ["sequoia"]="default"
   ["tahoe"]="latest"
 )
 declare -A SMBIOS_MODELS=(
+  ["monterey"]="MacPro7,1"
   ["ventura"]="MacPro7,1"
   ["sonoma"]="MacPro7,1"
   ["sequoia"]="MacPro7,1"
@@ -1406,7 +1410,7 @@ function nullmoth_supported_device() {
 function nullmoth_detect_macos() {
   local cfg="$1" key hit
   for key in description name; do
-    hit=$(sed -n "s/^${key}: //p" <<<"$cfg" | sed 's/%20/ /g' | grep -oiE 'ventura|sonoma|sequoia|tahoe' | head -1 || true)
+    hit=$(sed -n "s/^${key}: //p" <<<"$cfg" | sed 's/%20/ /g' | grep -oiE 'monterey|ventura|sonoma|sequoia|tahoe' | head -1 || true)
     [ -n "$hit" ] && { echo "${hit,,}"; return 0; }
   done
   return 1
@@ -7305,7 +7309,7 @@ IGD_RE = re.compile(r'^hostpci\d+:\s*(host=)?(0000:)?00:02(\.0)?(,|$)', re.M)
 SERIAL_RE = re.compile(r'^serial0:\s*socket\s*$', re.M)
 OPS_RE = re.compile(r'^\s+(?:rd|wr)_operations:\s*(\d+)\s*$', re.M)
 PVE_READY = '/etc/pve/.version'  # present while the cluster file system is mounted
-MACOS_RE = re.compile(r'\b(ventura|sonoma|sequoia|tahoe)\b', re.I)
+MACOS_RE = re.compile(r'\b(monterey|ventura|sonoma|sequoia|tahoe)\b', re.I)
 RECENT_LINES = 400  # serial lines kept in memory for the crash snapshot
 
 
@@ -7683,7 +7687,7 @@ PANIC_RE = re.compile(r'panic\(cpu \d+ caller|Nested panic detected|^Double faul
 KERNEL_RE = re.compile(r'vfio|i915|\bxe\b|DMAR|IOMMU|thermal|throttl|\bMCE\b|mce:|machine check|kvm|AER|pcieport|BAR 0',
                        re.I)
 MAC_RE = re.compile(r'(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}')
-MACOS_RE = re.compile(r'\b(ventura|sonoma|sequoia|tahoe)\b', re.I)
+MACOS_RE = re.compile(r'\b(monterey|ventura|sonoma|sequoia|tahoe)\b', re.I)
 
 
 def run(argv, timeout=5):
@@ -8240,8 +8244,8 @@ function gpu_verdict() {
       echo "unsupported|Not supported by macOS|$(amd_unsupported_reason "$dev")"; return 0
     fi
     IFS='|' read -r key label reset args tahoe <<<"$fam"
-    tail="macOS 13 to 26"
-    [ "$tahoe" == "ok" ] || tail="macOS 13 to 15 (26 not confirmed)"
+    tail="macOS 12 to 26"
+    [ "$tahoe" == "ok" ] || tail="macOS 12 to 15 (26 not confirmed)"
     echo "native|Works natively on ${tail}|${label}"
   elif [ "$vendor" == "intel" ]; then
     igpu_verdict "$dev"
@@ -8258,7 +8262,7 @@ function amd_extra_warnings() {
   fam=$(amd_family_for "$dev") || return 0
   IFS='|' read -r key label reset args tahoe <<<"$fam"
   [ "$key" == "vega20" ] && GPU_WARNS+=("$GPU_AMD_VEGA20_WARNING")
-  [ "$tahoe" == "unverified" ] && GPU_WARNS+=("${label}: no report of this family on macOS Tahoe 26 yet. Ventura to Sequoia are fine.")
+  [ "$tahoe" == "unverified" ] && GPU_WARNS+=("${label}: no report of this family on macOS Tahoe 26 yet. Monterey to Sequoia are fine.")
   return 0
 }
 
@@ -8557,9 +8561,11 @@ function igpu_verdict() {
 
 # 0 when the VM config ($1) names a machine other than pc, or has recovery attached. Fills GPU_ISSUES.
 # Mirrors igpu_attach.vm_issues.
+IGPU_MONTEREY_NOTE="The iGPU (WhateverXe) is not supported on macOS Monterey 12. Use a Ventura 13 or newer VM."
 function igpu_vm_issues() {
   local vmid="$1" cfg="$2" status="$3" stop="$4" machine
   grep -q '^args:.*isa-applesmc' <<<"$cfg" || GPU_ISSUES+=("VM $vmid is not a macOS VM made by this tool (no isa-applesmc in its args).")
+  [ "$(nullmoth_detect_macos "$cfg" || true)" != "monterey" ] || GPU_ISSUES+=("$IGPU_MONTEREY_NOTE")
   grep -qE '^(ide2|sata1):' <<<"$cfg" && GPU_ISSUES+=("VM $vmid still has the recovery disk attached, so the install is not finished. Finish it, run post-install, then attach the iGPU.")
   machine=$(sed -n 's/^machine: //p' <<<"$cfg" | cut -d, -f1)
   if [ "$machine" != "pc" ]; then
@@ -8893,6 +8899,7 @@ function igpu_finish() {
   grep -q '^hostpci0:' <<<"$cfg" && GPU_ISSUES+=("VM $vmid already has a PCI device on hostpci0. Run gpu-setup --undo first, then try again.")
   [ -n "$ver" ] || ver=$(nullmoth_detect_macos "$cfg" || true)
   [ -n "$ver" ] || GPU_ISSUES+=("Cannot tell which macOS this VM runs. Pass it: igpu-finish $vmid <ventura|sonoma|sequoia|tahoe>")
+  [ "${ver,,}" != "monterey" ] || GPU_ISSUES+=("$IGPU_MONTEREY_NOTE")
   igpu_check
   nullmoth_print_findings
   [ ${#GPU_ISSUES[@]} -eq 0 ] || return 1
@@ -9000,7 +9007,7 @@ function igpu_detected_line() {
 GPU_MACOS="${GPU_MACOS:-sequoia}"
 function gpu_macos_name() {
   case "$1" in
-    ventura) echo "macOS Ventura 13" ;; sonoma) echo "macOS Sonoma 14" ;; tahoe) echo "macOS Tahoe 26" ;;
+    monterey) echo "macOS Monterey 12" ;; ventura) echo "macOS Ventura 13" ;; sonoma) echo "macOS Sonoma 14" ;; tahoe) echo "macOS Tahoe 26" ;;
     *) echo "macOS Sequoia 15" ;;
   esac
 }
@@ -9009,10 +9016,10 @@ function gpu_macos_name() {
 # Mirrors Session.macos_for.
 function gpu_macos_for() {
   local vmid="$1" flag="$2" ver
-  case "$flag" in ventura|sonoma|sequoia|tahoe) echo "$flag"; return 0 ;; esac
+  case "$flag" in monterey|ventura|sonoma|sequoia|tahoe) echo "$flag"; return 0 ;; esac
   if [ -n "$vmid" ] && [ "$vmid" != "-1" ]; then
     ver=$(nullmoth_detect_macos "$(qm config "$vmid" 2>/dev/null)" || true)
-    case "$ver" in ventura|sonoma|sequoia|tahoe) echo "$ver"; return 0 ;; esac
+    case "$ver" in monterey|ventura|sonoma|sequoia|tahoe) echo "$ver"; return 0 ;; esac
   fi
   echo sequoia
 }
@@ -9033,6 +9040,7 @@ function gpu_version_status() {
     IFS='|' read -r key label reset args tahoe <<<"$fam"
     if [ "$tahoe" != "ok" ]; then echo "yes|works with ${name} (not confirmed on this family)"; return 0; fi
   fi
+  if [ "$vname" == "intel" ] && [ "$macos" == "monterey" ]; then echo "no|not supported by ${name} (the iGPU needs macOS 13 or newer)"; return 0; fi
   if [ "$vname" == "intel" ] && [ "$macos" == "tahoe" ]; then echo "yes|works with ${name} (experimental)"; return 0; fi
   echo "yes|works with ${name}"
 }
@@ -10540,7 +10548,8 @@ function default_settings() {
 function advanced_settings() {
   METHOD="advanced"
 
-  if MACOS_VER=$(whiptail --backtitle "OSX Proxmox Next" --title "macOS Version" --radiolist "Choose macOS version" --cancel-button Exit-Script 14 58 4 \
+  if MACOS_VER=$(whiptail --backtitle "OSX Proxmox Next" --title "macOS Version" --radiolist "Choose macOS version" --cancel-button Exit-Script 15 58 5 \
+    "monterey" "macOS Monterey 12 (stable)  " OFF \
     "ventura" "macOS Ventura 13 (stable)  " OFF \
     "sonoma" "macOS Sonoma 14 (stable)  " OFF \
     "sequoia" "macOS Sequoia 15 (stable)  " ON \
@@ -10728,7 +10737,7 @@ function advanced_settings() {
   fi
 
   IGPU="no"
-  if [ "$UNATTENDED" == "yes" ] && igpu_ready_quiet && whiptail --backtitle "OSX Proxmox Next" --title "INTEL iGPU (BETA)" --yesno \
+  if [ "$UNATTENDED" == "yes" ] && [ "$MACOS_VER" != "monterey" ] && igpu_ready_quiet && whiptail --backtitle "OSX Proxmox Next" --title "INTEL iGPU (BETA)" --yesno \
     "Pass this host's Intel iGPU through to the VM?\n\nThe VM becomes i440fx, the install runs as usual, and the graphics\npackage is installed for you afterwards (no steps in macOS).\n\nThe host has no screen of its own from then on. The VM needs a\nmonitor or an HDMI dummy plug on the native HDMI port.\nmacOS Tahoe is experimental with the iGPU." \
     17 66 --defaultno 3>&1 1>&2 2>&3; then
     IGPU="yes"

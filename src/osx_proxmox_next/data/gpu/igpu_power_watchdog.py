@@ -71,7 +71,7 @@ IGD_RE = re.compile(r'^hostpci\d+:\s*(host=)?(0000:)?00:02(\.0)?(,|$)', re.M)
 SERIAL_RE = re.compile(r'^serial0:\s*socket\s*$', re.M)
 OPS_RE = re.compile(r'^\s+(?:rd|wr)_operations:\s*(\d+)\s*$', re.M)
 PVE_READY = '/etc/pve/.version'  # present while the cluster file system is mounted
-MACOS_RE = re.compile(r'\b(ventura|sonoma|sequoia|tahoe)\b', re.I)
+MACOS_RE = re.compile(r'\b(monterey|ventura|sonoma|sequoia|tahoe)\b', re.I)
 RECENT_LINES = 400  # serial lines kept in memory for the crash snapshot
 
 

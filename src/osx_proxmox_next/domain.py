@@ -6,6 +6,7 @@ from shlex import join as shlex_join
 
 
 SUPPORTED_MACOS = {
+    "monterey": {"label": "macOS Monterey 12", "major": 12, "channel": "stable"},
     "ventura": {"label": "macOS Ventura 13", "major": 13, "channel": "stable"},
     "sonoma": {"label": "macOS Sonoma 14", "major": 14, "channel": "stable"},
     "sequoia": {"label": "macOS Sequoia 15", "major": 15, "channel": "stable"},

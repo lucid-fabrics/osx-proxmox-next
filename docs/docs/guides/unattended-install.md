@@ -106,7 +106,7 @@ Every phase is time-bounded. The Python and bash implementations share the same 
 
 ## Verified Versions
 
-Verified end to end on Ventura 13, Sonoma 14, Sequoia 15 and Tahoe 26, on both Intel and AMD hosts. A run takes 30 to 60 minutes.
+Verified end to end on Ventura 13, Sonoma 14, Sequoia 15 and Tahoe 26, on both Intel and AMD hosts. Monterey 12 uses the same flow but has not been verified yet. A run takes 30 to 60 minutes.
 
 ## When a Phase Times Out
 

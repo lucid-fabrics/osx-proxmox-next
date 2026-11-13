@@ -17,9 +17,10 @@ Header { background: #103252; color: #f6f8fa; }
 
 .os_card {
     border: round #1f4f7a;
-    padding: 1 2;
+    padding: 1 0;
     margin: 0 1 1 0;
-    min-width: 28;
+    width: 1fr;
+    min-width: 21;
     height: 5;
     content-align: center middle;
 }

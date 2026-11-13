@@ -246,6 +246,12 @@ def test_the_release_can_be_given(env):
         go(env, pve=Pve(cfg))
 
 
+def test_monterey_is_refused(env):
+    cfg = {k: v for k, v in CFG.items() if k != "name"}
+    with pytest.raises(igpu_finish.FinishError, match="Monterey 12"):
+        go(env, pve=Pve(cfg), macos="monterey")
+
+
 @pytest.mark.parametrize("change,text", [
     ({"machine": "q35"}, "i440fx"),
     ({"sata1": "x:vm-9-disk-5,media=disk"}, "recovery disk"),

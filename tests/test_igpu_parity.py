@@ -67,6 +67,7 @@ def test_check_command_prints_the_layout(bash, tmp_path):
     (("machine: pc\n", ""), "default machine type"),
     (("vga: std\n", "vga: std\nsata1: x:vm-1-disk-3,media=disk\n"), "recovery disk"),
     (("-device isa-applesmc", "-device other"), "not a macOS VM"),
+    (("name: macos-sequoia", "name: macos-monterey"), "not supported on macOS Monterey 12"),
 ])
 def test_vm_issues_match_python(bash, change, text):
     cfg = VM_CFG.replace(*change)
