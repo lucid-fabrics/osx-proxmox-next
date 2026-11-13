@@ -104,7 +104,10 @@ def erase_install_command(disk_gb: int) -> str:
 
 
 class QmConsole:
-    """Screen and keyboard of one VM via qm monitor/sendkey."""
+    """Screen and keyboard of one VM via qm monitor/sendkey.
+
+    ``qm monitor`` reads /dev/tty when it can, so a run from a terminal would wait on the keyboard instead of the
+    piped command: it is started in its own session, which has no controlling terminal."""
 
     def __init__(self, vmid: int, runner: Callable[..., "subprocess.CompletedProcess"] = subprocess.run,
                  sleep: Callable[[float], None] = time.sleep):
@@ -119,7 +122,7 @@ class QmConsole:
         except FileNotFoundError:
             pass
         self._run(f"echo 'screendump {self._probe}' | qm monitor {self.vmid}",
-                  shell=True, capture_output=True)
+                  shell=True, capture_output=True, start_new_session=True)
         self._sleep(0.6)
         try:
             return os.path.getsize(self._probe)
@@ -161,7 +164,7 @@ class QmConsole:
         for command, path in ((f"screendump {dest} -f png", dest),
                               (f"screendump {ppm}", ppm)):
             self._run(f"echo '{command}' | qm monitor {self.vmid}",
-                      shell=True, capture_output=True)
+                      shell=True, capture_output=True, start_new_session=True)
             self._sleep(0.6)
             try:
                 if os.path.getsize(path) > 0:

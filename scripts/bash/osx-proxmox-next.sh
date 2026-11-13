@@ -950,10 +950,12 @@ PICKER_TIMEOUT_INSTALLED=15
 UNATTENDED_TOTAL_BUDGET=10800
 UNATTENDED_POLL=6
 
+# `qm monitor` reads /dev/tty when it can, so from a terminal it would wait on the keyboard instead of the piped
+# command: setsid gives it a session without a controlling terminal. Mirrors QmConsole in unattended.py.
 function unattended_frame_size() {
   local vmid="$1" probe="/tmp/osx-next-unattended-$1.ppm"
   rm -f "$probe"
-  echo "screendump $probe" | qm monitor "$vmid" >/dev/null 2>&1
+  echo "screendump $probe" | setsid -w qm monitor "$vmid" >/dev/null 2>&1
   sleep 0.6
   stat -c %s "$probe" 2>/dev/null || echo 0
 }
@@ -1074,10 +1076,10 @@ function unattended_wait_frame() {
 function unattended_save_frame() {
   local vmid="$1" png="/var/log/osx-next-unattended-${1}.png"
   local ppm="/var/log/osx-next-unattended-${1}.ppm"
-  echo "screendump $png -f png" | qm monitor "$vmid" >/dev/null 2>&1
+  echo "screendump $png -f png" | setsid -w qm monitor "$vmid" >/dev/null 2>&1
   sleep 0.6
   [ -s "$png" ] && { echo "$png"; return 0; }
-  echo "screendump $ppm" | qm monitor "$vmid" >/dev/null 2>&1
+  echo "screendump $ppm" | setsid -w qm monitor "$vmid" >/dev/null 2>&1
   sleep 0.6
   [ -s "$ppm" ] && { echo "$ppm"; return 0; }
   return 1
@@ -8838,7 +8840,7 @@ function igpu_stage() {
     qm sendkey "$vmid" ret >/dev/null 2>&1
     if igpu_staging_started "$vmid" "$payload_ref" $((IGPU_START_WAIT + typing)); then started=yes; break; fi
     shot="/tmp/osx-next-igpu-stage-$vmid-try$attempt.ppm"  # what the Terminal showed, to read instead of guess
-    echo "screendump $shot" | qm monitor "$vmid" >/dev/null 2>&1 || true
+    echo "screendump $shot" | setsid -w qm monitor "$vmid" >/dev/null 2>&1 || true
     if (( attempt < IGPU_STAGE_ATTEMPTS )); then
       msg_info "The staging command did not start (a key was probably dropped); typing it again"
       qm sendkey "$vmid" ctrl-c >/dev/null 2>&1
