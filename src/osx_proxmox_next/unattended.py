@@ -93,10 +93,14 @@ def _diskutil_size(disk_gb: int) -> str:
 def erase_install_command(disk_gb: int) -> str:
     """One shell line typed into recovery Terminal: erase the target disk
     (matched by its exact diskutil size, never a hardcoded device) and run
-    the non-interactive installer."""
+    the non-interactive installer.
+
+    Ventura and later print a blank disk's size as "*85.9 GB"; Monterey
+    prints "85.9 GB" with no asterisk, so the asterisk is optional and the
+    leading space keeps 85.9 from matching 185.9."""
     size = _diskutil_size(disk_gb).replace(".", "\\.")
     return (
-        f"d=$(diskutil list | awk '/\\*{size} GB/{{print $NF; exit}}') && "
+        f"d=$(diskutil list | awk '/ \\*?{size} GB/{{print $NF; exit}}') && "
         "diskutil eraseDisk APFS MACOS $d && "
         '"/Install macOS "*.app/Contents/Resources/startosinstall '
         "--agreetolicense --volume /Volumes/MACOS --nointeraction"

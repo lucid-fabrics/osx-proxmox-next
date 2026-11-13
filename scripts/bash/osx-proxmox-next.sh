@@ -1035,10 +1035,12 @@ function unattended_type() {
 
 # The one shell line typed into recovery Terminal: erase the disk matched by
 # its exact diskutil size, then run the non-interactive installer.
+# Monterey prints a blank disk's size with no leading "*" (Ventura+ do), so the
+# asterisk is optional; the leading space keeps 85.9 from matching 185.9.
 function unattended_install_command() {
   local disk_gb="$1" size
   size=$(awk -v g="$disk_gb" 'BEGIN{printf "%.1f", g*1.073741824}' | sed 's/\./\\./')
-  printf '%s' "d=\$(diskutil list | awk '/\\*$size GB/{print \$NF; exit}') && diskutil eraseDisk APFS MACOS \$d && \"/Install macOS \"*.app/Contents/Resources/startosinstall --agreetolicense --volume /Volumes/MACOS --nointeraction"
+  printf '%s' "d=\$(diskutil list | awk '/ \\*?$size GB/{print \$NF; exit}') && diskutil eraseDisk APFS MACOS \$d && \"/Install macOS \"*.app/Contents/Resources/startosinstall --agreetolicense --volume /Volumes/MACOS --nointeraction"
 }
 
 function unattended_wait_stopped() {
@@ -10750,6 +10752,12 @@ msg_ok "Attached OpenCore disk (ide0)"
 # ── Stamp recovery with Apple icon flavour ──
 msg_info "Adding Apple icon flavour to recovery"
 MACOS_LABEL="${MACOS_LABELS[$MACOS_VER]}"
+# Monterey's BaseSystem carries an EFI System Partition ahead of the HFS+ volume.
+# Everything below (and the iGPU/NullMoth staging later) expects HFS+ at partition 1.
+# Mirrors the planner's recovery stamp step.
+if sgdisk -i 1 "$RECOVERY_RAW" 2>/dev/null | grep -qi c12a7328-f81f-11d2-ba4b-00a0c93ec93b; then
+  sgdisk -d 1 -s "$RECOVERY_RAW" >/dev/null || { msg_error "Could not drop the EFI partition from the recovery image"; exit 1; }
+fi
 # Fix HFS+ dirty/lock flags so Linux mounts read-write
 python3 -c "
 import struct, subprocess, sys

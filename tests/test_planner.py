@@ -1,3 +1,4 @@
+from pathlib import Path
 from osx_proxmox_next.defaults import CpuInfo
 from osx_proxmox_next.domain import VmConfig
 from osx_proxmox_next.planner import (
@@ -500,6 +501,30 @@ def test_stamp_step_aligns_recovery_before_import(monkeypatch) -> None:
     assert "truncate -s" in stamp.command
     # Alignment must happen before the HFS+ flag fix touches the image
     assert stamp.command.index("truncate -s") < stamp.command.index("HFS+ flags fixed")
+
+
+def test_stamp_step_drops_a_leading_esp_before_touching_partition_1(monkeypatch) -> None:
+    """Monterey's BaseSystem has an EFI System Partition at p1 and HFS+ at p2.
+
+    The flag fix and the mount both use partition 1, so the ESP must go first,
+    or the flag fix writes into the ESP and the hfsplus mount fails.
+    """
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    stamp = next(step for step in build_plan(_cfg("monterey")) if step.title == "Stamp recovery with Apple icon flavour")
+    drop = stamp.command.index("sgdisk -d 1 -s")
+    assert planner.ESP_TYPE_GUID in stamp.command
+    assert stamp.command.index("truncate -s") < drop < stamp.command.index("HFS+ flags fixed")
+    assert drop < stamp.command.index("mount -t hfsplus")
+
+
+def test_bash_drops_a_leading_esp_before_the_flag_fix() -> None:
+    """The bash installer mirrors the planner's ESP drop."""
+    from osx_proxmox_next.planner import ESP_TYPE_GUID
+    script = (Path(__file__).resolve().parents[1] / "scripts/bash/osx-proxmox-next.sh").read_text()
+    drop = script.index('sgdisk -d 1 -s "$RECOVERY_RAW"')
+    assert ESP_TYPE_GUID in script[drop - 200:drop]
+    assert drop < script.index("print('HFS+ flags fixed')")
 
 
 def test_build_plan_cpu_model_override(monkeypatch) -> None:

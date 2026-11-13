@@ -21,6 +21,8 @@ from .smbios_planner import (
 )
 
 POST_INSTALL_BOOT_ORDER = "order=ide0;virtio0"
+# GPT type GUID of an EFI System Partition (Monterey's BaseSystem has one ahead of the HFS+ volume)
+ESP_TYPE_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
 # Bare Penryn lacks SSE4.2, POPCNT, AVX and AVX2, which every supported macOS
 # needs: recovery hangs on the Apple logo at 0% and never reaches its UI
@@ -254,6 +256,13 @@ def _recovery_steps(
                 # builds; this covers every image that reaches apply.
                 f'SZ=$(stat -c%s {shquote(str(recovery_raw))}) && AL=$(( (SZ + 1048575) / 1048576 * 1048576 )) && '
                 f'{{ [ "$AL" -eq "$SZ" ] || truncate -s "$AL" {shquote(str(recovery_raw))}; }} && '
+                # Monterey's BaseSystem carries an EFI System Partition ahead
+                # of the HFS+ volume. Everything below (and the iGPU/NullMoth
+                # staging later) expects the HFS+ volume at partition 1, so
+                # drop the ESP and renumber.
+                f"if sgdisk -i 1 {shquote(str(recovery_raw))} 2>/dev/null | grep -qi {ESP_TYPE_GUID}; then "
+                f"sgdisk -d 1 -s {shquote(str(recovery_raw))} >/dev/null "
+                "|| { echo 'ERROR: could not drop the EFI partition from the recovery image'; false; }; fi && "
                 # Fix HFS+ dirty/lock flags so Linux mounts read-write,
                 # then write OpenCore .contentFlavour + .contentDetails
                 f"RECOVERY_IMG={shquote(str(recovery_raw))} python3 -c '"
