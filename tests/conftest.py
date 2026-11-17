@@ -23,6 +23,16 @@ def _no_host_memory_limit(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_github_for_device_list(monkeypatch, tmp_path):
+    """The Intel device list is derived from a WhateverXe release on GitHub. Tests never reach GitHub: with
+    IGPU_DEVICES_OFFLINE set the engine uses the bundled list (labelled as a fallback). Tests of the release path
+    unset it and hand the engine a fake `get` / `header_get`. The host cache goes to a temp dir; subprocesses (the
+    bash twin) see the same through the environment."""
+    monkeypatch.setenv("IGPU_DEVICES_CACHE", str(tmp_path / "devices-cache"))
+    monkeypatch.setenv("IGPU_DEVICES_OFFLINE", "1")
+
+
+@pytest.fixture(autouse=True)
 def _reset_event_loop_policy():
     """Reset the asyncio event loop policy before and after each test."""
     asyncio.set_event_loop_policy(None)

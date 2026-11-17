@@ -207,7 +207,7 @@ def finish(
     if version in UNSUPPORTED_MACOS:
         raise FinishError(UNSUPPORTED_NOTE)
 
-    report = check_intel_gpu()
+    report = check_intel_gpu(wex=wex)
     if not report.ok:
         raise FinishError("The iGPU is not ready: " + " ".join(report.issues))
     on_event("Looking up the WhateverXe releases on GitHub")
@@ -219,7 +219,8 @@ def finish(
     on_event("Using WhateverXe %s and WhateverXe Graphics %s" % (picks["whateverxe"]["version"], picks["graphics"]["version"]))
     # the same preflight the attach will run, so nothing is staged for a VM that could not take the card
     plan = prepare_attach_igpu(vmid, assets["whateverxe"], assets["amfipass"], assets["rom"], adapter=pve,
-                                  wex_sha=picks["whateverxe"]["sha256"], amfi_sha=igpu_engine.PINS["amfipass"][2])
+                                  wex_sha=picks["whateverxe"]["sha256"], amfi_sha=igpu_engine.PINS["amfipass"][2],
+                                  wex=wex)
     if not plan.ok:
         raise FinishError("Cannot attach the iGPU: " + " ".join(plan.issues))
     result = FinishResult(notes=list(plan.warnings))
@@ -273,7 +274,8 @@ def finish(
 
     on_event("Attaching the iGPU")
     plan = prepare_attach_igpu(vmid, assets["whateverxe"], assets["amfipass"], assets["rom"], adapter=pve,
-                                  wex_sha=picks["whateverxe"]["sha256"], amfi_sha=igpu_engine.PINS["amfipass"][2])
+                                  wex_sha=picks["whateverxe"]["sha256"], amfi_sha=igpu_engine.PINS["amfipass"][2],
+                                  wex=wex)
     if not plan.ok:
         raise FinishError("Cannot attach the iGPU: " + " ".join(plan.issues))
     applied = apply_plan(plan.steps, execute=True, adapter=pve)

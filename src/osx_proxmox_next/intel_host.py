@@ -2,7 +2,8 @@
 
 The decisions live in igpu_engine.py (standard library only, so the bash installer embeds the same
 file); this module adapts them to the vendor-neutral types the GPU walkthrough uses. The allowlist
-is data/gpu/intel_devices.txt, built from WhateverXe 0.8.0 (see its header).
+is derived from the WhateverXe release that will be installed (igpu_engine.device_list); data/gpu/intel_devices.txt
+is only the offline fallback.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ __all__ = [
     "INTEL_VENDOR",
     "IgpuCheck",
     "check_intel_gpu",
+    "device_list",
     "detect_intel_gpus",
     "is_supported_device",
     "lookup",
@@ -25,6 +27,11 @@ __all__ = [
 INTEL_VENDOR = igpu_engine.VENDOR
 lookup = igpu_engine.lookup
 verdict = igpu_engine.verdict
+
+
+def device_list(wex: str = igpu_engine.LATEST) -> dict:
+    """The supported chips of WhateverXe *wex* ("latest" or a tag); the bundled list, labelled, when GitHub is down."""
+    return igpu_engine.device_list(wex)
 
 
 def is_supported_device(device_id: int) -> bool:
@@ -52,6 +59,6 @@ class IgpuCheck(GpuReport):
         return self.engine["info"]["rom_file"] if self.engine["info"] else ""
 
 
-def check_intel_gpu(root: Path = Path("/"), run=igpu_engine.default_run) -> IgpuCheck:
-    """Every host-side check for the iGPU at 00:02.0 (the only slot Intel puts it in)."""
-    return IgpuCheck(igpu_engine.IGD_BDF.rsplit(".", 1)[0], igpu_engine.check(str(root), run))
+def check_intel_gpu(root: Path = Path("/"), run=igpu_engine.default_run, wex: str = igpu_engine.LATEST) -> IgpuCheck:
+    """Every host-side check for the iGPU at 00:02.0 (the only slot Intel puts it in), judged against WhateverXe *wex*."""
+    return IgpuCheck(igpu_engine.IGD_BDF.rsplit(".", 1)[0], igpu_engine.check(str(root), run, wex=wex))

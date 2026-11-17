@@ -1,11 +1,17 @@
-# Intel iGPU allowlist for macOS guests (PCI vendor 8086, WhateverXe).
+# Intel iGPU list for macOS guests (PCI vendor 8086, WhateverXe): the OFFLINE FALLBACK and the base metadata.
+# The tool derives the real list from the WhateverXe release it will install (igpu_engine.device_list: the
+# DeviceTable of kern_xelp_devices.hpp at the release tag, cached per tag on the host). This file is used
+# only when GitHub cannot be reached, and every message built on it says so. It also supplies what upstream
+# does not say: the option ROM per family and which chip was tested through this tool.
 # The Python package (igpu_engine.py) reads this file and the bash installer embeds it
 # verbatim; tests/test_igpu_parity.py diffs the two. Change the file, then run
 # scripts/embed_gpu_engines.py.
 #
-# Source: WhateverXe 0.8.0 kern_xelp_devices.hpp (github.com/b00t0x/WhateverXe, tag 0.8.0),
-# whose ids were checked against Linux v6.12 i915_pciids.h.
+# Snapshot: WhateverXe 0.8.0 kern_xelp_devices.hpp (github.com/b00t0x/WhateverXe, tag 0.8.0; the same table is in
+# 0.8.2), whose ids were checked against Linux v6.12 i915_pciids.h.
 #
+# version|<WhateverXe version this list was built from>
+version|0.8.0
 # family|key|label|rom
 #   rom: key of the pinned option ROM in igpu_engine.ROMS (LongQT-sea/intel-igpu-passthru v0.1)
 # device|id|family|status|model

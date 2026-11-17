@@ -62,7 +62,8 @@ def bash(block_file, tmp_path):
 
     def run(snippet: str, env: dict[str, str] | None = None, expect: int | None = 0, path: str = "") -> subprocess.CompletedProcess:
         full = {"PATH": f"{path + ':' if path else ''}{stub_bin}:/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
-                "GPU_STATE_DIR": str(tmp_path / "state"), **(env or {})}
+                "GPU_STATE_DIR": str(tmp_path / "state"), "IGPU_DEVICES_OFFLINE": "1",
+                "IGPU_DEVICES_CACHE": str(tmp_path / "devices-cache"), **(env or {})}
         res = subprocess.run(["bash", "-c", f"set -u; source {block_file}\n{snippet}"], capture_output=True, text=True,
                              env=full, timeout=120)
         if expect is not None:
