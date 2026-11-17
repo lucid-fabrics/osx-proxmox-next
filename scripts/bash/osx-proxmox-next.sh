@@ -10938,13 +10938,14 @@ if [ "$APPLE_SERVICES" = "true" ]; then
   msg_ok "Configured Apple Services (vmgenid: $VMGENID, MAC: $STATIC_MAC)"
 fi
 
-# ── Attach EFI disk + TPM ──
-msg_info "Attaching EFI disk + TPM"
+# ── Attach EFI disk ──
+# No TPM: macOS never uses one, and a hanging swtpm can block the first
+# start (issue #161)
+msg_info "Attaching EFI disk"
 qm set "$VMID" \
   --efidisk0 "${STORAGE}:0,efitype=4m,pre-enrolled-keys=0" \
-  --tpmstate0 "${STORAGE}:0,version=v2.0" \
   >/dev/null
-msg_ok "Attached EFI disk + TPM"
+msg_ok "Attached EFI disk"
 
 # ── Create main disk ──
 msg_info "Creating main disk (${DISK_SIZE})"
@@ -11096,10 +11097,6 @@ fi
 # ── Start VM ──
 if [ "$START_VM" == "yes" ]; then
   msg_info "Starting macOS VM"
-  # Clean up any stale swtpm processes for this VMID
-  pkill -f "swtpm.*/${VMID}\\.swtpm" 2>/dev/null || true
-  rm -f "/var/run/qemu-server/${VMID}.swtpm" "/var/run/qemu-server/${VMID}.swtpm.pid" 2>/dev/null
-  sleep 1
   qm start "$VMID"
   msg_ok "Started macOS VM"
 fi

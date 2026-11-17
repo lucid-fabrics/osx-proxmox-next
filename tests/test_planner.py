@@ -59,11 +59,16 @@ def test_build_plan_storage_validation_is_first_disk_step() -> None:
     steps = build_plan(_cfg("sequoia"))
     titles = [step.title for step in steps]
     validate_idx = titles.index("Validate storage target")
-    efi_idx = titles.index("Attach EFI + TPM")
+    efi_idx = titles.index("Attach EFI disk")
     assert validate_idx < efi_idx
     validate_step = steps[validate_idx]
     assert "pvesm list" in validate_step.command
     assert "local-lvm" in validate_step.command
+
+
+def test_build_plan_attaches_no_tpm() -> None:
+    steps = build_plan(_cfg("sequoia"))
+    assert not any("tpmstate" in step.command for step in steps)
 
 
 def test_recovery_stamp_stale_cleanup_before_python3() -> None:
