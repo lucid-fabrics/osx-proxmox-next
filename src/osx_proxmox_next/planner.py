@@ -308,7 +308,7 @@ def _recovery_steps(
 
 
 def _disk_steps(ctx: _DiskBuildContext, macos_label: str) -> list[PlanStep]:
-    """EFI/TPM disk, main disk, OpenCore build/import, and recovery import."""
+    """EFI disk, main disk, OpenCore build/import, and recovery import."""
     return [
         PlanStep(
             title="Validate storage target",
@@ -321,11 +321,12 @@ def _disk_steps(ctx: _DiskBuildContext, macos_label: str) -> list[PlanStep]:
             ],
         ),
         PlanStep(
-            title="Attach EFI + TPM",
+            # No TPM: macOS never uses one, and a hanging swtpm can block
+            # the first start (issue #161)
+            title="Attach EFI disk",
             argv=[
                 "qm", "set", ctx.vmid,
                 "--efidisk0", f"{ctx.config.storage}:0,efitype=4m,pre-enrolled-keys=0",
-                "--tpmstate0", f"{ctx.config.storage}:0,version=v2.0",
             ],
         ),
         PlanStep(
