@@ -18,7 +18,7 @@ The TUI wizard guides you through six steps:
 | Step | What Happens |
 |------|-------------|
 | 1. Preflight | Auto-detects CPU vendor (Intel/AMD), checks host readiness |
-| 2. Choose OS | Pick macOS version: Ventura 13, Sonoma 14, Sequoia 15, or Tahoe 26 |
+| 2. Choose OS | Pick macOS version: Monterey 12, Ventura 13, Sonoma 14, Sequoia 15, or Tahoe 26 |
 | 3. Storage | Select a storage target from auto-detected Proxmox storage pools |
 | 4. Config | Review/edit VM settings (VMID, cores, memory, disk, bridge, optional VLAN tag) with auto-filled defaults |
 | 5. Dry Run | Auto-downloads missing assets, then previews every `qm` command |
@@ -57,6 +57,7 @@ If the macOS installer does not show your disk, you need to format it first. Ope
 
 | macOS | Status | Apple Services | Notes |
 |-------|--------|---------------|-------|
+| Monterey 12 | Stable | Works | Oldest supported release |
 | Ventura 13 | Stable | Works | Lightweight, great for older hardware |
 | Sonoma 14 | Stable | Works | Best tested, most reliable |
 | Sequoia 15 | Stable | Works (with `--apple-services`) | Kernel patch applied automatically |

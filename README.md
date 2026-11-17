@@ -17,7 +17,7 @@
   <a href="https://github.com/lucid-fabrics/osx-proxmox-next">
     <img alt="Proxmox" src="https://img.shields.io/badge/Proxmox-9%20Ready-E57000?logo=proxmox&logoColor=white">
   </a>
-  <img alt="macOS" src="https://img.shields.io/badge/macOS-Ventura%2013%20%7C%20Sonoma%2014%20%7C%20Sequoia%2015%20%7C%20Tahoe%2026-111111?logo=apple&logoColor=white">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-Monterey%2012%20%7C%20Ventura%2013%20%7C%20Sonoma%2014%20%7C%20Sequoia%2015%20%7C%20Tahoe%2026-111111?logo=apple&logoColor=white">
   <a href="#-gpu-passthrough">
     <img alt="GPU passthrough" src="https://img.shields.io/badge/GPU%20passthrough-AMD%20%7C%20NVIDIA%20%7C%20Intel%20iGPU%20(beta)-76B900">
   </a>
@@ -170,7 +170,7 @@ Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv
 | Step | What Happens |
 |------|-------------|
 | **1️⃣ Preflight** | Auto-detects CPU vendor (Intel/AMD), checks host readiness |
-| **2️⃣ Choose OS** | Pick macOS version (Ventura, Sonoma, Sequoia, Tahoe) - SMBIOS auto-generated |
+| **2️⃣ Choose OS** | Pick macOS version (Monterey, Ventura, Sonoma, Sequoia, Tahoe) - SMBIOS auto-generated |
 | **3️⃣ Storage** | Select storage target from auto-detected Proxmox storage pools |
 | **4️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk, bridge, optional VLAN tag) with auto-filled defaults |
 | **5️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
@@ -188,7 +188,7 @@ Tick **Unattended install** on the config step (or answer yes in the bash script
 osx-next-cli install-unattended --vmid 910
 ```
 
-Beta notes: verified on Ventura, Sonoma, Sequoia and Tahoe across Intel and AMD hosts. Leave the VM console alone while it runs. If a phase times out it stops and leaves the VM as-is so you can continue manually.
+Beta notes: verified on Ventura, Sonoma, Sequoia and Tahoe across Intel and AMD hosts; Monterey uses the same flow but is not yet verified. Leave the VM console alone while it runs. If a phase times out it stops and leaves the VM as-is so you can continue manually.
 
 > **Smart caching:** OpenCore and recovery images are downloaded once and reused across VM installs. Creating a second Sonoma VM? No re-download needed. Use `--iso-dir` on shared storage to cache across Proxmox nodes.
 
@@ -243,6 +243,7 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 
 | macOS | Channel | Apple Services | Notes |
 |-------|---------|---------------|-------|
+| **Monterey 12** | ✅ Stable | ✅ Works | Oldest supported release; no Intel iGPU or NVIDIA passthrough |
 | **Ventura 13** | ✅ Stable | ✅ Works | Lightweight, great for older hardware |
 | **Sonoma 14** | ✅ Stable | ✅ Works | Best tested, most reliable |
 | **Sequoia 15** | ✅ Stable | 🧪 Community-tested | Kernel patch applied automatically with `--apple-services` |
@@ -481,7 +482,7 @@ osx-next-cli gpu-setup --undo     # put everything back
 - **AMD** Polaris, Vega, Navi 10/14/21/23 (RX 400/500, Vega 56/64, Radeon VII, RX 5000, RX 6600/6800/6900): native macOS drivers, no extra software. RX 6700, RX 7000 and RX 9000 series and APUs are not supported.
 - **NVIDIA** Turing and newer (RTX 20 to 50): beta, through the third-party NullMoth driver on Sequoia 15.5+ and Tahoe 26, with core macOS security turned off. The guided flow shows the NullMoth notice and asks you to acknowledge it. The tool then downloads the latest NullMoth release (or the one you pick), verifies it and installs it inside macOS for you, with nothing to do in macOS, and prints the ssh and vnc lines. Once the driver loads, the Proxmox console goes black, so connect a monitor or an HDMI/DisplayPort dummy plug to the card (without one there is no desktop; Screen Sharing mirrors that display and SSH always works).
 
-- **Intel iGPU** (beta, WhateverXe): Tiger Lake and Alder/Raptor Lake graphics give a macOS VM full Metal acceleration on Ventura, Sonoma and Sequoia, with Tahoe experimental. The scan finds the iGPU by itself and lists every GPU in the host with a status for the macOS release you pick ("works with macOS Sequoia 15", "not supported by macOS Sequoia 15", "in use by VM 100"). It preselects the strongest one that works (a supported AMD card beats the iGPU, the iGPU beats an NVIDIA card) and nothing changes until you confirm. What it costs: the host gives up its local screen, you need a monitor or an HDMI dummy plug on the native HDMI port (LSPCON HDMI and USB-C do not work, laptop panels mostly do not), and the host reboots once. The iGPU shares the CPU's power budget, so a busy host slows it down. On Tahoe the graphics package setup runs automatically too, but every restart from inside macOS hangs, so Tahoe stays experimental and a restart has to come from Proxmox. Tested on one machine only (i5-1240P, Iris Xe 8086:46a6), every other chip is untested. `osx-next-cli igpu-install` builds the whole VM hands-off, including the graphics package. Details: [Intel iGPU (WhateverXe)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/intel-igpu-passthrough).
+- **Intel iGPU** (beta, WhateverXe): Tiger Lake and Alder/Raptor Lake graphics give a macOS VM full Metal acceleration on Ventura, Sonoma and Sequoia, with Tahoe experimental (not supported on Monterey). The scan finds the iGPU by itself and lists every GPU in the host with a status for the macOS release you pick ("works with macOS Sequoia 15", "not supported by macOS Sequoia 15", "in use by VM 100"). It preselects the strongest one that works (a supported AMD card beats the iGPU, the iGPU beats an NVIDIA card) and nothing changes until you confirm. What it costs: the host gives up its local screen, you need a monitor or an HDMI dummy plug on the native HDMI port (LSPCON HDMI and USB-C do not work, laptop panels mostly do not), and the host reboots once. The iGPU shares the CPU's power budget, so a busy host slows it down. On Tahoe the graphics package setup runs automatically too, but every restart from inside macOS hangs, so Tahoe stays experimental and a restart has to come from Proxmox. Tested on one machine only (i5-1240P, Iris Xe 8086:46a6), every other chip is untested. `osx-next-cli igpu-install` builds the whole VM hands-off, including the graphics package. Details: [Intel iGPU (WhateverXe)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/intel-igpu-passthrough).
 
 Laptop NVIDIA GPUs are not supported: the scan marks them "not supported (laptop NVIDIA)" (judged by the lspci name: Laptop, Mobile, Max-Q or a chip name ending in M) and recommends the Intel iGPU instead.
 
@@ -737,7 +738,7 @@ Only Turing and newer (RTX 20 / 30 / 40 / 50), and only with a third-party drive
 | Volta | Titan V | Not supported |
 | Turing and newer | RTX 20 / 30 / 40 / 50 | Sequoia 15.5+ and Tahoe 26 via NullMoth (beta) |
 
-Ventura and Sonoma guests have no NVIDIA path at all. For a conventional setup on any supported macOS, use an **AMD** card instead: Polaris (RX 470/480/570/580), Vega, and Navi 10, 14, 21 and 23 (RX 5000, RX 6600, RX 6800/6900) have native macOS drivers and work with WhateverGreen, which ships in the OpenCore image. RX 6700, RX 7000 and RX 9000 cards have no macOS driver.
+Monterey, Ventura and Sonoma guests have no NVIDIA path at all. For a conventional setup on any supported macOS, use an **AMD** card instead: Polaris (RX 470/480/570/580), Vega, and Navi 10, 14, 21 and 23 (RX 5000, RX 6600, RX 6800/6900) have native macOS drivers and work with WhateverGreen, which ships in the OpenCore image. RX 6700, RX 7000 and RX 9000 cards have no macOS driver.
 
 ### Why does macOS show "Memory Modules Misconfigured"?
 
@@ -818,7 +819,7 @@ _Want to join them? [Sponsor on GitHub](https://github.com/sponsors/lucid-fabric
 ## ❓ FAQ
 
 **Can you run macOS in a virtual machine on Proxmox?**
-Yes. osx-proxmox-next creates a macOS VM on Proxmox VE 9 in one command: it builds the OpenCore bootloader, downloads the official Apple recovery image, generates a SMBIOS identity, and boots the installer. macOS Ventura 13, Sonoma 14, Sequoia 15, and Tahoe 26 are supported.
+Yes. osx-proxmox-next creates a macOS VM on Proxmox VE 9 in one command: it builds the OpenCore bootloader, downloads the official Apple recovery image, generates a SMBIOS identity, and boots the installer. macOS Monterey 12, Ventura 13, Sonoma 14, Sequoia 15, and Tahoe 26 are supported.
 
 **Does macOS work on AMD CPUs under Proxmox?**
 Yes. AMD hosts are auto-detected and run with Cascadelake-Server CPU emulation. Intel hosts (including 12th gen+ hybrid and Xeon) get the correct CPU mode automatically. No configuration needed.

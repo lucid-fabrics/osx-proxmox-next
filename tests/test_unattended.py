@@ -48,13 +48,37 @@ def test_diskutil_size_matches_what_diskutil_prints(gb: int, shown: str) -> None
 
 
 def test_erase_install_command_is_the_proven_one() -> None:
-    """Exactly the command validated live on Intel and AMD Sequoia installs."""
+    """Exactly the command validated live on Intel and AMD installs, Monterey to Tahoe."""
     assert erase_install_command(128) == (
-        "d=$(diskutil list | awk '/\\*137\\.4 GB/{print $NF; exit}') && "
+        "d=$(diskutil list | awk '/ \\*?137\\.4 GB/{print $NF; exit}') && "
         "diskutil eraseDisk APFS MACOS $d && "
         '"/Install macOS "*.app/Contents/Resources/startosinstall '
         "--agreetolicense --volume /Volumes/MACOS --nointeraction"
     )
+
+
+# diskutil list lines for a blank 80 GB disk: Ventura+ mark it with "*", Monterey does not.
+_VENTURA_LIST = "/dev/disk0 (internal):\n   0:                                     *85.9 GB    disk0\n"
+_MONTEREY_LIST = "/dev/disk0 (internal):\n   0:                                      85.9 GB    disk0\n"
+_DECOY_LIST = "   0:      GUID_partition_scheme             *185.9 GB   disk3\n"
+
+
+@pytest.mark.parametrize("listing,expected", [
+    (_VENTURA_LIST, "disk0"),
+    (_MONTEREY_LIST, "disk0"),
+    (_DECOY_LIST + _MONTEREY_LIST, "disk0"),
+    (_DECOY_LIST, ""),
+])
+def test_the_disk_match_finds_the_blank_disk_on_every_release(listing: str, expected: str) -> None:
+    """Run the awk the command types against real diskutil layouts."""
+    import re
+    import shutil
+    import subprocess
+    if not shutil.which("awk"):
+        pytest.skip("awk not available")
+    prog = re.search(r"awk '([^']+)'", erase_install_command(80)).group(1)
+    out = subprocess.run(["awk", prog], input=listing, capture_output=True, text=True, check=True).stdout
+    assert out.strip() == expected
 
 
 def test_every_command_character_is_typeable() -> None:

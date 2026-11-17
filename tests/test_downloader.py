@@ -840,6 +840,28 @@ class TestRecoveryOsType:
         download_recovery("ventura", tmp_path)
         assert captured[0] == "default"
 
+    def test_monterey_uses_its_board_id_and_default(self, tmp_path, monkeypatch):
+        """Monterey asks osrecovery with the Monterey board ID and os=default."""
+        captured = []
+
+        def spy_get_info(session, board_id, os_type="default"):
+            captured.append((board_id, os_type))
+            return {
+                "AU": "https://oscdn.apple.com/img",
+                "AT": "T", "CU": "https://oscdn.apple.com/cl", "CT": "T",
+            }
+
+        monkeypatch.setattr(dl_module, "_get_recovery_image_info", spy_get_info)
+        monkeypatch.setattr(dl_module, "_get_recovery_session", lambda: "session=X")
+        monkeypatch.setattr(dl_module, "_download_file_with_token",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(dl_module, "_build_recovery_image",
+                            lambda dmg, cl, dest: dest.write_bytes(b"img"))
+        monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
+
+        download_recovery("monterey", tmp_path)
+        assert captured[0] == ("Mac-FFE5EF870D7BA81A", "default")
+
     def test_tahoe_uses_latest(self, tmp_path, monkeypatch):
         """Tahoe uses os=latest for osrecovery to get macOS 26."""
         captured = []

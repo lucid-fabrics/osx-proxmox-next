@@ -66,7 +66,7 @@ def test_verdicts(vendor, device, kind):
 
 def test_verdict_details():
     assert "26 not confirmed" in gpu_setup.verdict("amd", 0x687F)[1]
-    assert gpu_setup.verdict("amd", 0x73FF)[1] == "Works natively on macOS 13 to 26"  # the verdict comes first, in plain words
+    assert gpu_setup.verdict("amd", 0x73FF)[1] == "Works natively on macOS 12 to 26"  # the verdict comes first, in plain words
     assert gpu_setup.verdict("amd", 0x73FF)[2].startswith("Navi 23")
     assert "macOS 15.5 to 26" in gpu_setup.verdict("nvidia", 0x2504)[1]
     assert "High Sierra" in gpu_setup.verdict("nvidia", 0x1B80)[2]

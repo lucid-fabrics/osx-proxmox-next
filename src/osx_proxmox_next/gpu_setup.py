@@ -162,8 +162,8 @@ class GpuCard:
         return " ".join(reasons)
 
 
-_MACOS_NUMBER = {"ventura": "13", "sonoma": "14", "sequoia": "15", "tahoe": "26"}
-MACOS_NAMES = {"ventura": "macOS Ventura 13", "sonoma": "macOS Sonoma 14", "sequoia": "macOS Sequoia 15",
+_MACOS_NUMBER = {"monterey": "12", "ventura": "13", "sonoma": "14", "sequoia": "15", "tahoe": "26"}
+MACOS_NAMES = {"monterey": "macOS Monterey 12", "ventura": "macOS Ventura 13", "sonoma": "macOS Sonoma 14", "sequoia": "macOS Sequoia 15",
                "tahoe": "macOS Tahoe 26"}
 DEFAULT_MACOS = "sequoia"
 # a supported AMD card beats the Intel iGPU, which beats an NVIDIA card (beta, third-party driver)
@@ -198,6 +198,8 @@ def version_status(vendor: str, device_id: int, kind: str, macos: str, laptop: b
         fam = amd_host.family_for(device_id)
         if macos == "tahoe" and fam is not None and fam.tahoe != "ok":
             return True, f"works with {name} (not confirmed on this family)"
+    if vendor == "intel" and macos in igpu_attach.UNSUPPORTED_MACOS:
+        return False, f"not supported by {name} (the iGPU needs macOS 13 or newer)"
     if vendor == "intel" and macos == "tahoe":
         return True, f"works with {name} (experimental)"
     return True, f"works with {name}"
@@ -212,7 +214,7 @@ def verdict(vendor: str, device_id: int, name: str = "", intel_devices: dict | N
         fam = amd_host.family_for(device_id)
         if fam is None:
             return "unsupported", "Not supported by macOS", amd_host.unsupported_reason(device_id)
-        span = "macOS 13 to 26" if fam.tahoe == "ok" else "macOS 13 to 15 (26 not confirmed)"
+        span = "macOS 12 to 26" if fam.tahoe == "ok" else "macOS 12 to 15 (26 not confirmed)"
         return "native", f"Works natively on {span}", fam.label
     if vendor == "intel":
         devices = intel_devices if intel_devices is not None else intel_host.device_list()

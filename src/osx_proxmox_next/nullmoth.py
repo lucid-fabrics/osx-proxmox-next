@@ -71,7 +71,7 @@ ACK_LABEL = (
 )
 ACK_PHRASE = "I accept"
 
-_MACOS_RE = re.compile(r"\b(ventura|sonoma|sequoia|tahoe)\b", re.IGNORECASE)
+_MACOS_RE = re.compile(r"\b(monterey|ventura|sonoma|sequoia|tahoe)\b", re.IGNORECASE)
 _ALLOWED_MACOS = ("sequoia", "tahoe")
 _PYEOF = "NULLMOTH_PY"
 # The only Proxmox report of NullMoth ran with a 256 MiB BAR1 (nullmoth issue #275).

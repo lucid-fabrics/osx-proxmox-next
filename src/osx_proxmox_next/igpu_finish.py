@@ -30,7 +30,7 @@ from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .executor import apply_plan
 from .gpu import parse_config
-from .igpu_attach import TAHOE_NOTE, TAHOE_STAGE_NOTE, oc_step, prepare_attach_igpu
+from .igpu_attach import TAHOE_NOTE, TAHOE_STAGE_NOTE, UNSUPPORTED_MACOS, UNSUPPORTED_NOTE, oc_step, prepare_attach_igpu
 from .infrastructure import ProxmoxAdapter
 from .intel_host import check_intel_gpu
 from .nullmoth import detect_macos
@@ -204,6 +204,8 @@ def finish(
     version = (macos or detect_macos(cfg) or "").lower()
     if not version:
         raise FinishError("Cannot tell which macOS this VM runs. Pass --macos (ventura, sonoma, sequoia or tahoe).")
+    if version in UNSUPPORTED_MACOS:
+        raise FinishError(UNSUPPORTED_NOTE)
 
     report = check_intel_gpu(wex=wex)
     if not report.ok:

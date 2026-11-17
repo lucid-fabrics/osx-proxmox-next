@@ -69,7 +69,7 @@ PANIC_RE = re.compile(r'panic\(cpu \d+ caller|Nested panic detected|^Double faul
 KERNEL_RE = re.compile(r'vfio|i915|\bxe\b|DMAR|IOMMU|thermal|throttl|\bMCE\b|mce:|machine check|kvm|AER|pcieport|BAR 0',
                        re.I)
 MAC_RE = re.compile(r'(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}')
-MACOS_RE = re.compile(r'\b(ventura|sonoma|sequoia|tahoe)\b', re.I)
+MACOS_RE = re.compile(r'\b(monterey|ventura|sonoma|sequoia|tahoe)\b', re.I)
 
 
 def run(argv, timeout=5):

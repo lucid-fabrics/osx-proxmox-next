@@ -147,4 +147,4 @@ Model-specific manufacturing data is stored in `APPLE_PLATFORM_DATA`:
 |-------------|-----------------|------------|------------|
 | MacPro7,1   | C02, C07, CK2   | 2019-2023  | K3F7       |
 
-All supported macOS versions (Ventura through Tahoe) use `MacPro7,1` as the SMBIOS model.
+All supported macOS versions (Monterey through Tahoe) use `MacPro7,1` as the SMBIOS model.

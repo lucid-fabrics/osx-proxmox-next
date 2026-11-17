@@ -32,6 +32,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmo
 
 | Version | Codename | Apple Services | Best for |
 |---------|----------|----------------|----------|
+| 12 | Monterey | Full | Software that needs macOS 12 |
 | 13 | Ventura | Full | Older or limited hardware |
 | 14 | **Sonoma** | **Full** | **Most users** (best tested, most reliable) |
 | 15 | Sequoia | Full (with `--apple-services`) | Latest features |

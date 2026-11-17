@@ -255,9 +255,17 @@ def test_a_prepared_host_skips_the_reboot_wording(tmp_path):
 
 
 def test_amd_beats_the_igpu_on_every_release(tmp_path):
-    for macos in gpu_setup.MACOS_NAMES:
+    for macos in set(gpu_setup.MACOS_NAMES) - {"monterey"}:
         found = cards(host(tmp_path / macos, amd=True), macos)
         assert found["amd"].recommended and not found["intel"].recommended and found["intel"].works
+
+
+def test_monterey_takes_amd_but_not_the_igpu(tmp_path):
+    found = cards(host(tmp_path, amd=True, nvidia=True), "monterey")
+    assert found["amd"].works and found["amd"].recommended
+    assert not found["intel"].works
+    assert found["intel"].status == "not supported by macOS Monterey 12 (the iGPU needs macOS 13 or newer)"
+    assert not found["nvidia"].works
 
 
 def test_the_igpu_beats_nvidia_on_sequoia_and_wins_alone_on_ventura(tmp_path):
@@ -292,7 +300,8 @@ def test_a_laptop_nvidia_gpu_is_not_supported_on_every_release(tmp_path):
     root = host(tmp_path, nvidia=True)
     for macos in gpu_setup.MACOS_NAMES:
         found = {c.vendor: c for c in named_session(root, lspci("AD107M [GeForce RTX 4060 Max-Q / Mobile]")).scan(macos=macos)}
-        assert found["nvidia"].status == "not supported (laptop NVIDIA)" and found["intel"].recommended
+        assert found["nvidia"].status == "not supported (laptop NVIDIA)"
+        assert found["intel"].recommended == (macos != "monterey")
 
 
 def test_a_desktop_nvidia_gpu_next_to_the_igpu_is_unchanged(tmp_path):

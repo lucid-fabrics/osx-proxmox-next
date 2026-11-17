@@ -37,7 +37,7 @@ These flags are shared by `apply` and `plan`:
 |------|------|----------|-------------|
 | `--vmid` | int | Yes | VM ID (100-999999) |
 | `--name` | string | Yes | VM display name |
-| `--macos` | string | Yes | Target version: `ventura`, `sonoma`, `sequoia`, `tahoe` |
+| `--macos` | string | Yes | Target version: `monterey`, `ventura`, `sonoma`, `sequoia`, `tahoe` |
 | `--cores` | int | Yes | CPU cores (power of 2) |
 | `--memory` | int | Yes | RAM in MB (minimum 4096) |
 | `--disk` | int | Yes | Disk size in GB (minimum 64) |

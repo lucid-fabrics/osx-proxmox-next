@@ -5,18 +5,34 @@ title: macOS Version Comparison
 
 # macOS Version Comparison
 
-OSX Proxmox Next supports four macOS versions. This guide helps you pick the right one for your setup.
+OSX Proxmox Next supports five macOS versions. This guide helps you pick the right one for your setup.
 
 ## Overview
 
 | Version | Stability | Apple Services | Performance | Recommended For |
 |---------|-----------|----------------|-------------|-----------------|
+| Monterey 12 | Good | Full (iCloud, iMessage, FaceTime) | Good | Software that needs macOS 12 |
 | Ventura 13 | Excellent | Full (iCloud, iMessage, FaceTime) | Good | Older hardware, maximum compatibility |
 | Sonoma 14 | Excellent | Full (iCloud, iMessage, FaceTime) | Very Good | Best all-around choice |
 | Sequoia 15 | Good | Full with `--apple-services` (kernel patch auto-applied) | Very Good | Users who need latest features |
 | Tahoe 26 | Good | Full with `--apple-services` (kernel patch auto-applied) | Good | Users who want the newest release |
 
 ## Version Details
+
+### Monterey 12
+
+The oldest supported release, for software that does not run on macOS 13 or newer.
+
+**Pros:**
+- Full Apple Services support (iCloud, iMessage, FaceTime)
+- Runs software that was dropped by later releases
+
+**Cons:**
+- No longer receives security updates from Apple
+- No Intel iGPU passthrough (WhateverXe needs macOS 13 or newer) and no NVIDIA passthrough
+- Unattended install uses the same flow as the other releases but has not been verified end to end
+
+AMD GPU passthrough works natively (the supported family list was taken from macOS 12.2.1).
 
 ### Ventura 13
 
@@ -90,6 +106,9 @@ Follow this decision path:
 3. **Are you running older or limited hardware?**
    - Yes: **Ventura 13** has the lightest resource footprint and widest compatibility.
    - No: **Sonoma 14** remains the best overall choice.
+
+4. **Do you need software that only runs on macOS 12?**
+   - Yes: **Monterey 12**.
 
 **Best overall: Sonoma 14.** It strikes the right balance between modern features, stability, and full Apple Services support.
 

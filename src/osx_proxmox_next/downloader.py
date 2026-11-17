@@ -41,6 +41,7 @@ _RAW_IMAGE_ALIGNMENT = 1024 * 1024
 
 
 RECOVERY_BOARD_IDS: dict[str, str] = {
+    "monterey": "Mac-FFE5EF870D7BA81A",
     "ventura": "Mac-4B682C642B45593E",
     "sonoma": "Mac-827FAC58A8FDFA22",
     "sequoia": "Mac-27AD2F918AE68F61",

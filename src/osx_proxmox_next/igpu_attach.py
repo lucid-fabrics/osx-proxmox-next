@@ -37,6 +37,8 @@ __all__ = [
 ]
 
 _PYEOF = "IGPU_OC_PY"
+UNSUPPORTED_MACOS = ("monterey",)
+UNSUPPORTED_NOTE = "The iGPU (WhateverXe) is not supported on macOS Monterey 12. Use a Ventura 13 or newer VM."
 TAHOE_NOTE = ("macOS Tahoe 26 is experimental with the iGPU: every restart and shut down from inside macOS hangs at "
               "the very end (WhateverXe issue 62). The power watchdog that igpu-finish installs on the host finishes "
               "them about a minute later. A VM set up before gets it with the igpu-watchdog command.")
@@ -151,6 +153,8 @@ def vm_issues(vmid: int, cfg: dict[str, str], running: bool, allow_stop: bool) -
     issues: list[str] = []
     if "isa-applesmc" not in cfg.get("args", ""):
         issues.append(f"VM {vmid} is not a macOS VM made by this tool (no isa-applesmc in its args).")
+    if detect_macos(cfg) in UNSUPPORTED_MACOS:
+        issues.append(UNSUPPORTED_NOTE)
     if igpu_engine.recovery_bus(cfg):
         issues.append(f"VM {vmid} still has the recovery disk attached, so the install is not finished. Finish it, "
                       "run post-install, then attach the iGPU.")

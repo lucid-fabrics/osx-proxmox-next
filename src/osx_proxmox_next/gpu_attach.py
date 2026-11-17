@@ -131,7 +131,7 @@ def prepare_attach_amd(
     plan.issues += _vm_issues(vmid, cfg, running, allow_stop)
     version = detect_macos(cfg)
     if version is None:
-        plan.warnings.append("Cannot tell which macOS this VM runs. AMD cards work on Ventura to Tahoe.")
+        plan.warnings.append("Cannot tell which macOS this VM runs. AMD cards work on Monterey to Tahoe.")
 
     report: GpuReport = amd_host.check_amd_gpu(gpu, sysfs_root, cmdline_path)
     plan.issues += report.issues
