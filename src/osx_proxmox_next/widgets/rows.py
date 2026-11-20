@@ -13,7 +13,7 @@ from textual.widgets import Input, Static
 
 __all__ = ["Option", "ChoiceRow", "FieldRow", "ExpandRow", "ActionRow", "LABEL_WIDTH", "wrap_text"]
 
-LABEL_WIDTH = 12
+LABEL_WIDTH = 13
 
 
 @dataclass
@@ -198,7 +198,7 @@ class FieldRow(Widget):
 
     DEFAULT_CSS = """
     FieldRow { height: 1; layout: horizontal; }
-    FieldRow > .field-label { width: 13; color: $muted; padding-left: 1; }
+    FieldRow > .field-label { width: 14; color: $muted; padding-left: 1; }
     FieldRow > Input { width: 1fr; max-width: 40; }
     FieldRow > .field-suffix { width: auto; color: $muted; padding-left: 1; }
     """
@@ -284,5 +284,10 @@ class ExpandRow(Widget, can_focus=True):
         line = Text(" ")
         line.append("▾" if self.open else "▸", style=pal["accent"])
         line.append(" " + self.label.ljust(LABEL_WIDTH - 2))
-        line.append(self.hint, style=pal["muted"])
+        room = (self.size.width or 80) - line.cell_len
+        kept: list[str] = []
+        for part in self.hint.split(" \u00b7 "):            # whole parts only: a hint is never cut in the middle
+            if len(" \u00b7 ".join(kept + [part])) <= room:
+                kept.append(part)
+        line.append(" \u00b7 ".join(kept), style=pal["muted"])
         return line

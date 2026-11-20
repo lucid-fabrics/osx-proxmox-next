@@ -14,11 +14,11 @@ __all__ = ["Line", "Lines"]
 
 @dataclass
 class Line:
-    """One row: *left*, and *right* flush with the right edge. *wrap* lets a long left text run onto more rows."""
+    """One row: *left*, and *right* flush with the right edge. A long left text runs onto more rows (*wrap*)."""
     left: Text
     right: Text | None = None
     indent: int = 0
-    wrap: bool = False
+    wrap: bool = True
 
 
 class Lines(Widget):

@@ -567,7 +567,7 @@ async def test_the_bios_screen_lists_the_settings_and_restarts_into_the_bios_aft
         title = F.text_of(screen.query_one("#g-run-title"))
         assert title == "One thing only you can do  a BIOS setting on this host blocks the card"
         rows = F.text_of(screen.query_one("#g-bios-rows"))
-        assert rows.startswith("Change in the BIOS · ASUSTeK COMPUTER INC. PRIME X670-P")
+        assert rows.startswith("Change in the BIOS · ASUS PRIME X670-P")
         assert "✗ Intel virtualization (VT-x)  set to Enabled" in rows
         assert "Without it no VM can start." in rows and "✓ " in rows and "already right" in rows
         assert "How" in rows and "1 Restart into the BIOS (enter does it for you)" in rows

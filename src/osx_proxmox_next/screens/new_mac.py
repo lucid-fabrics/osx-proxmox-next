@@ -115,9 +115,9 @@ class NewMacScreen(OsxScreen):
                     yield ChoiceRow("Size", [Option(k, preset_label(k)) for k in PRESET_KEYS], st.size, id="r-size",
                                     drop_long=True)
                     with Vertical(id="custom-box"):
-                        yield FieldRow("  Cores", st.custom_cores, id="r-cores", max_width=8)
-                        yield FieldRow("  Memory", st.custom_memory_gb, id="r-memory", suffix="GB", max_width=8)
-                        yield FieldRow("  Disk", st.custom_disk_gb, id="r-disk", suffix="GB", max_width=8)
+                        yield FieldRow(" Cores", st.custom_cores, id="r-cores", max_width=8)
+                        yield FieldRow(" Memory", st.custom_memory_gb, id="r-memory", suffix="GB", max_width=8)
+                        yield FieldRow(" Disk", st.custom_disk_gb, id="r-disk", suffix="GB", max_width=8)
                     yield ChoiceRow("Lives on", [Option(t, t) for t in self.targets],
                                     st.storage, id="r-storage", hint_lines=0, drop_long=True)
                     yield ChoiceRow("Install", [Option("handsoff", "Hands-off"), Option("manual", "Manual")],
@@ -127,23 +127,23 @@ class NewMacScreen(OsxScreen):
                     yield ExpandRow("More", "VLAN · CPU · NIC · installer · UUID",
                                     id="r-more")
                     with Vertical(id="more-box"):
-                        yield FieldRow("  VM ID", st.vmid, id="r-vmid", max_width=10)
-                        yield FieldRow("  Bridge", st.bridge, id="r-bridge", max_width=12)
-                        yield FieldRow("  VLAN", st.vlan, id="r-vlan", placeholder="untagged", max_width=12)
-                        yield FieldRow("  ISO storage", st.iso_dir, id="r-iso")
-                        yield FieldRow("  Installer", st.installer_path, id="r-installer",
+                        yield FieldRow(" VM ID", st.vmid, id="r-vmid", max_width=10)
+                        yield FieldRow(" Bridge", st.bridge, id="r-bridge", max_width=12)
+                        yield FieldRow(" VLAN", st.vlan, id="r-vlan", placeholder="untagged", max_width=12)
+                        yield FieldRow(" ISO storage", st.iso_dir, id="r-iso")
+                        yield FieldRow(" Installer", st.installer_path, id="r-installer",
                                        placeholder="optional path to an installer")
-                        yield FieldRow("  UUID", st.existing_uuid, id="r-uuid", placeholder="keep an existing UUID",
+                        yield FieldRow(" UUID", st.existing_uuid, id="r-uuid", placeholder="keep an existing UUID",
                                        max_width=40)
-                        yield _on_off("  CPU model", st.use_penryn, id="r-penryn",
+                        yield _on_off(" CPU model", st.use_penryn, id="r-penryn",
                                       hint=PENRYN_HINT_DETECTED if facts.cpu.needs_penryn else PENRYN_HINT_OTHER)
-                        yield ChoiceRow("  NIC model", [Option("vmxnet3", "vmxnet3"), Option("e1000", "e1000")],
+                        yield ChoiceRow(" NIC model", [Option("vmxnet3", "vmxnet3"), Option("e1000", "e1000")],
                                         "e1000" if st.e1000 else "vmxnet3", id="r-nic")
-                        yield FieldRow("  vmgenid", st.vmgenid, id="r-vmgenid", placeholder="made for you",
+                        yield FieldRow(" vmgenid", st.vmgenid, id="r-vmgenid", placeholder="made for you",
                                        max_width=40)
-                        yield FieldRow("  MAC", st.mac, id="r-mac", placeholder="made for you", max_width=20)
-                        yield ActionRow("  Identity", id="r-identity")
-                        yield _on_off("  Download", st.force_download, id="r-force",
+                        yield FieldRow(" MAC", st.mac, id="r-mac", placeholder="made for you", max_width=20)
+                        yield ActionRow(" Identity", id="r-identity")
+                        yield _on_off(" Download", st.force_download, id="r-force",
                                       hint="Off uses what is already here. On fetches the installer files again.")
                 with Vertical(id="new-side"):
                     yield Static("What it takes from this host", classes="side-title", id="side-title")

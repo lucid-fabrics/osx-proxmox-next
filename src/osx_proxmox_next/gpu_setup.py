@@ -631,7 +631,8 @@ class Session:
         data = bios_guide.load_data()
         vendor = bios_guide.match_vendor(facts, data)
         ven = data["vendors"].get(vendor) or {}
-        board = " ".join(x for x in (facts.get("board_vendor", ""), facts.get("board_name", "")) if x).strip()
+        board = " ".join(x for x in (ven.get("name") or facts.get("board_vendor", ""), facts.get("board_name", ""))
+                         if x).strip()
         return {"board": board or "this server", "enter": ven.get("enter", ""), "url": card["url"], "qr": card["qr"],
                 "rows": bios_guide.settings_view(failing, data, vendor),
                 "ok_labels": [bios_guide.short_label(data, i["key"]) for i in items if i["ok"]],

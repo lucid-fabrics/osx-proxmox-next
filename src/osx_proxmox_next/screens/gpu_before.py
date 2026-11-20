@@ -103,19 +103,20 @@ class BeforeDialog(ModalScreen):
         return not self.before.nvidia or self.query_one("#g-ack", Input).value.strip() == ACK_PHRASE
 
     def on_mount(self) -> None:
-        self._fit_notice()
-        self._more()
+        self.call_after_refresh(self._fit_notice)
+        self.call_after_refresh(self._more)
         field = self.query("Input")
         (field.first() if field else self.query_one("#before-go", Button)).focus()
 
     def _fit_notice(self) -> None:
-        """The notice scrolls in whatever height is left; the rest of the dialog never moves off screen."""
+        """The notice scrolls in whatever height is left, so the buttons never go off the bottom of the screen."""
         if not self.before.notice_body:
             return
-        fixed = 12 + len(self.before.warnings) + 2 * len(self.before.notes) + (4 if self.before.nvidia else 0)
-        fixed += 3 if self.before.phrase else 0
-        room = max(3, min(10, self.app.size.height - fixed - 8))
-        self.query_one("#before-notice").styles.height = room
+        box = self.query_one("#before-box")
+        notice = self.query_one("#before-notice")
+        room = int(self.app.size.height * 0.9) - 4                      # less the border and the padding
+        others = sum(c.outer_size.height + c.styles.margin.height for c in box.children if c is not notice)
+        notice.styles.height = max(3, min(12, room - others))
 
     def _more(self) -> None:
         """"down arrow N more lines" while the notice has text below the visible part."""
@@ -132,7 +133,7 @@ class BeforeDialog(ModalScreen):
         self._more()
 
     def on_resize(self) -> None:
-        self._fit_notice()
+        self.call_after_refresh(self._fit_notice)
         self.call_after_refresh(self._more)
 
     def on_input_changed(self, event: Input.Changed) -> None:

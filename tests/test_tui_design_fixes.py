@@ -108,7 +108,7 @@ async def test_a_detail_with_no_room_goes_under_the_value_whole_and_is_left_out_
 async def test_a_dropping_row_leaves_out_the_hint_lines_that_do_not_fit_instead_of_cutting_them():
     row = ChoiceRow("macOS", [Option("a", "Sequoia 15")], "a", drop_long=True)
     row.set_text("", "Tahoe 26 · Sonoma 14 · Ventura 13 · Monterey 12")
-    async with Host(row).run_test(size=(60, 6)) as pilot:
+    async with Host(row).run_test(size=(64, 6)) as pilot:
         await pilot.pause(0.2)
         assert "Monterey 12" in row.render().plain and row.size.height == 2
     narrow = ChoiceRow("macOS", [Option("a", "Sequoia 15")], "a", drop_long=True)
@@ -133,7 +133,7 @@ async def test_lines_put_the_value_flush_right_and_wrap_a_long_left_text():
     async with Host(panel).run_test(size=(30, 8)) as pilot:
         panel.set_lines([Line(Text("● Host setup"), Text("3 files change")),
                          Line(Text("a long sentence that has to wrap onto a second row"), wrap=True, indent=2),
-                         Line(Text("a very long label that leaves no room"), Text("value"))])
+                         Line(Text("a very long label that leaves no room"), Text("value"), wrap=False)])
         await pilot.pause(0.2)
         rows = panel.render().plain.splitlines()
         assert rows[0] == "● Host setup   3 files change".replace("   ", " " * (30 - len("● Host setup") - len("3 files change")))
@@ -158,7 +158,7 @@ async def test_an_action_row_runs_on_enter_and_on_a_click():
         await pilot.press("enter")
         await pilot.click(ActionRow)
         assert seen == ["ident", "ident"]
-        assert row.render().plain == " Identity    MacPro7,1 · C02ABC  enter makes a new one"
+        assert row.render().plain == " " + "Identity".ljust(13) + "MacPro7,1 \u00b7 C02ABC  enter makes a new one"
 
 
 # ── items 5 and 6: the live screen frame ─────────────────────────────
@@ -272,7 +272,7 @@ async def test_with_more_open_the_rows_above_are_one_line_each_and_the_fields_ha
             assert screen.query_one(f"#{rid}", ChoiceRow).size.height == 1
         installer = screen.query_one("#r-installer")
         label = installer.query_one(".field-label")
-        assert F.text_of(label).strip() == "Installer" and label.size.width == 12      # 12 columns (and a gap) for the label
+        assert F.text_of(label).strip() == "Installer" and label.size.width == 13      # room for a 12 column label and a gap
         for _ in range(14):
             await pilot.press("down")
         await pilot.pause(0.2)
@@ -299,7 +299,7 @@ async def test_the_identity_row_shows_the_model_and_serial_and_enter_makes_a_new
         row = screen.query_one("#r-identity", ActionRow)
         first = screen.identity
         assert row.display and first.model in row.render().plain and first.serial in row.render().plain
-        assert "enter makes a new one" in row.render().plain and row.label == "  Identity"
+        assert "enter makes a new one" in row.render().plain and row.label == " Identity"
         row.focus()
         await pilot.press("enter")
         await pilot.pause(0.2)
