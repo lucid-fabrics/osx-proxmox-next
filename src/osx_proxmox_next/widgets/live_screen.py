@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import tempfile
 from collections.abc import Callable
 from typing import ClassVar
@@ -92,7 +93,8 @@ class LiveScreen(Widget):
         self._cells_size = Size(0, 0)
         self._busy = False
         self.grabs = 0          # finished grabs, for tests and the status line
-        self._probe = os.path.join(tempfile.gettempdir(), f"osx-next-view-{vmid}-{os.getpid()}-{id or 'w'}.ppm")
+        self._dir = ""      # a private (0700) directory for the probe file, made on the first grab
+        self._probe = ""
 
     # ── state ────────────────────────────────────────────────────────
 
@@ -141,14 +143,17 @@ class LiveScreen(Widget):
         self.set_timer(0.05, self.grab_now)
 
     def on_unmount(self) -> None:
-        try:
-            os.unlink(self._probe)
-        except OSError:
-            pass
+        if self._dir:
+            shutil.rmtree(self._dir, ignore_errors=True)
+            self._dir = self._probe = ""
 
     def grab_now(self) -> None:
         if self._busy or not self.should_grab():
             return
+        if not self._dir:
+            # qm monitor (as root) writes the screendump here: a directory only we can write to, not /tmp
+            self._dir = tempfile.mkdtemp(prefix=f"osx-next-view-{self.vmid}-")
+            self._probe = os.path.join(self._dir, "frame.ppm")
         self._busy = True
         size = self.size
         self.run_worker(lambda: self._grab(size), thread=True, group=f"grab-{self.vmid}-{id(self)}",

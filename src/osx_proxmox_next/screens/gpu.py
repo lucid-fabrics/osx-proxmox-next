@@ -266,6 +266,9 @@ class GpuScreen(OsxScreen):
     def _primary_label(self) -> str:
         return self.box_buttons[-1][1] if self.box_buttons else "Go"
 
+    def on_resize(self) -> None:
+        self.set_class(self.size.width < 90, "narrow")
+
     def on_mount(self) -> None:
         self.s.state["resume_cmd"] = self.s.state.get("resume_cmd") or "osx-next-cli gpu-setup"
         if self.start_undo:

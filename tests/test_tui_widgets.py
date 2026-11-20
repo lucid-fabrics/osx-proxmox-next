@@ -47,10 +47,11 @@ async def test_a_running_vm_is_drawn_with_half_blocks_and_refreshes(monkeypatch)
         await F.settle(pilot, lambda: live.grabs >= 2)
         assert live.placeholder == "" and live.signal
         assert all(ch == "▀" for ch in lines(live)[3])
-        assert len(set(frames)) == 1 and "osx-next-view-105" in frames[0]
+        assert len(set(frames)) == 1 and "osx-next-view-105-" in frames[0]
         assert live.render_line(0).cell_length == 40
         probe = frames[0]
-    assert not os.path.exists(probe)
+        assert oct(os.stat(os.path.dirname(probe)).st_mode & 0o777) == "0o700"    # not a guessable file in /tmp
+    assert not os.path.exists(os.path.dirname(probe))
 
 
 @F.tui

@@ -1,6 +1,6 @@
 """The guided GPU passthrough walkthrough: state, scan, and one method per step.
 
-Both front ends (the CLI in gpu_setup_cli.py and the TUI panel in _gpu_mixin.py)
+Both front ends (the CLI in gpu_setup_cli.py and the TUI screen in screens/gpu.py)
 drive a Session. The host changes are done by host_setup.py and the BIOS card by
 bios_guide.py (standalone modules the bash installer embeds); VM changes go
 through nullmoth.py (NVIDIA) and gpu_attach.py (AMD).
