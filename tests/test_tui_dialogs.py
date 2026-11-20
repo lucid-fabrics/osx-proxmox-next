@@ -263,7 +263,11 @@ async def test_edit_is_prefilled_and_apply_waits_for_a_change(monkeypatch):
         dialog = edit_dialog(app)
         assert field(app, "e-name").value == "macos-sequoia" and field(app, "e-cores").value == "8"
         assert field(app, "e-memory").value == "16" and field(app, "e-bridge").value == "vmbr0"
-        assert dialog.query_one("#e-nic").value == "vmxnet3" and field(app, "e-slot").value == "virtio0"
+        assert dialog.query_one("#e-nic").value == "vmxnet3" and not dialog.query("#e-slot")
+        assert F.text_of(dialog.query_one("#e-disk .field-suffix")) == "GB more on virtio0 \u00b7 local-lvm"
+        widths = {fid: dialog.query_one(f"#{fid} Input").styles.max_width.value
+                  for fid in ("e-name", "e-cores", "e-memory", "e-bridge", "e-disk")}
+        assert set(widths.values()) == {20}                              # one column of equal fields
         assert dialog.query_one("#e-start", Checkbox).value is True       # it is running
         assert "stops it first" in F.text_of(dialog.query_one("#e-note", Static))
         assert dialog.query_one("#apply", Button).disabled
@@ -294,18 +298,18 @@ async def test_changing_only_the_nic_model_enables_apply(monkeypatch):
 
 
 @F.tui
-async def test_changing_only_the_added_disk_with_its_name_enables_apply(monkeypatch):
+async def test_changing_only_the_disk_size_enables_apply_and_grows_the_main_disk(monkeypatch):
     F.patch_host(monkeypatch)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("e")
-        field(app, "e-slot").value = "sata0"
-        await pilot.pause()
         assert app.screen.query_one("#apply", Button).disabled
         field(app, "e-disk").value = "32"
         await pilot.pause()
         assert not app.screen.query_one("#apply", Button).disabled
+        changes, _problems = changes_from_form(app.screen.facts, "macos-sequoia", "8", "16", "vmbr0", "vmxnet3", "32", "virtio0")
+        assert changes.disk_gb_add == 32 and changes.disk_name == "virtio0"
 
 
 @F.tui
@@ -445,7 +449,7 @@ async def test_the_edit_dialog_defaults_to_the_main_disk_and_the_arrows_move_bet
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("e")
-        assert field(app, "e-slot").value == "virtio0"
+        assert F.text_of(app.screen.query_one("#e-disk .field-suffix")) == "GB more on virtio0 \u00b7 local-lvm"
         assert app.focused is field(app, "e-name")
         await pilot.press("down")
         assert app.focused is field(app, "e-cores")

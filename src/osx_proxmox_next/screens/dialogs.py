@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 __all__ = ["RemoveDialog", "EditDialog", "StopDialog", "changes_from_form", "NIC_MODELS"]
 
 NIC_MODELS = ("vmxnet3", "e1000-82545em")
+FIELD_WIDTH = 20             # every field of the edit dialog is this wide, in one column
 
 
 def StopDialog(record: VmRecord) -> ChoiceDialog:
@@ -237,25 +238,30 @@ class EditDialog(ModalScreen[bool]):
         self.running = False
         self.finished = False
 
+    def _main_disk(self):
+        """The main disk is the big one: the OpenCore and recovery disks are small. The edit grows it in place."""
+        return max(self.facts.disks, key=lambda d: d.size_gb) if self.facts.disks else None
+
+    def _disk_suffix(self) -> str:
+        disk = self._main_disk()
+        return "GB more on " + (f"{disk.slot} \u00b7 {disk.storage}" if disk else "virtio0")
+
     def compose(self) -> ComposeResult:
         f, rec = self.facts, self.record
-        # the main disk is the big one: the OpenCore and recovery disks are small
-        disk = max(f.disks, key=lambda d: d.size_gb).slot if f.disks else "virtio0"
         nics = list(NIC_MODELS)
         if f.nic_model and f.nic_model not in nics:
             nics.insert(0, f.nic_model)
         with Vertical(id="edit-box", classes="dialog"):
             yield Static(f"Edit VM {rec.vmid} · {rec.name}", classes="dialog-title")
             yield Static("", classes="blank")
-            yield FieldRow("Name", f.name or rec.name, id="e-name")
-            yield FieldRow("Cores", str(f.cores or rec.cores), id="e-cores", max_width=8)
+            yield FieldRow("Name", f.name or rec.name, id="e-name", max_width=FIELD_WIDTH)
+            yield FieldRow("Cores", str(f.cores or rec.cores), id="e-cores", max_width=FIELD_WIDTH)
             yield FieldRow("Memory", str(round((f.memory_mb or rec.memory_mb) / 1024)), id="e-memory",
-                           suffix="GB", max_width=8)
-            yield FieldRow("Bridge", f.bridge or "vmbr0", id="e-bridge", max_width=12)
+                           suffix="GB", max_width=FIELD_WIDTH)
+            yield FieldRow("Bridge", f.bridge or "vmbr0", id="e-bridge", max_width=FIELD_WIDTH)
             yield ChoiceRow("NIC model", [Option(n, n) for n in nics], f.nic_model or nics[0], hint_lines=0,
                             id="e-nic")
-            yield FieldRow("Add disk", "", id="e-disk", suffix="GB more on", max_width=8)
-            yield FieldRow("Disk", disk, id="e-slot", max_width=10)
+            yield FieldRow("Grow disk", "", id="e-disk", suffix=self._disk_suffix(), max_width=FIELD_WIDTH)
             yield Check("Start it again afterwards", value=rec.status == "running", id="e-start")
             yield Static("", id="e-note", classes="dialog-line")
             yield Static("", classes="blank")
@@ -277,7 +283,7 @@ class EditDialog(ModalScreen[bool]):
         q = self.query_one
         return (q("#e-name", FieldRow).value, q("#e-cores", FieldRow).value, q("#e-memory", FieldRow).value,
                 q("#e-bridge", FieldRow).value, q("#e-nic", ChoiceRow).value, q("#e-disk", FieldRow).value,
-                q("#e-slot", FieldRow).value)
+                self._main_disk().slot if self._main_disk() else "virtio0")
 
     def _recheck(self) -> None:
         changes, _problems = changes_from_form(self.facts, *self._values())

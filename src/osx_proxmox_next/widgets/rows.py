@@ -11,7 +11,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Input, Static
 
-__all__ = ["Option", "ChoiceRow", "FieldRow", "ExpandRow", "LABEL_WIDTH", "wrap_text"]
+__all__ = ["Option", "ChoiceRow", "FieldRow", "ExpandRow", "ActionRow", "LABEL_WIDTH", "wrap_text"]
 
 LABEL_WIDTH = 12
 
@@ -53,13 +53,20 @@ class ChoiceRow(Widget, can_focus=True):
     """
 
     def __init__(self, label: str, options: list[Option], value: str = "", *, hint_lines: int = 1,
-                 id: str | None = None, classes: str | None = None) -> None:
+                 drop_long: bool = False, id: str | None = None, classes: str | None = None) -> None:
         super().__init__(id=id, classes=classes)
         self.label = label
         self.options = options
         self.detail = ""
         self.hint: "str | Text" = ""
         self.value = value or (options[0].value if options else "")
+        self.drop_long = drop_long      # a hint line that does not fit is left out whole, not wrapped
+        self.collapsed = False          # one line only: no hint, and a detail that does not fit is left out
+
+    def set_collapsed(self, value: bool) -> None:
+        if value != self.collapsed:
+            self.collapsed = value
+            self.refresh(layout=True)
 
     # ── value ────────────────────────────────────────────────────────
 
@@ -121,15 +128,20 @@ class ChoiceRow(Widget, can_focus=True):
             tail = " \u00b7 " + self.detail
             if line.cell_len + len(tail) <= width:
                 line.append(tail, style=pal["muted"])
-            else:  # no room beside the value: the detail goes under it, whole
+            elif not self.collapsed:  # no room beside the value: the detail goes under it, whole
                 under.append(Text(self.detail, style=pal["muted"]))
         hint = self.hint if isinstance(self.hint, Text) else Text(self.hint, style=pal["muted"])
-        if hint.plain:
-            under.append(hint)
+        room = max(8, width - len(pad))
+        if hint.plain and not self.collapsed:
+            if self.drop_long:
+                kept = [ln for ln in hint.split("\n") if ln.cell_len <= room]
+                under += kept
+            else:
+                under.append(hint)
         lines = [line]
         console = self.app.console
         for chunk in under:
-            lines += [Text(pad).append_text(row) for row in wrap_text(chunk, max(8, width - len(pad)), console)]
+            lines += [Text(pad).append_text(row) for row in wrap_text(chunk, room, console)]
         return lines
 
     def get_content_height(self, container, viewport, width: int) -> int:
@@ -141,6 +153,44 @@ class ChoiceRow(Widget, can_focus=True):
             out.append("\n" if idx else "")
             out.append_text(one)
         return out
+
+
+class ActionRow(Widget, can_focus=True):
+    """`Label  value  hint`: enter or a click runs the action (a new serial, for instance)."""
+
+    BINDINGS = [Binding("enter,space", "run", "Run", show=False)]
+
+    class Activated(Message):
+        def __init__(self, row: "ActionRow") -> None:
+            super().__init__()
+            self.row = row
+
+    DEFAULT_CSS = "ActionRow { height: 1; }"
+
+    def __init__(self, label: str, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.label = label
+        self.value = ""
+        self.hint = ""
+
+    def set_text(self, value: str, hint: str = "") -> None:
+        self.value, self.hint = value, hint
+        self.refresh()
+
+    def action_run(self) -> None:
+        self.post_message(self.Activated(self))
+
+    def on_click(self) -> None:
+        self.focus()
+        self.action_run()
+
+    def render(self) -> Text:
+        pal = self.app.get_css_variables()
+        line = Text(" " + self.label.ljust(LABEL_WIDTH), style=pal["muted"])
+        line.append(self.value, style="bold")
+        if self.hint:
+            line.append("  " + self.hint, style=pal["muted"])
+        return line
 
 
 class FieldRow(Widget):

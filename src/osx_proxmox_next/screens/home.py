@@ -341,7 +341,8 @@ class HomeScreen(VmActionScreen):
         height = rows + CARD_CHROME
         for card in cards:
             card.styles.height = height
-            card.query_one(LiveScreen).styles.height = rows
+            for thumb in card.query(LiveScreen):
+                thumb.styles.height = rows
         grid.styles.grid_rows = str(height)
         grid.styles.height = max(1, self._room() // height) * height
 

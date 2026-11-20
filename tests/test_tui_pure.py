@@ -477,3 +477,86 @@ def test_new_host_detections_read_the_system(monkeypatch):
     assert defaults.detect_host_cores() == 0
     monkeypatch.setattr(defaults, "_meminfo_mb", lambda field: 4096 if field == "MemTotal" else 0)
     assert defaults.detect_total_memory_mb() == 4096
+
+
+# ── S4: a reused VM ID must not read as a finished install ───────────
+
+def test_a_failure_after_the_ready_marker_still_means_the_run_did_not_finish():
+    state = parse_driver_log(LOG + "\n" + PHASE_MARK + "ready 1700003000\nERROR: the driver stopped")
+    assert state.error and not state.finished and not state.installing
+
+
+def test_the_driver_log_is_started_empty_so_an_old_run_cannot_count(tmp_path, monkeypatch):
+    monkeypatch.setattr("osx_proxmox_next.services.unattended_service.LOG_DIR", str(tmp_path))
+    old = tmp_path / "osx-next-unattended-105.log"
+    old.write_text(LOG + "\n" + PHASE_MARK + "ready 1700003000\n")
+    launched = []
+    path = spawn_unattended_driver(105, 128, popen=lambda *a, **k: launched.append(a))
+    assert path == str(old) and launched and old.read_text() == ""
+
+
+def test_markers_of_an_earlier_run_are_ignored_by_the_pipeline_until_the_new_driver_writes_its_own():
+    from osx_proxmox_next.services.pipeline import BuildPipeline, PipelineDeps
+    from osx_proxmox_next.services.unattended_service import DriverState
+    now = [1_800_000_000.0]
+    pipe = BuildPipeline(None, True, deps=PipelineDeps(clock=lambda: now[0]), vmid=105)
+    pipe._phase("install").status = "active"
+    pipe._driver_started = now[0]                                     # this run started its driver just now
+    old = DriverState(seen=["recovery", "ready"], started_at=1_700_000_000.0, finished=True, alive=False, exists=True)
+    pipe.apply_driver_state(old)
+    assert pipe._phase("install").status == "active" and pipe._phase("ready").status == "pending"
+    assert pipe.driver is not old
+    fresh = DriverState(seen=["recovery"], started_at=now[0] + 1, alive=True, exists=True)
+    pipe.apply_driver_state(fresh)
+    assert pipe.driver is fresh and pipe._phase("install").status == "active"
+    failed = DriverState(seen=["recovery", "ready"], started_at=now[0] + 1, finished=True, error="boom", exists=True)
+    pipe.apply_driver_state(failed)
+    assert pipe._phase("install").status == "failed" and pipe.failure == "boom"
+
+
+# ── N1: the iGPU command does not print the progress markers ─────────
+
+def test_the_igpu_command_leaves_the_phase_markers_out_of_its_output(capsys):
+    from osx_proxmox_next import igpu_cli
+    igpu_cli._on_event(PHASE_MARK + "recovery")
+    igpu_cli._on_event("Waiting for the boot picker")
+    out = capsys.readouterr().out
+    assert out == "  Waiting for the boot picker\n" and "##phase" not in out
+
+
+def test_the_unattended_banner_reaches_the_log_before_anything_else(monkeypatch):
+    import argparse
+    import io
+    import sys
+    from types import SimpleNamespace
+    from osx_proxmox_next import cli, unattended
+
+    class Out(io.StringIO):
+        flushes: list = []
+
+        def flush(self):
+            Out.flushes.append(self.getvalue())
+
+    out = Out()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(cli, "get_proxmox_adapter", lambda: SimpleNamespace(qm=lambda *a: SimpleNamespace(output="status: running")))
+    monkeypatch.setattr(unattended, "QmConsole", lambda vmid: SimpleNamespace(save_frame=lambda path: ""))
+
+    def stop(console, disk, on_event=None):
+        raise unattended.UnattendedError("stop here")
+
+    monkeypatch.setattr(unattended, "run_unattended_install", stop)
+    assert cli._run_install_unattended(argparse.Namespace(vmid=105, disk_gb=128)) == 1
+    assert Out.flushes[0].startswith("BETA: unattended install for VM 105")     # in the file before the first marker
+
+
+def test_a_failed_check_is_named_by_what_is_wrong():
+    from osx_proxmox_next.preflight import PreflightCheck
+    named = {c: PreflightCheck(c, False, "").problem for c in (
+        "dmg2img available", "KVM ignore_msrs", "/dev/kvm present", "Root privileges", "IOMMU enabled",
+        "initcall_blacklist", "CPU vendor", "Something else")}
+    assert named["dmg2img available"] == "dmg2img is not installed"
+    assert named["IOMMU enabled"] == "IOMMU is not enabled" and named["/dev/kvm present"] == "/dev/kvm is missing"
+    assert named["initcall_blacklist"] == "initcall_blacklist is missing from the kernel command line"
+    assert named["CPU vendor"] == "The CPU vendor is not recognised" and named["Something else"] == "Something else needs attention"
+    assert all(" available" not in v and v != k for k, v in named.items())

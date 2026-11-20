@@ -155,6 +155,10 @@ class NextApp(App):
         title = getattr(screen, "HELP_TITLE", "") or getattr(screen, "CRUMB", "") or "this screen"
         self.push_screen(HelpScreen(title, entries))
 
+    async def action_quit(self) -> None:
+        """ctrl+q (Textual's own quit key) asks like q does while a job runs."""
+        self.action_request_quit()
+
     def action_request_quit(self) -> None:
         screen = self.screen
         if isinstance(screen, ModalScreen):

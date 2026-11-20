@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 from rich.text import Text
@@ -16,9 +17,9 @@ from ..domain import SUPPORTED_MACOS
 from ..models.wizard_state import NewMacState, effective_size, validate_new_mac
 from ..presets import PRESET_KEYS, build_presets, preset_fits, preset_label
 from ..services.host_facts import HostFacts
-from ..smbios import resolve_smbios
+from ..smbios import SmbiosIdentity, model_for_macos, resolve_smbios
 from ..widgets.capacity import CapacityBar
-from ..widgets.rows import ChoiceRow, ExpandRow, FieldRow, Option
+from ..widgets.rows import ActionRow, ChoiceRow, ExpandRow, FieldRow, Option
 from .base import OsxScreen
 
 log = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ class NewMacScreen(OsxScreen):
         self.base_cores = detect_cpu_cores()
         self.base_memory_mb = detect_memory_mb()
         self.targets: list[str] = []
+        self.identity: SmbiosIdentity | None = None   # the model and serial the Mac gets, when Apple ID is on
 
     # ── setup ────────────────────────────────────────────────────────
 
@@ -108,18 +110,20 @@ class NewMacScreen(OsxScreen):
                 yield Static("picked for this host. Change anything, or just press enter.", id="new-sub")
             with Horizontal(id="new-cols"):
                 with VerticalScroll(id="new-form"):
-                    yield ChoiceRow("macOS", version_options(), st.macos, id="r-macos")
+                    yield ChoiceRow("macOS", version_options(), st.macos, id="r-macos", drop_long=True)
                     yield FieldRow("Name", st.name, id="r-name", suffix="", max_width=32)
-                    yield ChoiceRow("Size", [Option(k, preset_label(k)) for k in PRESET_KEYS], st.size, id="r-size")
+                    yield ChoiceRow("Size", [Option(k, preset_label(k)) for k in PRESET_KEYS], st.size, id="r-size",
+                                    drop_long=True)
                     with Vertical(id="custom-box"):
                         yield FieldRow("  Cores", st.custom_cores, id="r-cores", max_width=8)
                         yield FieldRow("  Memory", st.custom_memory_gb, id="r-memory", suffix="GB", max_width=8)
                         yield FieldRow("  Disk", st.custom_disk_gb, id="r-disk", suffix="GB", max_width=8)
                     yield ChoiceRow("Lives on", [Option(t, t) for t in self.targets],
-                                    st.storage, id="r-storage", hint_lines=0)
+                                    st.storage, id="r-storage", hint_lines=0, drop_long=True)
                     yield ChoiceRow("Install", [Option("handsoff", "Hands-off"), Option("manual", "Manual")],
-                                    "handsoff", id="r-install")
-                    yield ChoiceRow("Apple ID", [Option("off", "Off"), Option("on", "On")], "off", id="r-apple")
+                                    "handsoff", id="r-install", drop_long=True)
+                    yield ChoiceRow("Apple ID", [Option("off", "Off"), Option("on", "On")], "off", id="r-apple",
+                                    drop_long=True)
                     yield ExpandRow("More", "VLAN · CPU · NIC · installer · UUID",
                                     id="r-more")
                     with Vertical(id="more-box"):
@@ -138,6 +142,7 @@ class NewMacScreen(OsxScreen):
                         yield FieldRow("  vmgenid", st.vmgenid, id="r-vmgenid", placeholder="made for you",
                                        max_width=40)
                         yield FieldRow("  MAC", st.mac, id="r-mac", placeholder="made for you", max_width=20)
+                        yield ActionRow("  Identity", id="r-identity")
                         yield _on_off("  Download", st.force_download, id="r-force",
                                       hint="Off uses what is already here. On fetches the installer files again.")
                 with Vertical(id="new-side"):
@@ -168,6 +173,10 @@ class NewMacScreen(OsxScreen):
     def _sync_height(self) -> None:
         self.set_class(self.size.height < 30, "short")
         narrow = self.size.width < 90
+        if self.query("#new-note"):
+            self.query_one("#new-note").display = not narrow     # no room for it: left out, not cut
+        if self.query("#r-more"):
+            self._sync_collapse()
         if narrow != self.has_class("narrow"):
             self.set_class(narrow, "narrow")
             if self.is_attached and self.query("#r-size"):
@@ -220,8 +229,35 @@ class NewMacScreen(OsxScreen):
         q("#more-box").display = q("#r-more", ExpandRow).open
         q("#r-vmgenid").display = st.apple_services
         q("#r-mac").display = st.apple_services
+        q("#r-identity").display = st.apple_services
+        self._sync_identity()
+        self._sync_collapse()
         self._sync_bars(cores, mem_mb, disk)
         self._sync_after()
+
+    def _sync_collapse(self) -> None:
+        """While More is open (or the terminal is short) the rows above it shrink to one line each, so the
+        fields of More fit; what does not fit is reached by scrolling."""
+        tight = self.query_one("#r-more", ExpandRow).open or self.size.height < 30
+        self.set_class(self.query_one("#r-more", ExpandRow).open, "more-open")
+        for row in self.query("#new-form > ChoiceRow"):
+            row.set_collapsed(tight)
+
+    def _sync_identity(self) -> None:
+        """The model and serial the Mac gets. It is made when Apple ID is on and kept until enter makes another."""
+        st = self.state
+        if not st.apple_services:
+            self.identity = None
+            return
+        if self.identity is None or self.identity.model != model_for_macos(st.macos):
+            self.identity = resolve_smbios(st.macos, True)
+        self.query_one("#r-identity", ActionRow).set_text(f"{self.identity.model} \u00b7 {self.identity.serial}",
+                                                           "enter makes a new one")
+
+    def on_action_row_activated(self, event: ActionRow.Activated) -> None:
+        if event.row.id == "r-identity":
+            self.identity = None
+            self._sync_identity()
 
     def _size_hint(self, pal: dict) -> Text:
         hint = Text()
@@ -341,7 +377,7 @@ class NewMacScreen(OsxScreen):
 
     def _chain(self) -> list[Widget]:
         out: list[Widget] = []
-        for widget in self.query("#new-form ChoiceRow, #new-form ExpandRow, #new-form FieldRow"):
+        for widget in self.query("#new-form ChoiceRow, #new-form ExpandRow, #new-form FieldRow, #new-form ActionRow"):
             if not self._shown(widget):
                 continue
             if isinstance(widget, FieldRow):
@@ -384,7 +420,7 @@ class NewMacScreen(OsxScreen):
             "disk": "#r-disk", "storage": "#r-storage", "install": "#r-install", "apple": "#r-apple",
             "vmid": "#r-vmid", "bridge": "#r-bridge", "vlan": "#r-vlan", "iso_dir": "#r-iso",
             "installer_path": "#r-installer", "existing_uuid": "#r-uuid", "penryn": "#r-penryn", "nic": "#r-nic",
-            "vmgenid": "#r-vmgenid", "mac": "#r-mac", "force": "#r-force",
+            "vmgenid": "#r-vmgenid", "mac": "#r-mac", "force": "#r-force", "identity": "#r-identity",
         }
         selector = ids.get(key)
         return self.query_one(selector) if selector else None
@@ -392,7 +428,7 @@ class NewMacScreen(OsxScreen):
     def action_create(self) -> None:
         st = self.state
         presets = self._presets()
-        smbios = resolve_smbios(st.macos, st.apple_services, st.existing_uuid.strip().upper())
+        smbios = self._smbios_for_create()
         errors, config = validate_new_mac(st, presets, self.facts.vm_memory_limit_mb, smbios)
         self.errors = errors
         error_box = self.query_one("#errors", Static)
@@ -417,6 +453,13 @@ class NewMacScreen(OsxScreen):
         from .build import BuildScreen
         # the build replaces this screen: Back on the build goes to your Macs, not to a form that is done
         self.app.switch_screen(BuildScreen(config, unattended=st.handsoff, force_download=st.force_download))
+
+    def _smbios_for_create(self) -> SmbiosIdentity:
+        """The identity shown in More when Apple ID is on, with an existing UUID kept; else a fresh one."""
+        uuid = self.state.existing_uuid.strip().upper()
+        if self.identity is None:
+            return resolve_smbios(self.state.macos, self.state.apple_services, uuid)
+        return dataclasses.replace(self.identity, uuid=uuid) if uuid else self.identity
 
     def _focus_first_bad(self, errors: dict[str, str]) -> None:
         first = next(iter(errors))

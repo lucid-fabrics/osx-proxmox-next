@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import textwrap
+
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Static
 
@@ -105,6 +107,25 @@ def _binding_keys(entry) -> tuple[list[str], str]:
     return keys, entry[2] if len(entry) > 2 else ""
 
 
+MOVE_KEYS = {"\u2190", "\u2192", "\u2191", "\u2193", "h", "j", "k", "l", "tab", "shift+tab"}
+KEY_COLUMN = 22          # width of the key column of the help overlay; a description wraps inside its own column
+COMMON_KEYS = {k for k, _d in COMMON_HELP}
+
+
+def help_groups(entries: list[tuple[str, str]]) -> list[tuple[str, list[tuple[str, str]]]]:
+    """The keys of a screen in three groups: how to move, what this screen does, what works everywhere."""
+    groups: dict[str, list[tuple[str, str]]] = {"Move": [], "This screen": [], "Everywhere": []}
+    for keys, what in entries:
+        tokens = keys.split()
+        if keys in COMMON_KEYS:
+            groups["Everywhere"].append((keys, what))
+        elif tokens and all(t in MOVE_KEYS for t in tokens) and (len(tokens) > 1 or tokens[0] not in {"h", "j", "k", "l"}):
+            groups["Move"].append((keys, what))
+        else:
+            groups["This screen"].append((keys, what))
+    return [(name, rows) for name, rows in groups.items() if rows]
+
+
 class HelpScreen(ModalScreen):
     """Every key of the screen underneath."""
 
@@ -120,22 +141,34 @@ class HelpScreen(ModalScreen):
         self.title_text = title
         self.entries = entries
 
+    def _keys_text(self, width: int) -> Text:
+        """Group headings, then one row per key: the key in a 22 column, its description wrapped in its own."""
+        pal = self.app.get_css_variables()
+        text = Text()
+        for idx, (name, rows) in enumerate(help_groups(self.entries)):
+            text.append(("\n\n" if idx else "") + name, style="bold " + pal["muted"])
+            for keys, what in rows:
+                lines = textwrap.wrap(what, max(10, width - KEY_COLUMN)) or [""]
+                for n, line in enumerate(lines):
+                    text.append("\n")
+                    text.append(keys.ljust(KEY_COLUMN) if n == 0 else " " * KEY_COLUMN,
+                                style="bold " + pal["accent"])
+                    text.append(line)
+        return text
+
     def compose(self) -> ComposeResult:
         with Vertical(id="help-box", classes="dialog"):
             yield Static(f"Keys on {self.title_text}", classes="dialog-title")
             yield Static("", classes="blank")
-            width = max((len(k) for k, _ in self.entries), default=4) + 3
-            text = Text()
-            for idx, (keys, what) in enumerate(self.entries):
-                if idx:
-                    text.append("\n")
-                text.append(keys.ljust(width), style="bold " + self.app.get_css_variables()["accent"])
-                text.append(what)
-            yield Static(text, id="help-keys")
+            with VerticalScroll(id="help-scroll"):
+                yield Static(self._keys_text(self._inner()), id="help-keys")
             yield Static("", classes="blank")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Close", id="close", classes="secondary")
         yield KeyBar([("esc", "Close", "screen.close")])
+
+    def _inner(self) -> int:
+        return max(40, min(66, int(self.app.size.width * 0.96)) - 8)
 
     def on_mount(self) -> None:
         self.query_one("#close", Button).focus()

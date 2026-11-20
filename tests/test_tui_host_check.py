@@ -38,7 +38,7 @@ def test_titles_short_names_and_labels():
     assert check_title(PreflightCheck("dmg2img available", False, "")) == "dmg2img is not installed"
     assert check_title(PreflightCheck("/dev/kvm present", False, "")) == "/dev/kvm is missing"
     assert check_title(PreflightCheck("Root privileges", False, "")) == "osx-next is not running as root"
-    assert check_title(PreflightCheck("IOMMU enabled", False, "")) == "IOMMU enabled needs attention"
+    assert check_title(PreflightCheck("IOMMU enabled", False, "")) == "IOMMU is not enabled"
     assert short_name(PreflightCheck("qm available", True, "")) == "qm"
     assert short_name(PreflightCheck("/dev/kvm present", True, "")) == "/dev/kvm"
     assert short_name(PreflightCheck("IOMMU enabled", True, "")) == "IOMMU"

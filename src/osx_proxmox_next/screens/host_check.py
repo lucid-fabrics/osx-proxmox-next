@@ -211,7 +211,6 @@ class HostCheckScreen(OsxScreen):
     def action_recheck(self) -> None:
         if self.running:
             return
-        self.app.rerun_preflight()  # type: ignore[attr-defined]
         self.run_worker(self._recheck_work, thread=True, exclusive=True, group="hc-recheck", exit_on_error=False)
 
     def _recheck_work(self) -> None:
@@ -252,9 +251,16 @@ class HostCheckScreen(OsxScreen):
         self.query_one("#fix-log", RichLog).write(text)
 
     def _fix_work(self, fixes) -> None:
-        ok = run_fix_commands(fixes, lambda line: self.app.call_from_thread(self._line, line))
-        checks = run_preflight()
-        self.app.call_from_thread(self._fix_done, ok, checks)
+        """Run the fixes, then look again. Whatever happens, the screen is told it is over: esc and q work again."""
+        ok, checks = False, self.checks()
+        try:
+            ok = run_fix_commands(fixes, lambda line: self.app.call_from_thread(self._line, line))
+            checks = run_preflight()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("host fix failed")
+            self.app.call_from_thread(self._line, f"Stopped: {exc}")
+        finally:
+            self.app.call_from_thread(self._fix_done, ok, checks)
 
     async def _fix_done(self, ok: bool, checks: list[PreflightCheck]) -> None:
         self.running = False

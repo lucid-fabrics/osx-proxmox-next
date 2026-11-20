@@ -109,7 +109,9 @@ VmCard.compact .card-status { width: 1fr; }
 #new-mac.short #new-form > ChoiceRow, NewMacScreen.short #new-form > ChoiceRow { margin-bottom: 0; }
 NewMacScreen.short #new-form > FieldRow { margin-bottom: 0; }
 NewMacScreen.short #new-form > ExpandRow { margin-bottom: 0; }
-NewMacScreen.short #new-head { margin-bottom: 0; }
+NewMacScreen.more-open #new-form > ChoiceRow { margin-bottom: 0; }
+NewMacScreen.more-open #new-form > FieldRow { margin-bottom: 0; }
+NewMacScreen.more-open #new-form > ExpandRow { margin-bottom: 0; }
 #custom-box, #more-box { height: auto; display: none; }
 #new-side { width: 32; margin-left: 1; padding-left: 2; border-left: solid $edge; height: 100%; }
 #new-side .side-title { color: $muted; height: 1; margin-bottom: 1; }
@@ -122,10 +124,10 @@ NewMacScreen.narrow #new-side { width: 28; padding-left: 1; }
 #new-note { width: 1fr; color: $muted; }
 #new-action Button { dock: right; }
 
-ChoiceRow, ExpandRow {
+ChoiceRow, ExpandRow, ActionRow {
     border-left: blank;
 }
-ChoiceRow:focus, ExpandRow:focus {
+ChoiceRow:focus, ExpandRow:focus, ActionRow:focus {
     background: $raised;
     border-left: heavy $accent;
 }
@@ -186,7 +188,8 @@ ModalScreen { align: center middle; background: $background 70%; }
 .dialog-field { height: 1; }
 .dialog-field Static { width: auto; }
 .dialog-field Input { width: 10; }
-#help-box { width: 56; }
+#help-box { width: 66; }
+#help-scroll { height: auto; max-height: 20; }
 #e-note, #remove-log { height: auto; color: $muted; }
 
 /* ---- Graphics card ---------------------------------------------------- */
