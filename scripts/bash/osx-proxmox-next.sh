@@ -3879,6 +3879,29 @@ def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup"
     return "\n".join(rows)
 
 
+def settings_view(failing, data, vendor):
+    """The failing BIOS items as plain data for a screen: label, target value, where to look and why it matters."""
+    rows = []
+    for item in failing:
+        key = item["key"]
+        entry = _entry(data, vendor, key)
+        if entry:
+            where = [("" if entry["verified"] else "Usually under: ") + entry["path"].replace(" > ", " \u203a ")]
+            value = entry["value"]
+        else:
+            hint = _generic_hint(data, key)
+            where, value = ["Look for: " + hint["names"], hint["where"]], "Enabled"
+        why = "Without it no VM can start." if key in ("vtx", "svm") else data["settings"][key]["why"]
+        rows.append({"key": key, "label": data["settings"][key]["label"], "value": value, "where": where,
+                     "why": why})
+    return rows
+
+
+def short_label(data, key):
+    """`Intel virtualization` out of `Intel virtualization (VT-x)`: the name without its parenthesis."""
+    return re.sub(r"\s*\(.*\)$", "", data["settings"][key]["label"])
+
+
 def save_card(text, root="/"):
     path = _p(root, CARD_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
