@@ -7,7 +7,6 @@ import pytest
 from textual.widgets import Button, Input, Static
 
 import tui_fakes as F
-from gpu_fakes import write
 from gpu_tui_fakes import (  # noqa: F401 - the underscore names are autouse fixtures
     HINT, SIZE, _no_network, _vm_list, amd_env, applied, approved, at_choose, box, dialog_text, flat, host_card, keys,
     mode, nvidia_card, reboot_host, row, start, timeline)
@@ -186,7 +185,7 @@ async def test_a_changed_vm_after_the_restart_is_shown_and_asked_again(tmp_path,
     env = amd_env(tmp_path)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
-        screen = await to_restart_box(pilot, app, env)
+        await to_restart_box(pilot, app, env)
         await pilot.press("escape")
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen))
         reboot_host(env)
