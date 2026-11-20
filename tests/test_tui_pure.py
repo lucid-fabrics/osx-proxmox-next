@@ -143,7 +143,8 @@ def test_a_missing_build_tool_offers_its_apt_package(monkeypatch):
     monkeypatch.setattr("osx_proxmox_next.preflight._find_binary", lambda cmd: None if cmd == "sgdisk" else "/bin/" + cmd)
     checks = {c.name: c for c in run_preflight()}
     fix = checks["sgdisk available"].fix
-    assert [c.display for c in fix] == ["apt install -y gdisk"] and fix[0].argv == ("apt", "install", "-y", "gdisk")
+    assert [c.display for c in fix] == ["apt-get install -y gdisk"]
+    assert fix[0].argv == ("apt-get", "install", "-y", "gdisk")
     assert checks["qm available"].fix == ()
     assert checks["sgdisk available"].why == "Needed to partition the OpenCore boot disk."
 

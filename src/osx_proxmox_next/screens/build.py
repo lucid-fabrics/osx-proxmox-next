@@ -132,7 +132,7 @@ class BuildScreen(OsxScreen):
                     yield Static("", id="timeline")
                     yield Static("", id="latest")
                 with Vertical(id="build-right"):
-                    yield Static("", id="build-screen-slot")
+                    yield LiveScreen(self.pipe.vmid, "waiting", BUILD_REFRESH_SECONDS, fit=True, id="build-live")
                     yield Static("", id="build-caption")
             yield Static("", id="build-note")
 
@@ -202,28 +202,25 @@ class BuildScreen(OsxScreen):
         return self.pipe.phase("create").status == OK or self.pipe.config is None
 
     def _ensure_live(self) -> None:
-        slot = self.query_one("#build-screen-slot", Static)
-        if self._vm_exists() and not self.query("#build-live"):
-            live = LiveScreen(self.pipe.vmid, "running", BUILD_REFRESH_SECONDS, id="build-live")
-            self.vm_status = "running"
-            self.query_one("#build-right", Vertical).mount(live, before="#build-caption")
-            slot.display = False
+        live = self.query_one("#build-live", LiveScreen)
+        pal = self.app.get_css_variables()
         if self._vm_exists():
+            if live.status == "waiting":
+                live.set_state("running", False)
+                self.vm_status = "running"
             narrow = self.size.width < 90
-            caption = (f"live from VM {self.pipe.vmid} · every {BUILD_REFRESH_SECONDS} s" if narrow else
-                       f"live from VM {self.pipe.vmid} · refreshes every {BUILD_REFRESH_SECONDS} s")
+            caption = (f"live from VM {self.pipe.vmid} \u00b7 every {BUILD_REFRESH_SECONDS} s" if narrow else
+                       f"live from VM {self.pipe.vmid} \u00b7 refreshes every {BUILD_REFRESH_SECONDS} s")
         else:
             caption = "The Mac's screen shows here once the VM exists."
-            slot.update(Text("\n" * 3 + "waiting for the VM", style=self.app.get_css_variables()["muted"],
-                             justify="center"))
-        self.query_one("#build-caption", Static).update(Text(caption, style=self.app.get_css_variables()["muted"]))
+        self.query_one("#build-caption", Static).update(Text(caption, style=pal["muted"]))
 
     def _paint_latest(self, pal: dict) -> None:
         pipe = self.pipe
         text = Text()
         if pipe.failed:
             text.append(f"✗ {pipe.failure}\n", style=pal["error"])
-            tail = pipe.log_lines[-5:]
+            tail = [line for line in pipe.log_lines if line != f"FAILED: {pipe.failure}"][-5:]  # the reason is above
             if tail:
                 text.append("\nLog tail\n", style=pal["muted"])
                 text.append("\n".join(line[:TIMELINE_WIDTH + 24] for line in tail) + "\n", style=pal["muted"])
@@ -299,7 +296,7 @@ class BuildScreen(OsxScreen):
             return
         pipe = self.pipe
         install = pipe.phase("install").status == ACTIVE
-        if not install and not self.query("#build-live"):
+        if not install and not self._vm_exists():
             return
         self._polling = True
 
@@ -314,9 +311,7 @@ class BuildScreen(OsxScreen):
         self._polling = False
         if info is not None:
             self.vm_status = info.status
-            live = self.query("#build-live")
-            if live:
-                live.first().set_state(info.status, False)  # type: ignore[attr-defined]
+            self.query_one("#build-live", LiveScreen).set_state(info.status, False)
         if state is not None:
             self.pipe.apply_driver_state(state)
         else:

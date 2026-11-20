@@ -83,12 +83,12 @@ def test_a_failed_host_check_stops_at_phase_one():
     pipe = BuildPipeline(CONFIG, True, deps=deps)
     pipe.run()
     assert statuses(pipe)["check"] == FAILED and pipe.host_failed and pipe.can_retry
-    assert "2 host checks failed: qm available, dmg2img available" in pipe.failure
+    assert pipe.failure == "2 host checks failed: qm is not installed, dmg2img is not installed"
     assert statuses(pipe)["download"] == PENDING and not pipe.running
     deps2, _ = make(preflight=lambda: [PreflightCheck("qm available", False, "")])
     one = BuildPipeline(CONFIG, True, deps=deps2)
     one.run()
-    assert "1 host check failed" in one.failure
+    assert one.failure == "qm is not installed" and "available" not in one.failure
 
 
 def test_missing_assets_are_downloaded_and_the_plan_is_rebuilt():

@@ -49,7 +49,7 @@ class VmViewScreen(VmActionScreen):
         Binding("e", "edit", "Edit"),
         Binding("g", "gpu", "Graphics card"),
         Binding("d", "remove", "Remove"),
-        Binding("u", "undo_gpu", "Put the graphics card back"),
+        Binding("u", "undo_gpu", "Put everything back"),
         Binding("z", "zoom", "Zoom the screen"),
     ]
 
@@ -72,7 +72,7 @@ class VmViewScreen(VmActionScreen):
             with Horizontal(id="vm-view-body"):
                 with Vertical(id="vm-view-screen"):
                     yield LiveScreen(self.record.vmid, self.record.status, VIEW_REFRESH_SECONDS,
-                                     has_gpu=facts.display_on_gpu, id="vm-live")
+                                     has_gpu=facts.display_on_gpu, fit=True, id="vm-live")
                     yield Static("", id="vm-live-caption")
                 yield Static("", id="vm-facts")
 
@@ -147,6 +147,6 @@ class VmViewScreen(VmActionScreen):
         items = [("s", power, "screen.toggle_power"), ("e", "Edit", "screen.edit"),
                  ("g", "GPU", "screen.gpu"), ("d", "Remove", "screen.remove"), ("z", "Zoom", "screen.zoom")]
         if gpu.load_record(self.record.vmid) is not None:
-            items.append(("u", "Put the card back", "screen.undo_gpu"))
+            items.append(("u", "Put everything back", "screen.undo_gpu"))
         items += [("esc", "Back", "screen.back"), ("?", "Help", "app.help")]
         return items

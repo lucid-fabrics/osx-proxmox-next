@@ -11,9 +11,9 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Input, Static
 
-__all__ = ["Option", "ChoiceRow", "FieldRow", "ExpandRow", "LABEL_WIDTH"]
+__all__ = ["Option", "ChoiceRow", "FieldRow", "ExpandRow", "LABEL_WIDTH", "wrap_text"]
 
-LABEL_WIDTH = 11
+LABEL_WIDTH = 12
 
 
 @dataclass
@@ -23,10 +23,19 @@ class Option:
     enabled: bool = True
 
 
-class ChoiceRow(Widget, can_focus=True):
-    """`Label  < value >` with a muted detail after it and a muted hint line below.
+def wrap_text(text: Text, width: int, console) -> list[Text]:
+    """*text* wrapped at word breaks to *width* columns, styles kept. Nothing is ever cut off."""
+    out: list[Text] = []
+    for line in text.split("\n"):
+        out += list(line.wrap(console, max(1, width))) if line.plain else [Text("")]
+    return out
 
-    Left and right (or h and l) change the value and skip options that are not enabled."""
+
+class ChoiceRow(Widget, can_focus=True):
+    """`Label  < value >` with a muted detail after it and muted hint lines below.
+
+    Left and right (or h and l) change the value and skip options that are not enabled. What does not fit
+    on a line wraps onto the next one: a row grows instead of cutting its words."""
 
     BINDINGS = [
         Binding("left,h", "step(-1)", "Change", show=False),
@@ -40,7 +49,7 @@ class ChoiceRow(Widget, can_focus=True):
             self.value = value
 
     DEFAULT_CSS = """
-    ChoiceRow { height: 2; }
+    ChoiceRow { height: auto; }
     """
 
     def __init__(self, label: str, options: list[Option], value: str = "", *, hint_lines: int = 1,
@@ -49,10 +58,8 @@ class ChoiceRow(Widget, can_focus=True):
         self.label = label
         self.options = options
         self.detail = ""
-        self.hint = ""
+        self.hint: "str | Text" = ""
         self.value = value or (options[0].value if options else "")
-        self._base_hint_lines = hint_lines
-        self.styles.height = 1 + hint_lines
 
     # ── value ────────────────────────────────────────────────────────
 
@@ -74,9 +81,6 @@ class ChoiceRow(Widget, can_focus=True):
 
     def set_text(self, detail: str = "", hint: "str | Text" = "") -> None:
         self.detail, self.hint = detail, hint
-        text = hint.plain if isinstance(hint, Text) else hint
-        lines = text.count("\n") + 1 if text else 0
-        self.styles.height = 1 + max(self._base_hint_lines if lines else 0, lines)
         self.refresh(layout=True)
 
     @property
@@ -100,32 +104,40 @@ class ChoiceRow(Widget, can_focus=True):
 
     # ── drawing ──────────────────────────────────────────────────────
 
-    def render(self) -> Text:
+    def _lines(self, width: int) -> list[Text]:
         pal = self.app.get_css_variables()
         line = Text(" " + self.label.ljust(LABEL_WIDTH), style=pal["muted"])
         cur = self.current
         usable = sum(1 for o in self.options if o.enabled) > 1
         edge = pal["accent"] if usable else pal["muted"]
         if usable:
-            line.append("‹ ", style=edge)
+            line.append("\u2039 ", style=edge)
         line.append(cur.label if cur else self.value, style="bold")
         if usable:
-            line.append(" ›", style=edge)
-        if self.detail:
-            line.append(" · " + self.detail, style=pal["muted"])
-        width = self.size.width or 80
+            line.append(" \u203a", style=edge)
         pad = " " * (LABEL_WIDTH + 1)
-        lines: list[Text] = [line]
-        hint = self.hint
-        if isinstance(hint, Text):
-            for hint_line in hint.split("\n"):
-                lines.append(Text(pad).append_text(hint_line))
-        else:
-            for hint_line in (hint.split("\n") if hint else [""]):
-                lines.append(Text(pad).append(hint_line, style=pal["muted"]))
+        under: list[Text] = []
+        if self.detail:
+            tail = " \u00b7 " + self.detail
+            if line.cell_len + len(tail) <= width:
+                line.append(tail, style=pal["muted"])
+            else:  # no room beside the value: the detail goes under it, whole
+                under.append(Text(self.detail, style=pal["muted"]))
+        hint = self.hint if isinstance(self.hint, Text) else Text(self.hint, style=pal["muted"])
+        if hint.plain:
+            under.append(hint)
+        lines = [line]
+        console = self.app.console
+        for chunk in under:
+            lines += [Text(pad).append_text(row) for row in wrap_text(chunk, max(8, width - len(pad)), console)]
+        return lines
+
+    def get_content_height(self, container, viewport, width: int) -> int:
+        return len(self._lines(width or 80))
+
+    def render(self) -> Text:
         out = Text()
-        for idx, one in enumerate(lines):
-            one.truncate(width, overflow="ellipsis")  # one row each: a long detail never pushes the hint away
+        for idx, one in enumerate(self._lines(self.size.width or 80)):
             out.append("\n" if idx else "")
             out.append_text(one)
         return out
@@ -136,7 +148,7 @@ class FieldRow(Widget):
 
     DEFAULT_CSS = """
     FieldRow { height: 1; layout: horizontal; }
-    FieldRow > .field-label { width: 12; color: $muted; padding-left: 1; }
+    FieldRow > .field-label { width: 13; color: $muted; padding-left: 1; }
     FieldRow > Input { width: 1fr; max-width: 40; }
     FieldRow > .field-suffix { width: auto; color: $muted; padding-left: 1; }
     """

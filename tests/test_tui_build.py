@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,7 +51,7 @@ def deps(**over) -> PipelineDeps:
 
 
 def patch_build(monkeypatch, state=None, status="running"):
-    box = {"state": state or F.installing_driver(), "status": status}
+    box = {"state": state or F.installing_driver(0), "status": status}
     monkeypatch.setattr("osx_proxmox_next.screens.build.read_driver_state", lambda vmid: box["state"])
     monkeypatch.setattr("osx_proxmox_next.screens.build.fetch_vm_info",
                         lambda vmid, adapter=None: VmInfo(vmid, "macos-sequoia", box["status"], ""))
@@ -89,7 +90,7 @@ async def test_a_hands_off_build_reaches_the_install_phase_with_the_live_screen(
     async with app.run_test(size=SIZE) as pilot:
         screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=deps()))
         await open_build(pilot, app, screen)
-        await F.settle(pilot, lambda: screen.pipe.safe_to_close and bool(screen.query("#build-live")))
+        await F.settle(pilot, lambda: screen.pipe.safe_to_close and screen.query_one("#build-live", LiveScreen).status == "running")
         text = timeline(screen)
         for line in ("✓ Checked this host", "✓ Downloaded macOS", "✓ Rehearsed all 14 steps",
                      "✓ Created VM 105", "◐ Installing macOS", "· Ready"):
@@ -161,11 +162,14 @@ async def test_a_failed_host_check_stops_at_phase_one_and_offers_the_host_check(
         await open_build(pilot, app, screen)
         await F.settle(pilot, lambda: screen.pipe.failed == "check")
         assert "✗ Check this host" in timeline(screen) and "· Download macOS" in timeline(screen)
-        assert "1 host check failed: dmg2img available" in F.text_of(screen.query_one("#latest"))
+        latest = F.text_of(screen.query_one("#latest"))
+        assert latest.startswith("\u2717 dmg2img is not installed") and "available" not in latest
+        assert latest.count("dmg2img is not installed") == 1          # the reason once, not again in the log tail
         assert "Stopped." in note(screen) and "h opens the host check" in note(screen)
         for key in ("Retry", "Open host check", "Full log", "Back to your Macs"):
             assert key in keys(app)
-        assert not screen.query("#build-live")
+        waiting = screen.query_one("#build-live", LiveScreen)             # no VM was made: the frame says so
+        assert waiting.status == "waiting" and waiting.placeholder == "waiting for the VM"
         await pilot.press("h")
         from osx_proxmox_next.screens.host_check import HostCheckScreen
         await F.settle(pilot, lambda: isinstance(app.screen, HostCheckScreen))
@@ -290,7 +294,7 @@ async def test_z_zooms_the_live_screen_and_esc_comes_back(monkeypatch):
         await pilot.press("z")                              # no VM yet: nothing to zoom
         assert app.screen is screen and "The Mac's screen shows here once the VM exists." in F.text_of(screen.query_one("#build-caption"))
         gate.set()
-        await F.settle(pilot, lambda: screen.pipe.safe_to_close and bool(screen.query("#build-live")))
+        await F.settle(pilot, lambda: screen.pipe.safe_to_close and screen.query_one("#build-live", LiveScreen).status == "running")
         await pilot.press("z")
         assert isinstance(app.screen, ZoomScreen)
         live = app.screen.query_one("#zoom-live", LiveScreen)
@@ -306,7 +310,7 @@ async def test_z_zooms_the_live_screen_and_esc_comes_back(monkeypatch):
 @F.tui
 async def test_the_driver_log_drives_the_substeps_and_the_latest_lines(monkeypatch):
     F.patch_host(monkeypatch)
-    box = patch_build(monkeypatch, state=F.installing_driver(2))
+    box = patch_build(monkeypatch, state=F.installing_driver(0))
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=deps()))
@@ -321,7 +325,7 @@ async def test_the_driver_log_drives_the_substeps_and_the_latest_lines(monkeypat
         assert latest.index("13:42") < latest.index("13:40")          # newest first
         # the install finishes
         box["state"] = DriverState(seen=["recovery", "erase", "installer", "restarts", "first_start", "ready"],
-                                   started_at=1.0, finished=True, alive=False, exists=True)
+                                   started_at=time.time(), finished=True, alive=False, exists=True)
         await F.settle(pilot, lambda: screen.pipe.done)
         assert "✓ Ready at Setup Assistant" in timeline(screen)
         assert "Finish Setup Assistant on the screen above" in note(screen)
@@ -338,7 +342,7 @@ async def test_a_driver_failure_is_shown_with_what_to_do_by_hand(monkeypatch):
         await open_build(pilot, app, screen)
         await F.settle(pilot, lambda: screen.pipe.safe_to_close)
         box["state"] = DriverState(seen=["recovery", "erase"], error="Timed out after 900s waiting for recovery to start",
-                                   started_at=1.0, exists=True)
+                                   started_at=time.time(), exists=True)
         await F.settle(pilot, lambda: screen.pipe.failed == "install")
         assert "✗ Erasing the new disk" in timeline(screen)
         assert "Timed out after 900s" in F.text_of(screen.query_one("#latest"))
@@ -357,7 +361,7 @@ async def test_reopening_rebuilds_the_build_screen_from_the_log(monkeypatch):
         screen = BuildScreen.resume(107, F.installing_driver(18))
         await open_build(pilot, app, screen)
         assert screen.config is None and screen.pipe.safe_to_close
-        await F.settle(pilot, lambda: bool(screen.query("#build-live")))
+        await F.settle(pilot, lambda: screen.query_one("#build-live", LiveScreen).status == "running")
         assert F.text_of(screen.query_one("#build-title")) == "Building VM 107"
         text = timeline(screen)
         assert "✓ Created VM 107" in text and "◐ Installing macOS" in text

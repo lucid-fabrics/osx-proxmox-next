@@ -36,6 +36,22 @@ class PreflightCheck:
         """One plain sentence on why this check matters."""
         return WHY.get(self.name) or WHY.get(self.name.split()[0] + " available", "")
 
+    @property
+    def problem(self) -> str:
+        """What is wrong when this check fails, in a sentence (never the title it carries when it passes)."""
+        name = self.name
+        if name.endswith(" available"):
+            return f"{name.split()[0]} is not installed"
+        known = {
+            "KVM ignore_msrs": "KVM ignore_msrs is off",
+            "/dev/kvm present": "/dev/kvm is missing",
+            "Root privileges": "osx-next is not running as root",
+            "IOMMU enabled": "IOMMU is not enabled",
+            "initcall_blacklist": "initcall_blacklist is missing from the kernel command line",
+            "CPU vendor": "The CPU vendor is not recognised",
+        }
+        return known.get(name, f"{name} needs attention")
+
 
 KVM_CONF = "/etc/modprobe.d/kvm.conf"
 IGNORE_MSRS_LIVE_FIX = FixCommand("echo Y > /sys/module/kvm/parameters/ignore_msrs",
@@ -206,7 +222,7 @@ def run_preflight() -> list[PreflightCheck]:
                 name=f"{cmd} available",
                 ok=bool(binary),
                 details=binary or f"Not found. Install with: apt install {pkg}",
-                fix=() if binary else (FixCommand(f"apt install -y {pkg}", ("apt", "install", "-y", pkg)),),
+                fix=() if binary else (FixCommand(f"apt-get install -y {pkg}", ("apt-get", "install", "-y", pkg)),),
             )
         )
 

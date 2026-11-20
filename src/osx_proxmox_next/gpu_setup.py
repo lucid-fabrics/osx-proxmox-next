@@ -619,6 +619,25 @@ class Session:
         return {"text": text, "path": path, "url": url, "qr": qr, "vendor": vendor,
                 "firmware_reboot": bios_guide.firmware_setup_supported(self.root)}
 
+    def bios_view(self, items: list[dict]) -> dict | None:
+        """What the BIOS screen shows: the settings to change as data, the ones already right, the QR code.
+
+        None when nothing needs the BIOS. The plain-text guide is still saved, as bios_card does it."""
+        failing = [i for i in items if not i["ok"]]
+        if not failing:
+            return None
+        card = self.bios_card(items)
+        facts = self.facts()
+        data = bios_guide.load_data()
+        vendor = bios_guide.match_vendor(facts, data)
+        ven = data["vendors"].get(vendor) or {}
+        board = " ".join(x for x in (facts.get("board_vendor", ""), facts.get("board_name", "")) if x).strip()
+        return {"board": board or "this server", "enter": ven.get("enter", ""), "url": card["url"], "qr": card["qr"],
+                "rows": bios_guide.settings_view(failing, data, vendor),
+                "ok_labels": [bios_guide.short_label(data, i["key"]) for i in items if i["ok"]],
+                "firmware_reboot": card["firmware_reboot"], "path": card["path"],
+                "order": bios_guide.order_note([i["key"] for i in failing])}
+
     def running_vms(self) -> list[tuple[int, str]]:
         res = self.pve.qm("list")
         return bios_guide.parse_running_vms(res.output) if res.ok else []
@@ -727,6 +746,11 @@ class Session:
             return self.intel_plan(vmid, allow_stop, chosen)
         return gpu_attach.prepare_attach_amd(vmid, bdf, display, allow_stop,
                                              adapter=self.pve, sysfs_root=self.sysfs)
+
+    def vm_plan_for(self, vmid: int, allow_stop: bool = True) -> nullmoth.AttachPlan:
+        """The attach plan of the chosen card for another Mac than the saved one (the pick after "decide later")."""
+        self.target()
+        return self._vm_plan(self.state["gpu"], vmid, self.state["display"], self.state["ack_nullmoth"], allow_stop)
 
     def intel_plan(self, vmid: int, allow_stop: bool = False, chosen: dict | None = None) -> nullmoth.AttachPlan:
         """The iGPU attach preflight and plan. The downloads are not done here; the plan names where they go."""

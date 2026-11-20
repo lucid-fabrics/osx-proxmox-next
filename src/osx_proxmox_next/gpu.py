@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from shlex import quote as shquote
@@ -20,6 +22,9 @@ from .infrastructure import ProxmoxAdapter
 from .preflight import has_initcall_blacklist
 
 __all__ = [
+    "assuming_host_ready",
+    "host_ready_assumed",
+    "is_host_readiness_issue",
     "BAR1_WARN_BYTES",
     "AttachRecord",
     "GpuInfo",
@@ -52,6 +57,32 @@ __all__ = [
 ]
 
 BAR1_WARN_BYTES = 256 * 1024 * 1024
+
+# What a host plan fixes by itself: the card is not on vfio-pci yet, or the IOMMU is not active yet. Before the
+# host setup these are work still to do, not a reason to refuse. The Intel iGPU check words them its own way.
+BINDING_ISSUE = "Every function of the card must be bound to vfio-pci."
+NO_IOMMU_ISSUE = "IOMMU is not active for this card"
+HOST_READINESS_PREFIXES = (BINDING_ISSUE, NO_IOMMU_ISSUE, "The host still uses the iGPU",
+                           "IOMMU is not active for the iGPU")
+_HOST_READY: ContextVar[bool] = ContextVar("gpu_host_ready", default=False)
+
+
+@contextmanager
+def assuming_host_ready():
+    """Judge a card as if the host setup had already run (binding and IOMMU), to preview what the attach will do."""
+    token = _HOST_READY.set(True)
+    try:
+        yield
+    finally:
+        _HOST_READY.reset(token)
+
+
+def host_ready_assumed() -> bool:
+    return _HOST_READY.get()
+
+
+def is_host_readiness_issue(issue: str) -> bool:
+    return issue.startswith(HOST_READINESS_PREFIXES)
 
 _BDF_RE = re.compile(r"^(?:([0-9a-fA-F]{4}):)?([0-9a-fA-F]{2}):([0-9a-fA-F]{2})(?:\.([0-7]))?$")
 _SYSFS = Path("/sys")
@@ -153,7 +184,9 @@ def _bar_bytes(dev: Path, index: int = 1) -> int | None:
 def _group_issues(root: Path, dev: Path, functions: list[str]) -> list[str]:
     group = dev / "iommu_group"
     if not group.exists():
-        return ["IOMMU is not active for this card (no iommu_group). Enable VT-d/AMD-Vi "
+        if host_ready_assumed():
+            return []  # the host setup turns the IOMMU on; the groups are checked once it has
+        return [NO_IOMMU_ISSUE + " (no iommu_group). Enable VT-d/AMD-Vi "
                 "in the BIOS and intel_iommu=on iommu=pt (Intel) or iommu=pt (AMD) on the kernel cmdline."]
     members = sorted(p.name for p in (group.resolve() / "devices").iterdir())
     stray = []
@@ -213,7 +246,7 @@ def _check_binding(dev_root: Path, functions: list[str]) -> list[str]:
             wrong.append(f"{fn} ({driver or 'no driver'})")
     if not wrong:
         return []
-    return ["Every function of the card must be bound to vfio-pci. Not bound: "
+    return [BINDING_ISSUE + " Not bound: "
             + ", ".join(wrong) + ". The host GPU driver must not hold the card."]
 
 
@@ -249,7 +282,8 @@ def check_gpu(
             else unsupported_msg.format(device=f"{device_id:04x}"))
         return report
     functions = _functions(root, bdf)
-    report.issues += _check_binding(_devices(root), functions)
+    if not host_ready_assumed():
+        report.issues += _check_binding(_devices(root), functions)
     if report.issues:
         report.hints = vfio_conf_hint(root, bdf)
     report.issues += _group_issues(root, dev, functions)

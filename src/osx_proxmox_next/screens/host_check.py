@@ -24,16 +24,7 @@ NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
 
 def check_title(check: PreflightCheck) -> str:
     """The headline of a failing check."""
-    name = check.name
-    if name == "KVM ignore_msrs":
-        return "KVM ignore_msrs is off"
-    if name.endswith(" available"):
-        return f"{name.split()[0]} is not installed"
-    if name == "/dev/kvm present":
-        return "/dev/kvm is missing"
-    if name == "Root privileges":
-        return "osx-next is not running as root"
-    return f"{name} needs attention"
+    return check.problem
 
 
 def short_name(check: PreflightCheck) -> str:

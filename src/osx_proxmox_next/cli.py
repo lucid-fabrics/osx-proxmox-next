@@ -387,8 +387,8 @@ def _run_install_unattended(args: argparse.Namespace) -> int:
     if "running" not in status.output:
         print(f"ERROR: VM {args.vmid} is not running. Start it first (it must sit at the boot picker).")
         return 2
-    print(f"BETA: unattended install for VM {args.vmid} ({disk_gb} GB target disk).")
-    print("The VM disk will be ERASED. Watch progress below or on the VM console.")
+    print(f"BETA: unattended install for VM {args.vmid} ({disk_gb} GB target disk).", flush=True)
+    print("The VM disk will be ERASED. Watch progress below or on the VM console.", flush=True)
     console = QmConsole(args.vmid)
     try:
         summary = run_unattended_install(console, disk_gb, on_event=_log_unattended_event)

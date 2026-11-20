@@ -25,6 +25,7 @@ from ..services import (
     run_destroy_worker,
     run_edit_worker,
 )
+from ..widgets.checkbox import Check
 from ..widgets.chrome import KeyBar
 from ..widgets.rows import ChoiceRow, FieldRow, Option
 from .base import Choice, ChoiceDialog
@@ -77,7 +78,7 @@ class RemoveDialog(ModalScreen[bool]):
             yield Static("It cannot be undone.", classes="dialog-line error")
             yield Static("", classes="blank")
             label = "Also delete its disk images" + (f" ({disk})" if disk else "")
-            yield Checkbox(label, value=True, id="purge")
+            yield Check(label, value=True, id="purge")
             yield Static("", classes="blank")
             with Horizontal(classes="dialog-field"):
                 yield Static("Type the VM ID to confirm ", classes="dialog-line")
@@ -255,7 +256,7 @@ class EditDialog(ModalScreen[bool]):
                             id="e-nic")
             yield FieldRow("Add disk", "", id="e-disk", suffix="GB more on", max_width=8)
             yield FieldRow("Disk", disk, id="e-slot", max_width=10)
-            yield Checkbox("Start it again afterwards", value=rec.status == "running", id="e-start")
+            yield Check("Start it again afterwards", value=rec.status == "running", id="e-start")
             yield Static("", id="e-note", classes="dialog-line")
             yield Static("", classes="blank")
             with Horizontal(classes="dialog-buttons"):

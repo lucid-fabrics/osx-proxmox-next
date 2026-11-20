@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 __all__ = ["HomeScreen", "VmCard", "NewStrip", "status_line"]
 
 CARD_WIDTH = 30
+CARD_CHROME = 5          # border, gap under the thumbnail, name line, status line
+THUMB_MIN_ROWS = 5
+THUMB_MAX_ROWS = 10
 GRID_GAP = 2
 COMPACT_BELOW = 64
 HOME_REFRESH_SECONDS = 10
@@ -46,43 +49,56 @@ def status_line(record: VmRecord, driver: DriverState | None, now: float | None 
 class VmCard(Widget, can_focus=True):
     """One Mac: thumbnail, name, VM ID and a status line. The focused card is the selected one."""
 
-    def __init__(self, record: VmRecord, driver: DriverState | None, compact: bool) -> None:
+    def __init__(self, record: VmRecord, driver: DriverState | None, compact: bool, name_width: int = 0) -> None:
         super().__init__(id=f"vm-{record.vmid}")
         self.record = record
         self.driver = driver
         self.compact = compact
+        self.name_width = name_width
         self.set_class(compact, "compact")
 
     def compose(self) -> ComposeResult:
-        if not self.compact:
-            facts = self.record.facts
-            yield LiveScreen(self.record.vmid, self.record.status, THUMB_REFRESH_SECONDS,
-                             has_gpu=facts.display_on_gpu, classes="thumb")
+        if self.compact:
+            yield Static(self._compact_line(), classes="card-status")
+            return
+        facts = self.record.facts
+        yield LiveScreen(self.record.vmid, self.record.status, THUMB_REFRESH_SECONDS,
+                         has_gpu=facts.display_on_gpu, classes="thumb")
         yield Static(self._head(), classes="card-head")
         yield Static(self._status(), classes="card-status")
 
     def _head(self) -> Text:
         pal = self.app.get_css_variables()
         width = max(10, self.size.width - 4) if self.size.width else CARD_WIDTH - 4
-        if self.compact:
-            return Text(self.record.name)
         text = Text(self.record.name, style="bold")
         text.append(" " * max(1, width - len(self.record.name) - len(str(self.record.vmid))))
         text.append(str(self.record.vmid), style=pal["muted"])
         return text
 
+    def _tone(self, glyph: str) -> str:
+        pal = self.app.get_css_variables()
+        return {"\u25cf": pal["success"], "\u25d0": pal["accent"], "\u25cb": pal["muted"]}[glyph]
+
+    def _facts_tail(self, glyph: str) -> str:
+        return "" if glyph == "\u25d0" else f" \u00b7 {self.record.cores} cores \u00b7 {self.record.memory_gb} GB"
+
     def _status(self) -> Text:
         pal = self.app.get_css_variables()
         glyph, label = status_line(self.record, self.driver)
-        tone = {"●": pal["success"], "◐": pal["accent"], "○": pal["muted"]}[glyph]
-        text = Text(glyph + " ", style=tone)
-        text.append(label, style="" if glyph != "○" else pal["muted"])
-        if glyph != "◐":
-            text.append(f" · {self.record.cores} cores · {self.record.memory_gb} GB", style=pal["muted"])
-        if self.compact:
-            head = Text(f"{self.record.vmid:<7}{self.record.name:<26}", style="bold")
-            head.append_text(text)
-            return head
+        text = Text(glyph + " ", style=self._tone(glyph))
+        text.append(label, style="" if glyph != "\u25cb" else pal["muted"])
+        text.append(self._facts_tail(glyph), style=pal["muted"])
+        return text
+
+    def _compact_line(self) -> Text:
+        """`\u25cf macos-sequoia   101   running \u00b7 8 cores \u00b7 16 GB`: status glyph, name, VM ID, the rest."""
+        pal = self.app.get_css_variables()
+        glyph, label = status_line(self.record, self.driver)
+        text = Text(glyph + " ", style=self._tone(glyph))
+        text.append(self.record.name.ljust(max(self.name_width, len(self.record.name))) + "   ", style="bold")
+        text.append(f"{self.record.vmid:<5}  ", style=pal["muted"])
+        text.append(label, style="" if glyph != "\u25cb" else pal["muted"])
+        text.append(self._facts_tail(glyph), style=pal["muted"])
         return text
 
     def update_record(self, record: VmRecord, driver: DriverState | None) -> None:
@@ -90,7 +106,7 @@ class VmCard(Widget, can_focus=True):
         if not self.compact:
             facts = record.facts
             self.query_one(LiveScreen).set_state(record.status, facts.display_on_gpu)
-        self.query_one(".card-status", Static).update(self._status())
+        self.query_one(".card-status", Static).update(self._compact_line() if self.compact else self._status())
 
     def on_click(self, event) -> None:
         """One click selects the card, a double click opens it."""
@@ -202,6 +218,7 @@ class HomeScreen(VmActionScreen):
 
     @staticmethod
     def _resume_text(records: list[VmRecord]) -> str:
+        """The reminder of a graphics card setup that is mid-flow, named by the moment it waits at."""
         try:
             state = host_setup.load_state()
         except Exception:  # noqa: BLE001
@@ -210,10 +227,9 @@ class HomeScreen(VmActionScreen):
             return ""
         step = int(state.get("step", 1))
         name = next((r.name for r in records if r.vmid == state.get("vm")), "")
-        what = host_setup.STEPS[min(max(step, 1), len(host_setup.STEPS)) - 1]
         who = f" for {name}" if name else ""
-        return (f"▸ Graphics card setup{who} is waiting at step {step} of {len(host_setup.STEPS)}"
-                f" · {what.lower()} is next, press g to continue")
+        moment = "waiting to continue" if step < 5 else ("waiting for the restart" if step == 5 else "ready to finish")
+        return f"▸ Graphics card setup{who} is {moment}."
 
     async def _show(self, records: list[VmRecord], drivers: dict[int, DriverState], free: dict[str, int],
                     resume: str) -> None:
@@ -244,7 +260,8 @@ class HomeScreen(VmActionScreen):
         grid = self.query_one("#cards", Vertical)
         await grid.remove_children()
         compact = self._compact()
-        cards = [VmCard(r, self.drivers.get(r.vmid), compact) for r in self.records]
+        width = max((len(r.name) for r in self.records), default=0)
+        cards = [VmCard(r, self.drivers.get(r.vmid), compact, width) for r in self.records]
         grid.set_class(compact, "compact")
         if cards:
             await grid.mount(*cards)
@@ -262,8 +279,13 @@ class HomeScreen(VmActionScreen):
         strip = self.query_one(NewStrip)
         strip.set_proposal(self._proposal(), empty=count == 0)
         self.query_one("#cards").display = count > 0
+        self._fit_rows()
         resume = self.query_one("#resume", Static)
-        resume.update(Text(self.resume_text, style=self.app.get_css_variables()["warning"]) if self.resume_text else "")
+        pal = self.app.get_css_variables()
+        banner = Text(self.resume_text, style=pal["warning"])
+        banner.append("  g", style="bold " + pal["accent"])
+        banner.append(" continues", style=pal["muted"])
+        resume.update(banner if self.resume_text else "")
         resume.display = bool(self.resume_text)
         record = self.current_record()
         self.query_one("#selected-line", Static).update(
@@ -294,6 +316,34 @@ class HomeScreen(VmActionScreen):
     def _apply_columns(self) -> None:
         grid = self.query_one("#cards")
         grid.styles.grid_size_columns = self.columns()
+        self._fit_rows()
+
+    def _room(self) -> int:
+        """Rows left for the cards: the screen less the bars, the heading, the New Mac strip and the lines under it."""
+        taken = 2 + 1 + 2 + 3 + 1 + 1 + (2 if self.resume_text else 0)
+        return max(6, self.size.height - taken)
+
+    def thumb_rows(self) -> int:
+        """Rows of one thumbnail: the picture's own shape at this width, so it has no black bars above or below.
+
+        It is held to what lets one whole row of cards fit on the screen."""
+        wanted = -(-int((CARD_WIDTH - 2) * LiveScreen.ratio) // 2)
+        return max(THUMB_MIN_ROWS, min(wanted, THUMB_MAX_ROWS, self._room() - CARD_CHROME))
+
+    def _fit_rows(self) -> None:
+        """Whole rows of cards only: the grid is as tall as the rows that fit, and the rest is reached by scrolling."""
+        grid = self.query_one("#cards")
+        cards = [c for c in self.cards() if not c.compact]
+        if self._compact() or not cards:
+            grid.styles.height = "1fr"
+            return
+        rows = self.thumb_rows()
+        height = rows + CARD_CHROME
+        for card in cards:
+            card.styles.height = height
+            card.query_one(LiveScreen).styles.height = rows
+        grid.styles.grid_rows = str(height)
+        grid.styles.height = max(1, self._room() // height) * height
 
     def on_resize(self, event: Resize) -> None:
         if not self.loaded:
@@ -374,9 +424,9 @@ class HomeScreen(VmActionScreen):
     def footer_items(self) -> list[tuple]:
         record = self.current_record() if self.loaded else None
         power = "Stop" if record and record.status == "running" else "Start"
-        items = [("←→", "Select", None)]
+        items: list[tuple] = []
         if record:
-            items += [("enter", "Open", "screen.open"), ("s", power, "screen.toggle_power"),
+            items += [("←→", "Select", None), ("enter", "Open", "screen.open"), ("s", power, "screen.toggle_power"),
                       ("e", "Edit", "screen.edit"), ("g", "GPU", "screen.gpu"), ("d", "Remove", "screen.remove")]
         items += [("n", "New Mac", "screen.new_mac"), ("h", "Host", "screen.host"),
                   ("?", "Help", "app.help"), ("q", "Quit", "app.request_quit")]

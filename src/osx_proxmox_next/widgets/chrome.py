@@ -62,6 +62,7 @@ class KeyBar(Widget):
     def __init__(self, items: list[KeyItem] | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.items: list[KeyItem] = items or []
+        self._spans: list[tuple[int, int, str | None]] = []
 
     def set_items(self, items: list[KeyItem]) -> None:
         self.items = items
@@ -85,15 +86,24 @@ class KeyBar(Widget):
         return items, 1
 
     def render(self) -> Text:
+        """The accent key in bold, its label in plain text, nothing underlined (clicks are mapped by position)."""
         pal = colors(self)
         items, gap = self.fitted(self.size.width)
         text = Text(" ")
+        self._spans = []
         for idx, (key, label, action) in enumerate(items):
             if idx:
                 text.append(" " * gap)
-            meta = {"@click": action} if action else {}
-            text.append(key, style=Style(color=pal["accent"], bold=True, meta=meta))
-            text.append(" " + label, style=Style(meta=meta))
+            start = text.cell_len
+            text.append(key, style=Style(color=pal["accent"], bold=True))
+            text.append(" " + label)
+            self._spans.append((start, text.cell_len, action))
         text.no_wrap = True
         text.overflow = "ellipsis"
         return text
+
+    async def on_click(self, event) -> None:
+        for start, end, action in self._spans:
+            if action and start <= event.x < end:
+                await self.app.run_action(action, default_namespace=self)
+                return

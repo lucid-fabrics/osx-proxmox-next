@@ -205,7 +205,8 @@ async def test_choice_rows_skip_disabled_options_and_notify_only_on_change():
         await pilot.press("right")
         assert row.value == "only" and "‹" not in row.render().plain
         row.set_text("detail", "line one\nline two")
-        assert row.size.height == 3 or row.styles.height.value == 3
+        await pilot.pause()
+        assert row.size.height == 3
         assert "detail" in row.render().plain and row.render().plain.count("line") == 2
         more = app.query_one("#more", ExpandRow)
         assert more.render().plain.strip().startswith("▸ More")

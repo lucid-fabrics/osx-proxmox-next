@@ -73,9 +73,11 @@ def driver_log_path(vmid: int) -> str:
 
 
 def spawn_unattended_driver(vmid: int, disk_gb: int, popen=subprocess.Popen) -> str:
-    """Start install-unattended as a detached process that survives the TUI. Returns its log path."""
+    """Start install-unattended as a detached process that survives the TUI. Returns its log path.
+
+    The log is started empty: markers of an earlier install of a reused VM ID must never read as this run."""
     log_path = driver_log_path(vmid)
-    with open(log_path, "ab") as log_file:
+    with open(log_path, "wb") as log_file:
         popen(
             [sys.executable, "-m", "osx_proxmox_next.cli", "install-unattended",
              "--vmid", str(vmid), "--disk-gb", str(disk_gb)],
@@ -134,6 +136,8 @@ def parse_driver_log(text: str) -> DriverState:
         match = _EVENT_RE.match(line)
         if match:
             state.events.append((match.group(1), match.group(2)))
+    if state.error:
+        state.finished = False  # a failure after the ready marker still means the run did not finish
     return state
 
 

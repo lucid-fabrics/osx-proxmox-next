@@ -60,5 +60,11 @@ class IgpuCheck(GpuReport):
 
 
 def check_intel_gpu(root: Path = Path("/"), run=igpu_engine.default_run, wex: str = igpu_engine.LATEST) -> IgpuCheck:
-    """Every host-side check for the iGPU at 00:02.0 (the only slot Intel puts it in), judged against WhateverXe *wex*."""
-    return IgpuCheck(igpu_engine.IGD_BDF.rsplit(".", 1)[0], igpu_engine.check(str(root), run, wex=wex))
+    """Every host-side check for the iGPU at 00:02.0 (the only slot Intel puts it in), judged against WhateverXe *wex*.
+
+    Under gpu.assuming_host_ready() the two findings the host setup fixes (still on the host driver, no IOMMU
+    yet) are left out, so a preview before the setup shows the plan the attach will build after it."""
+    report = IgpuCheck(igpu_engine.IGD_BDF.rsplit(".", 1)[0], igpu_engine.check(str(root), run, wex=wex))
+    if gpu.host_ready_assumed():
+        report.issues = [i for i in report.issues if not gpu.is_host_readiness_issue(i)]
+    return report

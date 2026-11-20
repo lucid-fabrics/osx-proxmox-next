@@ -48,8 +48,8 @@ Checkbox {
     color: $foreground;
 }
 Checkbox:focus { background: $raised; border: none; }
-Checkbox > .toggle--button { color: $muted; background: $raised; }
-Checkbox.-on > .toggle--button { color: $accent; }
+Checkbox > .toggle--button { color: $raised; background: $raised; }
+Checkbox.-on > .toggle--button { color: $accent; background: $raised; }
 
 /* ---- bars ------------------------------------------------------------ */
 
@@ -62,7 +62,7 @@ KeyBar { background: $surface; }
 #home-head { height: 1; margin-bottom: 1; }
 #home-title { width: 1fr; text-style: bold; }
 #home-sub { width: auto; color: $muted; }
-#cards { height: 1fr; min-height: 3; layout: grid; grid-size: 1; grid-gutter: 0 2; grid-columns: 30; grid-rows: 12; overflow-y: auto; }
+#cards { height: 1fr; min-height: 3; layout: grid; grid-size: 1; grid-gutter: 0 2; grid-columns: 30; grid-rows: auto; overflow-y: auto; }
 #cards.compact { grid-rows: 1; grid-gutter: 0; grid-columns: 1fr; }
 #new-strip { height: 3; margin-top: 1; border: dashed $edge; padding: 0 2; }
 #new-strip:focus { border: dashed $accent; background: $surface; }
@@ -72,7 +72,7 @@ KeyBar { background: $surface; }
 
 VmCard {
     width: 30;
-    height: 12;
+    height: auto;
     border: round $edge;
     padding: 0;
     overflow: hidden hidden;
@@ -80,7 +80,7 @@ VmCard {
 VmCard:focus { border: round $accent; background: $surface; }
 VmCard.compact { width: 1fr; height: 1; border: none; padding: 0 1; }
 VmCard.compact:focus { background: $raised; border: none; border-left: heavy $accent; padding: 0 1 0 0; }
-VmCard .thumb { height: 7; margin-bottom: 1; }
+VmCard .thumb { height: 8; margin-bottom: 1; }
 VmCard .card-head { height: 1; padding-left: 1; }
 VmCard .card-status { height: 1; padding-left: 1; }
 VmCard.compact .card-status { width: 1fr; }
@@ -93,7 +93,7 @@ VmCard.compact .card-status { width: 1fr; }
 #vm-view-status { width: auto; }
 #vm-view-body { height: 1fr; }
 #vm-view-screen { width: 1fr; height: 1fr; }
-#vm-live { border: solid $edge; height: 1fr; }
+#vm-live { border: solid $edge; max-height: 100%; }
 #vm-live-caption { height: 1; }
 #vm-facts { width: 34; margin-left: 3; padding-left: 3; border-left: solid $edge; }
 
@@ -143,8 +143,7 @@ FieldRow { border-left: blank; }
 #timeline { height: auto; }
 #latest { height: auto; margin-top: 1; }
 #build-right { width: 1fr; height: 100%; }
-#build-live { border: solid $edge; height: 1fr; }
-#build-screen-slot { border: solid $edge; height: 1fr; }
+#build-live { border: solid $edge; max-height: 100%; }
 #build-caption { height: 1; }
 #build-note { height: auto; min-height: 1; margin-top: 1; }
 #full-log { height: 1fr; padding: 0 1; background: $background; }
@@ -193,20 +192,17 @@ ModalScreen { align: center middle; background: $background 70%; }
 /* ---- Graphics card ---------------------------------------------------- */
 
 #gpu { height: 1fr; padding: 1 2 0 2; }
-#g-title, #g-run-title { height: 1; }
-#g-run-title { margin-bottom: 1; }
-#g-host { height: 1; margin-bottom: 1; color: $muted; }
+#g-title, #g-run-title { height: 1; margin-bottom: 1; }
 .g-notice { height: auto; margin-bottom: 1; }
 #g-cols { height: 1fr; }
 #g-form { width: 1fr; height: 100%; padding-right: 1; }
 #g-form > ChoiceRow { margin-bottom: 1; }
-#g-form > FieldRow { margin-bottom: 0; }
-#g-before { height: auto; margin-top: 1; }
 #g-reason { height: auto; }
+#g-safe { height: 1; margin-top: 1; }
 #g-side { width: 38; margin-left: 1; padding-left: 2; border-left: solid $edge; height: 100%; }
 #g-side .side-title { color: $muted; height: 1; margin-bottom: 1; }
-GpuScreen.narrow #g-side { width: 30; padding-left: 1; }
-#g-need { height: auto; margin-bottom: 1; }
+GpuScreen.narrow #g-side { width: 30; padding-left: 1; margin-left: 0; }
+#g-need { margin-bottom: 1; }
 #g-part { height: auto; }
 #g-result { height: auto; }
 #g-action { height: 1; }
@@ -214,15 +210,38 @@ GpuScreen.narrow #g-side { width: 30; padding-left: 1; }
 #g-action Button { dock: right; }
 #g-run-cols { height: 1fr; }
 #g-timeline { width: 38; height: auto; margin-right: 3; }
-#g-box { width: 1fr; height: auto; max-height: 100%; border: solid $edge; padding: 1 2; }
+#g-box { width: 1fr; height: auto; max-height: 100%; border: solid $accent; padding: 1 2; }
+#g-box.warn { border: solid $warning; }
+#g-box.fail { border: solid $error; }
 #g-box-title { height: 1; }
 #g-box-text { height: auto; margin: 1 0; }
 #g-box-scroll { height: auto; max-height: 14; }
 #g-box-buttons { height: 1; align-horizontal: right; margin-top: 1; }
 #g-box-buttons Button { margin-left: 2; }
 #g-run-note { height: auto; dock: bottom; margin-bottom: 1; }
-#g-bios-scroll { height: 1fr; }
-#g-bios-sub { height: 1; margin-bottom: 1; color: $muted; }
+#g-bios-cols { height: 1fr; }
+#g-bios-left { width: 1fr; height: 100%; padding-right: 2; }
+#g-bios-qr { width: 30; height: 100%; margin-left: 1; padding-left: 3; border-left: solid $edge; }
+#g-bios-code { height: auto; width: auto; }
+#g-bios-caption { height: auto; }
+#g-bios-foot { height: 1; dock: bottom; margin-bottom: 1; }
+#g-bios-foot Button { margin-left: 2; }
+GpuScreen #g-pick-info { height: auto; margin-top: 1; }
 #g-typed { width: 20; }
 #changes-box { width: 92%; height: 80%; }
 #changes-scroll { height: 1fr; }
+
+/* ---- Before you continue --------------------------------------------- */
+
+#before-box { width: 76; border: solid $warning; }
+#before-head { height: 1; }
+#before-head .dialog-title { width: 1fr; }
+#before-head .before-once { width: auto; }
+.before-block { height: auto; margin-bottom: 1; }
+#before-notice-title { height: 1; }
+#before-notice { height: 6; }
+#before-more { height: 1; }
+#before-ack-label { height: auto; margin-top: 1; }
+.before-phrase { height: 1; margin-top: 1; }
+.before-label { width: auto; margin-right: 1; }
+.before-phrase Input { width: 20; }

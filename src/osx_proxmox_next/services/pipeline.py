@@ -207,8 +207,8 @@ class BuildPipeline:
         self.checks = self.deps.preflight()
         bad = [c for c in self.checks if not c.ok]
         if bad:
-            self._fail("check", f"{len(bad)} host check{'s' if len(bad) != 1 else ''} failed: "
-                       + ", ".join(c.name for c in bad))
+            what = ", ".join(c.problem for c in bad)
+            self._fail("check", what if len(bad) == 1 else f"{len(bad)} host checks failed: {what}")
             return False
         self._end("check")
         return True
@@ -319,20 +319,27 @@ class BuildPipeline:
 
     def apply_driver_state(self, state: DriverState) -> None:
         """Fold the driver's log into the Install phase and, when it is done, the Ready phase."""
+        if self._is_stale(state):
+            self.on_change()  # an earlier run of a reused VM ID: nothing of it counts yet
+            return
         self.driver = state
         if self._phase("install").status != ACTIVE:
             return
-        if state.finished:
+        if state.error:
+            self._fail("install", state.error)
+        elif state.finished:
             self._end("install")
             self._end("ready")
             self._say("The install reached Setup Assistant.")
-        elif state.error:
-            self._fail("install", state.error)
         elif not state.alive and self.deps.clock() - self._driver_started > DRIVER_GRACE_SECONDS:
             last = state.events[-1][1] if state.events else "no output yet"
             self._fail("install", f"The install driver stopped. Last line: {last}")
         else:
             self.on_change()
+
+    def _is_stale(self, state: DriverState) -> bool:
+        """Markers stamped before this run started its driver belong to an earlier install of the same VM ID."""
+        return bool(self._driver_started and state.started_at and state.started_at < self._driver_started - 2)
 
     @classmethod
     def from_driver(cls, vmid: int, state: DriverState, deps: PipelineDeps | None = None) -> "BuildPipeline":

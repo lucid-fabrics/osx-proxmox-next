@@ -32,6 +32,7 @@ __all__ = ["LiveScreen", "grab_frame", "render_cells"]
 PLACEHOLDER_OFF = "powered off"
 PLACEHOLDER_NO_SIGNAL = "no signal"
 PLACEHOLDER_GPU = "screen is on the GPU"
+PLACEHOLDER_WAITING = "waiting for the VM"
 
 _HALF = "▀"  # upper half block: foreground = top pixel, background = bottom pixel
 
@@ -79,10 +80,16 @@ class LiveScreen(Widget):
 
     # Swapped by tests; production grabs through qm monitor.
     grabber: ClassVar[Callable[[int, str], bytes]] = staticmethod(grab_frame)
+    # Height over width of the last picture seen (16:9 until one arrives): a frame that fits takes this shape.
+    ratio: ClassVar[float] = 0.5625
 
     def __init__(self, vmid: int, status: str = "stopped", interval: float = 5.0,
-                 has_gpu: bool = False, *, id: str | None = None, classes: str | None = None) -> None:
+                 has_gpu: bool = False, *, fit: bool = False, id: str | None = None,
+                 classes: str | None = None) -> None:
         super().__init__(id=id, classes=classes)
+        self.fit = fit          # the height follows the picture's shape, so no black bars above or below
+        if fit:
+            self.styles.height = "auto"
         self.vmid = vmid
         self.status = status
         self.interval = interval
@@ -101,6 +108,8 @@ class LiveScreen(Widget):
     @property
     def placeholder(self) -> str:
         """The text shown instead of a picture ("" when a picture is shown)."""
+        if self.status == "waiting":
+            return PLACEHOLDER_WAITING
         if self.has_gpu:
             return PLACEHOLDER_GPU
         if self.status != "running":
@@ -185,7 +194,15 @@ class LiveScreen(Widget):
         self.signal = frame is not None
         if frame is not None:
             self._frame, self._cells, self._cells_size = frame, cells, size
+            ratio = frame.height / frame.width
+            if abs(ratio - LiveScreen.ratio) > 0.01:
+                LiveScreen.ratio = ratio
+                self.refresh(layout=True)
         self.refresh()
+
+    def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
+        """Rows that give a picture of the last seen shape: two pixels per row, so half the width times the ratio."""
+        return max(3, -(-int(width * LiveScreen.ratio) // 2))
 
     def on_resize(self) -> None:
         if self._frame is not None and self.size != self._cells_size and self.size.width and self.size.height:

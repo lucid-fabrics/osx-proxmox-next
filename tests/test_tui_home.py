@@ -131,14 +131,17 @@ async def test_the_grid_has_as_many_columns_as_cards_fit_and_scrolls(monkeypatch
 
 @F.tui
 async def test_a_narrow_terminal_and_the_v_key_use_compact_rows(monkeypatch):
-    F.patch_host(monkeypatch)
+    F.patch_host(monkeypatch, drivers={107: F.installing_driver(18)})
     app = NextApp()
     async with app.run_test(size=(60, 24)) as pilot:
         screen = await home(pilot, app)
         assert all(c.compact for c in screen.cards()) and not screen.query(LiveScreen)
         assert screen.columns() == 1
         text = F.text_of(screen.cards()[0].query_one(".card-status"))
-        assert "101" in text and "macos-sequoia" in text and "running" in text
+        assert text == "\u25cf macos-sequoia   101    running \u00b7 8 cores \u00b7 16 GB"
+        assert text.count("macos-sequoia") == 1 and not screen.cards()[0].query(".card-head")   # the name once
+        ventura = F.text_of(screen.cards()[1].query_one(".card-status"))
+        assert ventura.startswith("\u25d0 macos-ventura   107") and "installing \u00b7 18 min in" in ventura
         await pilot.press("v")
         await F.settle(pilot, lambda: not screen.cards()[0].compact)
         assert screen.query(LiveScreen)
@@ -237,13 +240,19 @@ async def test_resume_banner_for_a_gpu_setup_in_the_middle(monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         screen = await home(pilot, app)
         banner = F.text_of(screen.query_one("#resume"))
-        assert "Graphics card setup for macos-sequoia is waiting at step 6 of 8" in banner and "g to continue" in banner
-        assert screen.query_one("#resume").display
+        assert banner == "\u25b8 Graphics card setup for macos-sequoia is ready to finish.  g continues"
+        assert "step" not in banner and screen.query_one("#resume").display
+    for step, moment in ((3, "waiting to continue"), (5, "waiting for the restart"), (7, "ready to finish")):
+        state["step"] = step
+        app = NextApp()
+        async with app.run_test(size=SIZE) as pilot:
+            screen = await home(pilot, app)
+            assert f"for macos-sequoia is {moment}." in F.text_of(screen.query_one("#resume"))
     state["vm"] = None
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await home(pilot, app)
-        assert "setup is waiting" in F.text_of(screen.query_one("#resume"))
+        assert F.text_of(screen.query_one("#resume")).startswith("\u25b8 Graphics card setup is ")
     state["finished"] = True
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
