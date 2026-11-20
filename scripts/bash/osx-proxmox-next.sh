@@ -9183,9 +9183,40 @@ function gpu_say() { echo -e "$*"; }
 # Whether to use whiptail screens: a terminal, whiptail installed, and not --yes.
 function gpu_use_ui() { [ "${GPU_YES:-no}" != "yes" ] && [ -t 0 ] && [ -t 1 ] && command -v whiptail >/dev/null 2>&1; }
 
+# Terminal size as "rows cols". The Proxmox web shell is often smaller than a fixed 24x100 box.
+function gpu_term_size() {
+  local size
+  size=$(stty size </dev/tty 2>/dev/null) || size=""
+  [[ "$size" =~ ^[0-9]+\ [0-9]+$ ]] || size="$(tput lines 2>/dev/null || echo 24) $(tput cols 2>/dev/null || echo 80)"
+  [[ "$size" =~ ^[0-9]+\ [0-9]+$ ]] || size="24 80"
+  echo "$size"
+}
+
+# Box "height width overflow" for TEXT in a ROWS x COLS terminal, at most MAX_W wide.
+# overflow is 1 when the text is taller than the box and must be scrolled.
+function gpu_ui_size() {
+  local text="$1" max_w="$2" rows="$3" cols="$4" w h need
+  w=$(( cols - 4 < max_w ? cols - 4 : max_w )); (( w >= 40 )) || w=40
+  need=$(python3 -c 'import sys, textwrap
+w = int(sys.argv[2])
+print(sum(max(1, len(textwrap.wrap(l, w))) for l in sys.argv[1].split("\n")))' "$(printf '%b' "$text")" "$(( w - 4 ))")
+  need=$(( need + 7 ))  # frame, padding and the button row
+  h=$(( rows - 2 < need ? rows - 2 : need )); (( h >= 8 )) || h=8
+  echo "$h $w $(( need > h ? 1 : 0 ))"
+}
+
+# whiptail box sized to the terminal; long text scrolls with the arrow keys (the mouse wheel does not work there).
+function gpu_whiptail() {
+  local kind="$1" title="$2" text="$3" rows cols h w over back="OSX Proxmox Next - GPU passthrough"
+  read -r rows cols <<<"$(gpu_term_size)"
+  read -r h w over <<<"$(gpu_ui_size "$text" 100 "$rows" "$cols")"
+  [ "$over" != 1 ] || back+="   (scroll with the arrow keys or PgUp/PgDn)"
+  whiptail --backtitle "$back" --title "$title" --scrolltext "$kind" "$text" "$h" "$w"
+}
+
 function gpu_ui_text() {
   local title="$1" text="$2"
-  if gpu_use_ui; then whiptail --backtitle "OSX Proxmox Next - GPU passthrough" --title "$title" --scrolltext --msgbox "$text" 24 100
+  if gpu_use_ui; then gpu_whiptail --msgbox "$title" "$text"
   else gpu_say "\n${BOLD}${title}${CL}\n${text}"; fi
 }
 
@@ -9193,7 +9224,7 @@ function gpu_ui_text() {
 function gpu_ui_yesno() {
   local title="$1" text="$2"
   [ "${GPU_YES:-no}" == "yes" ] && return 0
-  if gpu_use_ui; then whiptail --backtitle "OSX Proxmox Next - GPU passthrough" --title "$title" --yesno "$text" 20 90
+  if gpu_use_ui; then gpu_whiptail --yesno "$title" "$text"
   elif [ -t 0 ]; then local reply; read -r -p "$text [y/N] " reply; [[ "$reply" =~ ^[Yy] ]]
   else return 1; fi
 }
@@ -9740,11 +9771,13 @@ GPU_ITEMS_PY
   if command -v qrencode >/dev/null 2>&1; then
     qr=$(qrencode -t UTF8 -m 2 -o - "$url" 2>/dev/null | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))') || qr='[]'
   fi
-  # The QR code sits beside the steps only when the frame fits the screen (the dialog box is 100 wide), else under them.
-  local cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
+  # The QR code sits beside the steps only when the frame fits the screen, else under them.
+  # In a dialog the card must fit inside the box (at most 100 wide, 4 less than the terminal, 4 of border).
+  local rows cols
+  read -r rows cols <<<"$(gpu_term_size)"
   [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
   cols=$((10#$cols))
-  if gpu_use_ui && [ "$cols" -gt 96 ]; then cols=96; fi
+  if gpu_use_ui; then cols=$(( cols - 7 < 97 ? cols - 7 : 97 )); fi
   card=$(python3 -c 'import json,sys; print(json.dumps({"facts": json.loads(sys.argv[1]), "target": json.loads(sys.argv[2]), "items": json.loads(sys.argv[3]), "save": True, "resume_cmd": sys.argv[4], "qr": json.loads(sys.argv[5]), "max_width": int(sys.argv[6])}))' "$facts" "$target" "$items" "$GPU_RESUME_CMD" "$qr" "$((cols - 1))" | gpu_bios card) || {
     local card_rc=$?
     if [ "$card_rc" -eq 3 ]; then
@@ -9755,7 +9788,10 @@ GPU_ITEMS_PY
     msg_error "Could not build the BIOS steps (exit $card_rc). Nothing was marked done."
     return 1
   }
-  gpu_ui_text "BIOS steps for this server (take a photo)" "$card"
+  # A card that must scroll cannot be photographed in one shot: skip the box, the terminal shows it below.
+  if ! gpu_use_ui || [ "$(gpu_ui_size "$card" 100 "$rows" "$((cols + 7))" | cut -d' ' -f3)" = 0 ]; then
+    gpu_ui_text "BIOS steps for this server (take a photo)" "$card"
+  fi
   gpu_say "$card"
   [ "$qr" != '[]' ] || gpu_say "Same steps with pictures: $url"
   gpu_say "Saved to /root/osx-proxmox-next-bios-steps.txt (print it or cat it from another machine)."
