@@ -54,7 +54,7 @@ osx-proxmox-next replaces all of it with one screen that runs on your Proxmox ho
 
 **You get:**
 - A TUI that starts on your Macs, with a live picture of each VM's screen, and makes a new Mac from one prefilled screen followed by one build timeline: **Check this host > Download macOS > Rehearse > Create VM > Install macOS**
-- **Graphics card passthrough (BETA)**: choose and approve once, restart once, confirm it works. The tool scans your cards, shows a BIOS photo card with a QR code for your board only when a setting must change, sets up the host and attaches the card, and puts everything back on request. AMD Radeon natively, NVIDIA RTX 20 to 50 via the community NullMoth driver, the Intel iGPU via WhateverXe
+- **Graphics card passthrough (BETA)**: choose and approve once, restart once, confirm it works. The tool scans your cards, shows a BIOS screen with the settings to change for your board and a QR code, only when a setting must change, sets up the host and attaches the card, and puts everything back on request. AMD Radeon natively, NVIDIA RTX 20 to 50 via the community NullMoth driver, the Intel iGPU via WhateverXe
 - **Hands-off install (BETA)**: the default on the New Mac screen, so you can walk away - the tool erases the new disk, runs the installer, and answers every reboot until macOS sits at Setup Assistant
 - OpenCore boot image assembled on your host from pinned, checksum-verified upstream releases - no opaque prebuilt blob
 - Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
@@ -470,7 +470,7 @@ Use `--verbose-boot` flag in CLI: `osx-next-cli apply --verbose-boot ...`. This 
 
 ## 🎮 GPU Passthrough
 
-One guided flow takes a card from "it is in the server" to "macOS uses it": scan, a BIOS photo card with a QR code, host setup with a diff and backups, VM attach, first boot, and a full undo. It resumes across reboots.
+One guided flow takes a card from "it is in the server" to "macOS uses it": scan, a BIOS screen with a QR code, host setup with a diff and backups, VM attach, first boot, and a full undo. It resumes across reboots.
 
 ```bash
 osx-next-cli gpu-setup            # or: TUI > GPU Passthrough, or osx-proxmox-next.sh gpu-setup
