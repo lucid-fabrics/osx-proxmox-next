@@ -70,12 +70,13 @@ async def test_a_checkbox_shows_an_accent_check_when_on_and_an_empty_box_when_of
         box = app.screen.query_one("#purge", Check)
         accent = app.get_css_variables()["accent"].lower()
         raised = app.get_css_variables()["raised"].lower()
-        assert Check.BUTTON_INNER == "\u2713" and "\u2713" in box.render().plain and box.value
+        assert box.BUTTON_INNER == "\u2713" and "\u2713" in box.render().plain and box.value
         assert box.get_component_rich_style("toggle--button").color.name.lower() == accent
         box.value = False
         await pilot.pause(0.1)
         off = box.get_component_rich_style("toggle--button")
-        assert off.color.name.lower() == off.bgcolor.name.lower() == raised        # nothing shows in the box
+        assert box.BUTTON_INNER == " " and "\u2713" not in box.render().plain       # empty, also as plain text
+        assert off.bgcolor.name.lower() == raised
 
 
 # ── item 7: nothing meaningful is cut ────────────────────────────────

@@ -297,6 +297,8 @@ class ChooseMixin:
         try:
             self.query_one("#g-need", Lines).set_lines(rows)
             self.query_one("#g-part", Static).update(part)
+            for widget in (self.query_one("#g-part", Static), self.query_one("#g-part-title", Static)):
+                widget.display = bool(part.plain)
             self.query_one("#g-reason", Static).update(Text(reason, style=pal["error"]))
             self.query_one("#g-optional").display = bool(prev and (prev.plan.get("optional") or prev.optional))
             if prev is not None and not prev.error:

@@ -42,18 +42,22 @@ class CapacityBar(Widget):
     def state(self) -> str:
         return bar_state(self.used, self.total)
 
-    def summary(self) -> str:
-        """The right-hand text, with a glyph so colour is never the only signal."""
+    def summary(self, room: int = 0) -> str:
+        """The right-hand text, with a glyph so colour is never the only signal. It is shortened, never cut,
+        when *room* columns do not hold it: first "does not fit" becomes "no fit", then the glyph alone."""
         used = f"{self.used:g}"
         if self.state == "unknown":
             return f"{used} {self.unit}"
         total = f"{self.total:g}"
         base = f"{used} of {total} {self.suffix or self.unit}"
-        if self.state == "over":
-            return base + " ✗ does not fit"
         if self.state == "warn":
             return base + " !"
-        return base
+        if self.state != "over":
+            return base
+        for tail in (" \u2717 does not fit", " \u2717 too big", " \u2717"):
+            if not room or len(base + tail) <= room:
+                return base + tail
+        return base + " \u2717"
 
     def render(self) -> Text:
         pal = self.app.get_css_variables()
@@ -61,7 +65,7 @@ class CapacityBar(Widget):
         state = self.state
         tone = {"ok": pal["accent"], "warn": pal["warning"], "over": pal["error"], "unknown": pal["muted"]}[state]
         head = Text(self.label)
-        right = self.summary()
+        right = self.summary(width - len(self.label) - 1)
         head.append(" " * max(1, width - len(self.label) - len(right)))
         head.append(right, style=pal["muted"] if state in ("ok", "unknown") else tone)
         ratio = 0.0 if state == "unknown" else min(1.0, self.used / self.total)

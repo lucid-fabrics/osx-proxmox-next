@@ -73,26 +73,26 @@ def test_the_engine_command_takes_max_width():
     assert len(out.splitlines()[0]) <= 90 and not _qr_rows_with_steps(out)
 
 
-def test_the_bios_card_follows_the_terminal_width(tmp_path):
+def test_the_bios_screen_puts_the_qr_code_beside_the_steps_only_when_there_is_room(tmp_path):
     from osx_proxmox_next.screens.gpu import GpuScreen
 
-    async def card_at(cols):
+    async def at(cols):
         env = Env(tmp_path / str(cols), virt=False, tables=(), efi=False)
         add_card(env.root)
         app = NextApp()
-        async with app.run_test(size=(cols, 70)) as pilot:
+        async with app.run_test(size=(cols, 40)) as pilot:
             await pilot.pause()
             screen = GpuScreen(vmid=100, session=env.session())
             app.push_screen(screen)
             await settle(pilot, lambda: screen.mode == "choose" and screen.preview is not None)
             await pilot.press("enter")
             await settle(pilot, lambda: screen.mode == "bios")
-            return screen.bios_card["text"]
+            await pilot.pause(0.3)
+            return bool(screen.query("#g-bios-qr")), screen.bios_view["url"]
 
-    narrow = asyncio.run(card_at(100))
-    assert not _qr_rows_with_steps(narrow) and max(len(ln) for ln in narrow.splitlines()) <= 100
-    wide = asyncio.run(card_at(170))
-    assert _qr_rows_with_steps(wide)
+    narrow_qr, narrow_url = asyncio.run(at(80))
+    wide_qr, wide_url = asyncio.run(at(110))
+    assert not narrow_qr and wide_qr and narrow_url == wide_url
 
 
 # ── display choice ──
