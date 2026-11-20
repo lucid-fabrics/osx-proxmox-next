@@ -22,7 +22,7 @@ This handles all dependencies automatically.
 A standalone bash script with the same VM creation logic, using whiptail menus instead of the Python TUI:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh)"
+curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh -o /tmp/osx-proxmox-next.sh && bash /tmp/osx-proxmox-next.sh
 ```
 
 No Python or virtual environment needed.
