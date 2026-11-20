@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import os
 
-import pytest
 from textual.app import App
 from textual.containers import VerticalScroll
-from textual.geometry import Size
 
 import tui_fakes as F
 from osx_proxmox_next.app import NextApp

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import threading
 
-import pytest
 from textual.widgets import Button, RichLog
 
 import tui_fakes as F

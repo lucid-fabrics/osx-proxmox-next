@@ -1,8 +1,7 @@
 """New Mac: one screen, every row, the keyboard, the capacity bars and the create path."""
 from __future__ import annotations
 
-import pytest
-from textual.widgets import Button, Input, Static
+from textual.widgets import Input, Static
 
 import tui_fakes as F
 from osx_proxmox_next.app import NextApp

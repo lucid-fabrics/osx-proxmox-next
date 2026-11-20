@@ -11,7 +11,6 @@ from osx_proxmox_next.presets import build_presets, preset_fits, preset_label
 from osx_proxmox_next.services import detection_service as ds
 from osx_proxmox_next.services.fix_service import collect_fixes, run_fix_commands
 from osx_proxmox_next.services.unattended_service import (
-    DriverState,
     driver_alive,
     driver_log_path,
     parse_driver_log,

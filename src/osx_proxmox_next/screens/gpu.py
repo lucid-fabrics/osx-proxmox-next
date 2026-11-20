@@ -1366,7 +1366,6 @@ class GpuScreen(OsxScreen):
 
     def _pick_mac(self, options: list[VmOption]) -> None:
         """Decide later ended here: the user picks the Mac and approves its settings now."""
-        s = self.s
         usable = [o for o in options if o.eligible or o.status == "running"]
         self.start_phase("attach")
         self.run_worker(self._show_pick(options, usable), exclusive=True, group="gpu-mode")

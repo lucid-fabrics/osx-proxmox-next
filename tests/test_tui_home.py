@@ -1,8 +1,6 @@
 """Home, the VM view and the keys every screen shares."""
 from __future__ import annotations
 
-import pytest
-from textual.widgets import Static
 
 import tui_fakes as F
 from osx_proxmox_next.app import NextApp

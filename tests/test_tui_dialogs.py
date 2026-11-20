@@ -4,7 +4,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 from textual.widgets import Button, Checkbox, Input, Static
 
 import tui_fakes as F
@@ -13,7 +12,7 @@ from osx_proxmox_next.domain import EditChanges
 from osx_proxmox_next.rollback import RollbackSnapshot
 from osx_proxmox_next.screens.dialogs import EditDialog, RemoveDialog, changes_from_form
 from osx_proxmox_next.screens.home import HomeScreen
-from osx_proxmox_next.services import VmFacts, VmInfo, parse_vm_config
+from osx_proxmox_next.services import VmFacts, VmInfo
 
 SIZE = (100, 30)
 FACTS = VmFacts(name="macos-sequoia", cores=8, memory_mb=16384, bridge="vmbr0", nic_model="vmxnet3")

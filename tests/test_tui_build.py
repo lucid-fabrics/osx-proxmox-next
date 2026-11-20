@@ -5,7 +5,6 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 from textual.widgets import RichLog
 
 import tui_fakes as F

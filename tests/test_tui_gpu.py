@@ -8,12 +8,11 @@ import pytest
 from textual.widgets import Button, Input, Static
 
 import tui_fakes as F
-from gpu_fakes import add_card, add_other, write
-from nullmoth_fakes import MAC_CFG
+from gpu_fakes import add_card, write
 from osx_proxmox_next import gpu_setup, host_setup, nullmoth
 from osx_proxmox_next.app import NextApp
 from osx_proxmox_next.executor import ApplyResult, StepResult
-from osx_proxmox_next.gpu_setup import CONFIRM_PHRASE, NVIDIA_DISPLAY_NOTE, CardChanged
+from osx_proxmox_next.gpu_setup import CONFIRM_PHRASE, NVIDIA_DISPLAY_NOTE
 from osx_proxmox_next.nullmoth import ACK_PHRASE
 from osx_proxmox_next.screens.base import ChoiceDialog
 from osx_proxmox_next.screens.gpu import (
@@ -22,7 +21,7 @@ from osx_proxmox_next.screens.gpu import (
 from osx_proxmox_next.screens.home import HomeScreen
 from osx_proxmox_next.widgets.chrome import KeyBar
 from osx_proxmox_next.widgets.rows import ChoiceRow, FieldRow
-from test_gpu_setup import ANSWERS, SEQUOIA, Env, ready  # noqa: F401
+from test_gpu_setup import SEQUOIA, Env, ready
 
 SIZE = (110, 34)
 HINT = "etc/profile.d/osx-proxmox-next-gpu.sh"
@@ -375,7 +374,6 @@ def bios_env(tmp_path) -> Env:
     env = Env(tmp_path, virt=False, tables=(), efi=False)
     add_card(env.root)
     env.qm.vms[101] = ("running", SEQUOIA)
-    fw = env.root / "sys/firmware/efi/efivars"
     return env
 
 
