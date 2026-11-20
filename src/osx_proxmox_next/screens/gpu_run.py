@@ -147,11 +147,11 @@ class RunMixin:
 
     @staticmethod
     def _line_style(line: str, pal: dict) -> str:
-        if line.startswith(("Refused", "HARD", "Failed")):
+        if line.startswith(("Refused", "HARD", "Failed", "\u2717")):
             return pal["error"]
         if line.startswith(("Warning", "Careful", "!")):
             return pal["warning"]
-        if line.startswith(("Note", "OK:")):
+        if line.startswith(("Note", "OK:", "\u2713", "\u00b7")):
             return pal["muted"]
         return ""
 
