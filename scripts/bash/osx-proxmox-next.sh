@@ -2079,7 +2079,7 @@ function nvidia_detach() {
 # scripts/embed_gpu_engines.py refreshes them. Change both sides together.
 GPU_STATE_DIR="${GPU_STATE_DIR:-/var/lib/osx-proxmox-next}"
 GPU_DOCS_ROOT="https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/"
-GPU_RESUME_CMD='bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh)" -- gpu-setup'
+GPU_RESUME_CMD='curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh -o /tmp/osx-proxmox-next.sh && bash /tmp/osx-proxmox-next.sh gpu-setup'
 GPU_HOTPLUG_ARG="-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off"
 GPU_AMD_GENERIC_REASON="This AMD GPU has no Apple driver (APUs and cards newer than the RX 6000 series are not supported)."
 GPU_AMD_VEGA20_WARNING="Radeon VII / Pro VII: stopping and starting a VM that holds this card without rebooting the host has corrupted host storage on Proxmox 9 with vendor-reset (vendor-reset issue 112). Reboot the host between VM runs and do not rely on automatic restarts."
@@ -11148,7 +11148,7 @@ if [ "${UNATTENDED_DONE:-no}" != "yes" ]; then
   echo -e "  3. Use Disk Utility to erase the VirtIO disk as APFS"
   echo -e "  4. Run 'Reinstall macOS' from the recovery menu"
   echo -e "  5. When the installer reboots the first time, stop the VM and run:"
-  echo -e "     bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh)\" -- post-install ${VMID}"
+  echo -e "     curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh -o /tmp/osx-proxmox-next.sh && bash /tmp/osx-proxmox-next.sh post-install ${VMID}"
   echo -e "     It detaches recovery and makes the picker auto-boot again."
 fi
 echo -e ""

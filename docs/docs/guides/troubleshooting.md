@@ -105,7 +105,7 @@ osx-next-cli post-install --vmid <id> --execute
 Installed with the bash script? Stop the VM and run the same step from it:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh)" -- post-install <id>
+curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/scripts/bash/osx-proxmox-next.sh -o /tmp/osx-proxmox-next.sh && bash /tmp/osx-proxmox-next.sh post-install <id>
 ```
 
 It detaches the recovery disk, sets boot order `ide0;virtio0`, and restores the picker's 15 second auto-boot. Until you run it, the picker waits on every reboot with recovery listed ahead of the installer, so the install only resumes if you pick the right entry by hand each time. If macOS is already installed and every boot still stops at the picker until you press return, this is the step that was skipped.

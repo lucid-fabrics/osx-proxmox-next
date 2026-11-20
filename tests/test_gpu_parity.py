@@ -108,7 +108,7 @@ def test_constants_match():
     assert re.search(r'^GPU_LAPTOP_NVIDIA_REASON="(.*)"$', BLOCK, re.M).group(1) == gpu_setup._LAPTOP_NVIDIA
     assert re.search(r"^GPU_DOCS_ROOT=\"(.*)\"$", BLOCK, re.M).group(1) == gpu_setup.DOCS_ROOT
     resume = re.search(r"^GPU_RESUME_CMD='(.*)'$", BLOCK, re.M).group(1)
-    assert resume.endswith("-- gpu-setup") and "lucid-fabrics/osx-proxmox-next" in resume
+    assert resume.endswith("bash /tmp/osx-proxmox-next.sh gpu-setup") and "lucid-fabrics/osx-proxmox-next" in resume
     assert host_setup.STEPS == tuple(re.search(r"steps = \[(.*?)\]", BLOCK).group(1).replace('"', "").split(", "))
 
 
