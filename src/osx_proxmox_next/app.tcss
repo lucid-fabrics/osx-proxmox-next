@@ -248,3 +248,6 @@ GpuScreen #g-pick-info { height: auto; margin-top: 1; }
 .before-phrase { height: 1; margin-top: 1; }
 .before-label { width: auto; margin-right: 1; }
 .before-phrase Input { width: 20; }
+#before-box.tight .blank { display: none; }
+#before-box.tight .before-block { margin-bottom: 0; }
+#before-box.tight #before-ack-label, #before-box.tight .before-phrase { margin-top: 0; }

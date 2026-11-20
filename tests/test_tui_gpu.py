@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from textual.widgets import Button, Input
 
 import tui_fakes as F
@@ -221,7 +223,7 @@ async def test_nvidia_asks_its_notice_once_in_the_dialog_and_never_carries_it_ov
         assert "Before you continue" in F.text_of(dialog.query(".dialog-title").first())
         assert nullmoth.NOTICE_TITLE in F.text_of(dialog.query_one("#before-notice-title"))
         assert nullmoth.NOTICE_BODY in F.text_of(dialog.query_one("#before-notice-text"))
-        assert NVIDIA_DISPLAY_NOTE in " ".join(F.text_of(w) for w in dialog.query(".before-note"))
+        assert F.text_of(dialog.query_one("#before-notice-text")).startswith(NVIDIA_DISPLAY_NOTE)
         assert nullmoth.ACK_LABEL in F.text_of(dialog.query_one("#before-ack-label"))
         assert dialog.query_one("#before-go", Button).disabled
         field = dialog.query_one("#g-ack", Input)
@@ -253,6 +255,24 @@ async def test_the_notice_scrolls_and_says_how_many_lines_are_left(tmp_path):
         assert F.text_of(dialog.query_one("#before-more")) == ""      # read to the end: nothing left
         await pilot.press("escape")
         assert app.screen is screen and screen.s.approval is None
+
+
+@F.tui
+@pytest.mark.parametrize("size", [(100, 30), (80, 24), (110, 34)])
+async def test_the_dialog_buttons_and_the_phrase_field_stay_on_screen_at_every_size(tmp_path, size):
+    env = Env(tmp_path)
+    nvidia_card(env.root)
+    app = NextApp()
+    async with app.run_test(size=size) as pilot:
+        await at_choose(pilot, app, env)
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        dialog = app.screen
+        box = dialog.query_one("#before-box")
+        content_bottom = box.region.bottom - 2                        # the padding row and the border row
+        for widget in (dialog.query_one("#g-ack"), dialog.query_one("#before-go"), dialog.query_one("#before-cancel")):
+            assert widget.region.bottom <= content_bottom and widget.region.y >= box.region.y
+        assert dialog.query_one("#before-notice").size.height >= 3
 
 
 @F.tui

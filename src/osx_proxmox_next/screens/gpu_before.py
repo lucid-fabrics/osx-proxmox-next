@@ -58,11 +58,12 @@ class BeforeDialog(ModalScreen):
             if b.warnings:
                 yield Static(Text("\n".join(self._bang(line, self._inner()) for line in b.warnings),
                                   style=pal["warning"]), id="before-warnings", classes="before-block")
-            for note in b.notes + ([b.notice_lead] if b.notice_lead else []):
+            for note in b.notes:
                 yield Static(Text(note, style=pal["muted"]), classes="before-block before-note")
             if b.notice_body:
                 yield Static(Text(b.notice_title, style="bold"), id="before-notice-title")
-                yield NoticeScroll(Static(Text(b.notice_body, style=pal["muted"]), id="before-notice-text"),
+                lead = b.notice_lead + "\n\n" if b.notice_lead else ""
+                yield NoticeScroll(Static(Text(lead + b.notice_body, style=pal["muted"]), id="before-notice-text"),
                                    id="before-notice")
                 yield Static("", id="before-more")
             if b.phrase:
@@ -103,6 +104,7 @@ class BeforeDialog(ModalScreen):
         return not self.before.nvidia or self.query_one("#g-ack", Input).value.strip() == ACK_PHRASE
 
     def on_mount(self) -> None:
+        self.query_one("#before-box").set_class(self.app.size.height < 28, "tight")   # no blank rows when short
         self.call_after_refresh(self._fit_notice)
         self.call_after_refresh(self._more)
         field = self.query("Input")
@@ -114,7 +116,7 @@ class BeforeDialog(ModalScreen):
             return
         box = self.query_one("#before-box")
         notice = self.query_one("#before-notice")
-        room = int(self.app.size.height * 0.9) - 4                      # less the border and the padding
+        room = int((self.app.size.height - 1) * 0.9) - 4                # less the key bar, the border and the padding
         others = sum(c.outer_size.height + c.styles.margin.height for c in box.children if c is not notice)
         notice.styles.height = max(3, min(12, room - others))
 
@@ -133,6 +135,7 @@ class BeforeDialog(ModalScreen):
         self._more()
 
     def on_resize(self) -> None:
+        self.query_one("#before-box").set_class(self.app.size.height < 28, "tight")
         self.call_after_refresh(self._fit_notice)
         self.call_after_refresh(self._more)
 
