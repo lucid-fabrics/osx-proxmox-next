@@ -61,7 +61,7 @@ Use [GitHub Issues](https://github.com/lucid-fabrics/osx-proxmox-next/issues) wi
 
 ```
 src/osx_proxmox_next/
-  app.py           # TUI wizard (Textual)
+  app.py           # TUI app (Textual); screens live in screens/, widgets in widgets/
   cli.py           # CLI interface (argparse)
   domain.py        # VmConfig dataclass + validation
   defaults.py      # Hardware detection (CPU, RAM, storage)

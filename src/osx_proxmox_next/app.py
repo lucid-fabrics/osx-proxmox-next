@@ -1,458 +1,202 @@
 from __future__ import annotations
 
 import logging
+import socket
 import sys
 from pathlib import Path
 from threading import Thread
 
-log = logging.getLogger(__name__)
-
-from textual.app import App, ComposeResult
-from textual.containers import Container
-from textual.reactive import reactive
-from textual.widgets import Button, Checkbox, Header, Input, OptionList, ProgressBar, RadioSet, Select, Static
+from rich.text import Text
+from textual.app import App
+from textual.binding import Binding
+from textual.command import DiscoveryHit, Hit, Hits, Provider
+from textual.screen import ModalScreen
 
 from . import __version__
-from ._edit_mixin import EditModeMixin
-from ._manage_mixin import ManageModeMixin
-from ._gpu_mixin import GpuSetupMixin
-from ._wizard_mixin import WizardStepsMixin
-from .assets import required_assets
-from .defaults import (
-    DEFAULT_ISO_DIR,
-    detect_cpu_cores,
-    detect_cpu_info,
-    detect_iso_storage,
-    detect_net_model,
-)
-from .domain import PlanStep, SUPPORTED_MACOS, validate_config
-from .executor import StepResult
-from .models import WizardState
-from .planner import build_plan
-from .preflight import PreflightCheck
-from .rollback import RollbackSnapshot
-from .screens import (
-    compose_step1,
-    compose_step2,
-    compose_step3,
-    compose_step4,
-    compose_step5,
-    compose_step6,
-    format_preflight_text,
-    format_install_result,
-)
-from .services import (
-    detect_next_vmid,
-    detect_storage_targets,
-    run_dry_apply,
-    run_live_install,
-    run_preflight_worker,
-)
+from .preflight import PreflightCheck, run_preflight
+from .screens.base import ConfirmDialog, HelpScreen
+from .services import VmRecord
+from .services.host_facts import HostFacts, load_host_facts
+from .theme import OSX_NEXT, THEME_NAME
+
+log = logging.getLogger(__name__)
+
+__all__ = ["NextApp", "run"]
 
 
-class NextApp(WizardStepsMixin, ManageModeMixin, EditModeMixin, GpuSetupMixin, App):
+class OsxCommands(Provider):
+    """The command palette: every place the app can go, and every Mac by name."""
+
+    def _commands(self):
+        app = self.app
+        yield "New Mac", "Create a Mac VM", app.action_new_mac
+        yield "Host check", "See what this host needs", app.action_host_check
+        yield "GPU passthrough", "Give a Mac a graphics card", app.action_gpu
+        for record in app.vm_records:
+            yield (f"Open {record.name}", f"VM {record.vmid}",
+                   lambda vmid=record.vmid: app.open_vm(vmid))
+
+    async def discover(self) -> Hits:
+        for name, help_text, callback in self._commands():
+            yield DiscoveryHit(name, callback, help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for name, help_text, callback in self._commands():
+            score = matcher.match(name)
+            if score > 0:
+                yield Hit(score, matcher.highlight(name), callback, help=help_text)
+
+
+class NextApp(App):
     CSS_PATH = Path(__file__).with_suffix(".tcss")
-    TITLE = "osx-proxmox-next"
+    TITLE = "osx-next"
+    COMMANDS = App.COMMANDS | {OsxCommands}
+    ENABLE_COMMAND_PALETTE = True
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("escape", "quit", "Quit"),
+        Binding("q", "request_quit", "Quit", show=False),
+        Binding("f1", "help", "Help", show=False, priority=True),
+        Binding("question_mark", "help", "Help", show=False),
     ]
-
-    current_step: reactive[int] = reactive(1)
 
     def __init__(self) -> None:
         super().__init__()
-        self.state = WizardState()
-        self._cpu_info = detect_cpu_info()
-        self.state.use_penryn = self._cpu_info.needs_penryn
-        self.state.net_model = detect_net_model(self._cpu_info)
-        self.state.storage_targets = self._detect_storage_targets()
-        self.state.iso_dirs = detect_iso_storage()
-        self.state.selected_iso_dir = self.state.iso_dirs[0] if self.state.iso_dirs else DEFAULT_ISO_DIR
+        self.host_checks: list[PreflightCheck] | None = None
+        self.host_label = ""
+        self.vm_records: list[VmRecord] = []
+        self._facts: HostFacts | None = None
+        # The stylesheet reads the theme's variables while it is parsed, which is before on_mount.
+        self.register_theme(OSX_NEXT)
+        self.theme = THEME_NAME
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield Static("", id="step_bar")
-        with Container(id="body"):
-            yield from compose_step1()
-            yield from compose_step2()
-            yield from compose_step3(self.state.storage_targets)
-            yield from compose_step4(self._cpu_info)
-            yield from compose_step5()
-            yield from compose_step6()
+    # ── host state ───────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self._update_step_bar()
-        if self.state.storage_targets:
-            self.state.selected_storage = self.state.storage_targets[0]
+        from .screens.home import HomeScreen
+        self.push_screen(HomeScreen())
+        self.rerun_preflight()
+        Thread(target=self._warm_facts, daemon=True).start()
+
+    def _warm_facts(self) -> None:
+        try:
+            self.facts()
+        except Exception:  # noqa: BLE001 - a later facts() call reports it where it matters
+            log.debug("host facts failed", exc_info=True)
+
+    def facts(self) -> HostFacts:
+        """The host facts, read once (the first caller pays for the pvesm calls)."""
+        if self._facts is None:
+            self._facts = load_host_facts()
+        return self._facts
+
+    def rerun_preflight(self) -> None:
+        self.host_checks = None
+        self._refresh_bars()
         Thread(target=self._preflight_worker, daemon=True).start()
-
-    def watch_current_step(self, old_value: int, new_value: int) -> None:
-        for step_num in range(1, 7):
-            container = self.query_one(f"#step{step_num}")
-            if step_num == new_value:
-                container.remove_class("step_hidden")
-            else:
-                container.add_class("step_hidden")
-        self._update_step_bar()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        bid = event.button.id or ""
-
-        if bid.startswith("os_"):
-            os_key = bid[3:]
-            if os_key in SUPPORTED_MACOS:
-                self._select_os(os_key)
-            return
-
-        if bid.startswith("storage_"):
-            try:
-                idx = int(bid.split("_")[1])
-                self._select_storage(self.state.storage_targets[idx])
-            except (ValueError, IndexError):
-                log.debug("Invalid storage button index: %s", bid)
-            return
-
-        _NEXT = {"preflight_next_btn", "next_btn", "next_btn_3", "next_btn_4", "next_btn_5"}
-        _BACK = {"back_btn_2", "back_btn_3", "back_btn_4", "back_btn_5", "back_btn_6"}
-        _EXIT = {"exit_btn", "exit_btn_2", "exit_btn_3", "exit_btn_4", "exit_btn_5", "exit_btn_6"}
-        if bid in _NEXT:
-            self._go_next()
-        elif bid in _BACK:
-            self._go_back()
-        elif bid in _EXIT:
-            self.exit()
-        else:
-            handlers = {
-                "preflight_rerun_btn": self._rerun_preflight,
-                "suggest_btn": self._apply_host_defaults,
-                "smbios_btn": self._generate_smbios,
-                "dry_run_btn": self._run_dry_apply,
-                "install_btn": self._run_live_install,
-                "mode_create": lambda: self._toggle_mode("create"),
-                "mode_manage": lambda: self._toggle_mode("manage"),
-                "mode_gpu": lambda: self._toggle_mode("gpu"),
-                "gp_primary_btn": self._gp_primary,
-                "gp_secondary_btn": self._gp_secondary,
-                "gp_tertiary_btn": self._gp_tertiary,
-                "gp_stop_btn": self._gp_stop_selected,
-                "gp_back_btn": self._gp_back,
-                "gp_undo_btn": self._gp_undo,
-                "manage_refresh_btn": self._refresh_vm_list,
-                "manage_destroy_btn": self._run_destroy,
-                "edit_apply_btn": self._run_edit,
-            }
-            handler = handlers.get(bid)
-            if handler:
-                handler()
-
-    def on_input_changed(self, event: Input.Changed) -> None:
-        target_ids = {"vmid", "name", "memory", "disk", "bridge", "storage_input", "installer_path"}
-        if (event.input.id or "") in target_ids:
-            self._validate_form(quiet=True)
-        if event.input.id == "manage_vmid":
-            self._validate_manage_vmid()
-        if event.input.id in {"edit_vmid", "edit_name", "edit_cores", "edit_memory", "edit_bridge", "edit_disk_add"}:
-            self._validate_edit_form()
-        if event.input.id in {"gp_ack_in", "gp_confirm_in"}:
-            self._gp_validate()
-
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "gp_gpu_select":
-            self._gp_validate()
-
-    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
-        if event.radio_set.id == "gp_display_radio":
-            self._gp_validate()
-
-    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        if event.option_list.id == "gp_vm_list":
-            self._gp_validate()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option_list.id == "gp_vm_list":
-            self._gp_validate()
-
-    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
-        if event.checkbox.id == "manage_purge_cb":
-            self._toggle_purge()
-        if event.checkbox.id == "edit_start_after_cb":
-            self.state.edit_start_after = event.checkbox.value
-        if event.checkbox.id == "apple_services_cb":
-            self.state.apple_services = event.checkbox.value
-            self._generate_smbios()
-            self._toggle_apple_services_fields()
-        if event.checkbox.id == "penryn_cb":
-            self.state.use_penryn = event.checkbox.value
-            # Hint visibility is set at compose time from CPU detection and must
-            # not follow the checkbox: showing "Older Intel CPU detected" because
-            # the user ticked the box reads as a false detection claim (#107).
-            if event.checkbox.value:
-                self.query_one("#cores", Input).value = "4"
-            else:
-                self.query_one("#cores", Input).value = str(detect_cpu_cores())
-        if event.checkbox.id == "unattended_cb":
-            self.state.unattended = event.checkbox.value
-        if event.checkbox.id == "e1000_cb":
-            self.state.net_model = "e1000-82545em" if event.checkbox.value else "vmxnet3"
-
-    def _toggle_apple_services_fields(self) -> None:
-        c = self.query_one("#apple_services_fields")
-        (c.remove_class if self.state.apple_services else c.add_class)("hidden")
-
-    def _go_next(self) -> None:
-        step = self.current_step
-        if step == 1:
-            if not self.state.preflight_ok:
-                return
-            self.current_step = 2
-        elif step == 2:
-            if not self.state.selected_os:
-                return
-            self.current_step = 3
-        elif step == 3:
-            if not self.state.selected_storage:
-                return
-            self._fill_form()
-            self.current_step = 4
-        elif step == 4:
-            if not self._validate_form(quiet=False):
-                return
-            config = self._read_form()
-            if not config:
-                return
-            issues = validate_config(config)
-            if issues:
-                self._show_form_errors(issues)
-                return
-            self.state.config = config
-            self.state.plan_steps = build_plan(config)
-            self._render_config_summary()
-            self.current_step = 5
-            self._check_and_download_assets()
-        elif step == 5:
-            if not self.state.dry_run_ok:
-                return
-            self._prepare_install_step()
-            self.current_step = 6
-
-    def _go_back(self) -> None:
-        self.current_step = max(1, self.current_step - 1)
-
-    def _update_preflight_display(self) -> None:
-        text = format_preflight_text(self.state.preflight_done, self.state.preflight_checks)
-        self.query_one("#preflight_checks", Static).update(text)
-
-    def _rerun_preflight(self) -> None:
-        self.state.preflight_done = False
-        self.state.preflight_ok = False
-        self.query_one("#preflight_next_btn", Button).disabled = True
-        self._update_preflight_display()
-        Thread(target=self._preflight_worker, daemon=True).start()
-
-    def _check_and_download_assets(self) -> None:
-        config = self.state.config
-        if not config:
-            return
-        assets = required_assets(config)
-        missing = [a for a in assets if not a.ok]
-        # Present but outdated (prebuilt fallback or older pins): refresh it,
-        # while the existing image stays usable if the refresh cannot happen.
-        stale = [a for a in assets if a.ok and a.stale and a.downloadable]
-        downloadable = [a for a in missing if a.downloadable] + stale
-        if not missing and not stale:
-            self.state.assets_ok = True
-            self.state.assets_missing = []
-            self.state.downloads_complete = True
-            self.query_one("#download_status", Static).update("Assets: OK")
-            self.query_one("#dry_run_btn", Button).disabled = False
-            return
-        self.state.assets_ok = False
-        self.state.assets_missing = missing
-        if downloadable:
-            names = ", ".join(a.name for a in downloadable)
-            self.query_one("#download_status", Static).update(f"Downloading: {names}...")
-            self.query_one("#download_progress").remove_class("hidden")
-            self.query_one("#download_progress", ProgressBar).update(total=100, progress=0)
-            self.state.download_running = True
-            force = self.query_one("#force_download_cb", Checkbox).value
-            Thread(target=self._download_worker, args=(config, missing + stale, force), daemon=True).start()
-        else:
-            self.query_one("#download_status", Static).update(
-                f"Missing assets: {', '.join(a.name for a in missing)}. Provide path manually."
-            )
-
-    def _run_dry_apply(self) -> None:
-        if self.state.apply_running:
-            return
-        if not self.state.plan_steps:
-            return
-        self.state.apply_running = True
-        self.state.dry_log = []
-        self.query_one("#dry_progress").remove_class("hidden")
-        self.query_one("#dry_log").remove_class("hidden")
-        self.query_one("#dry_progress", ProgressBar).update(total=len(self.state.plan_steps), progress=0)
-        self.query_one("#dry_log", Static).update("Starting dry run...")
-        self.query_one("#dry_run_btn", Button).disabled = True
-
-        def callback(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
-            self.call_from_thread(self._update_dry_progress, idx, total, step.title, result)
-
-        def worker() -> None:
-            result = run_dry_apply(self.state.plan_steps, on_step=callback)
-            self.call_from_thread(self._finish_dry_apply, result.ok, result.log_path)
-
-        Thread(target=worker, daemon=True).start()
-
-    def _update_dry_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
-        self.query_one("#dry_progress", ProgressBar).update(total=total, progress=idx)
-        self._append_log("#dry_log", self._step_log_line(idx, total, title, result), self.state.dry_log)
-
-    def _finish_dry_apply(self, ok: bool, log_path: Path) -> None:
-        self.state.apply_running = False
-        self.state.dry_run_done = True
-        self.state.dry_run_ok = ok
-        if ok:
-            self._append_log("#dry_log", f"Dry run complete. Log: {log_path}", self.state.dry_log)
-            self.query_one("#next_btn_5", Button).disabled = False
-            self.notify("Dry run passed", severity="information")
-        else:
-            self._append_log("#dry_log", f"Dry run FAILED. Log: {log_path}", self.state.dry_log)
-            self.query_one("#dry_run_btn", Button).disabled = False
-            self.notify("Dry run failed", severity="error")
-
-    def _prepare_install_step(self) -> None:
-        if not self.state.config:
-            return
-        label = SUPPORTED_MACOS.get(self.state.config.macos, {}).get("label", self.state.config.macos)
-        btn = self.query_one("#install_btn", Button)
-        btn.label = f"Install {label}"
-        btn.remove_class("hidden")
-        btn.focus()
-
-    def _run_live_install(self) -> None:
-        if self.state.apply_running:
-            return
-        if not self.state.config or not self.state.plan_steps:
-            return
-        if not self.state.preflight_ok:
-            self.notify("Preflight has failures. Fix before install.", severity="error")
-            return
-        self.state.apply_running = True
-        self.state.live_log_lines = []
-        self.query_one("#install_btn").add_class("hidden")
-        self.query_one("#live_progress").remove_class("hidden")
-        self.query_one("#live_log").remove_class("hidden")
-        self.query_one("#live_progress", ProgressBar).update(
-            total=len(self.state.plan_steps), progress=0
-        )
-        self.query_one("#live_log", Static).update("Starting live install...")
-
-        def callback(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
-            self.call_from_thread(self._update_live_progress, idx, total, step.title, result)
-
-        def worker() -> None:
-            result, snapshot = run_live_install(
-                self.state.config.vmid, self.state.plan_steps, on_step=callback
-            )
-            self.call_from_thread(self._finish_live_install, result.ok, result.log_path, snapshot)
-
-        Thread(target=worker, daemon=True).start()
-
-    def _update_live_progress(self, idx: int, total: int, title: str, result: StepResult | None) -> None:
-        self.query_one("#live_progress", ProgressBar).update(total=total, progress=idx)
-        self._append_log("#live_log", self._step_log_line(idx, total, title, result), self.state.live_log_lines)
-
-    def _finish_live_install(
-        self, ok: bool, log_path: Path, snapshot: RollbackSnapshot | None
-    ) -> None:
-        self.state.apply_running = False
-        self.state.live_done = True
-        self.state.live_ok = ok
-        self.state.live_log = log_path
-        self.state.snapshot = snapshot
-        vmid = self.state.config.vmid if self.state.config else "???"
-        result_box = self.query_one("#result_box", Static)
-        result_box.remove_class("hidden")
-        unattended_log = None
-        if ok:
-            result_box.remove_class("result_fail")
-            self.notify("macOS VM created", severity="information")
-            if self.state.unattended:
-                unattended_log = self._spawn_unattended_driver(vmid)
-        else:
-            result_box.add_class("result_fail")
-            self.notify("Install failed", severity="error")
-        result_box.update(format_install_result(ok, vmid, log_path, snapshot, unattended_log))
-
-    UNATTENDED_LOG_DIR = "/var/log"
-
-    def _spawn_unattended_driver(self, vmid: int) -> str:
-        """Start install-unattended as a detached process that survives the TUI."""
-        import subprocess
-        import sys as _sys
-
-        log_path = f"{self.UNATTENDED_LOG_DIR}/osx-next-unattended-{vmid}.log"
-        disk_gb = self.state.config.disk_gb if self.state.config else 0
-        with open(log_path, "ab") as log_file:
-            subprocess.Popen(
-                [_sys.executable, "-m", "osx_proxmox_next.cli", "install-unattended",
-                 "--vmid", str(vmid), "--disk-gb", str(disk_gb)],
-                stdout=log_file, stderr=log_file,
-                stdin=subprocess.DEVNULL, start_new_session=True,
-            )
-        return log_path
 
     def _preflight_worker(self) -> None:
-        def _on_status(msg: str) -> None:
-            self.call_from_thread(self._update_preflight_status, msg)
-        checks = run_preflight_worker(on_status=_on_status)
-        self.call_from_thread(self._finish_preflight, checks)
+        checks = run_preflight()
+        label = self._host_label()
+        try:
+            self.call_from_thread(self.set_host_checks, checks, label)
+        except Exception:  # noqa: BLE001 - the app is closing
+            log.debug("preflight result dropped", exc_info=True)
 
-    def _update_preflight_status(self, msg: str) -> None:
-        self.query_one("#preflight_checks", Static).update(f"  ⏳ {msg}")
+    @staticmethod
+    def _host_label() -> str:
+        try:
+            return socket.gethostname()
+        except OSError:  # pragma: no cover
+            return ""
 
-    def _finish_preflight(self, checks: list[PreflightCheck]) -> None:
-        self.state.preflight_done = True
-        self.state.preflight_checks = checks
-        self.state.preflight_ok = all(c.ok for c in checks)
-        self._update_preflight_display()
-        self.query_one("#preflight_next_btn", Button).disabled = not self.state.preflight_ok
+    def set_host_checks(self, checks: list[PreflightCheck], label: str = "") -> None:
+        self.host_checks = checks
+        if label:
+            self.host_label = label
+        self._refresh_bars()
 
-    def _detect_storage_targets(self) -> list[str]:
-        return detect_storage_targets()
+    @property
+    def failing_checks(self) -> list[PreflightCheck]:
+        return [c for c in (self.host_checks or []) if not c.ok]
 
-    def _detect_next_vmid(self) -> int:
-        return detect_next_vmid()
+    def host_chip(self, pal: dict) -> Text:
+        if self.host_checks is None:
+            return Text("◌ checking host", style=pal["muted"])
+        bad = self.failing_checks
+        chip = Text()
+        if bad:
+            chip.append("● ", style=pal["error"])
+            chip.append(f"{len(bad)} to fix", style=pal["error"])
+        else:
+            chip.append("● ", style=pal["success"])
+            chip.append("host ready", style=pal["success"])
+        if self.host_label:
+            chip.append(" · " + self.host_label, style=pal["muted"])
+        return chip
 
-    def _set_input_value(self, selector: str, value: str) -> None:
-        widget = self.query_one(selector, Input)
-        widget.value = value
-        widget.cursor_position = len(value)
-        widget.refresh(layout=True)
+    def _refresh_bars(self) -> None:
+        for screen in self.screen_stack:
+            refresh = getattr(screen, "refresh_topbar", None)
+            if refresh:
+                try:
+                    refresh()
+                except Exception:  # noqa: BLE001 - screen not composed yet
+                    pass
 
-    def _update_step_bar(self) -> None:
-        labels = ["Preflight", "OS", "Storage", "Config", "Dry Run", "Install"]
-        s = self.current_step
-        parts = [
-            f"{'[x]' if n < s else '[>]' if n == s else '[ ]'} {n}.{labels[n-1]}"
-            for n in range(1, 7)
-        ]
-        self.query_one("#step_bar", Static).update("  ".join(parts))
+    # ── actions reachable from anywhere (and from the palette) ───────
 
-    def _step_log_line(self, idx: int, total: int, title: str, result: StepResult | None) -> str:
-        if result is None:
-            return f"Running {idx}/{total}: {title}"
-        return f"{'OK' if result.ok else 'FAIL'} {idx}/{total}: {title} (rc={result.returncode})"
+    def action_help(self) -> None:
+        screen = self.screen
+        if isinstance(screen, HelpScreen):
+            screen.dismiss()  # help is a toggle: it never stacks
+            return
+        entries = screen.help_entries() if hasattr(screen, "help_entries") else []
+        title = getattr(screen, "HELP_TITLE", "") or getattr(screen, "CRUMB", "") or "this screen"
+        self.push_screen(HelpScreen(title, entries))
 
-    def _append_log(self, selector: str, line: str, log: list[str]) -> None:
-        log.append(line)
-        widget = self.query_one(selector, Static)
-        # A Static never scrolls, so render only the 8 rows the 12-row box
-        # shows (app.tcss); a longer window hides the newest lines and a
-        # finished install reads as stuck mid-step.
-        widget.update("\n".join(log[-8:]))
+    def action_request_quit(self) -> None:
+        screen = self.screen
+        if isinstance(screen, ModalScreen):
+            return
+        busy = getattr(screen, "busy", None)
+        if busy and busy():
+            def answer(result: str | None) -> None:
+                if result == "yes":
+                    self.exit()
+            self.push_screen(ConfirmDialog(
+                "Quit while this is running?",
+                ["Stopping now can leave a half-done change on this host."],
+                confirm="Quit anyway", danger=True), answer)
+            return
+        self.exit()
+
+    def _on_home(self) -> bool:
+        return not isinstance(self.screen, ModalScreen)
+
+    def action_new_mac(self) -> None:
+        if not self._on_home():
+            return
+        from .screens.new_mac import NewMacScreen
+        self.push_screen(NewMacScreen())
+
+    def action_host_check(self) -> None:
+        if not self._on_home():
+            return
+        from .screens.host_check import HostCheckScreen
+        self.push_screen(HostCheckScreen())
+
+    def action_gpu(self, vmid: int | None = None) -> None:
+        if not self._on_home():
+            return
+        from .screens.gpu import GpuScreen
+        self.push_screen(GpuScreen(vmid=vmid))
+
+    def open_vm(self, vmid: int) -> None:
+        if not self._on_home():
+            return
+        from .screens.vm_view import open_vm_screen
+        open_vm_screen(self, vmid)
 
 
 def run() -> None:

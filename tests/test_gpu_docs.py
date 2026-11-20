@@ -87,9 +87,9 @@ def test_readme_points_to_the_guide_and_has_no_invalid_argument():
 
 def test_no_em_dash_in_the_new_files():
     src = REPO / "src/osx_proxmox_next"
-    new_modules = ["amd_host", "bios_guide", "host_setup", "gpu_attach", "gpu_setup", "gpu_setup_cli", "_gpu_mixin", "gpu", "nullmoth"]
+    new_modules = ["amd_host", "bios_guide", "host_setup", "gpu_attach", "gpu_setup", "gpu_setup_cli", "gpu", "nullmoth"]
     paths = [DOCS / "gpu-passthrough.md", *(DOCS / "gpu/bios").glob("*.md"), *(f for f in (src / "data/gpu").glob("*") if f.is_file()),
-             *(src / f"{m}.py" for m in new_modules), src / "screens/gpu_panel.py", REPO / "scripts/embed_gpu_engines.py"]
+             *(src / f"{m}.py" for m in new_modules), src / "screens/gpu.py", REPO / "scripts/embed_gpu_engines.py"]
     for path in paths:
         assert "\u2014" not in path.read_text(), path
     bash = (REPO / "scripts/bash/osx-proxmox-next.sh").read_text()
@@ -100,7 +100,7 @@ def test_no_em_dash_in_the_new_files():
 
 def test_no_mention_of_the_other_project():
     src = REPO / "src/osx_proxmox_next"
-    mine = [src / f"{m}.py" for m in ("amd_host", "bios_guide", "host_setup", "gpu_attach", "gpu_setup", "gpu_setup_cli", "_gpu_mixin")]
+    mine = [src / f"{m}.py" for m in ("amd_host", "bios_guide", "host_setup", "gpu_attach", "gpu_setup", "gpu_setup_cli")]
     mine += [f for f in (src / "data/gpu").glob("*") if f.is_file()]
     mine += [DOCS / "gpu-passthrough.md", *(DOCS / "gpu/bios").glob("*.md"), REPO / "README.md"]
     for path in mine:

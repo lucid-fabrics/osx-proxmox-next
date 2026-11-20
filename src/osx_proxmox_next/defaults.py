@@ -223,6 +223,16 @@ def max_vm_memory_mb() -> int:
     return max(0, avail - HOST_RAM_RESERVE_MB)
 
 
+def detect_total_memory_mb() -> int:
+    """Host MemTotal in MB; 0 when unknown (non-Linux or old kernel)."""
+    return _meminfo_mb("MemTotal")
+
+
+def detect_host_cores() -> int:
+    """Logical CPU count of the host (the cores a VM can be given)."""
+    return os.cpu_count() or 0
+
+
 def detect_memory_mb() -> int:
     mem_total_mb = _meminfo_mb("MemTotal")
     if mem_total_mb <= 0:

@@ -7,24 +7,25 @@ title: Quick Start
 
 The fastest path from zero to a running macOS VM.
 
-## Launch the Wizard
+## Launch the TUI
 
 ```bash
 osx-next
 ```
 
-The TUI wizard guides you through six steps:
+The TUI opens on your Macs, one card per macOS VM with a live picture of its screen. Press `n` for **New Mac**: one screen with everything prefilled from your host.
 
-| Step | What Happens |
-|------|-------------|
-| 1. Preflight | Auto-detects CPU vendor (Intel/AMD), checks host readiness |
-| 2. Choose OS | Pick macOS version: Monterey 12, Ventura 13, Sonoma 14, Sequoia 15, or Tahoe 26 |
-| 3. Storage | Select a storage target from auto-detected Proxmox storage pools |
-| 4. Config | Review/edit VM settings (VMID, cores, memory, disk, bridge, optional VLAN tag) with auto-filled defaults |
-| 5. Dry Run | Auto-downloads missing assets, then previews every `qm` command |
-| 6. Install | Creates the VM, builds OpenCore, imports disks, and starts the VM |
+| Row | What it sets |
+|-----|--------------|
+| macOS | Monterey 12, Ventura 13, Sonoma 14, Sequoia 15 or Tahoe 26 (left and right change it) |
+| Name | A live text field, `macos-<version>` until you change it |
+| Size | Light, Balanced, Heavy or Custom (cores, memory in GB, disk in GB) |
+| Lives on | A storage target from the auto-detected Proxmox storage pools |
+| Install | **Hands-off (beta)** finishes the install by itself, **Manual** leaves it to you in the Proxmox console |
+| Apple ID | Off, or On for iMessage, FaceTime and iCloud |
+| More | VM ID, bridge, VLAN tag, ISO storage, installer path, existing UUID, CPU model, NIC model |
 
-For most users: pick your macOS version, pick your storage, and click through to **Install**. Everything else is auto-detected.
+For most users: press `n`, look at the prefilled choices, and press `enter`. Everything else is auto-detected. The build screen then shows one timeline: **Check this host**, **Download macOS**, **Rehearse** (every command is run as a dry run first, and nothing on the host changes before it passes), **Create VM** and **Install macOS**. The Mac's live screen is beside it, and `l` shows the full log.
 
 :::note
 OpenCore and recovery images are downloaded once and cached. Creating a second VM with the same macOS version skips the download entirely.
@@ -32,7 +33,7 @@ OpenCore and recovery images are downloaded once and cached. Creating a second V
 
 ## What to Expect After Install
 
-Once the wizard completes:
+Once the build completes:
 
 1. **The VM starts automatically** and boots into the OpenCore boot picker
 2. **Press Enter on the macOS entry** in the VM console. The picker waits for you on purpose, so recovery never boots by itself mid-install
@@ -86,7 +87,7 @@ osx-next-cli edit --vmid 910 --cores 4 --memory 8192 --execute
 ## Next Steps
 
 - **CLI usage** -- Run `osx-next-cli --help` for headless/scripted VM creation
-- **Manage existing VMs** -- Run `osx-next --manage` to edit, start, or stop VMs from the TUI
+- **Manage existing VMs** -- Open `osx-next` and use `s` to start or stop, `e` to edit and `d` to remove a Mac
 - **GPU passthrough** -- Attach a discrete GPU for native graphics performance
 - **Apple Services** -- Enable iCloud, iMessage, and FaceTime with `--apple-services`
 - **Performance profiles** -- Apply guest-side tuning scripts for snappier UI

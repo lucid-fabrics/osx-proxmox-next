@@ -7,7 +7,7 @@
 <p align="center">
   <strong>You're losing 3–6 hours every time you set up a macOS VM on Proxmox.</strong><br>
   OpenCore plist editing. GenSMBIOS. Manual <code>qm</code> commands. One wrong flag and you start over.<br>
-  <strong>osx-proxmox-next does it in under 5 minutes. One command. Guided wizard. Done.</strong>
+  <strong>osx-proxmox-next does it in under 5 minutes. One command. One screen. Done.</strong>
 </p>
 
 <p align="center">
@@ -50,12 +50,12 @@
 
 The manual route eats your time: find the right OpenCore build, edit plist files, run GenSMBIOS, copy ISOs, type out `qm` commands, debug boot failures, repeat. Most people give up or spend a full day getting it right once - then forget the steps by the next time.
 
-osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxmox host.
+osx-proxmox-next replaces all of it with one screen that runs on your Proxmox host.
 
 **You get:**
-- A 6-step TUI wizard: **Preflight > OS > Storage > Config > Dry Run > Install**
-- **Guided GPU passthrough (BETA)**: scan your cards, get a BIOS photo card with a QR code for your board, let the tool set up the host and attach the card, undo it all with one command. AMD Radeon natively, NVIDIA RTX 20 to 50 via the community NullMoth driver, the Intel iGPU via WhateverXe
-- **Unattended install (BETA)**: tick one box and walk away - the tool erases the new disk, runs the installer, and answers every reboot until macOS sits at Setup Assistant
+- A TUI that starts on your Macs, with a live picture of each VM's screen, and makes a new Mac from one prefilled screen followed by one build timeline: **Check this host > Download macOS > Rehearse > Create VM > Install macOS**
+- **Graphics card passthrough (BETA)**: choose and approve once, restart once, confirm it works. The tool scans your cards, shows a BIOS photo card with a QR code for your board only when a setting must change, sets up the host and attaches the card, and puts everything back on request. AMD Radeon natively, NVIDIA RTX 20 to 50 via the community NullMoth driver, the Intel iGPU via WhateverXe
+- **Hands-off install (BETA)**: the default on the New Mac screen, so you can walk away - the tool erases the new disk, runs the installer, and answers every reboot until macOS sits at Setup Assistant
 - OpenCore boot image assembled on your host from pinned, checksum-verified upstream releases - no opaque prebuilt blob
 - Auto-detected hardware defaults (CPU vendor, cores, RAM, storage targets)
 - Intel, Xeon, and AMD CPU support - auto-detected, zero configuration needed
@@ -93,9 +93,7 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 
 ### Demo
 
-**Wizard (6 steps: Preflight → OS → Storage → Config → Dry Run → Install), including the Unattended install (BETA) toggle:**
-
-![osx-proxmox-next TUI wizard demo](docs/static/img/demo-tui.gif)
+**The TUI: your Macs, the New Mac screen and the build timeline with the VM's live screen:**
 
 **CLI tools (preflight, plan, doctor):**
 
@@ -106,22 +104,22 @@ osx-proxmox-next replaces all of it with a 6-step wizard that runs on your Proxm
 <table>
   <tr>
     <td align="center">
-      <img src="docs/static/img/screenshots/step1-preflight.svg" alt="Step 1: Preflight Checks" width="400"><br>
-      <strong>Step 1:</strong> Preflight Checks
+      <img src="docs/static/img/screenshots/tui-home.png" alt="Your Macs: cards with a live screen each" width="400"><br>
+      <strong>Your Macs:</strong> a live screen for every VM
     </td>
     <td align="center">
-      <img src="docs/static/img/screenshots/step2-choose-os.svg" alt="Step 2: OS Selection" width="400"><br>
-      <strong>Step 2:</strong> OS Selection
+      <img src="docs/static/img/screenshots/tui-new-mac.png" alt="New Mac: one screen, everything prefilled" width="400"><br>
+      <strong>New Mac:</strong> everything prefilled, press enter
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="docs/static/img/screenshots/step4-config-filled.svg" alt="Step 4: VM Configuration" width="400"><br>
-      <strong>Step 4:</strong> VM Configuration (VLAN tag + unattended beta)
+      <img src="docs/static/img/screenshots/tui-build.png" alt="Build: timeline with the live VM screen" width="400"><br>
+      <strong>Build:</strong> the timeline and the Mac's screen
     </td>
     <td align="center">
-      <img src="docs/static/img/screenshots/step5-review.svg" alt="Step 5: Review & Dry Run" width="400"><br>
-      <strong>Step 5:</strong> Review & Dry Run
+      <img src="docs/static/img/screenshots/tui-gpu.png" alt="Graphics card: choose and approve once" width="400"><br>
+      <strong>Graphics card:</strong> choose and approve once
     </td>
   </tr>
 </table>
@@ -151,7 +149,7 @@ Run this on your Proxmox 9 host as root:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"
 ```
 
-This clones the repo, sets up a Python venv, and launches the TUI wizard.
+This clones the repo, sets up a Python venv, and launches the TUI.
 
 > Built solo and maintained in my free time. If it saves you an afternoon of `qm` commands, [a coffee helps](https://ko-fi.com/s/84fe857595) or a [coffee on BMC](https://buymeacoffee.com/lucidfabrics). ☕
 
@@ -165,23 +163,24 @@ curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main
 
 Same VM creation logic (OpenCore + osrecovery + SMBIOS), whiptail menus, no venv needed. The advanced settings include the same **Unattended install (BETA)** toggle as the TUI.
 
-### 🪄 Wizard Walkthrough
+### 🪄 TUI Walkthrough
 
-| Step | What Happens |
-|------|-------------|
-| **1️⃣ Preflight** | Auto-detects CPU vendor (Intel/AMD), checks host readiness |
-| **2️⃣ Choose OS** | Pick macOS version (Monterey, Ventura, Sonoma, Sequoia, Tahoe) - SMBIOS auto-generated |
-| **3️⃣ Storage** | Select storage target from auto-detected Proxmox storage pools |
-| **4️⃣ Config** | Review/edit VM settings (VMID, cores, memory, disk, bridge, optional VLAN tag) with auto-filled defaults |
-| **5️⃣ Dry Run** | Auto-downloads missing assets, then previews every `qm` command |
-| **6️⃣ Install** | Creates the VM, builds OpenCore, imports disks, and starts the VM |
+| Screen | What Happens |
+|--------|-------------|
+| **Your Macs** | Opens on your macOS VMs as cards with a live picture of each screen. Keys: `enter` open, `s` start or stop, `e` edit, `g` graphics card, `d` remove, `n` new Mac, `h` host check, `v` cards or list, `?` help, `q` quit |
+| **New Mac** | One screen, prefilled from the host: macOS version, name, size (Light, Balanced, Heavy, Custom), storage, install mode, Apple ID. Left and right change a choice, up and down move between rows, `enter` creates the Mac. Everything else (VLAN, CPU model, NIC, installer path, UUID) is under **More** |
+| **Build** | One timeline: Check this host, Download macOS, Rehearse every step (nothing on the host changes before it passes), Create VM, Install macOS. The VM's live screen sits beside it. `l` shows the full log, `z` zooms the screen |
+| **Host check** | Failing checks first, each with one plain sentence on why it matters. Where there is a safe fix (KVM `ignore_msrs`, a missing apt package) `f` shows the exact commands and runs them after you confirm |
+| **Graphics card (BETA)** | Choose the card and the Mac, approve the whole plan once, restart once, confirm it works. `p` lists every change, `u` puts everything back |
 | **🤖 Unattended (BETA)** | Optional: drives the whole macOS install automatically - erases the new disk, runs the installer, handles every reboot - until Setup Assistant |
 
-**Most users:** pick your macOS version, pick your storage, click through to **Install**. Preflight and CPU detection run automatically.
+Hands-off is the default value of the **Install** row; choose **Manual** to finish the install yourself, and a hands-off run keeps going if you close osx-next and shows the same Build screen when you reopen it.
+
+**Most users:** press `n`, check the prefilled choices, press `enter`. Host detection runs in the background and CPU defaults are picked for you. `ctrl+p` opens a command palette with every screen and every Mac by name.
 
 ### 🤖 Unattended Install (BETA)
 
-Tick **Unattended install** on the config step (or answer yes in the bash script's advanced settings) and the tool finishes the whole macOS install by itself: it boots recovery, **erases the new VM disk**, runs `startosinstall`, and answers the boot picker across every reboot. Thirty to sixty minutes later the VM is sitting at Setup Assistant. It works by watching the VM console (`qm screendump` frame sizes) and typing (`qm sendkey`), so it needs nothing extra installed.
+Leave **Install** on **Hands-off** on the New Mac screen (or answer yes in the bash script's advanced settings) and the tool finishes the whole macOS install by itself: it boots recovery, **erases the new VM disk**, runs `startosinstall`, and answers the boot picker across every reboot. Thirty to sixty minutes later the VM is sitting at Setup Assistant. It works by watching the VM console (`qm screendump` frame sizes) and typing (`qm sendkey`), so it needs nothing extra installed.
 
 ```bash
 # CLI flavour: run right after apply --execute, while the VM shows the boot picker
@@ -401,7 +400,7 @@ The tool requires OpenCore and recovery/installer images. It scans `/var/lib/vz/
 - `opencore-osx-proxmox-vm.iso` or `opencore-{version}.iso`
 - `{version}-recovery.img` or `{version}-recovery.iso`
 
-Use `osx-next-cli download --macos <version>` to auto-fetch missing assets. The TUI wizard auto-downloads missing assets in step 5.
+Use `osx-next-cli download --macos <version>` to auto-fetch missing assets. The TUI downloads missing assets in the Download macOS phase of the build.
 </details>
 
 <details>
@@ -594,9 +593,9 @@ When `--apple-services` is enabled, this tool automatically:
 
 ### SMBIOS Identity (Auto-Generated)
 
-- **TUI:** SMBIOS is auto-generated when you select a macOS version in step 2. Click **Generate SMBIOS** in step 4 to regenerate.
+- **TUI:** SMBIOS is auto-generated when you press `enter` on the New Mac screen.
 - **CLI:** SMBIOS is auto-generated unless you pass `--no-smbios` or provide your own values via `--smbios-serial`, `--smbios-uuid`, `--smbios-mlb`, `--smbios-rom`, `--smbios-model`.
-- **Existing UUID:** Enter an existing UUID in step 4 to preserve it (useful for re-running on an existing VM).
+- **Existing UUID:** Enter an existing UUID under **More** on the New Mac screen to preserve it (useful for re-running on an existing VM).
 
 The generated values are visible in the dry-run output as a `qm set --smbios1` step.
 
@@ -616,7 +615,7 @@ osx-next-cli apply --execute \
   --apple-services --smbios-uuid "YOUR-UUID-HERE"
 ```
 
-In the **TUI**, check "Enable Apple Services (iMessage, FaceTime, iCloud)" in step 4 to add:
+In the **TUI**, set the **Apple ID** row to **On** to add:
 - `vmgenid` device (required for Apple services)
 - Static MAC address (persistent across reboots)
 - PlatformInfo patching in OpenCore's `config.plist`
@@ -684,7 +683,7 @@ If it prints `1` the patch is not in effect and sign-in will fail. Releases that
 
 ```
 src/osx_proxmox_next/
-  app.py              # TUI wizard (Textual) - 6-step reactive state machine
+  app.py              # TUI app (Textual): theme, command palette, host check in the background
   cli.py              # Non-interactive CLI
   domain.py           # VM config model + validation (VmConfig, EditChanges, PlanStep)
   planner.py          # qm command generation (build_plan, build_edit_plan)
@@ -699,13 +698,13 @@ src/osx_proxmox_next/
   profiles.py         # VM config profile management
   infrastructure.py   # Proxmox command adapter
   diagnostics.py      # Diagnostic log bundle export
-  _wizard_mixin.py    # TUI mixin: VM creation wizard steps
-  _edit_mixin.py      # TUI mixin: VM edit flow (stop, patch, optionally restart)
-  _manage_mixin.py    # TUI mixin: VM list, edit, and destroy in manage mode
-  models/             # WizardState dataclass and related models
-  services/           # Detection, edit, and Proxmox query services
-  forms/              # Textual form widgets
-  screens/            # TUI screen components (step screens, manage screen)
+  theme.py            # The osx-next Textual theme (every colour of app.tcss)
+  presets.py          # Light, Balanced and Heavy VM sizes
+  models/             # NewMacState: the New Mac screen's state and validation rules
+  services/           # Detection, build pipeline, host fixes, install driver log, Proxmox queries
+  forms/              # Form value validation shared by the screens
+  screens/            # Home, VM view, New Mac, Build, Host check, Graphics card and their dialogs
+  widgets/            # Live VM screen, key bar, top bar, capacity bars, form rows
   py.typed            # PEP 561 type marker
 ```
 
@@ -825,7 +824,7 @@ Yes. osx-proxmox-next creates a macOS VM on Proxmox VE 9 in one command: it buil
 Yes. AMD hosts are auto-detected and run with Cascadelake-Server CPU emulation. Intel hosts (including 12th gen+ hybrid and Xeon) get the correct CPU mode automatically. No configuration needed.
 
 **How long does it take to install macOS on Proxmox?**
-About 5 minutes of setup with the wizard, then the macOS installer runs unattended. Download time depends on your connection (recovery image is ~0.9 GB, downloaded once and cached).
+About 5 minutes of setup in the TUI, then the macOS installer runs unattended. Download time depends on your connection (recovery image is ~0.9 GB, downloaded once and cached).
 
 **Is GPU passthrough supported?**
 Yes. `osx-next-cli gpu-setup` walks you through it, including the BIOS and the host setup. See [GPU Passthrough](#-gpu-passthrough).

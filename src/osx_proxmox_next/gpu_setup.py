@@ -27,6 +27,7 @@ __all__ = [
     "VmOption",
     "Session",
     "TROUBLESHOOTING",
+    "CONFIRM_PHRASE",
     "card_text",
     "docs_url",
     "render_rail",
@@ -34,6 +35,7 @@ __all__ = [
 ]
 
 RESUME_CMD = "osx-next-cli gpu-setup"
+CONFIRM_PHRASE = "I understand"  # typed to continue past a hard warning (the TUI and the CLI ask for the same words)
 # (value, label, one-line description) of the AMD display choice, shared by the CLI and the TUI
 DISPLAY_OPTIONS = (
     ("gpu", "Monitor on the GPU", "Best performance. Plug a screen into the card; the Proxmox console goes blank."),
@@ -344,6 +346,22 @@ class Session:
     def save(self) -> None:
         host_setup.save_state(self.state, self.root)
 
+    # ── what the user approved (the TUI asks once, then runs the rest unattended) ──
+
+    def approve(self, record: dict) -> None:
+        """Store what the user approved, so the steps after a restart run without asking again."""
+        self.state["approved"] = record
+        self.save()
+
+    @property
+    def approval(self) -> dict | None:
+        return self.state.get("approved") or None
+
+    def clear_approval(self) -> None:
+        if "approved" in self.state:
+            del self.state["approved"]
+            self.save()
+
     def rail(self) -> str:
         return render_rail(self.state)
 
@@ -533,7 +551,9 @@ class Session:
     def target(self) -> dict:
         """The chosen card in the shape host_setup wants. Raises CardChanged when the device at the saved
         address is no longer the chosen card."""
-        chosen = self.state["gpu"]
+        return self._target_for(self.state["gpu"])
+
+    def _target_for(self, chosen: dict) -> dict:
         reset = "none"
         if chosen["vendor"] == "amd":
             fam = amd_host.family_for(chosen["device"])
@@ -543,6 +563,21 @@ class Session:
             raise CardChanged(target["mismatch"])
         target["boot_vga"] = target["boot_vga"] or chosen["boot_vga"]
         return target
+
+    @staticmethod
+    def _chosen_of(card: "GpuCard", root: str) -> dict:
+        return {"bdf": card.bdf, "vendor": card.vendor, "device": card.device_id, "boot_vga": card.boot_vga,
+                "name": card.name, "identity": host_setup.identity_of(root, card.bdf)}
+
+    def preview(self, card: "GpuCard", allow_no_console: bool = False, write_optional: bool = False) -> dict:
+        """What choosing *card* would need, without choosing it or writing anything: the BIOS items
+        and the host plan. Raises CardChanged when the device at the card's address is not that card."""
+        target = self._target_for(self._chosen_of(card, self.root))
+        facts = self.facts()
+        items = bios_guide.check_items(facts, target, self.root)
+        plan = host_setup.plan_host(facts, target, {"allow_no_console": allow_no_console, "write_optional": write_optional},
+                                    self.root, self.run)
+        return {"items": items, "plan": plan}
 
     def card_changed(self, exc: Exception) -> str:
         """The chosen card moved or changed: forget the choice and send the user back to the scan."""
@@ -663,8 +698,17 @@ class Session:
     # ── 7. VM ────────────────────────────────────────────────────────
 
     def vm_plan(self, allow_stop: bool = False) -> nullmoth.AttachPlan:
-        chosen, vmid = self.state["gpu"], self.state["vm"]
         self.target()  # raises CardChanged when the card moved
+        return self._vm_plan(self.state["gpu"], self.state["vm"], self.state["display"],
+                             self.state["ack_nullmoth"], allow_stop)
+
+    def preview_vm(self, card: "GpuCard", vmid: int, display: str, ack: bool) -> nullmoth.AttachPlan:
+        """The attach plan *card* and *vmid* would get, before anything is chosen. A running VM is
+        planned as if it were stopped: the run asks before stopping it."""
+        return self._vm_plan(self._chosen_of(card, self.root), vmid, display, ack, True)
+
+    def _vm_plan(self, chosen: dict, vmid: int | None, display: str, ack: bool,
+                 allow_stop: bool) -> nullmoth.AttachPlan:
         if vmid is None:
             plan = nullmoth.AttachPlan(0)
             plan.issues.append("No VM chosen yet. Create or pick a macOS VM first.")
@@ -673,22 +717,23 @@ class Session:
         if chosen["vendor"] == "nvidia":
             from .defaults import DEFAULT_ISO_DIR
             from .oc_builder import AMFIPASS
-            if not self.state["ack_nullmoth"]:
+            if not ack:
                 plan = nullmoth.AttachPlan(vmid)
                 plan.issues.append("The NullMoth notice has not been acknowledged.")
                 return plan
             return nullmoth.prepare_attach(vmid, bdf, Path(DEFAULT_ISO_DIR) / AMFIPASS.filename,
                                            allow_stop=allow_stop, adapter=self.pve, sysfs_root=self.sysfs)
         if chosen["vendor"] == "intel":
-            return self.intel_plan(vmid, allow_stop)
-        return gpu_attach.prepare_attach_amd(vmid, bdf, self.state["display"], allow_stop,
+            return self.intel_plan(vmid, allow_stop, chosen)
+        return gpu_attach.prepare_attach_amd(vmid, bdf, display, allow_stop,
                                              adapter=self.pve, sysfs_root=self.sysfs)
 
-    def intel_plan(self, vmid: int, allow_stop: bool = False) -> nullmoth.AttachPlan:
+    def intel_plan(self, vmid: int, allow_stop: bool = False, chosen: dict | None = None) -> nullmoth.AttachPlan:
         """The iGPU attach preflight and plan. The downloads are not done here; the plan names where they go."""
         from .defaults import DEFAULT_ISO_DIR
         from .oc_builder import AMFIPASS_MOD
-        info = intel_host.lookup(self.state["gpu"]["device"], intel_host.device_list()["text"])
+        device = (chosen or self.state["gpu"])["device"]
+        info = intel_host.lookup(device, intel_host.device_list()["text"])
         cache = Path(DEFAULT_ISO_DIR)
         rom_file = info["rom_file"] if info else ""
         return igpu_attach.prepare_attach_igpu(

@@ -18,15 +18,15 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmo
 - **Builds OpenCore** with the correct kexts, drivers, and config for your macOS version
 - **Generates a valid SMBIOS identity** so iCloud, iMessage, and FaceTime just work
 - **Downloads the recovery image** from Apple and caches it for future VMs
-- **Shows you every command** before touching your system (mandatory dry-run)
+- **Shows you every command** before touching your system (a rehearsal that must pass before anything changes)
 
 ## Pick your style
 
-| | TUI Wizard | CLI |
+| | TUI | CLI |
 |--|-----------|-----|
 | **Command** | `osx-next` | `osx-next-cli apply ...` |
 | **Best for** | First-time setup, exploring options | Scripting, automation, headless servers |
-| **Experience** | Guided 6-step flow with live validation | Flags and JSON output |
+| **Experience** | One prefilled screen, a build timeline and a live view of each Mac's screen | Flags and JSON output |
 
 ## Supported macOS versions
 
@@ -48,6 +48,6 @@ New here? Follow this path:
 
 1. **[Check requirements](getting-started/requirements)** -- make sure your hardware is ready
 2. **[Install](getting-started/installation)** -- one command on your Proxmox node
-3. **[Create your first VM](getting-started/quick-start)** -- walk through the wizard
+3. **[Create your first VM](getting-started/quick-start)** -- press `n` in the TUI
 
 Already comfortable? Jump to the **[CLI Reference](guides/cli-reference)** or explore the **[Architecture](architecture/overview)** to understand how it all fits together.

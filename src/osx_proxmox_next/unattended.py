@@ -31,7 +31,13 @@ from collections.abc import Callable
 log = logging.getLogger(__name__)
 
 __all__ = ["QmConsole", "UnattendedError", "erase_install_command", "open_recovery_terminal",
-           "run_unattended_install"]
+           "run_unattended_install", "PHASE_MARK", "PHASES"]
+
+# Structured phase markers. run_unattended_install passes "##phase <id>" to
+# on_event when a phase of the install begins; the CLI turns that into a
+# timestamped log line the TUI reads back (services/unattended_service.py).
+PHASE_MARK = "##phase "
+PHASES = ("recovery", "erase", "installer", "restarts", "first_start", "ready")
 
 # Frame-size heuristics (bytes of a raw PPM screendump).
 PICKER_MIN_BYTES = 5_000_000       # 1920x1080 OpenCore picker
@@ -114,11 +120,13 @@ class QmConsole:
     piped command: it is started in its own session, which has no controlling terminal."""
 
     def __init__(self, vmid: int, runner: Callable[..., "subprocess.CompletedProcess"] = subprocess.run,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, probe_path: str | None = None):
         self.vmid = str(vmid)
         self._run = runner
         self._sleep = sleep
-        self._probe = os.path.join(tempfile.gettempdir(), f"osx-next-unattended-{vmid}.ppm")
+        # *probe_path* lets another reader (the TUI's live screen) grab frames into its own file
+        # without ever touching the install driver's probe.
+        self._probe = probe_path or os.path.join(tempfile.gettempdir(), f"osx-next-unattended-{vmid}.ppm")
 
     def frame_size(self) -> int:
         try:
@@ -423,7 +431,9 @@ def run_unattended_install(
     a phase times out; the VM is left as-is for manual inspection."""
     start = clock()
 
+    on_event(PHASE_MARK + "recovery")
     open_recovery_terminal(console, on_event, clock, sleep)
+    on_event(PHASE_MARK + "erase")
 
     command = erase_install_command(disk_gb)
     on_event("Typing the erase + startosinstall command (the VM disk is wiped now)")
@@ -431,6 +441,7 @@ def run_unattended_install(
     sleep(1)
     console.sendkey("ret")
     on_event("Installer launched; waiting for its first reboot")
+    on_event(PHASE_MARK + "installer")
 
     # First 1080p frame after launch = the install's first reboot (picker or
     # boot logo). Detach the recovery disk now, exactly what the manual flow
@@ -449,6 +460,7 @@ def run_unattended_install(
                  "post-install after the install or every boot will wait for return")
     console.qm("start")
     on_event("Recovery detached; continuing hands-off")
+    on_event(PHASE_MARK + "restarts")
 
     boots = 0
     last_big = clock()
@@ -494,6 +506,8 @@ def run_unattended_install(
             last_big = clock()
             if changed:
                 boots += 1
+                if boots == 2:
+                    on_event(PHASE_MARK + "first_start")
                 sleep(2)
                 # Single-entry picker (Timeout=0 still waits) or an ignored
                 # keystroke on the Apple-logo boot screen; either way safe.
@@ -515,6 +529,7 @@ def run_unattended_install(
         elif (boots >= 1 and clock() - last_big > DONE_QUIET
               and clock() - last_change <= DONE_MOTION):
             elapsed = int(clock() - start)
+            on_event(PHASE_MARK + "ready")
             on_event(
                 f"Done: macOS has been running without a reboot for "
                 f"{DONE_QUIET // 60} min after {boots} boot(s). "

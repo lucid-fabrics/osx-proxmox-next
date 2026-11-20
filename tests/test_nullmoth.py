@@ -13,7 +13,6 @@ from textual.widgets import Button, Checkbox, Input, Select, Static
 from nullmoth_fakes import GUID, MAC_CFG, FakeQm, good_card, oc_config, write_oc
 from osx_proxmox_next import cli, gpu, nullmoth
 from osx_proxmox_next import oc_builder
-from osx_proxmox_next.app import NextApp
 from osx_proxmox_next.domain import PlanStep
 from osx_proxmox_next.executor import ApplyResult
 from osx_proxmox_next.gpu import GpuInfo

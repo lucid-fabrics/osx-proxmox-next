@@ -13,11 +13,55 @@ from .infrastructure import ProxmoxAdapter
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class FixCommand:
+    """One command of an automatic fix.
+
+    *display* is the exact text shown to the user and *argv* what runs. Both
+    are constants (an apt package name comes from a fixed table), never built
+    from VM or user supplied text."""
+    display: str
+    argv: tuple[str, ...]
+
+
 @dataclass
 class PreflightCheck:
     name: str
     ok: bool
     details: str
+    fix: tuple[FixCommand, ...] = ()   # empty when there is no safe automatic fix
+
+    @property
+    def why(self) -> str:
+        """One plain sentence on why this check matters."""
+        return WHY.get(self.name) or WHY.get(self.name.split()[0] + " available", "")
+
+
+KVM_CONF = "/etc/modprobe.d/kvm.conf"
+IGNORE_MSRS_LIVE_FIX = FixCommand("echo Y > /sys/module/kvm/parameters/ignore_msrs",
+                                  ("sh", "-c", "echo Y > /sys/module/kvm/parameters/ignore_msrs"))
+IGNORE_MSRS_PERSIST_FIX = FixCommand(
+    f"echo 'options kvm ignore_msrs=Y' >> {KVM_CONF}",
+    ("sh", "-c", f"echo 'options kvm ignore_msrs=Y' >> {KVM_CONF}"))
+INITRAMFS_FIX = FixCommand("update-initramfs -k all -u", ("update-initramfs", "-k", "all", "-u"))
+
+WHY: dict[str, str] = {
+    "KVM ignore_msrs": "macOS hangs at the Apple logo without it. No reboot needed.",
+    "qm available": "qm creates and starts the VMs.",
+    "pvesm available": "pvesm finds the storage the VM disk lives on.",
+    "pvesh available": "pvesh asks Proxmox for the next free VM ID.",
+    "qemu-img available": "qemu-img converts the macOS recovery image.",
+    "dmg2img available": "Needed to unpack the macOS recovery image.",
+    "sgdisk available": "Needed to partition the OpenCore boot disk.",
+    "partprobe available": "Needed to make the new partitions visible.",
+    "losetup available": "Needed to mount the boot disk while it is built.",
+    "mkfs.fat available": "Needed to format the OpenCore boot partition.",
+    "blkid available": "Needed to find the boot partition.",
+    "/dev/kvm present": "Without hardware virtualization a Mac VM is far too slow to install.",
+    "Root privileges": "Creating VMs and changing the host needs root. Start osx-next as root.",
+    "IOMMU enabled": "Only needed for GPU passthrough.",
+    "initcall_blacklist": "Only needed for GPU passthrough on Proxmox 8 and later.",
+}
 
 
 def _find_binary(cmd: str) -> str | None:
@@ -85,19 +129,23 @@ def _check_ignore_msrs(
         )
 
     if persisted:
+        fix = (IGNORE_MSRS_LIVE_FIX,)
         details = (
             "ignore_msrs=Y is in /etc/modprobe.d/kvm.conf but the running kvm module has not "
             "picked it up (sysfs still reports N), so macOS will hang at the Apple logo. "
             "Fix, no reboot needed: echo Y > /sys/module/kvm/parameters/ignore_msrs"
         )
     else:
+        fix = (IGNORE_MSRS_LIVE_FIX, IGNORE_MSRS_PERSIST_FIX, INITRAMFS_FIX)
         details = (
             "Missing ignore_msrs=Y - macOS will kernel panic on unsupported MSR access. "
             "Fix now, no reboot needed: echo Y > /sys/module/kvm/parameters/ignore_msrs - "
             "then persist it: echo 'options kvm ignore_msrs=Y' >> /etc/modprobe.d/kvm.conf "
             "&& update-initramfs -k all -u"
         )
-    return PreflightCheck(name="KVM ignore_msrs", ok=False, details=details)
+    if not sysfs_path.exists():
+        fix = ()  # no kvm module loaded: nothing to write to, /dev/kvm reports the real problem
+    return PreflightCheck(name="KVM ignore_msrs", ok=False, details=details, fix=fix)
 
 
 def _check_iommu(cmdline_path: Path | None = None) -> PreflightCheck:
@@ -158,6 +206,7 @@ def run_preflight() -> list[PreflightCheck]:
                 name=f"{cmd} available",
                 ok=bool(binary),
                 details=binary or f"Not found. Install with: apt install {pkg}",
+                fix=() if binary else (FixCommand(f"apt install -y {pkg}", ("apt", "install", "-y", pkg)),),
             )
         )
 

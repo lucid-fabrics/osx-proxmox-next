@@ -17,7 +17,7 @@ This is beta, and it **erases the target VM disk** without asking. Point it at a
 
 | Surface | How to start it |
 |---------|-----------------|
-| TUI wizard | Step 4 (VM Configuration): tick **Unattended install (BETA)** |
+| TUI | New Mac screen, **Install** row: **Hands-off** (the default). Close osx-next at any time after the install starts and reopen it to get the same Build screen back |
 | CLI | `osx-next-cli install-unattended --vmid 910` |
 | Bash script | Answer **yes** to the `UNATTENDED INSTALL (BETA)` prompt in advanced settings |
 
