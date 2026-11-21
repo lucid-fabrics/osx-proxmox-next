@@ -89,3 +89,14 @@ def test_running_containers_come_from_pct_list_and_a_raising_pct_is_none(tmp_pat
     s = gpu_setup.Session(str(tmp_path), FakeRun({"pct list": (0, PCT)}), None)
     assert s.running_containers() == [(200, "web")]
     assert gpu_setup.Session(str(tmp_path), boom, None).running_containers() == []
+
+
+def test_the_bash_restart_step_lists_running_containers_the_same_way(monkeypatch, capsys):
+    import io
+    import json
+    from pathlib import Path
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"pct_list": PCT})))
+    assert bios_guide.main(["bios_guide.py", "running-cts"]) == 0
+    assert capsys.readouterr().out == "CT 200 web\n"
+    bash = (Path(__file__).resolve().parent.parent / "scripts/bash/osx-proxmox-next.sh").read_text()
+    assert "pct list" in bash and "gpu_bios running-cts" in bash
