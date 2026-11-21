@@ -91,7 +91,7 @@ osx-next-cli download --macos <version>
 ```
 
 :::note
-The TUI wizard (step 5) auto-downloads missing assets before the dry-run preview.
+The TUI downloads missing assets in the **Download macOS** phase of the build, before the rehearsal.
 :::
 
 ## Post-Install Boot Order

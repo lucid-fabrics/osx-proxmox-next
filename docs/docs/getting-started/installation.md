@@ -9,7 +9,7 @@ Two ways to install OSX Proxmox Next on your Proxmox host. All commands run as r
 
 ## Method 1: One-Liner Script (Recommended)
 
-The fastest way to get started. Clones the repo, sets up a Python virtual environment, and launches the TUI wizard:
+The fastest way to get started. Clones the repo, sets up a Python virtual environment, and opens the terminal interface (the TUI):
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/lucid-fabrics/osx-proxmox-next/main/install.sh)"
@@ -33,15 +33,15 @@ After installation, two commands are available:
 
 | Command | Description |
 |---------|-------------|
-| `osx-next` | TUI wizard — guided 6-step interactive setup |
-| `osx-next-cli` | CLI — flags-based, suitable for scripting and headless servers |
+| `osx-next` | TUI: your Macs, a New Mac screen and a build timeline |
+| `osx-next-cli` | CLI - flags-based, suitable for scripting and headless servers |
 
 ## Verifying Installation
 
 After installing via Method 1, confirm both entry points are available:
 
 ```bash
-# Launch the TUI wizard
+# Open the TUI
 osx-next
 
 # Check CLI version

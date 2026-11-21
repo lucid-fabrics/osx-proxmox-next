@@ -37,7 +37,7 @@ const features = [
   {
     icon: '⚡',
     title: 'Two Interfaces',
-    description: 'Interactive TUI wizard for first-timers. CLI with JSON output for scripting and automation.',
+    description: 'An interactive TUI built around your Macs, for first-timers. CLI with JSON output for scripting and automation.',
   },
 ];
 
@@ -118,10 +118,10 @@ function BeforeAfter() {
             <div className={clsx(styles.compareLabel, styles.compareLabelGreen)}>With OSX Proxmox Next</div>
             <ul className={styles.compareList}>
               <li>Run one command</li>
-              <li>Pick your macOS version</li>
-              <li>Pick your storage</li>
-              <li>Review the dry-run</li>
-              <li>Hit install</li>
+              <li>Press n for a new Mac</li>
+              <li>Check the prefilled choices</li>
+              <li>Press enter</li>
+              <li>Watch the build</li>
               <li>&nbsp;</li>
               <li>&nbsp;</li>
               <li>&nbsp;</li>
@@ -153,8 +153,8 @@ function HowItWorks() {
               One command installs the tool on your Proxmox node. Python venv is created automatically.
             </div>
             <img
-              src={useBaseUrl('/img/screenshots/step1-preflight.svg')}
-              alt="Preflight checks"
+              src={useBaseUrl('/img/tui/host_check.png')}
+              alt="Host check listing the failing checks first"
               className={styles.stepScreenshot}
             />
           </div>
@@ -162,11 +162,11 @@ function HowItWorks() {
             <div className={styles.stepNumber}>2</div>
             <div className={styles.stepTitle}>Choose</div>
             <div className={styles.stepDesc}>
-              Pick your macOS version and storage. CPU, RAM, and SMBIOS are auto-configured.
+              One prefilled screen. CPU, RAM, and SMBIOS are auto-configured.
             </div>
             <img
-              src={useBaseUrl('/img/screenshots/step2-choose-os.svg')}
-              alt="Choose macOS version"
+              src={useBaseUrl('/img/tui/new_mac.png')}
+              alt="New Mac screen with every row prefilled"
               className={styles.stepScreenshot}
             />
           </div>
@@ -174,11 +174,11 @@ function HowItWorks() {
             <div className={styles.stepNumber}>3</div>
             <div className={styles.stepTitle}>Run</div>
             <div className={styles.stepDesc}>
-              Review the dry-run, hit install. OpenCore, recovery, and VM are created automatically.
+              Press enter. The build rehearses every step, then creates the VM and installs macOS.
             </div>
             <img
-              src={useBaseUrl('/img/screenshots/step5-review.svg')}
-              alt="Review and install"
+              src={useBaseUrl('/img/tui/build.png')}
+              alt="Build timeline next to the live screen of the VM"
               className={styles.stepScreenshot}
             />
           </div>
@@ -225,8 +225,8 @@ function Stats() {
           <div className={styles.statLabel}>CPU Platforms</div>
         </div>
         <div className={styles.statItem}>
-          <div className={styles.statValue}>6</div>
-          <div className={styles.statLabel}>Wizard Steps</div>
+          <div className={styles.statValue}>1</div>
+          <div className={styles.statLabel}>Screen to Start</div>
         </div>
         <div className={styles.statItem}>
           <div className={styles.statValue}>&lt;10min</div>
@@ -369,7 +369,7 @@ export default function Home(): ReactNode {
   return (
     <Layout
       title="macOS VMs on Proxmox VE 9: One-Command Install"
-      description="Create macOS virtual machines on Proxmox VE 9 with one command. Ventura, Sonoma, Sequoia, and Tahoe on Intel and AMD hosts. TUI wizard, automatic OpenCore and recovery download, SMBIOS generation.">
+      description="Create macOS virtual machines on Proxmox VE 9 with one command. Ventura, Sonoma, Sequoia, and Tahoe on Intel and AMD hosts. TUI, automatic OpenCore and recovery download, SMBIOS generation.">
       <HomepageHeader />
       <main>
         <BeforeAfter />

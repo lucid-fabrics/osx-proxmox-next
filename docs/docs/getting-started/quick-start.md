@@ -70,13 +70,7 @@ If the macOS installer does not show your disk, you need to format it first. Ope
 
 ## Managing Existing VMs
 
-After a VM is created, use the TUI to manage it:
-
-```bash
-osx-next --manage
-```
-
-This opens a VM list where you can edit settings (CPU, memory, disk, network), start, stop, or destroy existing macOS VMs without using the CLI.
+After a VM is created, it appears on the Home screen of `osx-next`. Select it with the arrows and press `s` to start or shut down, `e` to edit cores, memory, disk and network, or `d` to remove it. See [The TUI](../guides/tui-wizard.md) for every screen and key.
 
 From the CLI, use the `edit` subcommand directly:
 

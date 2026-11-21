@@ -129,7 +129,7 @@ Notes:
 
 If you want Sequoia or Tahoe but prefer to establish your Apple Services session on Sonoma first (the fully-verified baseline), use this approach:
 
-1. Install **Sonoma 14** using the wizard
+1. Install **Sonoma 14** using the New Mac screen
 2. Sign in to your Apple ID, activate iCloud and iMessage
 3. Once signed in, upgrade in-place to **Sequoia 15** or **Tahoe 26** via System Settings > Software Update
 4. Your Apple Services session carries over from the Sonoma sign-in

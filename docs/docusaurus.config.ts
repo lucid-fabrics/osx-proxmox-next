@@ -18,7 +18,7 @@ const config: Config = {
         applicationCategory: 'DeveloperApplication',
         operatingSystem: 'Proxmox VE 9 (Linux)',
         description:
-          'Open-source tool that creates macOS virtual machines (Ventura, Sonoma, Sequoia, Tahoe) on Proxmox VE 9 with one command. TUI wizard, automatic OpenCore and recovery download, SMBIOS generation, Intel and AMD support.',
+          'Open-source tool that creates macOS virtual machines (Ventura, Sonoma, Sequoia, Tahoe) on Proxmox VE 9 with one command. TUI, automatic OpenCore and recovery download, SMBIOS generation, Intel and AMD support.',
         url: 'https://lucid-fabrics.github.io/osx-proxmox-next/',
         offers: {'@type': 'Offer', price: '0', priceCurrency: 'USD'},
         sameAs: ['https://github.com/lucid-fabrics/osx-proxmox-next'],
@@ -83,7 +83,7 @@ const config: Config = {
       {
         name: 'description',
         content:
-          'Create macOS virtual machines on Proxmox VE 9 with one command. Supports Ventura, Sonoma, Sequoia, and Tahoe on Intel and AMD hosts. TUI wizard, automatic OpenCore and recovery download, SMBIOS generation.',
+          'Create macOS virtual machines on Proxmox VE 9 with one command. Supports Ventura, Sonoma, Sequoia, and Tahoe on Intel and AMD hosts. TUI, automatic OpenCore and recovery download, SMBIOS generation.',
       },
       {
         name: 'keywords',
