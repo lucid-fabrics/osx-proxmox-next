@@ -262,6 +262,16 @@ def parse_running_vms(qm_list):
     return out
 
 
+def parse_running_cts(pct_list):
+    """Running containers from `pct list` (VMID Status Lock Name, the Lock column is often empty)."""
+    out = []
+    for line in pct_list.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1] == "running":
+            out.append((int(parts[0]), parts[-1]))
+    return out
+
+
 REBOOT_ARGV = ["systemctl", "reboot", "--firmware-setup"]
 
 
@@ -293,8 +303,11 @@ def main(argv):
     elif cmd == "running":
         for vmid, name in parse_running_vms(payload.get("qm_list", "")):
             print("%d %s" % (vmid, name))
+    elif cmd == "running-cts":
+        for ctid, name in parse_running_cts(payload.get("pct_list", "")):
+            print("CT %d %s" % (ctid, name))
     else:
-        sys.stderr.write("usage: bios_guide.py vendor|check|card|url|firmware|running\n")
+        sys.stderr.write("usage: bios_guide.py vendor|check|card|url|firmware|running|running-cts\n")
         return 64
     return 0
 

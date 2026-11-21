@@ -333,7 +333,13 @@ async def test_backup_words_count_only_files_that_existed(tmp_path):
             assert screen._backup_words() == words
         screen.s.state["host_changes"] = [{"path": "/etc/o", "existed": True, "stamp": "a", "reverted": True},
                                           {"path": "/etc/n", "existed": False, "stamp": "b", "reverted": False}]
-        assert screen._backup_words() == "Nothing to back up (1 new file)"    # only the last setup counts
+        assert screen._backup_words() == "Backed up 1 file, 1 new"           # the whole record counts
+        retried = [{"path": "/etc/a", "existed": True, "stamp": "a", "reverted": False},
+                   {"path": "/etc/b", "existed": True, "stamp": "a", "reverted": False},
+                   {"path": "/etc/a", "existed": True, "stamp": "b", "reverted": False},    # a retried host setup
+                   {"path": "/etc/c", "existed": False, "stamp": "b", "reverted": False}]
+        screen.s.state["host_changes"] = retried
+        assert screen._backup_words() == "Backed up 2 files, 1 new"          # /etc/a once, from both runs
 
 
 # ── 6 and 7: the files, in the undo question and its answer ──────────

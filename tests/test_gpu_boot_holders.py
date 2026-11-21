@@ -2,12 +2,13 @@
 the plain-words plan view and the undo wording."""
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import replace
 from types import SimpleNamespace
 
 from gpu_fakes import add_card, write
 from nullmoth_fakes import FakeQm
-from osx_proxmox_next import amd_host, gpu, gpu_attach, host_setup
+from osx_proxmox_next import amd_host, gpu, gpu_attach, host_setup, nullmoth
 from osx_proxmox_next.gpu_flow import Choice, Preview, build_before, build_preview, changes_text
 from osx_proxmox_next.gpu_plan_view import step_summary
 from test_gpu_setup import SEQUOIA, Env, ready
@@ -124,20 +125,44 @@ def test_the_command_line_warns_about_a_vm_that_starts_with_the_host(tmp_path):
 
 # ── every warning and refusal of the engine is shown or blocks ───────
 
-def full_preview(card, vm_issues=(), refusals=()):
+# lists of work to do, and "skipped" (things already right: OK lines, no reason to warn), not warnings
+NOT_TEXT = {"changes", "commands", "refresh", "steps", "skipped"}
+
+
+def engine_texts():
+    """One marker for every list of words the engine's plan types have, found from the types themselves: a new
+    warning source added later has a list here and so a marker the dialogs must show (or the test fails)."""
     plan = host_setup.new_plan()
-    plan.update(warnings=["w-host"], hard_warnings=["h-host"], notes=["n-host"], manual=["m-host"],
-                skipped=["s-host"], refusals=list(refusals))
-    vm_plan = SimpleNamespace(issues=list(vm_issues), hints=["hint-vm"], warnings=["warn-vm"], steps=[])
+    host_keys = [k for k, v in plan.items() if isinstance(v, list) and k not in NOT_TEXT]
+    vm_keys = [f.name for f in dataclasses.fields(nullmoth.AttachPlan)
+               if f.default_factory is list and f.name not in NOT_TEXT]      # type: ignore[misc]
+    return host_keys, vm_keys
+
+
+def full_preview(card, vm_issues=(), refusals=()):
+    host_keys, vm_keys = engine_texts()
+    plan = host_setup.new_plan()
+    for key in host_keys:
+        plan[key] = [f"host-{key}"]
+    plan["refusals"] = list(refusals)
+    vm_plan = nullmoth.AttachPlan(100)
+    for key in vm_keys:
+        setattr(vm_plan, key, [f"vm-{key}"])
+    vm_plan.issues = list(vm_issues)
     return Preview(card, 100, "gpu", plan=plan, vm_plan=vm_plan, typed_needed=True, typed_extra=["Careful: only-ssh"])
 
 
 def test_every_warning_the_engine_returns_is_in_before_you_continue(tmp_path):
     card = card_of(host(tmp_path, {103: ("stopped", CARD + "onboot: 1\n")}).session())
-    before = build_before(full_preview(card))
+    prev = full_preview(card)
+    before = build_before(prev)
     shown = "\n".join(before.warnings + before.notes)
-    for text in ("w-host", "h-host", "n-host", "m-host", "hint-vm", "warn-vm", "only-ssh", ONE, gpu.shared_note([103])):
+    host_keys, vm_keys = engine_texts()
+    # a refusal stops the button instead of being listed here, so it is checked by the test below
+    wanted = [f"host-{k}" for k in host_keys if k != "refusals"] + [f"vm-{k}" for k in vm_keys if k != "issues"]
+    for text in wanted + ["only-ssh", ONE, gpu.shared_note([103])]:
         assert text in shown, text
+    assert {"warnings", "hard_warnings", "notes", "manual"} <= set(host_keys) and "hints" in vm_keys
     assert before.phrase and not before.empty                                 # the phrase is asked in the same dialog
     assert build_before(full_preview(replace(card, vendor="nvidia"))).nvidia     # the NullMoth notice and its phrase
     assert any("Intel iGPU" in n for n in build_before(full_preview(replace(card, vendor="intel"))).notes)
@@ -248,3 +273,9 @@ def test_the_not_offered_reason_is_a_few_words(tmp_path):
     assert cards["0000:41:00"].short_why_not == "no Apple driver" and cards["0000:06:00"].short_why_not == ""
     env.qm.vms[120] = ("running", CARD)
     assert {c.bdf: c for c in env.session().scan()}["0000:06:00"].short_why_not == "in use by VM 120"
+
+
+def test_a_snapshot_section_is_never_read_as_the_live_config():
+    raw = "onboot: 0\nhostpci0: 0000:06:00,pcie=1\n\n[before-upgrade]\nonboot: 1\nhostpci1: 0000:07:00\nsnaptime: 5\n"
+    cfg = gpu.parse_config(raw)
+    assert cfg == {"onboot": "0", "hostpci0": "0000:06:00,pcie=1"}

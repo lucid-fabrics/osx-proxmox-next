@@ -595,6 +595,8 @@ def build_hostpci_detach_steps(
 def parse_config(raw: str) -> dict[str, str]:
     cfg: dict[str, str] = {}
     for line in raw.splitlines():
+        if line.startswith("["):   # a snapshot section: older values, never the live config
+            break
         if ":" in line and not line.startswith("#"):
             key, _, value = line.partition(":")
             cfg[key.strip()] = value.strip()

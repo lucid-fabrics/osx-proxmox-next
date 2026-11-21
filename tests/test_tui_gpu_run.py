@@ -13,6 +13,7 @@ from gpu_tui_fakes import (  # noqa: F401 - the underscore names are autouse fix
 from osx_proxmox_next import gpu_setup, host_setup, nullmoth
 from osx_proxmox_next.app import NextApp
 from osx_proxmox_next.gpu_setup import CONFIRM_PHRASE
+from osx_proxmox_next.screens import gpu_restart
 from osx_proxmox_next.screens.base import ChoiceDialog
 from osx_proxmox_next.screens.gpu import ChangesDialog, GpuScreen
 from osx_proxmox_next.screens.home import HomeScreen
@@ -86,8 +87,10 @@ async def test_the_backup_folder_is_in_the_p_dialog_not_on_the_screen(tmp_path, 
 
 
 @F.tui
-async def test_the_restart_box_is_the_one_confirmation(tmp_path, applied):
+async def test_the_restart_box_is_the_one_confirmation(tmp_path, applied, monkeypatch):
     """Fix 4: Restart now has the focus, enter restarts and nothing opens after it."""
+    clock = [100.0]
+    monkeypatch.setattr(gpu_restart, "_now", lambda: clock[0])      # the guard runs on this clock, no sleeping
     env = amd_env(tmp_path)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
@@ -96,16 +99,17 @@ async def test_the_restart_box_is_the_one_confirmation(tmp_path, applied):
         assert buttons == ["g-later", "g-restart"]                    # the primary button on the right
         assert app.focused.id == "g-restart"
         assert keys(app).startswith(" enter Restart now   p See every change") and "esc Later" in keys(app)
+        await F.settle(pilot, lambda: screen._primary_action is not None)   # the box is drawn and armed
         await pilot.press("enter")                                    # typed ahead: the first second is ignored
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert not env.run.ran("systemctl", "reboot") and app.screen is screen
-        screen._restart_armed = 0.0
+        clock[0] += 2.0                                               # a second has passed
+        await F.settle(pilot, lambda: not screen.query_one("#g-restart").has_class("-active"))   # button press effect
         await pilot.press("enter")
-        await pilot.pause(0.3)
-        assert env.run.ran("systemctl", "reboot") and app.screen is screen   # no second dialog
-        assert "Restarting..." in screen.result_text
+        await F.settle(pilot, lambda: env.run.ran("systemctl", "reboot"))
+        assert app.screen is screen and "Restarting..." in screen.result_text   # no second dialog
         await pilot.press("enter")                                    # a second enter does not restart twice
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert [c for c in env.run.calls if c[:2] == ["systemctl", "reboot"]] == [["systemctl", "reboot"]]
         await pilot.click("#g-later")
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen))

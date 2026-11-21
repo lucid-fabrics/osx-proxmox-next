@@ -673,6 +673,14 @@ class Session:
         res = self.pve.qm("list")
         return bios_guide.parse_running_vms(res.output) if res.ok else []
 
+    def running_containers(self) -> list[tuple[int, str]]:
+        """Running LXC containers (a host restart stops them too). No pct or a failing pct: none."""
+        try:
+            code, out = self.run(["pct", "list"])
+        except Exception:  # noqa: BLE001 - the list is extra: a missing pct never stops the restart box
+            return []
+        return bios_guide.parse_running_cts(out) if code == 0 else []
+
     def reboot_to_bios(self) -> tuple[bool, str]:
         """Reboot into the firmware setup, only when the firmware allows it."""
         if not bios_guide.firmware_setup_supported(self.root):

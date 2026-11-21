@@ -1178,8 +1178,9 @@ def undo_host(state, root="/", run=default_run):
         if problem:
             errors.append(problem)
             continue
-        restored.append(entry["path"])
-        if not entry["existed"]:
+        if entry["path"] not in restored:   # one line per file, even when it was changed twice
+            restored.append(entry["path"])
+        if not entry["existed"] and entry["path"] not in removed:
             removed.append(entry["path"])
         if entry["path"] == GRUB_DROPIN:
             kinds.add("grub")

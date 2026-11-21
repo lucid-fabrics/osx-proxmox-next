@@ -69,9 +69,11 @@ class RunMixin:
     def _backup_words(self) -> str:
         """What the backup step did, counting only files that existed: new files have nothing to back up."""
         changes = self.s.state["host_changes"]
-        entries = [c for c in changes if c.get("stamp") == changes[-1].get("stamp")] if changes else []   # the last setup
-        old = len([c for c in entries if c.get("existed")])
-        new = len(entries) - old
+        first: dict[str, bool] = {}
+        for c in changes:   # the whole record, a file once: a retried host setup writes more than one stamp
+            first.setdefault(c["path"], bool(c.get("existed")))
+        old = sum(first.values())
+        new = len(first) - old
         if not old:
             return "Nothing to back up" + (f" ({new} new file{'s' if new != 1 else ''})" if new else "")
         return f"Backed up {old} file{'s' if old != 1 else ''}" + (f", {new} new" if new else "")

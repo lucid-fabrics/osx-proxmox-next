@@ -3268,8 +3268,9 @@ def undo_host(state, root="/", run=default_run):
         if problem:
             errors.append(problem)
             continue
-        restored.append(entry["path"])
-        if not entry["existed"]:
+        if entry["path"] not in restored:   # one line per file, even when it was changed twice
+            restored.append(entry["path"])
+        if not entry["existed"] and entry["path"] not in removed:
             removed.append(entry["path"])
         if entry["path"] == GRUB_DROPIN:
             kinds.add("grub")
@@ -3949,6 +3950,16 @@ def parse_running_vms(qm_list):
     return out
 
 
+def parse_running_cts(pct_list):
+    """Running containers from `pct list` (VMID Status Lock Name, the Lock column is often empty)."""
+    out = []
+    for line in pct_list.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1] == "running":
+            out.append((int(parts[0]), parts[-1]))
+    return out
+
+
 REBOOT_ARGV = ["systemctl", "reboot", "--firmware-setup"]
 
 
@@ -3980,8 +3991,11 @@ def main(argv):
     elif cmd == "running":
         for vmid, name in parse_running_vms(payload.get("qm_list", "")):
             print("%d %s" % (vmid, name))
+    elif cmd == "running-cts":
+        for ctid, name in parse_running_cts(payload.get("pct_list", "")):
+            print("CT %d %s" % (ctid, name))
     else:
-        sys.stderr.write("usage: bios_guide.py vendor|check|card|url|firmware|running\n")
+        sys.stderr.write("usage: bios_guide.py vendor|check|card|url|firmware|running|running-cts\n")
         return 64
     return 0
 
@@ -9936,6 +9950,8 @@ function gpu_step_reboot() {
     return 100
   fi
   running=$(qm list 2>/dev/null | python3 -c 'import json,sys; print(json.dumps({"qm_list": sys.stdin.read()}))' | gpu_bios running)
+  cts=$(pct list 2>/dev/null | python3 -c 'import json,sys; print(json.dumps({"pct_list": sys.stdin.read()}))' | gpu_bios running-cts)
+  [ -z "$cts" ] || running="${running:+$running$'\n'}$cts"
   gpu_say "The host must reboot so the new kernel arguments and the early card binding take effect."
   [ -z "$running" ] || gpu_say "These VMs will be shut down:\n$running"
   gpu_host hint-set </dev/null
