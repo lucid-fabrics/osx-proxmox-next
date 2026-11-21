@@ -392,6 +392,8 @@ async def test_the_dialog_opens_again_when_the_plan_changed_after_the_phrase(tmp
         await F.settle(pilot, lambda: app.screen is not dialog and isinstance(app.screen, BeforeDialog))
         again = app.screen
         assert again is not dialog and again.query_one("#before-go", Button).disabled   # the phrase is asked again
+        assert "Careful: This card is the only display adapter" in \
+            F.text_of(again.query_one("#before-warnings")).replace("\n  ", " ")   # N1: and says why
         assert screen.s.approval is None and "The plan changed while you were reading it" in screen.result_text
 
 

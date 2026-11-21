@@ -155,10 +155,16 @@ def build_preview(s: Session, choice: Choice, typed: bool = False) -> Preview:
                    host_pending=pending, optional=optional, typed_extra=extra)
 
 
+def _spoken(prev: Preview) -> set[str]:
+    """The warnings a preview shows, without the Careful line that only the phrase-less plan carries."""
+    return {w for w in build_before(prev).warnings if not w.startswith("Careful: ")}
+
+
 def same_plan(a: Preview, b: Preview) -> bool:
-    """Both previews would write the same host files and commands and the same VM settings."""
+    """Both previews would write the same host files and commands and the same VM settings, and warn the same."""
     rec_a, rec_b = approval_record(a, typed=False, release=""), approval_record(b, typed=False, release="")
-    return rec_a["host_fp"] == rec_b["host_fp"] and rec_a["vm_fp"] == rec_b["vm_fp"]
+    return (rec_a["host_fp"] == rec_b["host_fp"] and rec_a["vm_fp"] == rec_b["vm_fp"]
+            and _spoken(a) == _spoken(b))   # same files, same words
 
 
 def approval_record(prev: Preview, *, typed: bool, release: str) -> dict:

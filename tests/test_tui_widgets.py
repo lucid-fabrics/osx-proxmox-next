@@ -264,6 +264,17 @@ def test_a_signal_removes_the_frame_folder_and_the_process_still_ends_by_that_si
     assert not os.path.exists(path)
 
 
+def test_a_hangup_ignored_by_nohup_stays_ignored_and_the_folder_is_kept():
+    ignoring = "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+    proc = subprocess.Popen([sys.executable, "-c", HOOK.replace("import sys,", "import signal, sys,")
+                             .replace("ls.install_cleanup()", ignoring + "ls.install_cleanup()")
+                             .format(src=SRC, tail="time.sleep(1.5)")], stdout=subprocess.PIPE, text=True)
+    path = proc.stdout.readline().strip()
+    proc.send_signal(signal.SIGHUP)
+    assert proc.wait(timeout=10) == 0                  # the hangup was ignored, the process ran to its end
+    assert not os.path.exists(path)                     # and the exit hook still cleaned up
+
+
 def test_the_frame_folder_is_removed_at_interpreter_exit():
     proc = subprocess.run([sys.executable, "-c", HOOK.format(src=SRC, tail="")], capture_output=True, text=True,
                           timeout=20)

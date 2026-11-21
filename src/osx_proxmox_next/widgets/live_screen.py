@@ -98,7 +98,7 @@ def install_cleanup() -> None:
     try:
         for name in ("SIGHUP", "SIGTERM"):
             signum = getattr(signal, name, None)
-            if signum is not None:
+            if signum is not None and signal.getsignal(signum) is not signal.SIG_IGN:   # nohup stays honoured
                 signal.signal(signum, _on_signal)
     except ValueError:  # not the main thread
         log.debug("signal handlers not installed", exc_info=True)

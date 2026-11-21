@@ -327,6 +327,21 @@ def test_same_plan_tells_a_changed_plan_from_an_unchanged_one(tmp_path):
     assert not same_plan(shown, build_preview(s, Choice(card, 100, "gpu")))
 
 
+def test_same_plan_also_notices_a_warning_that_appeared_or_went(tmp_path, monkeypatch):
+    """N2: the same files and steps but another warning is another plan to approve."""
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    env = env_with(tmp_path)
+    write(env.root, "/sys/bus/pci/devices/0000:06:00.0/boot_vga", "1\n")
+    s = env.session()
+    card = card_of(s)
+    shown = build_preview(s, Choice(card, 100, "gpu"))
+    assert same_plan(shown, build_preview(s, Choice(card, 100, "gpu"), typed=True))   # the phrase alone changes nothing
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.2 5000 10.0.0.1 22")                 # the SSH warning goes away
+    changed = build_preview(s, Choice(card, 100, "gpu"), typed=True)
+    assert approval_record(shown, typed=False, release="")["host_fp"] == approval_record(changed, typed=False, release="")["host_fp"]
+    assert not same_plan(shown, changed)
+
+
 def test_the_igpu_attach_fingerprint_survives_the_zips_landing_in_the_cache(tmp_path):
     """N4: the zip hash is in the attach script only once the file is there. It must not make the attach differ."""
     wex, amfi = tmp_path / "wex.zip", tmp_path / "amfi.zip"

@@ -363,16 +363,17 @@ class ChooseMixin:
             assert prev.card is not None
             choice = Choice(prev.card, prev.vmid, prev.display, prev.optional)
             self.working = True
-            self.job(lambda: build_preview(self.s, choice, typed=True),
-                     lambda fresh: self._typed_planned(prev, fresh, typed, ack))
+            self.job(lambda: (build_preview(self.s, choice, typed=True), build_preview(self.s, choice)),
+                     lambda fresh: self._typed_planned(prev, fresh[0], fresh[1], typed, ack))
             return
         self._shared_check(prev, typed, ack)
 
-    def _typed_planned(self, shown: Preview, fresh: Preview, typed: bool, ack: bool) -> None:
+    def _typed_planned(self, shown: Preview, fresh: Preview, plain: Preview, typed: bool, ack: bool) -> None:
         """The plan worked out with the phrase typed must be the one the dialog showed; when the host or the
-        Mac changed in between, the dialog is opened again with what would run now."""
+        Mac changed in between, the dialog is opened again with what would run now (*plain*: the plan without
+        the phrase, so the dialog says again why the phrase is asked)."""
         if not fresh.error and not same_plan(shown, fresh):
-            self.preview = fresh
+            self.preview = plain
             self.paint_preview()
             self.say("The plan changed while you were reading it. Check it again.", fail=True)
             self.approve()
