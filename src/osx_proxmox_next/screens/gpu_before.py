@@ -75,8 +75,18 @@ class BeforeDialog(ModalScreen):
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="before-cancel", classes="secondary")
                 yield Button("Set it up", id="before-go", classes="primary", disabled=self._locked())
-        yield KeyBar([("↑↓", "Read on", None), ("tab", "Next field", None), ("enter", "Set it up", None),
-                      ("esc", "Cancel", "screen.cancel")])
+        yield KeyBar(self._keys(), id="before-keys")
+
+    def _keys(self) -> list[tuple]:
+        """enter is named only while it does it: with a phrase still to type it does nothing."""
+        go = [] if self._locked_now() else [("enter", "Set it up", None)]
+        return [("↑↓", "Read on", None), ("tab", "Next field", None), *go, ("esc", "Cancel", "screen.cancel")]
+
+    def _locked_now(self) -> bool:
+        try:
+            return not (self._typed() and self._acked())
+        except Exception:  # noqa: BLE001 - not composed yet: the phrases are empty, so locked
+            return self._locked()
 
     def _inner(self) -> int:
         """Columns of text inside the dialog (it is 76 wide, or 96 percent of a narrow terminal)."""
@@ -141,6 +151,7 @@ class BeforeDialog(ModalScreen):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self.query_one("#before-go", Button).disabled = not (self._typed() and self._acked())
+        self.query_one("#before-keys", KeyBar).set_items(self._keys())
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()

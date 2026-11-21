@@ -254,6 +254,8 @@ class HomeScreen(VmActionScreen):
         name = next((r.name for r in records if r.vmid == state.get("vm")), "")
         who = f" for {name}" if name else ""
         moment = "waiting to continue" if step < 5 else ("waiting for the restart" if step == 5 else "ready to finish")
+        if step >= 5 and host_setup.rebooted_since_apply(state):   # the host has restarted since the changes: say so
+            return f"▸ Restart done. Graphics card setup{who} is ready to finish."
         return f"▸ Graphics card setup{who} is {moment}."
 
     async def _show(self, records: list[VmRecord], drivers: dict[int, DriverState], free: dict[str, int],

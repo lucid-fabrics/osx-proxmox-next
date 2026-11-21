@@ -16,6 +16,7 @@ from typing import Any
 from . import gpu, host_setup
 from .services import fetch_vm_info
 from .gpu_setup import INTEL_DISPLAY_NOTE, NVIDIA_DISPLAY_NOTE, CardChanged, GpuCard, Session
+from .gpu_plan_view import vm_step_lines
 from .nullmoth import NOTICE_BODY, NOTICE_TITLE
 
 __all__ = ["LATER", "Choice", "same_plan", "REBOOT_SECONDS", "Before", "Preview", "approval_record", "attach_differs", "build_before",
@@ -243,6 +244,8 @@ class Before:
 def build_before(prev: Preview) -> Before:
     """Today's warnings, notes and the NVIDIA notice, in today's words. Refusals are not here: they stop the button."""
     out = Before(phrase=prev.typed_needed)
+    if prev.card is not None:   # other VMs that hold the card: the old "use this card anyway" question lives here now
+        out.warnings += ["Warning: " + note for note in prev.card.share_notes]
     for line in plan_lines(prev.plan) if prev.plan else []:
         if line.startswith(("OK: ", "Refused: ")):
             continue
@@ -250,7 +253,7 @@ def build_before(prev: Preview) -> Before:
     out.warnings += prev.typed_extra
     if prev.vm_plan is not None:
         out.notes += list(prev.vm_plan.hints)
-        out.warnings += ["Warning: " + w for w in prev.vm_plan.warnings]
+        out.warnings += ["Warning: " + w for w in prev.vm_plan.warnings if "Warning: " + w not in out.warnings]
     card = prev.card
     if card is not None and card.vendor == "nvidia":
         out.nvidia = True
@@ -269,8 +272,9 @@ def card_facts(card: GpuCard, fields: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def changes_text(plan: dict | None, vm_plan: Any, vmid: int | None, head: str = "") -> str:
-    """Every change in one text: the card and the host facts, the files and commands, the VM settings, the backups."""
+def changes_text(plan: dict | None, vm_plan: Any, vmid: int | None, head: str = "", exact: bool = False) -> str:
+    """Every change in one text: the card and the host facts, the files and commands, the VM settings, the backups.
+    The VM steps are one plain line each; *exact* shows the full command under each title instead."""
     lines: list[str] = [head] if head else []
     if plan is not None:
         lines.append("Host files and commands (each file is backed up first, in " f"{host_setup.BACKUP_ROOT}):")
@@ -278,7 +282,7 @@ def changes_text(plan: dict | None, vm_plan: Any, vmid: int | None, head: str = 
         lines.append(preview if preview else "  nothing to change on the host")
     if vm_plan is not None:
         lines += ["", f"VM {vmid} settings (a config snapshot is saved first):"]
-        lines += [f"  {i:02d}. {st.title}\n      {st.command}" for i, st in enumerate(vm_plan.steps, start=1)]
+        lines += vm_step_lines(vm_plan, exact)
         lines += ["Refused: " + i for i in vm_plan.issues] + vm_plan.hints + ["Warning: " + w for w in vm_plan.warnings]
     elif vmid is None:
         lines += ["", "No Mac is chosen yet: the VM settings are shown when you pick one."]

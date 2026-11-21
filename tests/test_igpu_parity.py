@@ -181,6 +181,22 @@ def test_the_shared_note_matches_python(bash, ids):
     assert notes == [gpu.shared_note(ids)]
 
 
+@pytest.mark.parametrize("ids", [[103], [103, 106], [1, 2, 3]])
+def test_the_starts_with_the_host_note_matches_python(bash, vm, ids):
+    assert bash("gpu_starts_note " + " ".join(map(str, ids))).stdout.strip() == gpu.starts_note(ids)
+    for vmid in ids:
+        vm(vmid, "stopped", "hostpci0: 0000:00:02\nonboot: 1\n")
+    vm(9, "stopped", "hostpci0: 0000:00:02\nonboot: 0\n")                    # holds the card, does not start with the host
+    vm(8, "stopped", "hostpci0: 0000:00:02\nonboot: 1\ntemplate: 1\n")       # a template never starts
+    users = ",".join(f"{i}:stopped" for i in [*ids, 9, 8])
+    card = f"0000:00:02|intel|{0x46A6}|n|intel|h|d|0|vfio-pci|{users}|||0"
+    assert bash(f"gpu_card_starters '{card}'", env=vm.env).stdout.split() == [str(i) for i in ids]
+    notes = bash(f"gpu_card_notes '{card}'", env=vm.env).stdout.splitlines()
+    assert gpu.starts_note(ids) in notes and notes.index(gpu.starts_note(ids)) > 0   # after the Also assigned line
+    quiet = f"0000:00:02|intel|{0x46A6}|n|intel|h|d|0|vfio-pci|9:stopped|||0"
+    assert not [n for n in bash(f"gpu_card_notes '{quiet}'", env=vm.env).stdout.splitlines() if "starts with" in n]
+
+
 def shell_functions(*names: str) -> str:
     """The text of bash functions from the installer, for tests that run them with stubbed commands."""
     out = []

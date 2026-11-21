@@ -15,7 +15,7 @@ from osx_proxmox_next.domain import PlanStep, VmConfig
 from osx_proxmox_next.preflight import PreflightCheck
 from osx_proxmox_next.rollback import RollbackSnapshot
 from osx_proxmox_next.screens.base import ChoiceDialog
-from osx_proxmox_next.screens.build import BuildScreen, LogScreen, ZoomScreen, format_clock, timeline_text
+from osx_proxmox_next.screens.build import LATEST_WIDTH, BuildScreen, LogScreen, ZoomScreen, format_clock, timeline_text
 from osx_proxmox_next.screens.home import HomeScreen
 from osx_proxmox_next.services import VmInfo
 from osx_proxmox_next.services.pipeline import BuildPipeline, PipelineDeps
@@ -316,6 +316,26 @@ async def test_z_zooms_the_live_screen_and_esc_comes_back(monkeypatch):
         await pilot.press("z")
         await pilot.press("z")
         assert app.screen is screen
+
+
+@F.tui
+async def test_a_cut_entry_of_latest_ends_with_an_ellipsis_and_never_runs_into_the_next_time(monkeypatch):
+    F.patch_host(monkeypatch)
+    long = "screen changed, still installing, the installer says about 15 min left and the estimate keeps moving"
+    state = F.installing_driver(0)
+    state.events = [("13:40:01", "recovery detached"), ("13:41:02", long), ("13:42:03", long + " again")]
+    patch_build(monkeypatch, state=state)
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=deps()))
+        await open_build(pilot, app, screen)
+        await F.settle(pilot, lambda: "13:42" in F.text_of(screen.query_one("#latest")))
+        rows = F.text_of(screen.query_one("#latest")).splitlines()
+        assert [r[:5] for r in rows[1:]] == ["13:42", "13:41", "13:40"]     # each entry starts on its own row
+        pane = screen.query_one("#latest").size.width
+        assert all(len(r) <= min(pane, LATEST_WIDTH) for r in rows)         # a cut entry fits its pane
+        assert rows[1].endswith("\u2026") and rows[2].endswith("\u2026") and not rows[3].endswith("\u2026")
+        assert "13:4" not in rows[1][5:] and "13:4" not in rows[2][5:]      # no time glued into the cut text
 
 
 @F.tui

@@ -561,7 +561,7 @@ def test_walkthrough_through_the_reboot_attach_and_undo(bash, vm, tmp_path):
     # undo
     vm(100, "stopped", MAC + "hostpci0: 0000:06:00,pcie=1\n")
     undo = bash("gpu_oc_boot_args() { echo \"OC $*\"; }; gpu_setup --undo", env=env)
-    assert "Everything this setup changed is back as it was." in undo.stdout and "Restored /etc/default/grub.d" in undo.stdout
+    assert "Everything this setup changed is back as it was." in undo.stdout and "Removed /etc/default/grub.d" in undo.stdout
     assert not (state_dir / "gpu-setup.json").exists() and not (state_dir / "gpu-attach-100.json").exists()
     assert not (root / "etc/default/grub.d/osx-proxmox-next.cfg").exists()
 

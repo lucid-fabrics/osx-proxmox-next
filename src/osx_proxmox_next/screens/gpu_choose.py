@@ -27,7 +27,6 @@ from ..gpu_flow import (
 from ..gpu_setup import DISPLAY_OPTIONS, GpuCard, VmOption
 from ..widgets.lines import Line, Lines
 from ..widgets.rows import ChoiceRow, Option
-from .base import ConfirmDialog
 from .gpu_before import BeforeDialog
 
 log = logging.getLogger(__name__)
@@ -172,9 +171,10 @@ class ChooseMixin:
                 hint.append("\n! " + lead + "You confirm before anything changes.", style=pal["warning"])
             for note in card.notes:
                 hint.append("\n" + note, style=pal["warning"])
-        for other in self.cards:
+        for other in self.cards:   # devices that are not offered: one muted line each, never under the chosen card's notes
             if not other.selectable:
-                hint.append(f"\n{short_card_name(other.name)}: {other.why_not}", style=pal["muted"] + " dim")
+                hint.append(f"\nNot offered: {short_card_name(other.name)} ({other.short_why_not})",
+                            style=pal["muted"])
         return hint
 
     def _card_changed_ui(self) -> None:
@@ -366,7 +366,7 @@ class ChooseMixin:
             self.job(lambda: (build_preview(self.s, choice, typed=True), build_preview(self.s, choice)),
                      lambda fresh: self._typed_planned(prev, fresh[0], fresh[1], typed, ack))
             return
-        self._shared_check(prev, typed, ack)
+        self._confirmed(prev, typed, ack)
 
     def _typed_planned(self, shown: Preview, fresh: Preview, plain: Preview, typed: bool, ack: bool) -> None:
         """The plan worked out with the phrase typed must be the one the dialog showed; when the host or the
@@ -378,29 +378,20 @@ class ChooseMixin:
             self.say("The plan changed while you were reading it. Check it again.", fail=True)
             self.approve()
             return
-        self._shared_check(fresh, typed, ack)
+        self._confirmed(fresh, typed, ack)
 
-    def _shared_check(self, prev: Preview, typed: bool, ack: bool) -> None:
-        card = prev.card
-        assert card is not None
+    def _confirmed(self, prev: Preview, typed: bool, ack: bool) -> None:
         if prev.error or prev.refusals:
             self.say(prev.error or "Refused: " + prev.refusals[0], fail=True)
             return
-        if not card.stopped_users:
-            self._choose(prev, typed, ack, shared=False)
-            return
-        lines = list(card.notes) + ["Use this card anyway?"]
+        self._choose(prev, typed, ack)
 
-        def answer(result: str | None) -> None:
-            if result == "yes":
-                self._choose(prev, typed, ack, shared=True)
-
-        self.app.push_screen(ConfirmDialog("This card is listed by other VMs", lines, confirm="Use it anyway"),
-                             answer)
-
-    def _choose(self, prev: Preview, typed: bool, ack: bool, shared: bool) -> None:
+    def _choose(self, prev: Preview, typed: bool, ack: bool) -> None:
+        """Store the choice. Confirming "Before you continue" is also the OK for a card other VMs list (their
+        warning is on that dialog), so the sharing acknowledgement is recorded here, once."""
         s, card = self.s, prev.card
         assert card is not None
+        shared = bool(card.stopped_users)
         release = self.query_one("#g-driver", ChoiceRow).value if card.vendor == "nvidia" else ""
         record = approval_record(prev, typed=typed, release=release)
 

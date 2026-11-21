@@ -408,7 +408,8 @@ def test_undo_reverts_vm_and_host(amd, monkeypatch):
     amd.qm.vms[100] = ("stopped", SEQUOIA + "hostpci0: 0000:06:00,pcie=1\n")
     ok, messages = s.undo()
     assert ok and applied and any("VM 100: GPU settings restored." in m for m in messages)
-    assert any(m.startswith("Restored /etc/default/grub.d") for m in messages) and "Reboot the host" in messages[-1]
+    assert any(m.startswith("Removed /etc/default/grub.d") for m in messages)  # the setup created the file: it is removed
+    assert messages[-1] == "Restart this host when it suits you. The boot change stays active until then."
     assert host_setup.load_state(str(amd.root)) is None
     assert not (amd.root / "etc/default/grub.d/osx-proxmox-next.cfg").exists()
     assert s.undo()[0]  # twice is fine

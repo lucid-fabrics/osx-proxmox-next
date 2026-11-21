@@ -15,14 +15,17 @@ from ..gpu_flow import attach_differs, replan_attach, stop_mac, vm_fingerprint
 from ..gpu_setup import CardChanged, VmOption
 from ..services import fetch_vm_info
 from ..widgets.rows import ChoiceRow, Option
+from .. import gpu
 from .base import ConfirmDialog
+from .gpu_card_busy import CardBusyMixin
 from .gpu_choose import CHOOSE_LABEL
 from .gpu_run import Guidance
 
 MARKS = {"ok": "✓", "fail": "✗", "warn": "!", "info": "·"}
+NOT_FREE = "Card is not free yet"
 
 
-class AttachMixin:
+class AttachMixin(CardBusyMixin):
     """Stage 6 (verify), stage 7 (attach) and the Mac pick that "decide later" ends with."""
 
     # ── stage 6: check the card is free ──────────────────────────────
@@ -48,7 +51,11 @@ class AttachMixin:
             self._guidance(Guidance("The card is not free yet", body + [
                 "", "The host has rebooted but the kernel arguments are still not active. Check that the boot "
                 "loader picked them up (GRUB: /boot/grub/grub.cfg, systemd-boot: proxmox-boot-tool refresh), "
-                "then check again."], "Check again", self.step_verify))
+                "then check again."], "Check again", self.step_verify, fail=("check", NOT_FREE)))
+            return
+        busy = next((c for c in fails if c["fix"] == "free"), None)
+        if busy is not None:
+            self.card_busy([gpu.Holder(*h) for h in busy["holders"]], self._stopped_note(busy))
             return
         if needs_reboot:
             s.mark_reboot_needed()
@@ -67,7 +74,12 @@ class AttachMixin:
                 s.send_back(target)
             self.drive()
 
-        self._guidance(Guidance("The card is not free yet", body, label, action))
+        self._guidance(Guidance("The card is not free yet", body, label, action, fail=("check", NOT_FREE)))
+
+    @staticmethod
+    def _stopped_note(check: dict) -> list[str]:
+        """Warnings that go with the busy box: stopped VMs that also list the card."""
+        return ["Warning: " + gpu.shared_note(check["stopped"])] if check.get("stopped") else []
 
     # ── stage 7: attach ──────────────────────────────────────────────
 
@@ -81,7 +93,8 @@ class AttachMixin:
     def _attach_probe(self) -> Any:
         s = self.s
         info = fetch_vm_info(s.state["vm"], adapter=s.pve)
-        return s.vm_plan(allow_stop=True), bool(info and info.status == "running")
+        busy = [h for h in s.card_holders() if h.running]
+        return s.vm_plan(allow_stop=True), bool(info and info.status == "running"), busy
 
     @staticmethod
     def _plan_lines(plan: Any) -> list[str]:
@@ -89,10 +102,16 @@ class AttachMixin:
 
     def _attach_probed(self, result: Any) -> None:
         s = self.s
-        plan, running = result
+        plan, running, busy = result
+        if busy:   # the card is not free after all: back to the check, where the box says who has it
+            s.goto(6)
+            others = [line for line in self._plan_lines(plan) if not line.startswith("Refused: The card is in use")]
+            self.card_busy(busy, others)
+            return
         if not plan.ok:
             self._guidance(Guidance("The Mac cannot take the card yet", self._plan_lines(plan), "Check again",
-                                    self.step_attach, ("Pick another Mac", self._pick_other)))
+                                    self.step_attach, ("Pick another Mac", self._pick_other),
+                                    fail=("attach", "Mac cannot take the card")))
             return
         fp = vm_fingerprint(s.state["gpu"]["bdf"], s.state["vm"], s.state["display"], plan.steps)
         if attach_differs(s.approval, s.state, plan):
@@ -154,12 +173,12 @@ class AttachMixin:
                 return "done", plan, s.finish_nvidia(release, progress), None
             create_snapshot(s.state["vm"])
             result = apply_plan(plan.steps, execute=True)
-            start_secs = None
+            started_info = None
             if result.ok:
                 started = time.monotonic()
-                s.pve.qm("start", str(s.state["vm"]))  # the Mac starts on the card
-                start_secs = time.monotonic() - started
-            return "done", plan, result, start_secs
+                started_ok = s.pve.qm("start", str(s.state["vm"]))  # the Mac starts on the card
+                started_info = (time.monotonic() - started, started_ok.ok, started_ok.output)
+            return "done", plan, result, started_info
 
         self.job(work, lambda res: self._attach_done(nvidia, res), note)
 
@@ -169,9 +188,10 @@ class AttachMixin:
 
     def _attach_done(self, nvidia: bool, res: Any) -> None:
         s = self.s
-        kind, plan, result, start_secs = res
-        if start_secs is not None:  # the state dict is only written on the UI thread
-            self.durations["start"] = start_secs
+        kind, plan, result, started_info = res
+        started = started_info is None or started_info[1]
+        if started_info is not None:  # the state dict is only written on the UI thread
+            self.durations["start"] = started_info[0]
         if kind == "changed":  # the Mac was edited after it was shown: look again and show what would be written now
             self.step_attach()
             return
@@ -179,11 +199,31 @@ class AttachMixin:
             self._nvidia_done(result)
             return
         if not result.ok:
-            self._guidance(Guidance("Attaching failed", [f"Log: {result.log_path}"], "Try again", self.step_attach))
+            self._guidance(Guidance("Attaching failed", [f"Log: {result.log_path}"], "Try again", self.step_attach,
+                                    fail=("attach", "Attaching failed")))
             return
         self.end_phase("attach")
         s.vm_applied()
+        s.state["start_failed"] = "" if started else (started_info[2] or "qm start failed")
+        s.save()
         self.drive()
+
+    def start_failed(self) -> None:
+        """The card is attached but Proxmox could not start the Mac: say so, never show a started Mac."""
+        reason = self.s.state.get("start_failed") or "Proxmox could not start it."
+        self._guidance(Guidance("The Mac did not start", [reason, "Start it again, or start it from Proxmox."],
+                                "Start again", self._start_again, fail=("start", "Mac did not start")))
+
+    def _start_again(self) -> None:
+        s = self.s
+        self.start_phase("start")
+        self.job(lambda: s.pve.qm("start", str(s.state["vm"])), self._start_retried, "Starting the Mac...")
+
+    def _start_retried(self, res: Any) -> None:
+        self.end_phase("start")
+        self.s.state["start_failed"] = "" if res.ok else (res.output or "qm start failed")
+        self.s.save()
+        self.drive() if res.ok else self.start_failed()
 
     def _nvidia_done(self, result: nullmoth_finish.FinishResult) -> None:
         s = self.s
@@ -193,7 +233,7 @@ class AttachMixin:
             self._guidance(Guidance(
                 "The driver is not confirmed",
                 notes + [f"The NullMoth driver is not confirmed: {reason}. " + nullmoth.FAILED_NOTE],
-                "Try again", self.step_attach))
+                "Try again", self.step_attach, fail=("attach", "Driver is not confirmed")))
             return
         lines = notes + [f"NullMoth {result.version} is installed and loaded ({result.kexts} extensions)."]
         if result.ip:

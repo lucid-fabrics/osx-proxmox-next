@@ -1161,6 +1161,7 @@ def undo_host(state, root="/", run=default_run):
     A file somebody changed after this tool wrote it is kept as it is and reported."""
     kinds = set(state.get("pending_refresh", []))
     restored = []
+    removed = []
     errors = []
     kept = []
     for entry in reversed(state["host_changes"]):
@@ -1178,6 +1179,8 @@ def undo_host(state, root="/", run=default_run):
             errors.append(problem)
             continue
         restored.append(entry["path"])
+        if not entry["existed"]:
+            removed.append(entry["path"])
         if entry["path"] == GRUB_DROPIN:
             kinds.add("grub")
             if _p(root, PBT_UUIDS).exists():
@@ -1194,7 +1197,7 @@ def undo_host(state, root="/", run=default_run):
             errors.append("dkms remove failed: " + out.strip()[-200:])
     errors += _run_refreshes(kinds, state, run)
     save_state(state, root)
-    return {"ok": not errors, "restored": restored, "errors": errors, "kept": kept,
+    return {"ok": not errors, "restored": restored, "removed": removed, "errors": errors, "kept": kept,
             "reboot_required": bool(restored)}
 
 

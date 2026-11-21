@@ -57,11 +57,11 @@ async def test_approving_stores_one_approval_and_runs_the_host_setup(tmp_path, a
         assert "The host needs it to hand the card over.\nAbout 3 minutes." in text
         assert "run: osx-next-cli" not in text                        # the Home reminder resumes it, no command to type
         tl = timeline(screen)
-        assert "✓ Backed up 3 files" in tl and "✓ Set up the host" in tl and "◐ Restart this host" in tl
+        assert "✓ Nothing to back up (3 new files)" in tl and "✓ Set up the host" in tl and "◐ Restart this host" in tl
         assert "your turn" in tl and "· Check the card is free" in tl and "· Attach it to macos-sequoia" in tl
         assert "· Start the Mac" in tl and "The last three run by themselves\nwhen you open osx-next again." in tl
         for line in tl.splitlines()[:2]:
-            assert len(line) == 38 and line[-3] == ":"                 # a duration, flush right
+            assert len(line) == 40 and line[-3] == ":"                 # a duration, flush right
         note = F.text_of(screen.query_one("#g-run-note"))
         assert note == "✓ Safe to leave here. Choose Later and your Macs page shows a reminder to finish."
         assert "Backups are in" not in note and host_setup.BACKUP_ROOT not in note
@@ -86,28 +86,27 @@ async def test_the_backup_folder_is_in_the_p_dialog_not_on_the_screen(tmp_path, 
 
 
 @F.tui
-async def test_the_restart_box_says_later_or_asks_before_restarting(tmp_path, applied):
+async def test_the_restart_box_is_the_one_confirmation(tmp_path, applied):
+    """Fix 4: Restart now has the focus, enter restarts and nothing opens after it."""
     env = amd_env(tmp_path)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await to_restart_box(pilot, app, env)
         buttons = [b.id for b in screen.query("#g-box-buttons Button")]
         assert buttons == ["g-later", "g-restart"]                    # the primary button on the right
-        await pilot.press("enter")                                    # Restart now
-        dialog = app.screen
-        assert isinstance(dialog, ChoiceDialog)
-        assert F.text_of(dialog.query_one(".dialog-title")) == "Restart this host now?"
-        assert app.focused.name == "no"
-        await pilot.press("escape")
+        assert app.focused.id == "g-restart"
+        assert keys(app).startswith(" enter Restart now   p See every change") and "esc Later" in keys(app)
+        await pilot.press("enter")                                    # typed ahead: the first second is ignored
         await pilot.pause(0.2)
         assert not env.run.ran("systemctl", "reboot") and app.screen is screen
+        screen._restart_armed = 0.0
         await pilot.press("enter")
-        await pilot.pause(0.2)
-        await pilot.press("tab")
-        await pilot.press("enter")                                    # confirm
         await pilot.pause(0.3)
-        assert env.run.ran("systemctl", "reboot")
+        assert env.run.ran("systemctl", "reboot") and app.screen is screen   # no second dialog
         assert "Restarting..." in screen.result_text
+        await pilot.press("enter")                                    # a second enter does not restart twice
+        await pilot.pause(0.2)
+        assert [c for c in env.run.calls if c[:2] == ["systemctl", "reboot"]] == [["systemctl", "reboot"]]
         await pilot.click("#g-later")
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen))
         assert any("reminder" in n.message for n in app._notifications)
@@ -116,16 +115,14 @@ async def test_the_restart_box_says_later_or_asks_before_restarting(tmp_path, ap
 @F.tui
 async def test_the_restart_box_warns_about_an_install_in_progress(tmp_path, applied, monkeypatch):
     env = amd_env(tmp_path, vms={100: ("running", SEQUOIA), 107: ("running", SEQUOIA)})
-    monkeypatch.setattr("osx_proxmox_next.screens.gpu_run.read_driver_state",
+    monkeypatch.setattr("osx_proxmox_next.screens.gpu_restart.read_driver_state",
                         lambda vmid: F.installing_driver(18) if vmid == 107 else F.DriverState())
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await to_restart_box(pilot, app, env)
         text = box(screen)
-        assert "● vm100 is shut down cleanly first" in text
-        assert "! vm107 is still installing, 18 min in" in text and "A restart now interrupts that install." in text
-        await pilot.press("enter")
-        assert "An install in progress will be interrupted." in F.text_of(app.screen.query(".dialog-line").last())
+        assert "● vm100 (VM 100) is shut down cleanly first" in text
+        assert "! vm107 (VM 107) is still installing, 18 min in" in text and "A restart now interrupts that install." in text
 
 
 @F.tui
@@ -155,7 +152,7 @@ async def test_after_the_restart_the_check_and_the_attach_run_without_asking(tmp
         assert "✓ Checked the card is free" in tl and "✓ Attached it to macos-sequoia" in tl
         assert "✓ Started the Mac" in tl and "Finished without a question" in tl
         for line in tl.splitlines()[:6]:                            # every finished step has its duration
-            assert len(line) == 38 and line[-3] == ":"
+            assert len(line) == 40 and line[-3] == ":"
         assert F.text_of(screen2.query_one("#g-run-title")) == "macos-sequoia is starting on the Radeon RX 6600"
         for key in ("Yes, all good", "No, help me", "Put everything back", "Your Macs"):
             assert key in keys(app)
@@ -719,7 +716,8 @@ async def test_u_puts_everything_back_after_a_confirmation(tmp_path, applied):
         await pilot.press("u")
         dialog = app.screen
         assert isinstance(dialog, ChoiceDialog) and F.text_of(dialog.query_one(".dialog-title")) == "Put everything back?"
-        assert "puts back every file and VM setting this setup changed" in dialog_text(dialog)
+        assert "Remove /etc/modprobe.d/osx-proxmox-next-vfio.conf" in dialog_text(dialog)
+        assert "Anything you edited since is kept and reported." in dialog_text(dialog)
         assert app.focused.name == "no"
         await pilot.press("escape")
         assert (env.root / HINT).exists()

@@ -90,7 +90,8 @@ class RemoveDialog(ModalScreen[bool]):
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="cancel", classes="secondary")
                 yield Button("Remove VM", id="remove", classes="danger", disabled=True)
-        yield KeyBar([("tab", "Next field", None), ("enter", "Confirm", None), ("esc", "Cancel", "screen.cancel")],
+        # Cancel has the focus, so enter chooses Cancel: the footer must not promise Remove
+        yield KeyBar([("tab", "Next field", None), ("enter", "Choose", None), ("esc", "Cancel", "screen.cancel")],
                      id="keybar")
 
     def on_mount(self) -> None:

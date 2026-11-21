@@ -15,6 +15,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Input, Static
@@ -29,25 +30,28 @@ from .gpu_attach_step import AttachMixin
 from .gpu_bios import BiosMixin
 from .gpu_boot import BootMixin
 from .gpu_choose import ChooseMixin
-from .gpu_run import RunMixin
+from .gpu_restart import RestartMixin
+from .gpu_run import Guidance, RunMixin
 
 log = logging.getLogger(__name__)
 
 __all__ = ["GpuScreen", "ChangesDialog"]
 
-UNDO_LINES = ["This puts back every file and VM setting this setup changed (anything you edited since is "
-              "kept and reported)."]
+KEPT_LINE = "Anything you edited since is kept and reported."
 
 
 class ChangesDialog(ModalScreen):
-    """Every change of the plan in one scrolling dialog: files, commands, VM settings, backups."""
+    """Every change of the plan in one scrolling dialog: files, commands, VM settings, backups. The VM steps are
+    one plain line each; x shows the exact commands instead."""
 
     BINDINGS = [Binding("escape", "close", "Close"), Binding("enter", "close", "Close"),
-                Binding("p", "close", "Close")]
+                Binding("p", "close", "Close"), Binding("x", "exact", "Exact commands")]
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, exact_text: str | None = None) -> None:
         super().__init__()
         self.body_text = text
+        self.exact_text = exact_text if exact_text is not None else text
+        self.exact = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="changes-box", classes="dialog"):
@@ -58,10 +62,19 @@ class ChangesDialog(ModalScreen):
             yield Static("", classes="blank")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Close", id="close", classes="secondary")
-        yield KeyBar([("↑↓", "Scroll", None), ("esc", "Close", "screen.close")])
+        yield KeyBar(self._keys(), id="changes-keys")
+
+    def _keys(self) -> list[tuple]:
+        return [("↑↓", "Scroll", None), ("x", "Plain summary" if self.exact else "Exact commands", "screen.exact"),
+                ("esc", "Close", "screen.close")]
 
     def on_mount(self) -> None:
         self.query_one("#changes-scroll", VerticalScroll).focus()
+
+    def action_exact(self) -> None:
+        self.exact = not self.exact
+        self.query_one("#changes-text", Static).update(Text(self.exact_text if self.exact else self.body_text))
+        self.query_one("#changes-keys", KeyBar).set_items(self._keys())
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss()
@@ -70,7 +83,7 @@ class ChangesDialog(ModalScreen):
         self.dismiss()
 
 
-class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScreen):
+class GpuScreen(ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, BootMixin, OsxScreen):
     """The graphics card flow. Modes: choose, bios, run, first boot, finished."""
 
     BINDINGS = [
@@ -119,6 +132,10 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
         self._names: dict[int, str] = {}   # VM names read from Proxmox, for a flow that was reopened
         self._mac_touched = False          # the user moved the Mac row themselves
         self._width = width
+        self.failed: dict[str, str] = {}   # step id -> why it was refused (five words or fewer): it shows a cross
+        self._apply_base: int | None = None   # host changes already recorded when the host apply began
+        self._restart_armed = 0.0          # enter does nothing in the restart box before this moment
+        self._restarting = False
 
     # ── layout ───────────────────────────────────────────────────────
 
@@ -174,6 +191,7 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
         self.s.state["resume_cmd"] = self.s.state.get("resume_cmd") or "osx-next-cli gpu-setup"
         if self.start_undo:
             self.call_after_refresh(self._open_undo)
+        self.set_interval(1.0, self.tick)   # the running time of the step that works moves every second
         self.begin()
 
     def _open_undo(self, tries: int = 0) -> None:
@@ -234,11 +252,15 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
             self.run_worker(self._show_finished(), exclusive=True, group="gpu-mode")
         elif step <= 2:
             self.run_worker(self._show_choose(), exclusive=True, group="gpu-mode")
+        elif step == 8 and s.state.get("start_failed"):
+            self.run_worker(self.step_in_run(self.start_failed, False), exclusive=True, group="gpu-mode")
         elif step == 8:
             self.run_worker(self._show_first_boot(), exclusive=True, group="gpu-mode")
         else:
-            {3: self.step_bios, 4: self.step_host, 5: self.step_restart, 6: self.step_verify,
-             7: self.step_attach}.get(step, self.step_attach)()
+            todo = {3: self.step_bios, 4: self.step_host, 5: self.step_restart, 6: self.step_verify,
+                    7: self.step_attach}.get(step, self.step_attach)
+            # the run screen is up before the step starts (the restart step only needs it when none is up yet)
+            self.run_worker(self.step_in_run(todo, step != 5), exclusive=True, group="gpu-mode")
 
     # ── worker plumbing ──────────────────────────────────────────────
 
@@ -271,6 +293,11 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
     def _job_failed(self, message: str) -> None:
         self.working = False
         self.progress = ""
+        if self.mode == "run":   # the step that was running is the one that failed: it shows a cross and a way on
+            current = next((p[0] for p in self.phases() if not self._is_done(p[0])), "")
+            self._guidance(Guidance("Something went wrong", [message], "Try again", self.drive,
+                                    fail=(current, "Step did not finish") if current else None))
+            return
         self.say("Something went wrong: " + message, fail=True)
         self.refresh_buttons()
 
@@ -294,7 +321,10 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
 
     async def set_mode(self, mode: str, widgets: list[Widget]) -> None:
         self.mode = mode
-        body = self.query_one("#gpu", Vertical)
+        try:
+            body = self.query_one("#gpu", Vertical)
+        except NoMatches:   # the screen was closed while a step was starting
+            return
         await body.remove_children()
         await body.mount(*widgets)
         self.refresh_footer()
@@ -344,7 +374,8 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
                 return
             card = prev.card
             head = card_facts(card, self.host_fields)
-            self.app.push_screen(ChangesDialog(changes_text(prev.plan, prev.vm_plan, prev.vmid, head)))
+            self.app.push_screen(ChangesDialog(changes_text(prev.plan, prev.vm_plan, prev.vmid, head),
+                                               changes_text(prev.plan, prev.vm_plan, prev.vmid, head, exact=True)))
         elif self.mode in ("run", "bios", "first_boot"):
             self.run_worker(self._changes_from_state, thread=True, exit_on_error=False, group="gpu-changes")
 
@@ -356,14 +387,15 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
                                allow_no_console=bool((s.approval or {}).get("allow_no_console")))
             vm_plan = s.vm_plan(allow_stop=True) if s.state["vm"] is not None else None
         except CardChanged as exc:
-            text = str(exc)
+            text = exact = str(exc)
         else:
             head = f"Card: {chosen['name']}\nAddress: {chosen['bdf']}\n" if chosen else ""
             backups = s.state.get("backup_dir")
             if backups:
                 head += f"Backups of this setup: {backups}\n"
             text = changes_text(plan, vm_plan, s.state["vm"], head)
-        self.app.call_from_thread(lambda: self.app.push_screen(ChangesDialog(text)))
+            exact = changes_text(plan, vm_plan, s.state["vm"], head, exact=True)
+        self.app.call_from_thread(lambda: self.app.push_screen(ChangesDialog(text, exact)))
 
     # ── u: put everything back ───────────────────────────────────────
 
@@ -376,7 +408,11 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
             running = [i for i, n in s.running_vms() if i in recorded]
         except Exception:  # noqa: BLE001
             running = []
-        lines = list(UNDO_LINES)
+        try:
+            lines = s.undo_plan()
+        except Exception:  # noqa: BLE001 - the list is a courtesy: the question still has to be asked
+            lines = []
+        lines += ["", KEPT_LINE]
         if running:
             lines.append("Running VMs that were changed are stopped first: " + ", ".join(str(i) for i in running) + ".")
 

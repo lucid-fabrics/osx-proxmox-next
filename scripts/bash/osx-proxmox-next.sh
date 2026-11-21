@@ -3251,6 +3251,7 @@ def undo_host(state, root="/", run=default_run):
     A file somebody changed after this tool wrote it is kept as it is and reported."""
     kinds = set(state.get("pending_refresh", []))
     restored = []
+    removed = []
     errors = []
     kept = []
     for entry in reversed(state["host_changes"]):
@@ -3268,6 +3269,8 @@ def undo_host(state, root="/", run=default_run):
             errors.append(problem)
             continue
         restored.append(entry["path"])
+        if not entry["existed"]:
+            removed.append(entry["path"])
         if entry["path"] == GRUB_DROPIN:
             kinds.add("grub")
             if _p(root, PBT_UUIDS).exists():
@@ -3284,7 +3287,7 @@ def undo_host(state, root="/", run=default_run):
             errors.append("dkms remove failed: " + out.strip()[-200:])
     errors += _run_refreshes(kinds, state, run)
     save_state(state, root)
-    return {"ok": not errors, "restored": restored, "errors": errors, "kept": kept,
+    return {"ok": not errors, "restored": restored, "removed": removed, "errors": errors, "kept": kept,
             "reboot_required": bool(restored)}
 
 
@@ -9374,6 +9377,31 @@ function gpu_shared_note() {
   fi
 }
 
+# One warning for the VMs ($@: ids) that hold a card and start with the host. Mirrors gpu.starts_note.
+function gpu_starts_note() {
+  if [ $# -eq 1 ]; then
+    echo "VM $1 starts with this host and has this card. After the restart it takes the card before the Mac can. Shut it down then, or turn off its Start at boot option."
+  else
+    local list="$1"; shift
+    local v; for v in "$@"; do list+=", $v"; done
+    echo "VMs ${list} start with this host and have this card. After the restart one of them takes the card before the Mac can. Shut it down then, or turn off their Start at boot option."
+  fi
+}
+
+# The VMs of a GPU_CARDS line that start with the host (onboot: 1, not a template), space separated ids.
+function gpu_card_starters() {
+  local users u id cfg out=""
+  IFS='|' read -r _ _ _ _ _ _ _ _ _ users _ <<<"$1"
+  for u in ${users//,/ }; do
+    id="${u%%:*}"
+    cfg=$(qm config "$id" 2>/dev/null) || continue
+    grep -Eq '^onboot:[[:space:]]*1[[:space:]]*$' <<<"$cfg" || continue
+    grep -Eq '^template:[[:space:]]*1[[:space:]]*$' <<<"$cfg" && continue
+    out+="${out:+ }$id"
+  done
+  echo "$out"
+}
+
 # Warnings shown on a card, one per line. Mirrors GpuCard.notes.
 function gpu_card_notes() {
   local kind boot users console u
@@ -9382,6 +9410,8 @@ function gpu_card_notes() {
   local -a stopped=()
   for u in ${users//,/ }; do [ "${u#*:}" == "running" ] || stopped+=("${u%%:*}"); done
   [ ${#stopped[@]} -eq 0 ] || gpu_shared_note "${stopped[@]}"
+  local -a starters=($(gpu_card_starters "$1"))
+  [ ${#starters[@]} -eq 0 ] || gpu_starts_note "${starters[@]}"
   if [ "$boot" == "1" ] && [ "$console" != "1" ]; then echo "The firmware shows its boot screen on this card."; fi
 }
 
@@ -9510,7 +9540,7 @@ function gpu_undo() {
   res=$(gpu_host undo </dev/null) || ok=no
   [ -z "$res" ] || kept=$(echo "$res" | gpu_json 'len(d.get("kept", []))')
   kept=$((kept + GPU_OC_KEPT))
-  [ -z "$res" ] || echo "$res" | gpu_json '"\n".join(["Restored " + p for p in d["restored"]] + d.get("kept", []) + d["errors"]) + ("\nReboot the host to finish undoing the boot changes." if d["reboot_required"] else "")'
+  [ -z "$res" ] || echo "$res" | gpu_json '"\n".join([("Removed " if p in d.get("removed", []) else "Restored ") + p for p in d["restored"]] + d.get("kept", []) + d["errors"]) + ("\nRestart this host when it suits you. The boot change stays active until then." if d["reboot_required"] else "")'
   local rj="${res:-}"; [ -n "$rj" ] || rj='{}'
   if [ -z "${vmids// /}" ] && [ "$(echo "$rj" | gpu_json 'bool(d.get("restored") or d.get("kept") or d.get("errors") or d.get("reboot_required"))')" != "True" ]; then
     nothing=yes
@@ -9706,7 +9736,7 @@ function gpu_step_choose() {
   IFS='|' read -r bdf vname device name kind head detail boot driver users _ <<<"$chosen"
   if [ -n "$(gpu_card_stopped_users "$chosen")" ]; then
     local note
-    while IFS= read -r note; do case "$note" in Also*) gpu_say "WARN: $note" ;; esac; done < <(gpu_card_notes "$chosen")
+    while IFS= read -r note; do case "$note" in Also*|VM*) gpu_say "WARN: $note" ;; esac; done < <(gpu_card_notes "$chosen")
     if ! gpu_ui_yesno "Use this card anyway?" "Another stopped VM also lists this card. Use it anyway?"; then
       gpu_say "Nothing was changed. Run again with --yes (or answer y) to use a card that another stopped VM also lists."
       return 2

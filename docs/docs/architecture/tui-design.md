@@ -40,7 +40,7 @@ All colours come from one Textual theme named `osx-next`. The stylesheet uses th
 The interface is keyboard first, and the mouse works everywhere too.
 
 - Arrows move the selection, and `h j k l` do the same where no text field has focus. `tab` and `shift+tab` cycle the focus.
-- `enter` runs the primary action of the screen. `esc` goes back or cancels, and never quits the app.
+- `enter` runs the primary action of the screen. `esc` goes back or cancels, and never quits the app. The footer never promises an enter action that the focused button does not do: a question that destroys something (Remove, Put everything back) keeps the focus on Cancel, and its footer says `enter Choose`.
 - Single letters run the actions listed in the footer. They never fire while a text field has focus.
 - `?` opens a help overlay with every key of the current screen. `f1` does the same and also works inside text fields.
 - `q` quits. While a job runs in this process (creating a VM, a host fix, a graphics card change) it asks first.
@@ -84,7 +84,7 @@ Host check lists the failing checks first, each with one sentence on why it matt
 
 Passing a graphics card to a Mac is shown as three moments instead of a long walkthrough.
 
-In the first moment you choose the card and the Mac and approve the whole plan once. The right panel lists what it takes on this host, with a glyph for what is already right and what is still to do. A "Before you continue" dialog shows the warnings, the NVIDIA notice and the phrases you have to type. Because this is the only approval, the dialog lists every warning of the plan that will actually run.
+In the first moment you choose the card and the Mac and approve the whole plan once. The right panel lists what it takes on this host, with a glyph for what is already right and what is still to do. A "Before you continue" dialog shows the warnings, the NVIDIA notice and the phrases you have to type. Because this is the only approval, the dialog lists every warning of the plan that will actually run, including the one for other VMs that have the card in their config, and "Set it up" there is the single approval: nothing else opens between the choose screen, that dialog and the run screen. A VM that has the card and starts with the host (Start at boot) gets its own warning, because after the restart it takes the card before the Mac can. Devices the tool does not offer are one muted "Not offered" line at the end of the Card block, never a note under the chosen card. `p` shows every change in plain lines (one sentence per VM step); `x` switches to the exact commands.
 
 ![Graphics card](/img/screenshots/tui-gpu.png)
 
@@ -92,6 +92,6 @@ If a BIOS setting has to change, a screen titled "One thing only you can do" lis
 
 ![BIOS screen](/img/screenshots/tui-gpu-bios.png)
 
-In the second moment the pipeline runs: back up the files, set up the host, restart, check the card is free, attach it to the Mac and start it. The restart step shows what a restart affects right now, including any Mac with an install in progress. After the restart the flow continues without asking again, unless the plan no longer matches what was approved.
+In the second moment the pipeline runs: back up the files, set up the host, restart, check the card is free, attach it to the Mac and start it. The run screen is up the moment you approve, the step that works shows `◐` and a running time, and keys keep working while it runs. A step gets `✓` only when its check passed; a refused step shows `✗` with the reason in a few words and the steps after it stay `·`. The backup step counts only files that existed ("Nothing to back up (2 new files)"). The restart box lists every running VM that the restart shuts down, by name and ID, and each VM that starts with the host and will take the card. It is the confirmation: the focus starts on "Restart now", enter restarts (ignored for the first second, so keys typed ahead cannot restart the host) and no second question follows. After the restart the flow continues without asking again, unless the plan no longer matches what was approved. When another VM is running with the card, the box names it ("VM 103 is using the card"), offers Leave and Check again, and the tool never starts, stops or edits any VM but the Mac it is setting up. On Home the banner says "Restart done" once the host has restarted.
 
-In the third moment you confirm the first boot. AMD cards ask whether it worked and offer troubleshooting if it did not. NVIDIA cards finish with Done. "Put everything back" is available throughout and asks before it does anything.
+In the third moment you confirm the first boot. AMD cards ask whether it worked and offer troubleshooting if it did not. NVIDIA cards finish with Done. "Put everything back" is available throughout. It asks first and lists what it will do, with the same words as its result: "Remove" for a file the setup created, "Restore" for one it changed, "Take the card off" a Mac, and whether the host needs a restart afterwards.

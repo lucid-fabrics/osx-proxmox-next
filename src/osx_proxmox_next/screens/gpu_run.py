@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
 from rich.text import Text
 from textual.containers import Horizontal, Vertical
@@ -15,10 +14,8 @@ from textual.widgets import Button, Input, Static
 from .. import host_setup
 from ..gpu_flow import needs_typed, plan_for_approval, plan_lines, short_card_name
 from ..gpu_setup import CONFIRM_PHRASE
-from ..services.unattended_service import read_driver_state
-from .base import ConfirmDialog
 
-TIMELINE_WIDTH = 38
+TIMELINE_WIDTH = 40
 WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
 
 
@@ -35,6 +32,8 @@ class Guidance:
     action: Callable[[], None]
     secondary: tuple[str, Callable[[], None]] | None = None
     tone: str = "fail"
+    fail: tuple[str, str] | None = None   # (step id, the reason in five words or fewer): that step shows a cross
+    muted: tuple[int, ...] = ()           # indexes of the lines that are quiet notes
 
 
 class RunMixin:
@@ -57,8 +56,7 @@ class RunMixin:
         host = bool(approval.get("host_work")) or bool(s.state["host_changes"]) or 4 in s.state["done"]
         phases: list[tuple[str, str, str]] = []
         if host:
-            files = approval.get("host_files") or len([c for c in s.state["host_changes"] if not c.get("reverted")])
-            phases.append(("backup", "Back up files", f"Backed up {files} file{'s' if files != 1 else ''}"))
+            phases.append(("backup", "Back up files", self._backup_words()))
             phases.append(("host", "Set up the host", "Set up the host"))
         if approval.get("restart") or s.state.get("reboot_needed") or 5 in s.state["done"]:
             phases.append(("restart", "Restart this host", "Restarted this host"))
@@ -68,18 +66,42 @@ class RunMixin:
             phases.append(("start", "Start the Mac", "Started the Mac"))
         return phases
 
+    def _backup_words(self) -> str:
+        """What the backup step did, counting only files that existed: new files have nothing to back up."""
+        changes = self.s.state["host_changes"]
+        entries = [c for c in changes if c.get("stamp") == changes[-1].get("stamp")] if changes else []   # the last setup
+        old = len([c for c in entries if c.get("existed")])
+        new = len(entries) - old
+        if not old:
+            return "Nothing to back up" + (f" ({new} new file{'s' if new != 1 else ''})" if new else "")
+        return f"Backed up {old} file{'s' if old != 1 else ''}" + (f", {new} new" if new else "")
+
+    def _backup_done(self) -> bool:
+        """The files of the plan are backed up once every one of them has its backup and is written."""
+        s = self.s
+        if 4 in set(s.state["done"]) | set(s.state["skipped"]) or "host" in self.failed:
+            return True
+        if self._apply_base is None:
+            return False
+        written = len(s.state["host_changes"]) - self._apply_base
+        return written >= int((s.approval or {}).get("host_files") or 0)
+
     def _is_done(self, pid: str) -> bool:
         s = self.s
         done = set(s.state["done"]) | set(s.state["skipped"])
-        return ((pid in ("backup", "host") and 4 in done) or (pid == "restart" and 5 in done)
-                or (pid == "check" and 6 in done) or (pid == "attach" and 7 in done)
-                or (pid == "start" and (8 in done or s.state["step"] >= 8)))
+        return ((pid == "backup" and self._backup_done()) or (pid == "host" and 4 in done)
+                or (pid == "restart" and 5 in done) or (pid == "check" and 6 in done)
+                or (pid == "attach" and 7 in done)
+                or (pid == "start" and (8 in done or s.state["step"] >= 8) and not s.state.get("start_failed")))
 
     def phase_status(self, pid: str) -> str:
+        """ok only for a step that is done now, fail for the step that was refused, active for the one that runs."""
         if self._is_done(pid):
             return "ok"
         first_open = next((p[0] for p in self.phases() if not self._is_done(p[0])), "")
-        return "active" if pid == first_open else "pending"
+        if pid != first_open:
+            return "pending"
+        return "fail" if pid in self.failed else "active"
 
     def timeline(self, first_boot: bool = False) -> Text:
         pal = self.app.get_css_variables()
@@ -91,10 +113,14 @@ class RunMixin:
             if status == "ok":
                 out.append("✓ ", style=pal["success"])
                 title, tail, tone = past, clock(self.durations.get(pid)), pal["muted"]
+            elif status == "fail":
+                out.append("✗ ", style=pal["error"])
+                title, tail, tone = self.failed[pid], "", pal["error"]
             elif status == "active":
                 waiting = pid == "restart" and self.waiting_for_restart
                 out.append("◐ ", style=pal["accent"])
-                title, tail, tone = active, "your turn" if waiting else clock(self.durations.get(pid)), "bold"
+                title, tone = active, "bold"
+                tail = "your turn" if waiting else clock(self.elapsed(pid))
             else:
                 out.append("· ", style=pal["muted"])
                 title, tail, tone = active, "", pal["muted"]
@@ -111,7 +137,13 @@ class RunMixin:
             out.append("\n\nFinished without a question\nafter the restart.", style=pal["muted"])
         return out
 
+    def elapsed(self, pid: str) -> float | None:
+        """Seconds a step has run so far, or took when it is over."""
+        started = self._phase_started.get(pid)
+        return time.monotonic() - started if started is not None else self.durations.get(pid)
+
     def start_phase(self, pid: str) -> None:
+        self.failed.pop(pid, None)
         self._phase_started[pid] = time.monotonic()
 
     def end_phase(self, pid: str, seconds: float | None = None) -> None:
@@ -124,7 +156,7 @@ class RunMixin:
     # ── the box ──────────────────────────────────────────────────────
 
     async def show_run(self, title: str, lines: list[str], buttons: list[tuple[str, str, str]],
-                       tone: str = "") -> None:
+                       tone: str = "", muted: tuple[int, ...] = ()) -> None:
         """The run view: the timeline on the left, a box on the right (secondary button left of the primary)."""
         pal = self.app.get_css_variables()
         self.box_title, self.box_lines, self.box_buttons = title, lines, buttons
@@ -133,7 +165,7 @@ class RunMixin:
         box_text = Text()
         for idx, line in enumerate(lines):
             box_text.append("\n" if idx else "")
-            box_text.append(line, style=self._line_style(line, pal))
+            box_text.append(line, style=pal["muted"] if idx in muted else self._line_style(line, pal))
         widgets: list[Widget] = [
             Static(Text(f"Setting up the {name}" + (f" for {head}" if head else ""), style="bold"),
                    id="g-run-title"),
@@ -190,12 +222,31 @@ class RunMixin:
     def set_actions(self, primary: Callable[[], None] | None, secondary: Callable[[], None] | None = None) -> None:
         self._primary_action, self._secondary_action = primary, secondary
 
+    async def step_in_run(self, step: Callable[[], None], force: bool = True) -> None:
+        """Show the run screen at once, then start *step*: the user sees the step move the moment they approve,
+        never the old screen while the host works. Keys keep working: the step runs in a worker thread."""
+        if force or self.mode != "run":
+            self.set_actions(None, None)
+            await self.show_run("Working on it", [], [])
+        step()
+
+    def tick(self) -> None:
+        """Once a second while a step runs: its time moves, and the backup step ends when its files are written."""
+        if self.mode != "run" or not self.working:
+            return
+        if "backup" in self._phase_started and "host" in self._phase_started and self._backup_done():
+            self.end_phase("backup")
+        self.paint_run()
+
     def _guidance(self, g: Guidance) -> None:
         """A box with one primary action (and optionally a second button on its left), in the run view."""
         buttons = [("g-primary-run", g.label, "primary")]
         if g.secondary:
             buttons.insert(0, ("g-secondary", g.secondary[0], "secondary"))
-        self.run_worker(self.show_run(g.title, g.lines, buttons, g.tone), exclusive=True, group="gpu-mode")
+        if g.fail:
+            self.failed[g.fail[0]] = g.fail[1]
+        self.run_worker(self.show_run(g.title, g.lines, buttons, g.tone, g.muted), exclusive=True,
+                        group="gpu-mode")
         self.set_actions(g.action, g.secondary[1] if g.secondary else None)
 
     # ── stage 4: the host ────────────────────────────────────────────
@@ -209,7 +260,6 @@ class RunMixin:
 
     def _host_planned(self, plan: dict, same: bool, force_ask: bool) -> None:
         s = self.s
-        self.end_phase("backup")
         if not s.plan_needs_work(plan) and not plan["refusals"] and s.state.get("verify_retry"):
             s.state["verify_retry"] = False
             s.save()
@@ -263,83 +313,24 @@ class RunMixin:
 
     def _apply_host(self, plan: dict, typed: bool) -> None:
         s = self.s
+        self._apply_base = len(s.state["host_changes"])
         self.start_phase("host")
 
         def done(res: dict) -> None:
+            backed_up = len(s.state["host_changes"]) - (self._apply_base or 0) >= int((s.approval or {}).get("host_files") or 0)
+            self._apply_base = None
             if not res["ok"]:
                 self.say(f"Failed: {res['error']}" + (" The files were put back." if res["rolled_back"] else ""),
                          fail=True)
+                # the cross sits on the step that was refused: the backups were made, or they were not
                 self._guidance(Guidance("The host setup did not finish", [res["error"]], "Try again",
-                                        lambda: self.step_host()))
+                                        lambda: self.step_host(),
+                                        fail=("host" if backed_up else "backup", "Host setup did not finish")))
                 return
+            self.end_phase("backup")
             self.end_phase("host")
             s.state["backup_dir"] = res["backup_dir"]
             s.save()
             self.drive()
 
         self.job(lambda: s.host_apply(plan, typed), done, "Applying...")
-
-    # ── stage 5: the one restart ─────────────────────────────────────
-
-    def step_restart(self) -> None:
-        s = self.s
-        if not s.state.get("reboot_needed"):
-            s.complete(5, skipped=True)
-            self.drive()
-            return
-
-        def work() -> Any:
-            if not s.reboot_pending():
-                return None
-            s.state.setdefault("restart_at", time.time())
-            s.pause()
-            running = s.running_vms()
-            installing = []
-            for vmid, name in running:
-                state = read_driver_state(vmid)
-                if state.installing:
-                    minutes = int(max(0, time.time() - state.started_at) // 60) if state.started_at else 0
-                    installing.append((vmid, name, minutes))
-            return running, installing
-
-        self.job(work, self._restart_ready)
-
-    def _restart_ready(self, result: Any) -> None:
-        if result is None:
-            self.drive()
-            return
-        running, installing = result
-        # two lines, so the line break never falls inside "3 minutes"
-        lines = ["The host needs it to hand the card over.", "About 3 minutes.", "", "What a restart means right now"]
-        stuck = {vmid for vmid, _n, _m in installing}
-        lines += [f"● {name} is shut down cleanly first" for vmid, name in running if vmid not in stuck]
-        for _vmid, name, minutes in installing:
-            lines += [f"! {name} is still installing, {minutes} min in", "  A restart now interrupts that install."]
-        if not running:
-            lines.append("No VM is running.")
-        self.waiting_for_restart = True
-        self.run_worker(self.show_run("Time for the one restart", lines,
-                                      [("g-later", "Later", "secondary"), ("g-restart", "Restart now", "primary")]),
-                        exclusive=True, group="gpu-mode")
-        self.set_actions(lambda: self._restart_confirm(running, installing), self._restart_later)
-
-    def _restart_later(self) -> None:
-        self.s.pause()
-        self.app.notify("Saved. Your Macs page shows a reminder to finish.")
-        self.app.pop_screen()
-
-    def _restart_confirm(self, running: list, installing: list) -> None:
-        names = ", ".join(f"{i} ({n})" for i, n in running)
-        lines = ["The host restarts now."]
-        lines.append(f"These VMs will be shut down: {names}." if running else "No VM is running.")
-        if installing:
-            lines.append("An install in progress will be interrupted.")
-
-        def answer(result: str | None) -> None:
-            if result != "yes":
-                return
-            ok, out = self.s.reboot_host()
-            self.say("Restarting..." if ok else "Could not start the restart: " + out, fail=not ok)
-
-        self.app.push_screen(ConfirmDialog("Restart this host now?", lines, confirm="Restart now", danger=True),
-                             answer)

@@ -214,7 +214,7 @@ GpuScreen.narrow #g-side { width: 30; padding-left: 1; margin-left: 0; }
 #g-note { width: 1fr; color: $muted; }
 #g-action Button { dock: right; }
 #g-run-cols { height: 1fr; }
-#g-timeline { width: 38; height: auto; margin-right: 3; }
+#g-timeline { width: 40; height: auto; margin-right: 3; }
 #g-box { width: 1fr; height: auto; max-height: 100%; border: solid $accent; padding: 1 2; }
 #g-box.warn { border: solid $warning; }
 #g-box.fail { border: solid $error; }

@@ -36,6 +36,14 @@ TIMELINE_WIDTH = 36
 POLL_EVERY = 3  # seconds between reads of the driver log and the VM status
 
 
+LATEST_WIDTH = TIMELINE_WIDTH + 30   # the widest entry of "Latest"
+
+
+def _row(line: str, width: int = LATEST_WIDTH) -> str:
+    """One entry of "Latest" on one row: a cut entry ends with an ellipsis, so it never runs into the next one."""
+    return line if len(line) <= width else line[:width - 1] + "…"
+
+
 def format_clock(seconds: float) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 60}:{seconds % 60:02d}"
@@ -218,6 +226,7 @@ class BuildScreen(OsxScreen):
     def _paint_latest(self, pal: dict) -> None:
         pipe = self.pipe
         text = Text()
+        room = min(LATEST_WIDTH, self.query_one("#latest", Static).size.width or LATEST_WIDTH)   # the pane, when it is narrower
         if pipe.failed:
             text.append(f"✗ {pipe.failure}\n", style=pal["error"])
             tail = [line for line in pipe.log_lines if line != f"FAILED: {pipe.failure}"][-5:]  # the reason is above
@@ -230,11 +239,11 @@ class BuildScreen(OsxScreen):
         elif pipe.phase("install").status in (ACTIVE, OK) and pipe.driver.events:
             text.append("Latest\n", style=pal["muted"])
             for stamp, message in pipe.driver.events[-3:][::-1]:
-                text.append(f"{stamp[:5]} {message}\n"[:TIMELINE_WIDTH + 30], style=pal["muted"])
+                text.append(_row(f"{stamp[:5]} {message}", room) + "\n", style=pal["muted"])
         elif pipe.log_lines:
             text.append("Latest\n", style=pal["muted"])
             for line in pipe.log_lines[-2:][::-1]:
-                text.append(line[:TIMELINE_WIDTH + 30] + "\n", style=pal["muted"])
+                text.append(_row(line, room) + "\n", style=pal["muted"])
         text.rstrip()
         self.query_one("#latest", Static).update(text)
 

@@ -73,7 +73,7 @@ def test_undo(host, monkeypatch):
     s.choose("06:00", 100, "gpu")
     s.host_apply(s.host_plan())
     code, out = go(host, "--undo")
-    assert code == 0 and "Everything this setup changed is back as it was." in out and "Restored /etc/default/grub.d" in out
+    assert code == 0 and "Everything this setup changed is back as it was." in out and "Removed /etc/default/grub.d" in out
     s2 = host.session()
     s2.state["vm_records"] = [100]
     from osx_proxmox_next import gpu

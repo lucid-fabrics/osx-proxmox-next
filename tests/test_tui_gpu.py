@@ -166,7 +166,9 @@ async def test_p_opens_every_change_with_the_card_and_the_host_facts(tmp_path):
         assert "each file is backed up first" in text and host_setup.BACKUP_ROOT in text
         assert ("--- /etc/modprobe.d/osx-proxmox-next-vfio.conf  (Bind the card to vfio-pci before its driver loads)"
                 in text)
-        assert "VM 100 settings (a config snapshot is saved first):" in text and "qm set 100" in text
+        assert "VM 100 settings (a config snapshot is saved first):" in text
+        assert "01. " in text and "qm set 100" not in text and "bash -c" not in text   # plain lines first
+        assert "Hands the card (0000:06:00,pcie=1) to VM 100 as hostpci0" in text
         await pilot.press("escape")
         assert app.screen is screen
         await pilot.press("p")
@@ -300,7 +302,7 @@ async def test_a_refusal_is_one_line_and_disables_the_button(tmp_path):
         screen = await at_choose_unusable(pilot, app, env)
         assert "No card here can run macOS graphics" in panel(screen)
         assert screen.query_one("#g-primary", Button).disabled
-        assert "In use by VM 120" in row(screen, "#g-card")
+        assert "Not offered: Radeon RX 6600 (in use by VM 120)" in row(screen, "#g-card")
 
 
 @F.tui
@@ -442,7 +444,7 @@ async def test_a_second_card_that_macos_cannot_use_is_listed_dimmed_with_its_rea
         screen = await at_choose(pilot, app, env)
         card_row = screen.query_one("#g-card", ChoiceRow)
         assert [o.enabled for o in card_row.options] == [True, False]
-        assert "Apple never shipped an accelerator for it." in flat(row(screen, "#g-card"))
+        assert flat(row(screen, "#g-card")).endswith("Not offered: AMD GPU (no Apple driver)")
         await pilot.press("right")                                    # the unusable card is skipped
         assert card_row.value == "0000:06:00"
 
@@ -508,26 +510,25 @@ async def test_a_refused_choose_shows_the_refusals(tmp_path, monkeypatch):
 
 
 @F.tui
-async def test_a_stopped_holder_is_confirmed_in_a_dialog_before_the_card_is_used(tmp_path, applied):
+async def test_a_stopped_holder_is_confirmed_once_in_before_you_continue(tmp_path, applied):
+    """Fix 3: the warning of a card other VMs list is shown once, in "Before you continue", and its "Set it up"
+    is the only approval: no question opens before it or after it."""
     env = amd_env(tmp_path)
     env.qm.vms[120] = ("stopped", "hostpci0: 0000:06:00,pcie=1\n")
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await at_choose(pilot, app, env)
         assert "stopped VM 120" in row(screen, "#g-card")
-        await pilot.press("enter")                                    # the warnings first ...
-        assert isinstance(app.screen, BeforeDialog) and "stopped VM 120" in flat(F.text_of(app.screen.query_one("#before-warnings")))
         await pilot.press("enter")
-        dialog = app.screen                                           # ... then the shared card question
-        assert isinstance(dialog, ChoiceDialog) and F.text_of(dialog.query_one(".dialog-title")) == "This card is listed by other VMs"
-        assert app.focused.name == "no"
+        dialog = app.screen
+        assert isinstance(dialog, BeforeDialog) and "stopped VM 120" in flat(F.text_of(dialog.query_one("#before-warnings")))
+        assert screen.s.state["gpu"] is None                         # nothing is stored before the approval
         await pilot.press("escape")
-        assert screen.s.state["gpu"] is None and screen.mode == "choose"
+        assert app.screen is screen and screen.s.state["gpu"] is None and screen.mode == "choose"
         await pilot.press("enter")
-        await pilot.press("enter")
-        await pilot.press("tab")
-        await pilot.press("enter")
+        await pilot.press("enter")                                    # "Set it up": the one approval
         await mode(pilot, screen, "run")
+        assert not isinstance(app.screen, ChoiceDialog)
         assert screen.s.state["gpu"]["bdf"] == "0000:06:00"
 
 

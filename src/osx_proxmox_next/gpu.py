@@ -42,6 +42,9 @@ __all__ = [
     "detect_gpus",
     "MMIO_ARG",
     "gpu_users",
+    "gpu_holders",
+    "Holder",
+    "starts_note",
     "is_host_console",
     "record_vmids",
     "running_user_issue",
@@ -352,6 +355,16 @@ def shared_note(vmids: int | Iterable[int]) -> str:
             "Proxmox refuses to start the others.")
 
 
+def starts_note(vmids: Iterable[int]) -> str:
+    """The warning for a card that VMs starting with the host also hold: one of them takes it after a restart."""
+    ids = list(vmids)
+    if len(ids) == 1:
+        return (f"VM {ids[0]} starts with this host and has this card. After the restart it takes the card "
+                "before the Mac can. Shut it down then, or turn off its Start at boot option.")
+    return (f"VMs {', '.join(map(str, ids))} start with this host and have this card. After the restart one of "
+            "them takes the card before the Mac can. Shut it down then, or turn off their Start at boot option.")
+
+
 def running_user_issue(vmid: int) -> str:
     return f"The card is in use by running VM {vmid}."
 
@@ -615,18 +628,37 @@ def pci_mappings(adapter: ProxmoxAdapter, root: str = "/") -> dict[str, set[str]
     return host_setup.load_mappings(root, run)
 
 
-def gpu_users(adapter: ProxmoxAdapter, bdf: str, vmid: int, root: str = "/") -> list[tuple[int, bool]]:
-    """Other VMs that already hold this card (directly or through a resource mapping), and whether they run."""
+@dataclass(frozen=True)
+class Holder:
+    """Another VM that has this card in its config."""
+
+    vmid: int
+    name: str
+    running: bool
+    onboot: bool   # it starts with the host (onboot: 1) and is not a template
+
+
+def gpu_holders(adapter: ProxmoxAdapter, bdf: str, vmid: int, root: str = "/") -> list[Holder]:
+    """Other VMs that already hold this card (directly or through a resource mapping)."""
     listing = adapter.qm("list")
-    users: list[tuple[int, bool]] = []
+    out: list[Holder] = []
     if not listing.ok:
-        return users
+        return out
     mappings = pci_mappings(adapter, root)
     for line in listing.output.splitlines()[1:]:
         parts = line.split()
         if len(parts) < 3 or not parts[0].isdigit() or int(parts[0]) == vmid:
             continue
         cfg = adapter.qm("config", parts[0])
-        if cfg.ok and any(bdf in ids for ids in hostpci_bdfs(parse_config(cfg.output), mappings).values()):
-            users.append((int(parts[0]), parts[2] == "running"))
-    return users
+        if not cfg.ok:
+            continue
+        parsed = parse_config(cfg.output)
+        if any(bdf in ids for ids in hostpci_bdfs(parsed, mappings).values()):
+            onboot = parsed.get("onboot", "").strip() == "1" and parsed.get("template", "").strip() != "1"
+            out.append(Holder(int(parts[0]), parts[1], parts[2] == "running", onboot))
+    return out
+
+
+def gpu_users(adapter: ProxmoxAdapter, bdf: str, vmid: int, root: str = "/") -> list[tuple[int, bool]]:
+    """Other VMs that already hold this card, and whether they run."""
+    return [(h.vmid, h.running) for h in gpu_holders(adapter, bdf, vmid, root)]

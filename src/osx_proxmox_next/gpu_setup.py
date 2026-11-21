@@ -35,6 +35,7 @@ __all__ = [
 ]
 
 RESUME_CMD = "osx-next-cli gpu-setup"
+RESTART_AFTER_UNDO = "Restart this host when it suits you. The boot change stays active until then."
 CONFIRM_PHRASE = "I understand"  # typed to continue past a hard warning (the TUI and the CLI ask for the same words)
 # (value, label, one-line description) of the AMD display choice, shared by the CLI and the TUI
 DISPLAY_OPTIONS = (
@@ -116,6 +117,7 @@ class GpuCard:
     host_console: bool = False  # boot_vga AND a host display driver or a firmware framebuffer holds the card
     driver: str | None = None
     users: list[tuple[int, bool]] = field(default_factory=list)
+    starters: list[int] = field(default_factory=list)  # VMs that hold the card and start with the host (onboot)
     shares: list[str] = field(default_factory=list)
     risky: list[str] = field(default_factory=list)  # storage or network devices in the same IOMMU group
     lxc: list[tuple[int, str]] = field(default_factory=list)  # containers that use the host GPU driver nodes
@@ -152,12 +154,31 @@ class GpuCard:
         return self.kind != "unsupported" and not self.running_users and not self.risky
 
     @property
-    def notes(self) -> list[str]:
-        """Warnings shown on the card: stopped VMs that also list it, and the firmware boot screen."""
+    def share_notes(self) -> list[str]:
+        """What other VMs holding the card mean: stopped ones that also list it, ones that start with the host."""
         out = [gpu.shared_note(self.stopped_users)] if self.stopped_users else []
+        return out + ([gpu.starts_note(self.starters)] if self.starters else [])
+
+    @property
+    def notes(self) -> list[str]:
+        """Warnings shown on the card: other VMs that hold it, and the firmware boot screen."""
+        out = self.share_notes
         if self.boot_vga and not self.host_console:
             out.append("The firmware shows its boot screen on this card.")
         return out
+
+    @property
+    def short_why_not(self) -> str:
+        """A few words on why the card is not offered, for the one muted line under the offered card."""
+        if self.laptop:
+            return "laptop GPU"
+        if self.kind == "unsupported":
+            return {"amd": "no Apple driver", "nvidia": "no macOS driver"}.get(self.vendor, "not supported")
+        if self.risky:
+            return "shares its group with storage or network"
+        if self.running_users:
+            return "in use by " + ", ".join(f"VM {v}" for v in self.running_users)
+        return ""
 
     @property
     def why_not(self) -> str:
@@ -443,6 +464,7 @@ class Session:
                         if (other["class"] or 0) >> 16 in (0x01, 0x02):
                             risky.append(other["bdf"])
             containers = [(c, n) for c, n in host_setup.lxc_gpu_users(self.root) if n == "/dev/dri" or vendor == "nvidia"]
+            holders = gpu.gpu_holders(self.pve, bdf, exclude_vm, self.root) if kind != "unsupported" else []
             info = intel_host.lookup(disp["device"], intel_devices["text"]) if vendor == "intel" and intel_devices else None
             cards.append(GpuCard(
                 model=info["model"] if info else "",
@@ -451,7 +473,7 @@ class Session:
                 kind=kind, headline=headline, detail=detail, boot_vga=bool(first["boot_vga"]), driver=first["driver"],
                 host_console=gpu.is_host_console(self.sysfs / "bus/pci/devices" / f"{bdf}.0",
                                                  Path(self.root) / "proc/iomem"),
-                users=gpu.gpu_users(self.pve, bdf, exclude_vm, self.root) if kind != "unsupported" else [],
+                users=[(h.vmid, h.running) for h in holders], starters=[h.vmid for h in holders if h.onboot],
                 shares=shares, risky=risky, lxc=containers if kind != "unsupported" else [],
             ))
         apply_verdicts(cards, macos)
@@ -689,6 +711,15 @@ class Session:
     def verify(self) -> list[dict]:
         checks = host_setup.verify_host(self.target(), self.root, self.run)
         if not any(c["status"] == "fail" for c in checks):
+            holders = self.card_holders()
+            busy = [h for h in holders if h.running]
+            if busy:   # the host is ready, but a VM that is running holds the card: the check is not passed
+                ids = ", ".join(str(h.vmid) for h in busy)
+                checks.append({"id": "card-free", "label": f"Card is in use by VM{'s' if len(busy) > 1 else ''} {ids}",
+                               "status": "fail", "detail": "Shut it down, then check again.", "fix": "free",
+                               "holders": [(h.vmid, h.name, h.running, h.onboot) for h in busy],
+                               "stopped": [h.vmid for h in holders if not h.running]})
+                return checks
             self.state["reboot_needed"] = False
             if 5 not in self.state["done"]:
                 self.complete(5, skipped=True)
@@ -921,7 +952,8 @@ class Session:
         res = host_setup.undo_host(self.state, self.root, self.run)
         ok = ok and res["ok"]
         self.undo_kept += len(res["kept"])
-        messages += [f"Restored {path}" for path in res["restored"]] + res["kept"] + res["errors"]
+        messages += [("Removed " if path in res["removed"] else "Restored ") + path for path in res["restored"]]
+        messages += res["kept"] + res["errors"]
         self.undo_nothing = not vmids and not (res["restored"] or res["kept"] or res["errors"] or res["reboot_required"])
         if self.undo_nothing:
             messages.append("Removed an empty setup record; nothing else to undo." if had_record else
@@ -929,13 +961,34 @@ class Session:
             messages += [f"VM {v} has NullMoth settings in its config but no record. Undo it with: nvidia-detach {v}"
                          for v in self.nullmoth_markers()]
         if res["reboot_required"]:
-            messages.append("Reboot the host to finish undoing the boot changes.")
+            messages.append(RESTART_AFTER_UNDO)
         if ok:
             host_setup.clear_login_hint(self.root)
             host_setup.delete_state(self.root)
         else:
             self.save()
         return ok, messages
+
+    def undo_plan(self) -> list[str]:
+        """What undo would do, in the words of its result: a line per file and per Mac, and the restart."""
+        lines: list[str] = []
+        first: dict[str, bool] = {}
+        for c in self.state["host_changes"]:
+            if not c.get("reverted"):
+                first.setdefault(c["path"], c["existed"])
+        for path in reversed(list(first)):
+            lines.append(("Restore " if first[path] else "Remove ") + path)
+        for vmid in list(self.state["vm_records"]) + [v for v in gpu.record_vmids() if v not in self.state["vm_records"]]:
+            if load_record(vmid) is not None:
+                name = self._vm_name_suffix(vmid).strip()
+                lines.append(f"Take the card off {name} (VM {vmid})" if name else f"Take the card off VM {vmid}")
+        return lines + (["The host needs one restart afterwards."] if first else [])
+
+    def card_holders(self) -> list[gpu.Holder]:
+        """Other VMs that hold the chosen card right now (the Mac being set up is left out)."""
+        chosen = self.state["gpu"]
+        vmid = self.state["vm"]
+        return gpu.gpu_holders(self.pve, chosen["bdf"], -1 if vmid is None else vmid, self.root) if chosen else []
 
     def _forget_vm(self, vmid: int) -> None:
         if vmid in self.state["vm_records"]:
