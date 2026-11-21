@@ -276,7 +276,8 @@ async def test_a_step_that_crashes_shows_a_cross_and_a_way_on(tmp_path, applied,
         app.push_screen(screen)
         await F.settle(pilot, lambda: bool(screen.query("#g-primary-run")))
         assert box(screen).startswith("Something went wrong") and "lspci vanished" in box(screen)
-        assert "✗ Step did not finish" in timeline(screen) and "enter Try again" in keys(app)
+        await F.settle(pilot, lambda: "enter Try again" in keys(app))   # the key bar follows the box by a redraw
+        assert "✗ Step did not finish" in timeline(screen)
 
 
 # ── 5: the run screen the moment the user approves ───────────────────
