@@ -19,7 +19,10 @@ _EXIT_CODE_TIMEOUT = 124
 class ProxmoxAdapter:
     def run(self, argv: list[str]) -> CommandResult:
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=_SUBPROCESS_TIMEOUT)
+            # Detached from the terminal: a `qm shutdown` that shares it ends up hanging the tty up, and the TUI
+            # that owns it dies with "Input/output error" (seen live). Nothing here ever reads a prompt.
+            proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=_SUBPROCESS_TIMEOUT,
+                                  stdin=subprocess.DEVNULL, start_new_session=True)
             output = (proc.stdout or "") + (proc.stderr or "")
             return CommandResult(ok=(proc.returncode == 0), returncode=proc.returncode, output=output.strip())
         except FileNotFoundError:

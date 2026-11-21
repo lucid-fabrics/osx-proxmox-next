@@ -132,3 +132,15 @@ def test_run_command_timeout(monkeypatch):
     assert result.ok is False
     assert result.returncode == 124
     assert "timed out" in result.output
+
+
+def test_commands_run_detached_from_the_terminal_so_qm_cannot_hang_the_tty_up(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert ProxmoxAdapter().qm("shutdown", "101").ok
+    assert seen["stdin"] is subprocess.DEVNULL and seen["start_new_session"] is True
