@@ -55,6 +55,7 @@ const sidebars: SidebarsConfig = {
         'architecture/overview',
         'architecture/opencore',
         'architecture/smbios',
+        'architecture/tui-design',
       ],
     },
   ],
