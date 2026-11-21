@@ -118,15 +118,15 @@ class PlanStep:
 | `defaults.py`       | Hardware detection: CPU vendor, core count, hybrid topology, RAM |
 | `rollback.py`       | Config snapshot (saved to `generated/snapshots/` before destructive ops) and rollback hints for manual recovery |
 | `diagnostics.py`    | Diagnostic log bundle export |
-| `app.py`            | TUI wizard entry point. Composes `_WizardMixin`, `_EditMixin`, and `_ManageMixin` |
-| `_wizard_mixin.py`  | TUI 6-step VM creation flow: Preflight, OS selection, Storage, Config, Dry Run, Install |
-| `_edit_mixin.py`    | TUI VM edit flow: verifies VM exists, creates snapshot, stops VM, applies `EditChanges`, optionally restarts |
-| `_manage_mixin.py`  | TUI manage mode: lists macOS VMs, provides per-VM edit/start/stop/destroy actions |
+| `app.py`            | TUI entry point: registers the `osx-next` theme, the command palette and the background host check, and opens the Home screen |
+| `screens/`          | One module per screen: Home (cards with live screens), VM view, New Mac, Build (check, download, rehearse, create, install), Host check, Graphics card, and the Remove and Edit dialogs |
+| `widgets/`          | The live VM screen (a `qm monitor` screendump drawn with half blocks), the key bar, the top bar, capacity bars and form rows |
+| `services/pipeline.py` | The Build pipeline: one run from the host check to a ready Mac, with a detached driver for the hands-off install whose log the Build screen reads back |
 | `script_renderer.py`| Generates shell scripts for OpenCore disk creation (GPT + ESP partitioning, config.plist patching) |
 | `preflight.py`      | Asset presence checks (`required_assets`): verifies OpenCore ISO and recovery image exist before apply |
 | `assets.py`         | Asset path resolution and download hint generation for missing OpenCore/recovery files |
 | `services/`         | Detection service (storage targets, next VMID with overflow protection, VM listing), edit service (worker for applying `EditChanges`) |
-| `models/`           | `WizardState` dataclass — reactive TUI state shared across all mixin steps (`dry_log`, `live_log_lines`, form field values) |
+| `models/`           | `NewMacState` dataclass and the rules that turn the New Mac screen into a `VmConfig` |
 
 ## CPU Strategy
 

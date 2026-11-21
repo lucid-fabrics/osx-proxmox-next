@@ -41,7 +41,7 @@ osx-next-cli apply --execute \
 
 ### TUI
 
-Check "Enable Apple Services (iMessage, FaceTime, iCloud)" in step 4 of the wizard.
+Set the **Apple ID** row to **On** on the New Mac screen.
 
 ### Custom SMBIOS Values
 

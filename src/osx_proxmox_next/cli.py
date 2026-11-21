@@ -5,6 +5,7 @@ import dataclasses
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -365,6 +366,16 @@ def _detect_vm_disk_gb(vmid: int) -> int:
     return 0
 
 
+def _log_unattended_event(message: str) -> None:
+    """One log line per driver event. Phase markers carry an epoch the TUI reads back."""
+    from .unattended import PHASE_MARK
+
+    if message.startswith(PHASE_MARK):
+        print(f"{PHASE_MARK}{message[len(PHASE_MARK):]} {int(time.time())}", flush=True)
+    else:
+        print(f"  [{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
 def _run_install_unattended(args: argparse.Namespace) -> int:
     from .unattended import QmConsole, UnattendedError, run_unattended_install
 
@@ -376,12 +387,11 @@ def _run_install_unattended(args: argparse.Namespace) -> int:
     if "running" not in status.output:
         print(f"ERROR: VM {args.vmid} is not running. Start it first (it must sit at the boot picker).")
         return 2
-    print(f"BETA: unattended install for VM {args.vmid} ({disk_gb} GB target disk).")
-    print("The VM disk will be ERASED. Watch progress below or on the VM console.")
+    print(f"BETA: unattended install for VM {args.vmid} ({disk_gb} GB target disk).", flush=True)
+    print("The VM disk will be ERASED. Watch progress below or on the VM console.", flush=True)
     console = QmConsole(args.vmid)
     try:
-        summary = run_unattended_install(console, disk_gb,
-                                         on_event=lambda m: print(f"  {m}", flush=True))
+        summary = run_unattended_install(console, disk_gb, on_event=_log_unattended_event)
     except UnattendedError as exc:
         print(f"ERROR: {exc}")
         shot = console.save_frame(f"/var/log/osx-next-unattended-{args.vmid}.png")

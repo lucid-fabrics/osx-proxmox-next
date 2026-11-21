@@ -7,6 +7,7 @@ import pytest
 from osx_proxmox_next.infrastructure import ProxmoxAdapter
 from osx_proxmox_next.services import proxmox_service as svc_module
 from osx_proxmox_next.services.proxmox_service import get_proxmox_adapter
+from adapter_fakes import patch_adapter_run
 
 
 def _reset(monkeypatch):
@@ -43,7 +44,7 @@ def test_adapter_qm_delegates_to_run(monkeypatch):
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    patch_adapter_run(monkeypatch, fake_run)
     adapter = get_proxmox_adapter()
     result = adapter.qm("status", "100")
     assert result.ok is True
@@ -52,9 +53,7 @@ def test_adapter_qm_delegates_to_run(monkeypatch):
 
 def test_adapter_run_returns_false_on_nonzero_exit(monkeypatch):
     _reset(monkeypatch)
-    monkeypatch.setattr(
-        subprocess, "run",
-        lambda *a, **kw: subprocess.CompletedProcess(a[0], 1, stdout="", stderr="not found"),
+    patch_adapter_run(monkeypatch, lambda *a, **kw: subprocess.CompletedProcess(a[0], 1, stdout="", stderr="not found"),
     )
     result = get_proxmox_adapter().run(["qm", "status", "999"])
     assert result.ok is False
@@ -75,7 +74,7 @@ def test_adapter_run_handles_timeout(monkeypatch):
     def _timeout(*a, **kw):
         raise subprocess.TimeoutExpired(cmd=["qm"], timeout=300)
 
-    monkeypatch.setattr(subprocess, "run", _timeout)
+    patch_adapter_run(monkeypatch, _timeout)
     result = get_proxmox_adapter().run(["qm", "status", "100"])
     assert result.ok is False
     assert result.returncode == 124
@@ -84,9 +83,7 @@ def test_adapter_run_handles_timeout(monkeypatch):
 def test_adapter_pvesm_delegates(monkeypatch):
     _reset(monkeypatch)
     calls = []
-    monkeypatch.setattr(
-        subprocess, "run",
-        lambda argv, **kw: (calls.append(argv), subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))[1],
+    patch_adapter_run(monkeypatch, lambda argv, **kw: (calls.append(argv), subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))[1],
     )
     get_proxmox_adapter().pvesm("status")
     assert calls[0][:2] == ["pvesm", "status"]
@@ -95,9 +92,7 @@ def test_adapter_pvesm_delegates(monkeypatch):
 def test_adapter_pvesh_delegates(monkeypatch):
     _reset(monkeypatch)
     calls = []
-    monkeypatch.setattr(
-        subprocess, "run",
-        lambda argv, **kw: (calls.append(argv), subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))[1],
+    patch_adapter_run(monkeypatch, lambda argv, **kw: (calls.append(argv), subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))[1],
     )
     get_proxmox_adapter().pvesh("get", "/nodes")
     assert calls[0][:2] == ["pvesh", "get"]

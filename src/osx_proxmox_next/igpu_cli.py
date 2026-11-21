@@ -105,6 +105,10 @@ def run_check(wex: str = igpu_engine.LATEST) -> int:
 
 
 def _on_event(message: str) -> None:
+    from .unattended import PHASE_MARK
+
+    if message.startswith(PHASE_MARK):
+        return  # the progress markers are for the TUI's log reader, not for a person
     print(f"  {message}", flush=True)
 
 

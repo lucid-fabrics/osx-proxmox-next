@@ -1,6 +1,11 @@
+import os
 import subprocess
 
+import pytest
+
+from osx_proxmox_next import infrastructure
 from osx_proxmox_next.infrastructure import ProxmoxAdapter, run_command
+from adapter_fakes import patch_adapter_run
 
 
 def test_run_timeout(monkeypatch):
@@ -10,7 +15,7 @@ def test_run_timeout(monkeypatch):
         exc.stderr = ""
         raise exc
 
-    monkeypatch.setattr(subprocess, "run", raise_timeout)
+    patch_adapter_run(monkeypatch, raise_timeout)
     adapter = ProxmoxAdapter()
     result = adapter.run(["qm", "status", "900"])
     assert result.ok is False
@@ -25,7 +30,7 @@ def test_pvesm_wraps_binary(monkeypatch):
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    patch_adapter_run(monkeypatch, fake_run)
     adapter = ProxmoxAdapter()
     result = adapter.pvesm("status")
     assert result.ok is True
@@ -40,7 +45,7 @@ def test_pvesh_wraps_binary(monkeypatch):
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    patch_adapter_run(monkeypatch, fake_run)
     adapter = ProxmoxAdapter()
     result = adapter.pvesh("get", "/cluster/nextid")
     assert result.ok is True
@@ -56,7 +61,7 @@ def test_run_timeout_with_bytes_output(monkeypatch):
         exc.stderr = b"error bytes"
         raise exc
 
-    monkeypatch.setattr(subprocess, "run", raise_timeout)
+    patch_adapter_run(monkeypatch, raise_timeout)
     adapter = ProxmoxAdapter()
     result = adapter.run(["qm", "start", "900"])
     assert result.ok is False
@@ -72,7 +77,7 @@ def test_run_timeout_with_none_output(monkeypatch):
         exc.stderr = None
         raise exc
 
-    monkeypatch.setattr(subprocess, "run", raise_timeout)
+    patch_adapter_run(monkeypatch, raise_timeout)
     adapter = ProxmoxAdapter()
     result = adapter.run(["qm", "start", "900"])
     assert result.ok is False
@@ -83,7 +88,7 @@ def test_run_nonzero_returncode(monkeypatch):
     def fake_run(argv, **kw):
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="fail")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    patch_adapter_run(monkeypatch, fake_run)
     adapter = ProxmoxAdapter()
     result = adapter.run(["qm", "status", "999"])
     assert result.ok is False
@@ -132,3 +137,70 @@ def test_run_command_timeout(monkeypatch):
     assert result.ok is False
     assert result.returncode == 124
     assert "timed out" in result.output
+
+
+def test_commands_run_detached_from_the_terminal_so_qm_cannot_hang_the_tty_up(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    patch_adapter_run(monkeypatch, fake_run)
+    assert ProxmoxAdapter().qm("shutdown", "101").ok
+    assert seen["stdin"] is subprocess.DEVNULL and seen["start_new_session"] is True
+
+
+# ── the whole process group goes down on every exit path (real subprocesses) ──────────────────
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(stat) and not stat.startswith("Z")          # an unreaped zombie is already dead
+
+
+def _spawner(pidfile) -> list[str]:
+    """A command that starts a grandchild ignoring SIGTERM, records its pid and then waits for it."""
+    return ["sh", "-c", f"(trap '' TERM; exec sleep 60) & echo $! > {pidfile}; wait"]
+
+
+def _pid_of(pidfile) -> int:
+    return int(pidfile.read_text())
+
+
+def test_timeout_takes_the_grandchild_down_too(monkeypatch, tmp_path):
+    pidfile = tmp_path / "pid"
+    monkeypatch.setattr(infrastructure, "_SUBPROCESS_TIMEOUT", 2)
+    result = ProxmoxAdapter().run(_spawner(pidfile))
+    assert result.returncode == 124 and "timed out" in result.output and result.ok is False
+    assert not _alive(_pid_of(pidfile))
+
+
+def test_keyboard_interrupt_takes_the_grandchild_down_and_propagates(monkeypatch, tmp_path):
+    pidfile = tmp_path / "pid"
+    real_communicate = subprocess.Popen.communicate
+
+    def interrupted(self, input=None, timeout=None):
+        while not (pidfile.exists() and pidfile.read_text().strip()):
+            try:
+                self.wait(timeout=0.05)                     # a bounded wait for the grandchild to start
+            except subprocess.TimeoutExpired:
+                pass
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        ProxmoxAdapter().run(_spawner(pidfile))
+    monkeypatch.setattr(subprocess.Popen, "communicate", real_communicate)
+    assert not _alive(_pid_of(pidfile))
+
+
+def test_a_normal_command_still_returns_its_output_and_exit_code():
+    ok = ProxmoxAdapter().run(["sh", "-c", "echo out; echo err >&2"])
+    assert (ok.ok, ok.returncode, ok.output) == (True, 0, "out\nerr")
+    bad = ProxmoxAdapter().run(["sh", "-c", "echo boom >&2; exit 3"])
+    assert (bad.ok, bad.returncode, bad.output) == (False, 3, "boom")
+    assert ProxmoxAdapter().run(["no-such-binary-xyz"]).returncode == 127

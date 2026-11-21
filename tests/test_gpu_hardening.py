@@ -643,3 +643,18 @@ def test_the_vfio_hint_never_suggests_a_storage_or_foreign_function(tmp_path):
     hint = gpu.vfio_conf_hint(root / "sys", "0000:06:00")
     assert "  options vfio-pci ids=1002:73ff,1002:ab28" in hint
     assert not any("144d" in line or "4444" in line for line in hint)
+
+
+def test_a_file_changed_twice_is_one_line_of_the_undo_result(tmp_path):
+    root = tmp_path / "root"
+    path = root / "etc/twice.conf"
+    path.parent.mkdir(parents=True)
+    path.write_text("third\n")
+    state = hs.new_state()
+    for existed, before, after in ((False, "", "second\n"), (True, "second\n", "third\n")):
+        state["host_changes"].append({"path": "/etc/twice.conf", "existed": existed, "backup": "", "stamp": "s",
+                                      "sha_before": "", "sha_after": hs._sha(after), "reverted": False})
+    state["host_changes"][1]["backup"] = str(tmp_path / "bak")
+    (tmp_path / "bak").write_text("second\n")
+    res = hs.undo_host(state, str(root), FakeRun(default=(0, "")))
+    assert res["restored"] == ["/etc/twice.conf"] and res["removed"] == ["/etc/twice.conf"]

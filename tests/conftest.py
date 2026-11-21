@@ -19,7 +19,7 @@ def _no_host_memory_limit(monkeypatch):
     machine happens to have free. Tests that exercise the check re-patch it
     with an explicit value."""
     monkeypatch.setattr("osx_proxmox_next.defaults.max_vm_memory_mb", lambda: 0)
-    monkeypatch.setattr("osx_proxmox_next._wizard_mixin.max_vm_memory_mb", lambda: 0)
+    monkeypatch.setattr("osx_proxmox_next.services.host_facts.max_vm_memory_mb", lambda: 0)
 
 
 @pytest.fixture(autouse=True)

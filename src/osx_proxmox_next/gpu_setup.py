@@ -1,6 +1,6 @@
 """The guided GPU passthrough walkthrough: state, scan, and one method per step.
 
-Both front ends (the CLI in gpu_setup_cli.py and the TUI panel in _gpu_mixin.py)
+Both front ends (the CLI in gpu_setup_cli.py and the TUI screen in screens/gpu.py)
 drive a Session. The host changes are done by host_setup.py and the BIOS card by
 bios_guide.py (standalone modules the bash installer embeds); VM changes go
 through nullmoth.py (NVIDIA) and gpu_attach.py (AMD).
@@ -27,6 +27,7 @@ __all__ = [
     "VmOption",
     "Session",
     "TROUBLESHOOTING",
+    "CONFIRM_PHRASE",
     "card_text",
     "docs_url",
     "render_rail",
@@ -34,6 +35,8 @@ __all__ = [
 ]
 
 RESUME_CMD = "osx-next-cli gpu-setup"
+RESTART_AFTER_UNDO = "Restart this host when it suits you. The boot change stays active until then."
+CONFIRM_PHRASE = "I understand"  # typed to continue past a hard warning (the TUI and the CLI ask for the same words)
 # (value, label, one-line description) of the AMD display choice, shared by the CLI and the TUI
 DISPLAY_OPTIONS = (
     ("gpu", "Monitor on the GPU", "Best performance. Plug a screen into the card; the Proxmox console goes blank."),
@@ -94,6 +97,14 @@ TROUBLESHOOTING = _BLACK_BOX
 
 
 @dataclass
+class VmAsk:
+    """The Mac, the display choice and the NullMoth acknowledgement an attach plan is worked out for."""
+    vmid: int | None
+    display: str
+    ack: bool
+
+
+@dataclass
 class GpuCard:
     bdf: str
     vendor: str  # "amd" | "nvidia" | "intel"
@@ -106,6 +117,7 @@ class GpuCard:
     host_console: bool = False  # boot_vga AND a host display driver or a firmware framebuffer holds the card
     driver: str | None = None
     users: list[tuple[int, bool]] = field(default_factory=list)
+    starters: list[int] = field(default_factory=list)  # VMs that hold the card and start with the host (onboot)
     shares: list[str] = field(default_factory=list)
     risky: list[str] = field(default_factory=list)  # storage or network devices in the same IOMMU group
     lxc: list[tuple[int, str]] = field(default_factory=list)  # containers that use the host GPU driver nodes
@@ -142,12 +154,31 @@ class GpuCard:
         return self.kind != "unsupported" and not self.running_users and not self.risky
 
     @property
-    def notes(self) -> list[str]:
-        """Warnings shown on the card: stopped VMs that also list it, and the firmware boot screen."""
+    def share_notes(self) -> list[str]:
+        """What other VMs holding the card mean: stopped ones that also list it, ones that start with the host."""
         out = [gpu.shared_note(self.stopped_users)] if self.stopped_users else []
+        return out + ([gpu.starts_note(self.starters)] if self.starters else [])
+
+    @property
+    def notes(self) -> list[str]:
+        """Warnings shown on the card: other VMs that hold it, and the firmware boot screen."""
+        out = self.share_notes
         if self.boot_vga and not self.host_console:
             out.append("The firmware shows its boot screen on this card.")
         return out
+
+    @property
+    def short_why_not(self) -> str:
+        """A few words on why the card is not offered, for the one muted line under the offered card."""
+        if self.laptop:
+            return "laptop GPU"
+        if self.kind == "unsupported":
+            return {"amd": "no Apple driver", "nvidia": "no macOS driver"}.get(self.vendor, "not supported")
+        if self.risky:
+            return "shares its group with storage or network"
+        if self.running_users:
+            return "in use by " + ", ".join(f"VM {v}" for v in self.running_users)
+        return ""
 
     @property
     def why_not(self) -> str:
@@ -344,6 +375,22 @@ class Session:
     def save(self) -> None:
         host_setup.save_state(self.state, self.root)
 
+    # ── what the user approved (the TUI asks once, then runs the rest unattended) ──
+
+    def approve(self, record: dict) -> None:
+        """Store what the user approved, so the steps after a restart run without asking again."""
+        self.state["approved"] = record
+        self.save()
+
+    @property
+    def approval(self) -> dict | None:
+        return self.state.get("approved") or None
+
+    def clear_approval(self) -> None:
+        if "approved" in self.state:
+            del self.state["approved"]
+            self.save()
+
     def rail(self) -> str:
         return render_rail(self.state)
 
@@ -417,6 +464,7 @@ class Session:
                         if (other["class"] or 0) >> 16 in (0x01, 0x02):
                             risky.append(other["bdf"])
             containers = [(c, n) for c, n in host_setup.lxc_gpu_users(self.root) if n == "/dev/dri" or vendor == "nvidia"]
+            holders = gpu.gpu_holders(self.pve, bdf, exclude_vm, self.root) if kind != "unsupported" else []
             info = intel_host.lookup(disp["device"], intel_devices["text"]) if vendor == "intel" and intel_devices else None
             cards.append(GpuCard(
                 model=info["model"] if info else "",
@@ -425,7 +473,7 @@ class Session:
                 kind=kind, headline=headline, detail=detail, boot_vga=bool(first["boot_vga"]), driver=first["driver"],
                 host_console=gpu.is_host_console(self.sysfs / "bus/pci/devices" / f"{bdf}.0",
                                                  Path(self.root) / "proc/iomem"),
-                users=gpu.gpu_users(self.pve, bdf, exclude_vm, self.root) if kind != "unsupported" else [],
+                users=[(h.vmid, h.running) for h in holders], starters=[h.vmid for h in holders if h.onboot],
                 shares=shares, risky=risky, lxc=containers if kind != "unsupported" else [],
             ))
         apply_verdicts(cards, macos)
@@ -533,7 +581,9 @@ class Session:
     def target(self) -> dict:
         """The chosen card in the shape host_setup wants. Raises CardChanged when the device at the saved
         address is no longer the chosen card."""
-        chosen = self.state["gpu"]
+        return self._target_for(self.state["gpu"])
+
+    def _target_for(self, chosen: dict) -> dict:
         reset = "none"
         if chosen["vendor"] == "amd":
             fam = amd_host.family_for(chosen["device"])
@@ -543,6 +593,21 @@ class Session:
             raise CardChanged(target["mismatch"])
         target["boot_vga"] = target["boot_vga"] or chosen["boot_vga"]
         return target
+
+    @staticmethod
+    def _chosen_of(card: "GpuCard", root: str) -> dict:
+        return {"bdf": card.bdf, "vendor": card.vendor, "device": card.device_id, "boot_vga": card.boot_vga,
+                "name": card.name, "identity": host_setup.identity_of(root, card.bdf)}
+
+    def preview(self, card: "GpuCard", allow_no_console: bool = False, write_optional: bool = False) -> dict:
+        """What choosing *card* would need, without choosing it or writing anything: the BIOS items
+        and the host plan. Raises CardChanged when the device at the card's address is not that card."""
+        target = self._target_for(self._chosen_of(card, self.root))
+        facts = self.facts()
+        items = bios_guide.check_items(facts, target, self.root)
+        plan = host_setup.plan_host(facts, target, {"allow_no_console": allow_no_console, "write_optional": write_optional},
+                                    self.root, self.run)
+        return {"items": items, "plan": plan}
 
     def card_changed(self, exc: Exception) -> str:
         """The chosen card moved or changed: forget the choice and send the user back to the scan."""
@@ -584,9 +649,37 @@ class Session:
         return {"text": text, "path": path, "url": url, "qr": qr, "vendor": vendor,
                 "firmware_reboot": bios_guide.firmware_setup_supported(self.root)}
 
+    def bios_view(self, items: list[dict]) -> dict | None:
+        """What the BIOS screen shows: the settings to change as data, the ones already right, the QR code.
+
+        None when nothing needs the BIOS. The plain-text guide is still saved, as bios_card does it."""
+        failing = [i for i in items if not i["ok"]]
+        if not failing:
+            return None
+        card = self.bios_card(items)
+        facts = self.facts()
+        data = bios_guide.load_data()
+        vendor = bios_guide.match_vendor(facts, data)
+        ven = data["vendors"].get(vendor) or {}
+        board = " ".join(x for x in (ven.get("name") or facts.get("board_vendor", ""), facts.get("board_name", ""))
+                         if x).strip()
+        return {"board": board or "this server", "enter": ven.get("enter", ""), "url": card["url"], "qr": card["qr"],
+                "rows": bios_guide.settings_view(failing, data, vendor),
+                "ok_labels": [bios_guide.short_label(data, i["key"]) for i in items if i["ok"]],
+                "firmware_reboot": card["firmware_reboot"], "path": card["path"],
+                "order": bios_guide.order_note([i["key"] for i in failing])}
+
     def running_vms(self) -> list[tuple[int, str]]:
         res = self.pve.qm("list")
         return bios_guide.parse_running_vms(res.output) if res.ok else []
+
+    def running_containers(self) -> list[tuple[int, str]]:
+        """Running LXC containers (a host restart stops them too). No pct or a failing pct: none."""
+        try:
+            code, out = self.run(["pct", "list"])
+        except Exception:  # noqa: BLE001 - the list is extra: a missing pct never stops the restart box
+            return []
+        return bios_guide.parse_running_cts(out) if code == 0 else []
 
     def reboot_to_bios(self) -> tuple[bool, str]:
         """Reboot into the firmware setup, only when the firmware allows it."""
@@ -626,6 +719,15 @@ class Session:
     def verify(self) -> list[dict]:
         checks = host_setup.verify_host(self.target(), self.root, self.run)
         if not any(c["status"] == "fail" for c in checks):
+            holders = self.card_holders()
+            busy = [h for h in holders if h.running]
+            if busy:   # the host is ready, but a VM that is running holds the card: the check is not passed
+                ids = ", ".join(str(h.vmid) for h in busy)
+                checks.append({"id": "card-free", "label": f"Card is in use by VM{'s' if len(busy) > 1 else ''} {ids}",
+                               "status": "fail", "detail": "Shut it down, then check again.", "fix": "free",
+                               "holders": [(h.vmid, h.name, h.running, h.onboot) for h in busy],
+                               "stopped": [h.vmid for h in holders if not h.running]})
+                return checks
             self.state["reboot_needed"] = False
             if 5 not in self.state["done"]:
                 self.complete(5, skipped=True)
@@ -663,8 +765,21 @@ class Session:
     # ── 7. VM ────────────────────────────────────────────────────────
 
     def vm_plan(self, allow_stop: bool = False) -> nullmoth.AttachPlan:
-        chosen, vmid = self.state["gpu"], self.state["vm"]
         self.target()  # raises CardChanged when the card moved
+        return self._vm_plan(self.state["gpu"], self._ask(self.state["vm"], self.state["display"],
+                                                          self.state["ack_nullmoth"]), allow_stop)
+
+    def preview_vm(self, card: "GpuCard", vmid: int, display: str, ack: bool) -> nullmoth.AttachPlan:
+        """The attach plan *card* and *vmid* would get, before anything is chosen. A running VM is
+        planned as if it were stopped: the run asks before stopping it."""
+        return self._vm_plan(self._chosen_of(card, self.root), self._ask(vmid, display, ack), True)
+
+    @staticmethod
+    def _ask(vmid: int | None, display: str, ack: bool) -> "VmAsk":
+        return VmAsk(vmid, display, ack)
+
+    def _vm_plan(self, chosen: dict, ask: "VmAsk", allow_stop: bool) -> nullmoth.AttachPlan:
+        vmid, display, ack = ask.vmid, ask.display, ask.ack
         if vmid is None:
             plan = nullmoth.AttachPlan(0)
             plan.issues.append("No VM chosen yet. Create or pick a macOS VM first.")
@@ -673,22 +788,29 @@ class Session:
         if chosen["vendor"] == "nvidia":
             from .defaults import DEFAULT_ISO_DIR
             from .oc_builder import AMFIPASS
-            if not self.state["ack_nullmoth"]:
+            if not ack:
                 plan = nullmoth.AttachPlan(vmid)
                 plan.issues.append("The NullMoth notice has not been acknowledged.")
                 return plan
             return nullmoth.prepare_attach(vmid, bdf, Path(DEFAULT_ISO_DIR) / AMFIPASS.filename,
                                            allow_stop=allow_stop, adapter=self.pve, sysfs_root=self.sysfs)
         if chosen["vendor"] == "intel":
-            return self.intel_plan(vmid, allow_stop)
-        return gpu_attach.prepare_attach_amd(vmid, bdf, self.state["display"], allow_stop,
+            return self.intel_plan(vmid, allow_stop, chosen)
+        return gpu_attach.prepare_attach_amd(vmid, bdf, display, allow_stop,
                                              adapter=self.pve, sysfs_root=self.sysfs)
 
-    def intel_plan(self, vmid: int, allow_stop: bool = False) -> nullmoth.AttachPlan:
+    def vm_plan_for(self, vmid: int, allow_stop: bool = True) -> nullmoth.AttachPlan:
+        """The attach plan of the chosen card for another Mac than the saved one (the pick after "decide later")."""
+        self.target()
+        return self._vm_plan(self.state["gpu"], self._ask(vmid, self.state["display"], self.state["ack_nullmoth"]),
+                             allow_stop)
+
+    def intel_plan(self, vmid: int, allow_stop: bool = False, chosen: dict | None = None) -> nullmoth.AttachPlan:
         """The iGPU attach preflight and plan. The downloads are not done here; the plan names where they go."""
         from .defaults import DEFAULT_ISO_DIR
         from .oc_builder import AMFIPASS_MOD
-        info = intel_host.lookup(self.state["gpu"]["device"], intel_host.device_list()["text"])
+        device = (chosen or self.state["gpu"])["device"]
+        info = intel_host.lookup(device, intel_host.device_list()["text"])
         cache = Path(DEFAULT_ISO_DIR)
         rom_file = info["rom_file"] if info else ""
         return igpu_attach.prepare_attach_igpu(
@@ -770,12 +892,15 @@ class Session:
 
     # ── undo ─────────────────────────────────────────────────────────
 
-    def undo(self, allow_stop: bool = False) -> tuple[bool, list[str]]:
+    def undo(self, allow_stop: bool = False, progress: Callable[[int], None] | None = None) -> tuple[bool, list[str]]:
         """Revert VM settings, then host files. Returns (ok, messages). Safe to run twice.
 
         Only what this tool wrote is reverted; anything changed since stays as the user left it and is
-        reported. Nothing to revert (no record, the VM is gone, the attach was refused) is a success."""
+        reported. Nothing to revert (no record, the VM is gone, the attach was refused) is a success.
+        *progress* is told how many lines of undo_plan() are done, before each Mac and each file group."""
         from .executor import apply_plan
+        tick = progress or (lambda _n: None)
+        finished = 0
         messages: list[str] = []
         ok = True
         self.undo_kept = 0
@@ -792,6 +917,8 @@ class Session:
                 self._forget_vm(vmid)
                 messages.append(f"VM {vmid}: nothing to revert (the attach did not change it).")
                 continue
+            tick(finished)
+            finished += len(self._oc_undo_lines(record, "")) + 1
             info = fetch_vm_info(vmid, adapter=self.pve)
             if info is not None and not (info.config_raw or "").strip():
                 # qm config failed: keep the record, undo can be run again
@@ -835,10 +962,13 @@ class Session:
                 ok = False
                 messages.append(f"VM {vmid}: restoring failed. Log: {result.log_path}")
         had_record = host_setup._p(self.root, host_setup.STATE_FILE).exists()
+        tick(finished)
         res = host_setup.undo_host(self.state, self.root, self.run)
+        tick(finished + len(res["restored"]))
         ok = ok and res["ok"]
         self.undo_kept += len(res["kept"])
-        messages += [f"Restored {path}" for path in res["restored"]] + res["kept"] + res["errors"]
+        messages += [("Removed " if path in res["removed"] else "Restored ") + path for path in res["restored"]]
+        messages += res["kept"] + res["errors"]
         self.undo_nothing = not vmids and not (res["restored"] or res["kept"] or res["errors"] or res["reboot_required"])
         if self.undo_nothing:
             messages.append("Removed an empty setup record; nothing else to undo." if had_record else
@@ -846,13 +976,48 @@ class Session:
             messages += [f"VM {v} has NullMoth settings in its config but no record. Undo it with: nvidia-detach {v}"
                          for v in self.nullmoth_markers()]
         if res["reboot_required"]:
-            messages.append("Reboot the host to finish undoing the boot changes.")
+            messages.append(RESTART_AFTER_UNDO)
         if ok:
             host_setup.clear_login_hint(self.root)
             host_setup.delete_state(self.root)
         else:
             self.save()
         return ok, messages
+
+    def undo_plan(self) -> list[str]:
+        """What undo would do, in the order undo does it and in the words of its result: a line per Mac (and its
+        OpenCore change), a line per file, and the restart."""
+        lines: list[str] = []
+        first: dict[str, bool] = {}
+        for c in self.state["host_changes"]:
+            if not c.get("reverted"):
+                first.setdefault(c["path"], c["existed"])
+        for vmid in list(self.state["vm_records"]) + [v for v in gpu.record_vmids() if v not in self.state["vm_records"]]:
+            record = load_record(vmid)
+            if record is not None:
+                name = self._vm_name_suffix(vmid).strip()
+                lines += self._oc_undo_lines(record, name or f"VM {vmid}")   # the same record undo reads
+                lines.append(f"Take the card off {name} (VM {vmid})" if name else f"Take the card off VM {vmid}")
+        for path in reversed(list(first)):
+            lines.append(("Restore " if first[path] else "Remove ") + path)
+        return lines + (["The host needs one restart afterwards."] if first else [])
+
+    def _oc_undo_lines(self, record: AttachRecord, who: str) -> list[str]:
+        """The OpenCore change undo makes for this record (the step build_detach_steps adds), in plain words."""
+        if record.oc == "gpu":
+            dev = gpu._read_hex(Path(self.root) / "sys/bus/pci/devices" / f"{record.bdf}.0" / "device")
+            args = amd_host.boot_args_for(dev) if dev is not None else ()
+            what = " ".join(args)
+            return [f"Take {what} out of {who}'s OpenCore settings" if what else f"Restore {who}'s OpenCore settings"]
+        if record.oc == "igpu":
+            return [f"Restore {who}'s OpenCore settings"]
+        return []
+
+    def card_holders(self) -> list[gpu.Holder]:
+        """Other VMs that hold the chosen card right now (the Mac being set up is left out)."""
+        chosen = self.state["gpu"]
+        vmid = self.state["vm"]
+        return gpu.gpu_holders(self.pve, chosen["bdf"], -1 if vmid is None else vmid, self.root) if chosen else []
 
     def _forget_vm(self, vmid: int) -> None:
         if vmid in self.state["vm_records"]:

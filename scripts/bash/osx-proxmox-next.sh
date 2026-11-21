@@ -1125,7 +1125,7 @@ function restore_picker_timeout() {
   local vmid="$1" vol path loop mnt rc=1 _i
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || return 1
-  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$vol") || return 1
   loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
   for _i in 1 2 3 4 5; do
     partprobe "$loop" 2>/dev/null || true
@@ -1182,6 +1182,22 @@ function post_install() {
 # ── Vendor-neutral GPU helpers begin ──
 # Bash twin of src/osx_proxmox_next/gpu.py (detection, vfio/IOMMU/BAR checks,
 # hostpci and MMIO-window args). Vendor profiles (NullMoth below) sit on top.
+# The path of a volume, made usable first. PVE 9 leaves guest logical volumes inactive after a boot (and a
+# rolled-back thin volume keeps the activation-skip flag), so a stopped VM's disk may be missing from /dev.
+# An LV (lvm, lvmthin) is activated with -K; zfs, rbd and files need nothing. Mirrors ProxmoxAdapter.volume_path
+# and planner.activate_volume_snippet.
+function pve_vol_path() {
+  local p
+  p=$(pvesm path "$1" 2>/dev/null) || return 1
+  case "$p" in
+    /dev/zvol/*|/dev/rbd*|rbd:*) ;;
+    /dev/*)
+      if lvs "$p" >/dev/null 2>&1; then
+        lvchange -ay -K "$p" >/dev/null 2>&1 || { echo "ERROR: could not activate the disk $p" >&2; return 1; }
+      fi ;;
+  esac
+  echo "$p"
+}
 GPU_ISSUES=()
 GPU_WARNS=()
 GPU_HINTS=()
@@ -1426,7 +1442,7 @@ function nullmoth_oc_patch() {
   local nkept=0 vmid="$1" action="$2" zip="${3:-}" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
-  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$vol") || return 1
   loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     partprobe "$loop" 2>/dev/null || true
@@ -1753,7 +1769,7 @@ function nullmoth_choose_version() {
   echo "${reply:-latest}"
 }
 
-function nullmoth_payload_result() { nullmoth_engine result "$(pvesm path "$1" 2>/dev/null)" 2>/dev/null || true; }
+function nullmoth_payload_result() { nullmoth_engine result "$(pve_vol_path "$1")" 2>/dev/null || true; }
 
 # Download and verify the driver, build the payload disk, boot recovery and stage it inside macOS.
 # $1 vmid $2 release (latest or a tag) $3 macos. Sets NM_TAG, NM_PAYLOAD_REF, NM_PAYLOAD_FILE. Mirrors the first half of nullmoth_finish.finish.
@@ -3251,6 +3267,7 @@ def undo_host(state, root="/", run=default_run):
     A file somebody changed after this tool wrote it is kept as it is and reported."""
     kinds = set(state.get("pending_refresh", []))
     restored = []
+    removed = []
     errors = []
     kept = []
     for entry in reversed(state["host_changes"]):
@@ -3267,7 +3284,10 @@ def undo_host(state, root="/", run=default_run):
         if problem:
             errors.append(problem)
             continue
-        restored.append(entry["path"])
+        if entry["path"] not in restored:   # one line per file, even when it was changed twice
+            restored.append(entry["path"])
+        if not entry["existed"] and entry["path"] not in removed:
+            removed.append(entry["path"])
         if entry["path"] == GRUB_DROPIN:
             kinds.add("grub")
             if _p(root, PBT_UUIDS).exists():
@@ -3284,7 +3304,7 @@ def undo_host(state, root="/", run=default_run):
             errors.append("dkms remove failed: " + out.strip()[-200:])
     errors += _run_refreshes(kinds, state, run)
     save_state(state, root)
-    return {"ok": not errors, "restored": restored, "errors": errors, "kept": kept,
+    return {"ok": not errors, "restored": restored, "removed": removed, "errors": errors, "kept": kept,
             "reboot_required": bool(restored)}
 
 
@@ -3879,6 +3899,29 @@ def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup"
     return "\n".join(rows)
 
 
+def settings_view(failing, data, vendor):
+    """The failing BIOS items as plain data for a screen: label, target value, where to look and why it matters."""
+    rows = []
+    for item in failing:
+        key = item["key"]
+        entry = _entry(data, vendor, key)
+        if entry:
+            where = [("" if entry["verified"] else "Usually under: ") + entry["path"].replace(" > ", " \u203a ")]
+            value = entry["value"]
+        else:
+            hint = _generic_hint(data, key)
+            where, value = ["Look for: " + hint["names"], hint["where"]], "Enabled"
+        why = "Without it no VM can start." if key in ("vtx", "svm") else data["settings"][key]["why"]
+        rows.append({"key": key, "label": data["settings"][key]["label"], "value": value, "where": where,
+                     "why": why})
+    return rows
+
+
+def short_label(data, key):
+    """`Intel virtualization` out of `Intel virtualization (VT-x)`: the name without its parenthesis."""
+    return re.sub(r"\s*\(.*\)$", "", data["settings"][key]["label"])
+
+
 def save_card(text, root="/"):
     path = _p(root, CARD_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3923,6 +3966,16 @@ def parse_running_vms(qm_list):
     return out
 
 
+def parse_running_cts(pct_list):
+    """Running containers from `pct list` (VMID Status Lock Name, the Lock column is often empty)."""
+    out = []
+    for line in pct_list.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1] == "running":
+            out.append((int(parts[0]), parts[-1]))
+    return out
+
+
 REBOOT_ARGV = ["systemctl", "reboot", "--firmware-setup"]
 
 
@@ -3954,8 +4007,11 @@ def main(argv):
     elif cmd == "running":
         for vmid, name in parse_running_vms(payload.get("qm_list", "")):
             print("%d %s" % (vmid, name))
+    elif cmd == "running-cts":
+        for ctid, name in parse_running_cts(payload.get("pct_list", "")):
+            print("CT %d %s" % (ctid, name))
     else:
-        sys.stderr.write("usage: bios_guide.py vendor|check|card|url|firmware|running\n")
+        sys.stderr.write("usage: bios_guide.py vendor|check|card|url|firmware|running|running-cts\n")
         return 64
     return 0
 
@@ -8333,7 +8389,7 @@ function gpu_oc_boot_args() {
   local nkept=0 vmid="$1" action="$2" args="${3:-}" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
-  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$vol") || return 1
   loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     partprobe "$loop" 2>/dev/null || true
@@ -8628,7 +8684,7 @@ function igpu_oc_patch() {
   local nkept=0 vmid="$1" action="$2" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
-  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$vol") || return 1
   loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     partprobe "$loop" 2>/dev/null || true
@@ -8772,7 +8828,7 @@ function igpu_wait_first_boot() {
     qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
     if [ "$tahoe" == "yes" ] && (( $(date +%s) - last >= IGPU_RESULT_POLL )); then
       last=$(date +%s)
-      res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+      res=$(igpu_engine result "$(pve_vol_path "$ref")" 2>/dev/null || true)
       case "$res" in installed*|failed:*|"not installed:"*) sleep "$IGPU_RESULT_GRACE"; return 1 ;; esac
     fi
     sleep 10
@@ -8806,7 +8862,7 @@ function igpu_staging_started() {
   t0=$(date +%s)
   while :; do
     qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
-    res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+    res=$(igpu_engine result "$(pve_vol_path "$ref")" 2>/dev/null || true)
     [ -n "$res" ] && return 0
     (( $(date +%s) - t0 >= wait )) && return 1
     sleep 5
@@ -8821,7 +8877,7 @@ function igpu_wait_staged() {
   t0=$(date +%s)
   while (( $(date +%s) - t0 < timeout )); do
     qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
-    res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+    res=$(igpu_engine result "$(pve_vol_path "$ref")" 2>/dev/null || true)
     case "$res" in
       staged*|failed:*) igpu_wait_stopped "$vmid" "$IGPU_STAGE_GRACE" || true; return 0 ;;
     esac
@@ -8871,7 +8927,7 @@ function igpu_stage() {
     qm stop "$vmid" >/dev/null 2>&1 || true
     igpu_wait_stopped "$vmid" 120 || true
   fi
-  path=$(pvesm path "$payload_ref" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$payload_ref") || return 1
   staged=$(igpu_engine result "$path")
   [ "$staged" == "staged" ] || { msg_error "Staging failed: ${staged:-the script left no result}. Is the macOS disk encrypted (FileVault)?"; return 1; }
   msg_ok "Staged the graphics package"
@@ -8962,7 +9018,7 @@ function igpu_finish() {
     else echo -e "${INFO}${YW}The guest did not power off within $((IGPU_FIRSTBOOT_TIMEOUT / 60)) minutes, so it was stopped.${CL}"; fi
     igpu_wait_stopped "$vmid" 120 || true
   fi
-  result=$(igpu_engine result "$(pvesm path "$payload_ref" 2>/dev/null)" 2>/dev/null || true)
+  result=$(igpu_engine result "$(pve_vol_path "$payload_ref")" 2>/dev/null || true)
   igpu_drop_disk "$vmid" sata2
   rm -f "$payload"
   printf '{"package_installed": %s, "package_result": %s}' "$([ "$result" == "installed" ] && echo true || echo false)" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$result")" | igpu_engine state-write "$vmid" >/dev/null 2>&1 || true
@@ -9351,6 +9407,31 @@ function gpu_shared_note() {
   fi
 }
 
+# One warning for the VMs ($@: ids) that hold a card and start with the host. Mirrors gpu.starts_note.
+function gpu_starts_note() {
+  if [ $# -eq 1 ]; then
+    echo "VM $1 starts with this host and has this card. After the restart it takes the card before the Mac can. Shut it down then, or turn off its Start at boot option."
+  else
+    local list="$1"; shift
+    local v; for v in "$@"; do list+=", $v"; done
+    echo "VMs ${list} start with this host and have this card. After the restart one of them takes the card before the Mac can. Shut it down then, or turn off their Start at boot option."
+  fi
+}
+
+# The VMs of a GPU_CARDS line that start with the host (onboot: 1, not a template), space separated ids.
+function gpu_card_starters() {
+  local users u id cfg out=""
+  IFS='|' read -r _ _ _ _ _ _ _ _ _ users _ <<<"$1"
+  for u in ${users//,/ }; do
+    id="${u%%:*}"
+    cfg=$(qm config "$id" 2>/dev/null) || continue
+    grep -Eq '^onboot:[[:space:]]*1[[:space:]]*$' <<<"$cfg" || continue
+    grep -Eq '^template:[[:space:]]*1[[:space:]]*$' <<<"$cfg" && continue
+    out+="${out:+ }$id"
+  done
+  echo "$out"
+}
+
 # Warnings shown on a card, one per line. Mirrors GpuCard.notes.
 function gpu_card_notes() {
   local kind boot users console u
@@ -9359,6 +9440,8 @@ function gpu_card_notes() {
   local -a stopped=()
   for u in ${users//,/ }; do [ "${u#*:}" == "running" ] || stopped+=("${u%%:*}"); done
   [ ${#stopped[@]} -eq 0 ] || gpu_shared_note "${stopped[@]}"
+  local -a starters=($(gpu_card_starters "$1"))
+  [ ${#starters[@]} -eq 0 ] || gpu_starts_note "${starters[@]}"
   if [ "$boot" == "1" ] && [ "$console" != "1" ]; then echo "The firmware shows its boot screen on this card."; fi
 }
 
@@ -9487,7 +9570,7 @@ function gpu_undo() {
   res=$(gpu_host undo </dev/null) || ok=no
   [ -z "$res" ] || kept=$(echo "$res" | gpu_json 'len(d.get("kept", []))')
   kept=$((kept + GPU_OC_KEPT))
-  [ -z "$res" ] || echo "$res" | gpu_json '"\n".join(["Restored " + p for p in d["restored"]] + d.get("kept", []) + d["errors"]) + ("\nReboot the host to finish undoing the boot changes." if d["reboot_required"] else "")'
+  [ -z "$res" ] || echo "$res" | gpu_json '"\n".join([("Removed " if p in d.get("removed", []) else "Restored ") + p for p in d["restored"]] + d.get("kept", []) + d["errors"]) + ("\nRestart this host when it suits you. The boot change stays active until then." if d["reboot_required"] else "")'
   local rj="${res:-}"; [ -n "$rj" ] || rj='{}'
   if [ -z "${vmids// /}" ] && [ "$(echo "$rj" | gpu_json 'bool(d.get("restored") or d.get("kept") or d.get("errors") or d.get("reboot_required"))')" != "True" ]; then
     nothing=yes
@@ -9683,7 +9766,7 @@ function gpu_step_choose() {
   IFS='|' read -r bdf vname device name kind head detail boot driver users _ <<<"$chosen"
   if [ -n "$(gpu_card_stopped_users "$chosen")" ]; then
     local note
-    while IFS= read -r note; do case "$note" in Also*) gpu_say "WARN: $note" ;; esac; done < <(gpu_card_notes "$chosen")
+    while IFS= read -r note; do case "$note" in Also*|VM*) gpu_say "WARN: $note" ;; esac; done < <(gpu_card_notes "$chosen")
     if ! gpu_ui_yesno "Use this card anyway?" "Another stopped VM also lists this card. Use it anyway?"; then
       gpu_say "Nothing was changed. Run again with --yes (or answer y) to use a card that another stopped VM also lists."
       return 2
@@ -9883,6 +9966,8 @@ function gpu_step_reboot() {
     return 100
   fi
   running=$(qm list 2>/dev/null | python3 -c 'import json,sys; print(json.dumps({"qm_list": sys.stdin.read()}))' | gpu_bios running)
+  cts=$(pct list 2>/dev/null | python3 -c 'import json,sys; print(json.dumps({"pct_list": sys.stdin.read()}))' | gpu_bios running-cts)
+  [ -z "$cts" ] || running="${running:+$running$'\n'}$cts"
   gpu_say "The host must reboot so the new kernel arguments and the early card binding take effect."
   [ -z "$running" ] || gpu_say "These VMs will be shut down:\n$running"
   gpu_host hint-set </dev/null
@@ -11036,7 +11121,7 @@ OC_IMPORT_OUT="$("${IMPORT_CMD[@]}" "$VMID" "$OC_DISK" "$STORAGE" --format raw 2
 OC_DISK_REF="$(get_disk_ref "$OC_IMPORT_OUT" "$STORAGE" "$VMID" "OpenCore")"
 qm set "$VMID" --ide0 "${OC_DISK_REF},media=disk" >/dev/null
 # Fix GPT header corruption on thin-provisioned LVM after importdisk
-OC_DEV=$(pvesm path "$OC_DISK_REF" 2>/dev/null) || true
+OC_DEV=$(pve_vol_path "$OC_DISK_REF" 2>/dev/null) || true
 if [ -n "$OC_DEV" ] && [ -b "$OC_DEV" ]; then
   dd if="$OC_DISK" of="$OC_DEV" bs=512 count=2048 conv=notrunc 2>/dev/null || true
 fi

@@ -223,6 +223,7 @@ def _opencore_steps(ctx: _DiskBuildContext) -> list[PlanStep]:
                 # (qemu-img dd would try to create a new RBD image and fail
                 # with "File exists" because qm importdisk already created it.)
                 'DEV=$(pvesm path "$REF") && '
+                + activate_volume_snippet("DEV") +
                 f'if [[ "$DEV" != rbd:* ]]; then '
                 f'dd if={shquote(str(ctx.oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null; '
                 f'fi',
@@ -409,6 +410,18 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
     ]
 
 
+def activate_volume_snippet(var: str) -> str:
+    """Bash that makes the volume at the path in $var usable. PVE 9 no longer activates guest logical volumes at
+    boot, and a rolled-back thin volume carries the activation-skip flag, so a stopped VM's disk can be missing
+    from /dev. An LV (lvm, lvmthin) is activated with -K; zfs, rbd, files and block paths need nothing.
+    Ends with ``&& `` so it chains."""
+    return (
+        f'{{ case "${var}" in /dev/zvol/*|/dev/rbd*|rbd:*) ;; /dev/*) '
+        f'if lvs "${var}" >/dev/null 2>&1; then lvchange -ay -K "${var}" || '
+        f'{{ echo "ERROR: could not activate the disk ${var}"; false; }}; fi;; esac; }} && '
+    )
+
+
 def mount_oc_disk_script(vid: str) -> str:
     """Return bash that loop-mounts the VM's ide0 (OpenCore) disk at $OC_MNT.
 
@@ -420,7 +433,8 @@ def mount_oc_disk_script(vid: str) -> str:
         f"OC_VOL=$(qm config {q} | sed -n 's/^ide0: \\([^,]*\\).*/\\1/p') && "
         "{ [ -n \"$OC_VOL\" ] || { echo 'ERROR: no ide0 (OpenCore) disk found'; false; }; } && "
         "OC_PATH=$(pvesm path \"$OC_VOL\") && "
-        "OC_MNT=$(mktemp -d) && export OC_MNT && "
+        + activate_volume_snippet("OC_PATH")
+        + "OC_MNT=$(mktemp -d) && export OC_MNT && "
         "OC_LOOP=$(losetup -fP --show \"$OC_PATH\") && "
         "trap 'umount $OC_MNT 2>/dev/null; losetup -d $OC_LOOP 2>/dev/null; "
         "rmdir $OC_MNT 2>/dev/null' EXIT && "

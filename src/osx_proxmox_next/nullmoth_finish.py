@@ -68,7 +68,7 @@ class FinishResult:
 
 
 def _read_payload_result(pve: ProxmoxAdapter, ref: str) -> str:
-    path = pve.pvesm("path", ref).output.strip()
+    path = pve.volume_path(ref)
     return engine.read_result(path) if path else ""
 
 

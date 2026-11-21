@@ -1,3 +1,3 @@
-from .wizard_state import WizardState
+from .wizard_state import NewMacState
 
-__all__ = ["WizardState"]
+__all__ = ["NewMacState"]

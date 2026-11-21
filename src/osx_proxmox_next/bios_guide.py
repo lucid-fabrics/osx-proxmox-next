@@ -195,6 +195,29 @@ def build_card(failing, facts, data, vendor, resume_cmd="osx-next-cli gpu-setup"
     return "\n".join(rows)
 
 
+def settings_view(failing, data, vendor):
+    """The failing BIOS items as plain data for a screen: label, target value, where to look and why it matters."""
+    rows = []
+    for item in failing:
+        key = item["key"]
+        entry = _entry(data, vendor, key)
+        if entry:
+            where = [("" if entry["verified"] else "Usually under: ") + entry["path"].replace(" > ", " \u203a ")]
+            value = entry["value"]
+        else:
+            hint = _generic_hint(data, key)
+            where, value = ["Look for: " + hint["names"], hint["where"]], "Enabled"
+        why = "Without it no VM can start." if key in ("vtx", "svm") else data["settings"][key]["why"]
+        rows.append({"key": key, "label": data["settings"][key]["label"], "value": value, "where": where,
+                     "why": why})
+    return rows
+
+
+def short_label(data, key):
+    """`Intel virtualization` out of `Intel virtualization (VT-x)`: the name without its parenthesis."""
+    return re.sub(r"\s*\(.*\)$", "", data["settings"][key]["label"])
+
+
 def save_card(text, root="/"):
     path = _p(root, CARD_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -239,6 +262,16 @@ def parse_running_vms(qm_list):
     return out
 
 
+def parse_running_cts(pct_list):
+    """Running containers from `pct list` (VMID Status Lock Name, the Lock column is often empty)."""
+    out = []
+    for line in pct_list.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1] == "running":
+            out.append((int(parts[0]), parts[-1]))
+    return out
+
+
 REBOOT_ARGV = ["systemctl", "reboot", "--firmware-setup"]
 
 
@@ -270,8 +303,11 @@ def main(argv):
     elif cmd == "running":
         for vmid, name in parse_running_vms(payload.get("qm_list", "")):
             print("%d %s" % (vmid, name))
+    elif cmd == "running-cts":
+        for ctid, name in parse_running_cts(payload.get("pct_list", "")):
+            print("CT %d %s" % (ctid, name))
     else:
-        sys.stderr.write("usage: bios_guide.py vendor|check|card|url|firmware|running\n")
+        sys.stderr.write("usage: bios_guide.py vendor|check|card|url|firmware|running|running-cts\n")
         return 64
     return 0
 

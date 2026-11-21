@@ -33,7 +33,7 @@ class FormValues:
     existing_uuid: str = ""
     custom_vmgenid: str = ""
     custom_mac: str = ""
-    # State that comes from WizardState, not directly from Input widgets
+    # State that comes from NewMacState, not directly from Input widgets
     selected_os: str = "sequoia"
     apple_services: bool = False
     use_penryn: bool = False

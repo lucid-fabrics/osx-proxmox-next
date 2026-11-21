@@ -17,7 +17,7 @@ NVIDIA support relies on NullMoth, a community driver tested by its own communit
 
 | Where | How |
 |-------|-----|
-| TUI | `osx-next`, then step 2, **GPU Passthrough** |
+| TUI | `osx-next`, then `g` on a Mac (or `ctrl+p` and **GPU passthrough**) |
 | CLI | `osx-next-cli gpu-setup` (also `--status`, `--undo`, `--yes`, `--vm <vmid>`, `--gpu <address>`, `--display gpu\|console`, `--macos <release>`) |
 | Standalone script | `osx-proxmox-next.sh gpu-setup` (uses whiptail screens) |
 
@@ -27,10 +27,14 @@ Run it again at any time: it resumes where it stopped. While a setup is paused, 
 
 ## The eight steps
 
+The TUI shows three moments instead of eight numbered steps: one screen to choose and approve, one restart, one question about the first boot. The CLI and the bash script still walk the eight steps:
+
 ```
  [1 Scan] [2 Choose] [3 BIOS] [4 Host] [5 Reboot] [6 Verify] [7 VM] [8 First boot]
                       done      done     <now>
 ```
+
+In the TUI, the card, the Mac and the display are rows on one screen (`g` on a Mac preselects it), the right panel lists only what this host needs (BIOS settings, host setup, one restart, the attach), `p` shows every file line, command and VM setting, and `enter` approves the whole plan once, including the attach that runs after the restart. The BIOS screen only appears when a setting must change. After the restart, opening the flow again runs the check and the attach without asking again, unless the plan changed since you approved it. `u` puts everything back.
 
 Steps that this host does not need show as `skipped`. Detection comes first: the tool reads your CPU, board, boot loader and IOMMU state itself and only asks what it cannot know.
 

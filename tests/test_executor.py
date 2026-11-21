@@ -3,6 +3,7 @@ import subprocess
 from osx_proxmox_next.executor import apply_plan
 from osx_proxmox_next.infrastructure import ProxmoxAdapter
 from osx_proxmox_next.domain import PlanStep
+from adapter_fakes import patch_adapter_run
 
 
 def test_apply_plan_dry_run_creates_success_results() -> None:
@@ -110,7 +111,7 @@ def test_apply_plan_step_failure_stops_execution(monkeypatch):
         call_count[0] += 1
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="error")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    patch_adapter_run(monkeypatch, fake_run)
     adapter = ProxmoxAdapter()
     steps = [
         PlanStep("Step Fail", ["false"]),

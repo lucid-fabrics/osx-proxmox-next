@@ -15,6 +15,7 @@ from osx_proxmox_next.unattended import (
     INSTALL_REBOOT_TIMEOUT,
     MAX_POWER_CYCLES,
     MAX_RECOVERY_RESETS,
+    PHASE_MARK,
     PICKER_MIN_BYTES,
     PICKER_REPRESS,
     PICKER_TIMEOUT,
@@ -214,6 +215,9 @@ def test_full_install_happy_path() -> None:
     # only the menu navigation uses "right"; no blind picker entry-walking
     assert console.keys.count("right") == TERMINAL_NAV.count("right")
     assert any("Done" in e for e in events)
+    # the TUI reads the phases back from the log: each one is announced once, in order
+    marks = [e[len(PHASE_MARK):] for e in events if e.startswith(PHASE_MARK)]
+    assert marks == ["recovery", "erase", "installer", "restarts", "first_start", "ready"]
 
 
 def test_terminal_nav_waits_for_a_still_screen() -> None:

@@ -387,30 +387,6 @@ def test_cli_never_assumes_the_shared_card_warning_was_accepted(tmp_path):
     assert code == gpu_setup_cli.EXIT_REFUSED and "Nothing was changed" in out
 
 
-def test_tui_two_click_keys_follow_the_card_and_the_vm():
-    from types import SimpleNamespace as NS
-    from osx_proxmox_next._gpu_mixin import GpuSetupMixin as M
-    a, b = NS(bdf="0000:06:00", stopped_users=[120]), NS(bdf="0000:07:00", stopped_users=[120])
-    assert M._gp_share_key(a) != M._gp_share_key(b)
-    assert M._gp_share_key(a) != M._gp_share_key(NS(bdf="0000:06:00", stopped_users=[120, 130]))
-    s1 = NS(state={"vm": 100, "gpu": {"bdf": "0000:06:00"}})
-    s2 = NS(state={"vm": 101, "gpu": {"bdf": "0000:06:00"}})
-    assert M._gp_guest_key(s1) != M._gp_guest_key(s2)
-
-    class Dummy(M):
-        _gp_armed = None
-
-        def _gp_result(self, *_a, **_k):
-            pass
-
-    d = Dummy()
-    assert d._gp_confirm_click(M._gp_share_key(a), "x", "w") is False
-    assert d._gp_confirm_click(M._gp_share_key(b), "x", "w") is False  # another card: armed again, not accepted
-    assert d._gp_confirm_click(M._gp_share_key(b), "x", "w") is True
-
-
-# ── standalone nvidia-attach: the risk notice is the only question ──
-
 def test_nvidia_attach_asks_only_the_risk_notice_and_yes_never_answers_it(monkeypatch, tmp_path, capsys):
     from test_nullmoth import patch_cli
     applied = patch_cli(monkeypatch, tmp_path)

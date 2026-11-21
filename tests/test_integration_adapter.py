@@ -5,6 +5,7 @@ import pytest
 from osx_proxmox_next.executor import apply_plan, ApplyResult
 from osx_proxmox_next.infrastructure import ProxmoxAdapter, CommandResult
 from osx_proxmox_next.domain import PlanStep
+from adapter_fakes import patch_adapter_run
 
 
 def _fake_ok(argv, **kw):
@@ -24,7 +25,7 @@ def test_adapter_qm_wraps_binary(monkeypatch) -> None:
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    patch_adapter_run(monkeypatch, fake_run)
     adapter = ProxmoxAdapter()
     result = adapter.qm("status", "900")
     assert result.ok is True
@@ -33,7 +34,7 @@ def test_adapter_qm_wraps_binary(monkeypatch) -> None:
 
 def test_adapter_pvesm_wraps_binary(monkeypatch) -> None:
     calls: list[list[str]] = []
-    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: (calls.append(argv), _fake_ok(argv))[1])
+    patch_adapter_run(monkeypatch, lambda argv, **kw: (calls.append(argv), _fake_ok(argv))[1])
     adapter = ProxmoxAdapter()
     result = adapter.pvesm("status")
     assert result.ok is True
@@ -42,13 +43,13 @@ def test_adapter_pvesm_wraps_binary(monkeypatch) -> None:
 
 def test_adapter_pvesh_wraps_binary(monkeypatch) -> None:
     calls: list[list[str]] = []
-    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: (calls.append(argv), _fake_ok(argv))[1])
+    patch_adapter_run(monkeypatch, lambda argv, **kw: (calls.append(argv), _fake_ok(argv))[1])
     result = ProxmoxAdapter().pvesh("get", "/nodes")
     assert calls[0][:2] == ["pvesh", "get"]
 
 
 def test_adapter_run_nonzero_returns_ok_false(monkeypatch) -> None:
-    monkeypatch.setattr(subprocess, "run", _fake_fail)
+    patch_adapter_run(monkeypatch, _fake_fail)
     result = ProxmoxAdapter().run(["qm", "start", "999"])
     assert result.ok is False
     assert result.returncode == 1
@@ -66,16 +67,14 @@ def test_adapter_run_file_not_found(monkeypatch) -> None:
 def test_adapter_run_timeout(monkeypatch) -> None:
     def _timeout(*a, **kw):
         raise subprocess.TimeoutExpired(cmd=["qm"], timeout=300)
-    monkeypatch.setattr(subprocess, "run", _timeout)
+    patch_adapter_run(monkeypatch, _timeout)
     result = ProxmoxAdapter().run(["qm", "status", "100"])
     assert result.ok is False
     assert result.returncode == 124
 
 
 def test_adapter_captures_both_stdout_and_stderr(monkeypatch) -> None:
-    monkeypatch.setattr(
-        subprocess, "run",
-        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="out\n", stderr="err\n"),
+    patch_adapter_run(monkeypatch, lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="out\n", stderr="err\n"),
     )
     result = ProxmoxAdapter().run(["qm", "config", "100"])
     assert "out" in result.output
@@ -91,7 +90,7 @@ def test_apply_plan_executes_argv_without_shell(monkeypatch) -> None:
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout="done", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    patch_adapter_run(monkeypatch, fake_run)
 
     steps = [
         PlanStep("Step 1", ["qm", "status", "901"]),
@@ -119,7 +118,7 @@ def test_apply_plan_stops_on_failure(monkeypatch) -> None:
         rc = 1 if "start" in argv else 0
         return subprocess.CompletedProcess(argv, rc, stdout="", stderr="fail" if rc else "")
 
-    monkeypatch.setattr(subprocess, "run", _selective)
+    patch_adapter_run(monkeypatch, _selective)
     steps = [
         PlanStep("Fail step", ["qm", "start", "903"]),
         PlanStep("Should not run", ["qm", "stop", "903"]),
