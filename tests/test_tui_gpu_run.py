@@ -707,7 +707,7 @@ async def test_the_no_signal_help_fits_100x30_and_names_the_current_screens(tmp_
             assert current in " ".join(text.split())
         assert "gpu-setup" not in text and "Monitor on the GPU" not in text
         assert screen.focused is screen.query_one("#g-back", Button)
-        assert F.text_of(screen.query_one("#g-yes", Button).label) == "It works now"
+        assert str(screen.query_one("#g-yes", Button).label) == "It works now"
         assert [(k, label) for k, label, _ in screen.footer_items()] == \
             [("↑↓", "Scroll"), ("enter", "Back"), ("esc", "Back")]
 
