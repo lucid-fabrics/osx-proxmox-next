@@ -36,7 +36,8 @@ class VmActionScreen(OsxScreen):
             if choice in ("shutdown", "stop"):
                 self._qm(record, choice, f"{'Shutting down' if choice == 'shutdown' else 'Stopping'} {record.name}")
 
-        self.app.push_screen(StopDialog(record), chosen)
+        stuck = self.app.shutdowns.state(record) == "stuck"   # it ignored the request: Force stop is the offer
+        self.app.push_screen(StopDialog(record, force_first=stuck), chosen)
 
     def _qm(self, record: VmRecord, command: str, message: str) -> None:
         self.app.notify(message + "...")
@@ -48,6 +49,10 @@ class VmActionScreen(OsxScreen):
         self.run_worker(work, thread=True, exit_on_error=False)
 
     def _qm_done(self, record: VmRecord, command: str, ok: bool, output: str) -> None:
+        if ok and command == "shutdown":
+            self.app.shutdowns.ask(record.vmid)
+        elif command == "stop":
+            self.app.shutdowns.forget(record.vmid)
         if ok:
             self.app.notify(f"{record.name}: {command} done")
         else:

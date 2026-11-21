@@ -15,6 +15,9 @@ from .base import ConfirmDialog
 QR_GAP = 4          # the border and padding of the QR column
 SEARCH_LINE = "Cannot find it? The BIOS search finds settings by name."
 MIN_BESIDE = 44     # columns the steps need before the QR code may sit beside them
+CHROME_ROWS = 7     # the rows around the columns: bars, title, the hint, the buttons
+QR_TOP = 2          # the "Take it with you" label and the gap under it
+QR_CAPTION = 3      # the gap and the two caption lines under the code
 
 
 def bios_lines(view: dict, pal: dict) -> list[Line]:
@@ -22,7 +25,7 @@ def bios_lines(view: dict, pal: dict) -> list[Line]:
     rows: list[Line] = [Line(Text(f"Change in the BIOS · {view['board']}", style=pal["muted"])), Line(Text(""))]
     for item in view["rows"]:
         left = Text.assemble(("✗ ", pal["error"]), (item["label"], "bold"))
-        rows.append(Line(left, Text.assemble(("set to ", ""), (item["value"], "bold"))))
+        rows.append(Line(left, Text.assemble(("set to ", ""), (item["value"], "bold")), hang=2))
         for text in item["where"] + [item["why"]]:
             rows.append(Line(Text(text, style=pal["muted"]), indent=2, wrap=True))
         rows.append(Line(Text("")))
@@ -45,7 +48,7 @@ def _how(view: dict, pal: dict) -> list[Line]:
              ("Open osx-next again", "")]
     rows = [Line(Text("How", style=pal["muted"])), Line(Text(""))]
     for idx, (head, tail) in enumerate(steps, start=1):
-        rows.append(Line(Text.assemble((f"{idx} ", pal["muted"]), head, (tail, pal["muted"])), wrap=True))
+        rows.append(Line(Text.assemble((f"{idx} ", pal["muted"]), head, (tail, pal["muted"])), wrap=True, hang=2))
     rows.append(Line(Text("it checks and carries on by itself", style=pal["muted"]), indent=2))
     if view["order"]:
         rows += [Line(Text("")), Line(Text(view["order"], style=pal["muted"]), wrap=True)]
@@ -74,14 +77,22 @@ class BiosMixin:
 
     def _qr_beside(self, view: dict) -> bool:
         width = max((len(row) for row in view["qr"]), default=0)
-        return bool(width) and (self.size.width or 100) - 4 - width - QR_GAP - 3 >= MIN_BESIDE
+        fits_wide = (self.size.width or 100) - 4 - width - QR_GAP - 3 >= MIN_BESIDE
+        # a code cut off at the bottom cannot be scanned: without the rows it needs, the link goes in the text
+        return bool(width) and fits_wide and self._qr_rows_left(view) >= 0
+
+    def _qr_rows_left(self, view: dict) -> int:
+        """Rows left under the code and its label (negative when it does not fit)."""
+        return (self.size.height or 30) - CHROME_ROWS - len(view["qr"]) - QR_TOP
 
     def _qr_column(self, view: dict, pal: dict) -> Vertical:
         qr = Text("\n".join(view["qr"]), style="black on white", no_wrap=True)
         caption = "Scan to keep these steps on your phone while the host is in the BIOS."
-        column = Vertical(Static(Text("Take it with you", style=pal["muted"])), Static(""), Static(qr, id="g-bios-code"),
-                          Static(""), Static(Text(caption, style=pal["muted"]), id="g-bios-caption"),
-                          id="g-bios-qr")
+        parts: list[Widget] = [Static(Text("Take it with you", style=pal["muted"])), Static(""),
+                               Static(qr, id="g-bios-code")]
+        if self._qr_rows_left(view) >= QR_CAPTION:   # the caption only when there is room for it whole
+            parts += [Static(""), Static(Text(caption, style=pal["muted"]), id="g-bios-caption")]
+        column = Vertical(*parts, id="g-bios-qr")
         column.styles.width = max(len(row) for row in view["qr"]) + QR_GAP
         return column
 
@@ -103,8 +114,9 @@ class BiosMixin:
             buttons.append(Button("Restart into BIOS", id="g-primary-bios", classes="primary"))
         widgets: list[Widget] = [
             Static(Text.assemble(("One thing only you can do", "bold"), ("  " + sub, pal["muted"])), id="g-run-title"),
-            Horizontal(*cols, id="g-bios-cols"), Static("", id="g-result"),
-            Horizontal(Static(Text(SEARCH_LINE, style=pal["muted"]), id="g-note"), *buttons, id="g-bios-foot")]
+            Horizontal(*cols, id="g-bios-cols"), Static("", id="g-result", classes="when-text"),
+            Static(Text(SEARCH_LINE, style=pal["muted"]), id="g-note", classes="bios-note"),   # whole, on its own row above the buttons
+            Horizontal(*buttons, id="g-bios-foot")]
         self.box_buttons = [("g-recheck", "Restart into BIOS" if firmware else "Check again", "primary")]
         await self.set_mode("bios", widgets)
         lines.set_lines(bios_lines(view, pal))

@@ -2,7 +2,13 @@
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
+import pytest
 from textual.app import App
 from textual.containers import VerticalScroll
 
@@ -230,3 +236,44 @@ async def test_the_footer_keys_are_clickable(monkeypatch):
         await pilot.click(KeyBar, offset=(at, 0))
         from osx_proxmox_next.screens.base import HelpScreen
         await F.settle(pilot, lambda: isinstance(app.screen, HelpScreen))
+
+
+# ── design round 2, item 6: the private frame folder goes away when a signal ends the app ──
+
+HOOK = textwrap.dedent("""
+    import sys, tempfile, time
+    sys.path.insert(0, {src!r})
+    from osx_proxmox_next.widgets import live_screen as ls
+    path = tempfile.mkdtemp(prefix="osx-next-view-999-")
+    ls._FRAME_DIRS.add(path)
+    ls.install_cleanup()
+    print(path, flush=True)
+    {tail}
+""")
+SRC = str(Path(__file__).resolve().parent.parent / "src")
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_removes_the_frame_folder_and_the_process_still_ends_by_that_signal(signum):
+    proc = subprocess.Popen([sys.executable, "-c", HOOK.format(src=SRC, tail="time.sleep(60)")],
+                            stdout=subprocess.PIPE, text=True)
+    path = proc.stdout.readline().strip()
+    assert os.path.isdir(path)
+    proc.send_signal(signum)
+    assert proc.wait(timeout=10) == -signum            # it ended the way the signal would have ended it
+    assert not os.path.exists(path)
+
+
+def test_the_frame_folder_is_removed_at_interpreter_exit():
+    proc = subprocess.run([sys.executable, "-c", HOOK.format(src=SRC, tail="")], capture_output=True, text=True,
+                          timeout=20)
+    assert proc.returncode == 0 and not os.path.exists(proc.stdout.strip())
+
+
+def test_remove_frame_dirs_empties_the_registry(tmp_path):
+    from osx_proxmox_next.widgets import live_screen as ls
+    folder = tmp_path / "osx-next-view-1-x"
+    folder.mkdir()
+    ls._FRAME_DIRS.add(str(folder))
+    ls.remove_frame_dirs()
+    assert not folder.exists() and not ls._FRAME_DIRS

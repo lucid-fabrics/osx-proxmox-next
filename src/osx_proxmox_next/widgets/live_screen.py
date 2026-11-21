@@ -8,9 +8,11 @@ the widget is on screen."""
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import shutil
+import signal
 import tempfile
 from collections.abc import Callable
 from typing import ClassVar
@@ -27,7 +29,10 @@ from .ppm import Frame, Pixels, fit_size, parse_ppm, sample
 
 log = logging.getLogger(__name__)
 
-__all__ = ["LiveScreen", "grab_frame", "render_cells"]
+__all__ = ["LiveScreen", "grab_frame", "install_cleanup", "remove_frame_dirs", "render_cells"]
+
+_FRAME_DIRS: set[str] = set()     # the private frame folders of this process, removed however it ends
+_HOOKED = False
 
 PLACEHOLDER_OFF = "powered off"
 PLACEHOLDER_NO_SIGNAL = "no signal"
@@ -69,6 +74,34 @@ def render_cells(pixels: Pixels, cols: int, rows: int) -> list[Strip]:
         segments = [Segment(_HALF, style(pixel(x, row * 2), pixel(x, row * 2 + 1))) for x in range(cols)]
         strips.append(Strip(segments, cols))
     return strips
+
+
+def remove_frame_dirs() -> None:
+    """Remove every private frame folder this process made (unmount, interpreter exit or a signal)."""
+    while _FRAME_DIRS:
+        shutil.rmtree(_FRAME_DIRS.pop(), ignore_errors=True)
+
+
+def _on_signal(signum: int, _frame) -> None:
+    remove_frame_dirs()
+    signal.signal(signum, signal.SIG_DFL)   # then end the way the signal would have: same exit status
+    os.kill(os.getpid(), signum)
+
+
+def install_cleanup() -> None:
+    """Clean the frame folders at interpreter exit and on SIGHUP and SIGTERM (terminal closed, ssh dropped).
+    Only the main thread may install signal handlers; anywhere else the exit hook alone is installed."""
+    global _HOOKED
+    if not _HOOKED:
+        atexit.register(remove_frame_dirs)
+        _HOOKED = True
+    try:
+        for name in ("SIGHUP", "SIGTERM"):
+            signum = getattr(signal, name, None)
+            if signum is not None:
+                signal.signal(signum, _on_signal)
+    except ValueError:  # not the main thread
+        log.debug("signal handlers not installed", exc_info=True)
 
 
 class LiveScreen(Widget):
@@ -154,6 +187,7 @@ class LiveScreen(Widget):
     def on_unmount(self) -> None:
         if self._dir:
             shutil.rmtree(self._dir, ignore_errors=True)
+            _FRAME_DIRS.discard(self._dir)
             self._dir = self._probe = ""
 
     def grab_now(self) -> None:
@@ -162,6 +196,8 @@ class LiveScreen(Widget):
         if not self._dir:
             # qm monitor (as root) writes the screendump here: a directory only we can write to, not /tmp
             self._dir = tempfile.mkdtemp(prefix=f"osx-next-view-{self.vmid}-")
+            _FRAME_DIRS.add(self._dir)
+            install_cleanup()
             self._probe = os.path.join(self._dir, "frame.ppm")
         self._busy = True
         size = self.size

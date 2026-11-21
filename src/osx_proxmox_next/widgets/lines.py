@@ -19,6 +19,7 @@ class Line:
     right: Text | None = None
     indent: int = 0
     wrap: bool = True
+    hang: int = 0    # extra columns the wrapped continuation lines are indented by (a numbered step's text)
 
 
 class Lines(Widget):
@@ -29,6 +30,12 @@ class Lines(Widget):
     def __init__(self, *, id: str | None = None, classes: str | None = None) -> None:
         super().__init__(id=id, classes=classes)
         self.rows: list[Line] = []
+        self.stack = False   # every right-hand value goes on its own muted row under its label (narrow terminals)
+
+    def set_stack(self, stack: bool) -> None:
+        if stack != self.stack:
+            self.stack = stack
+            self.refresh(layout=True)
 
     def set_lines(self, rows: list[Line]) -> None:
         self.rows = rows
@@ -40,14 +47,14 @@ class Lines(Widget):
         for row in self.rows:
             pad = " " * row.indent
             inner = max(8, width - row.indent)
-            pieces = wrap_text(row.left, inner, console) if row.wrap else [row.left]
+            pieces = wrap_text(row.left, inner - row.hang, console) if row.wrap else [row.left]
             for idx, piece in enumerate(pieces):
-                out.append(Text(pad).append_text(piece))
+                out.append(Text(pad + " " * (row.hang if idx else 0)).append_text(piece))
             if row.right is None:
                 continue
             last = out[-1]
             room = width - last.cell_len - row.right.cell_len
-            if room >= 1:
+            if room >= 1 and not self.stack:
                 last.append(" " * room).append_text(row.right)
             else:
                 out.append(Text("  " + pad).append_text(row.right))

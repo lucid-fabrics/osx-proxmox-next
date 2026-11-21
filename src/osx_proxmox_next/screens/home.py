@@ -19,6 +19,7 @@ from ..services import VmRecord, list_macos_vm_records
 from ..services.detection_service import detect_storage_free_gb
 from ..services.unattended_service import DriverState, read_driver_state
 from ..widgets.live_screen import LiveScreen
+from .shutdown import still_running_line
 from .vm_actions import VmActionScreen
 
 log = logging.getLogger(__name__)
@@ -35,8 +36,11 @@ HOME_REFRESH_SECONDS = 10
 THUMB_REFRESH_SECONDS = 5
 
 
-def status_line(record: VmRecord, driver: DriverState | None, now: float | None = None) -> tuple[str, str]:
-    """(glyph, text) of a Mac's status: `● running`, `○ stopped`, `◐ installing · N min in`."""
+def status_line(record: VmRecord, driver: DriverState | None, now: float | None = None,
+                shutdown: str = "") -> tuple[str, str]:
+    """(glyph, text) of a Mac's status: `● running`, `○ stopped`, `◐ installing · N min in`, `◐ shutting down`."""
+    if shutdown and record.status == "running":
+        return "◐", "shutting down"
     if driver is not None and driver.installing:
         started = driver.started_at or (now or time.time())
         minutes = max(0, int(((now or time.time()) - started) // 60))
@@ -79,12 +83,15 @@ class VmCard(Widget, can_focus=True):
         pal = self.app.get_css_variables()
         return {"\u25cf": pal["success"], "\u25d0": pal["accent"], "\u25cb": pal["muted"]}[glyph]
 
+    def _shutdown(self) -> str:
+        return self.app.shutdowns.state(self.record)
+
     def _facts_tail(self, glyph: str) -> str:
         return "" if glyph == "\u25d0" else f" \u00b7 {self.record.cores} cores \u00b7 {self.record.memory_gb} GB"
 
     def _status(self) -> Text:
         pal = self.app.get_css_variables()
-        glyph, label = status_line(self.record, self.driver)
+        glyph, label = status_line(self.record, self.driver, shutdown=self._shutdown())
         text = Text(glyph + " ", style=self._tone(glyph))
         text.append(label, style="" if glyph != "\u25cb" else pal["muted"])
         text.append(self._facts_tail(glyph), style=pal["muted"])
@@ -93,13 +100,29 @@ class VmCard(Widget, can_focus=True):
     def _compact_line(self) -> Text:
         """`\u25cf macos-sequoia   101   running \u00b7 8 cores \u00b7 16 GB`: status glyph, name, VM ID, the rest."""
         pal = self.app.get_css_variables()
-        glyph, label = status_line(self.record, self.driver)
-        text = Text(glyph + " ", style=self._tone(glyph))
-        text.append(self.record.name.ljust(max(self.name_width, len(self.record.name))) + "   ", style="bold")
+        glyph, label = status_line(self.record, self.driver, shutdown=self._shutdown())
+        text = Text()
+        text.append(glyph + " ", style=self._tone(glyph))   # not Text(style=...): the name keeps the text colour
+        text.append(self.record.name.ljust(max(self.name_width, len(self.record.name))) + "   ",
+                    style="bold" if self.has_focus else "")
         text.append(f"{self.record.vmid:<5}  ", style=pal["muted"])
-        text.append(label, style="" if glyph != "\u25cb" else pal["muted"])
+        text.append(label, style=self._tone(glyph))
         text.append(self._facts_tail(glyph), style=pal["muted"])
         return text
+
+    def _repaint_compact(self) -> None:
+        if not self.compact:
+            return
+        try:
+            self.query_one(".card-status", Static).update(self._compact_line())
+        except Exception:  # noqa: BLE001 - not composed yet
+            pass
+
+    def on_focus(self) -> None:
+        self._repaint_compact()
+
+    def on_blur(self) -> None:
+        self._repaint_compact()
 
     def update_record(self, record: VmRecord, driver: DriverState | None) -> None:
         self.record, self.driver = record, driver
@@ -184,6 +207,7 @@ class HomeScreen(VmActionScreen):
             yield Vertical(id="cards")
             yield NewStrip()
             yield Static("", id="resume")
+            yield Static("", id="stuck")
             yield Static("", id="selected-line")
 
     def on_mount(self) -> None:
@@ -287,10 +311,20 @@ class HomeScreen(VmActionScreen):
         banner.append(" continues", style=pal["muted"])
         resume.update(banner if self.resume_text else "")
         resume.display = bool(self.resume_text)
+        stuck = self.query_one("#stuck", Static)
+        held = self._stuck_record()
+        stuck.update(Text("! " + still_running_line(held.name), style=pal["warning"]) if held else "")
+        stuck.display = held is not None
         record = self.current_record()
         self.query_one("#selected-line", Static).update(
             Text(f"{record.name} selected", style=self.app.get_css_variables()["muted"]) if record else "")
         self.refresh_footer()
+
+    def _stuck_record(self) -> VmRecord | None:
+        """The selected Mac when it ignored a shutdown request for a minute, else the first such Mac."""
+        stuck = [r for r in self.records if self.app.shutdowns.state(r) == "stuck"]
+        selected = self.current_record()
+        return next((r for r in stuck if selected and r.vmid == selected.vmid), stuck[0] if stuck else None)
 
     def _proposal(self) -> str:
         cores, mem_gb, disk = detect_cpu_cores(), detect_memory_mb() // 1024, default_disk_gb("sequoia")
@@ -320,7 +354,7 @@ class HomeScreen(VmActionScreen):
 
     def _room(self) -> int:
         """Rows left for the cards: the screen less the bars, the heading, the New Mac strip and the lines under it."""
-        taken = 2 + 1 + 2 + 3 + 1 + 1 + (2 if self.resume_text else 0)
+        taken = 2 + 1 + 2 + 3 + 1 + 1 + (2 if self.resume_text else 0) + (1 if self._stuck_record() else 0)
         return max(6, self.size.height - taken)
 
     def thumb_rows(self) -> int:
@@ -336,6 +370,7 @@ class HomeScreen(VmActionScreen):
         cards = [c for c in self.cards() if not c.compact]
         if self._compact() or not cards:
             grid.styles.height = "1fr"
+            grid.styles.grid_rows = "1"  # one-row list entries, whatever the card rows were before
             return
         rows = self.thumb_rows()
         height = rows + CARD_CHROME

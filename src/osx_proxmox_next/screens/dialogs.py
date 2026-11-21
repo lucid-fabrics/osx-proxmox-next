@@ -38,15 +38,16 @@ NIC_MODELS = ("vmxnet3", "e1000-82545em")
 FIELD_WIDTH = 20             # every field of the edit dialog is this wide, in one column
 
 
-def StopDialog(record: VmRecord) -> ChoiceDialog:
-    """What to do with a running VM: ask it to shut down, or cut the power."""
+def StopDialog(record: VmRecord, force_first: bool = False) -> ChoiceDialog:
+    """What to do with a running VM: ask it to shut down, or cut the power. *force_first*: it ignored the
+    shutdown request, so Force stop has the focus."""
     return ChoiceDialog(
         f"Stop {record.name} (VM {record.vmid})?",
         ["Shut down asks macOS to close everything and power off.",
          "Force stop cuts the power at once; whatever is open is lost."],
         [Choice("cancel", "Cancel"), Choice("shutdown", "Shut down", "primary"),
          Choice("stop", "Force stop", "danger")],
-        focus="shutdown",
+        focus="stop" if force_first else "shutdown",
     )
 
 

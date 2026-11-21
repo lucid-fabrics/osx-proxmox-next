@@ -150,6 +150,7 @@ async def test_after_the_restart_the_check_and_the_attach_run_without_asking(tmp
         s = screen2.s
         assert s.approval == approval and 6 in s.state["done"] and 7 in s.state["done"]
         assert ("start", "100") in [tuple(c[1:]) for c in env.qm.calls]  # the Mac is started on the card
+        assert isinstance(screen2.durations["start"], float)         # written on the UI thread, from the worker's result
         tl = timeline(screen2)
         assert "✓ Checked the card is free" in tl and "✓ Attached it to macos-sequoia" in tl
         assert "✓ Started the Mac" in tl and "Finished without a question" in tl

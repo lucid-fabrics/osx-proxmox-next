@@ -15,6 +15,7 @@ from ..services import VmRecord, fetch_vm_info, get_proxmox_adapter
 from ..services.unattended_service import read_driver_state
 from ..widgets.live_screen import LiveScreen
 from .home import status_line
+from .shutdown import still_running_line
 from .vm_actions import VmActionScreen
 
 log = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ class VmViewScreen(VmActionScreen):
             with Horizontal(id="vm-view-head"):
                 yield Static(self.record.name, id="vm-view-title")
                 yield Static("", id="vm-view-status")
+            yield Static("", id="vm-stuck")
             with Horizontal(id="vm-view-body"):
                 with Vertical(id="vm-view-screen"):
                     yield LiveScreen(self.record.vmid, self.record.status, VIEW_REFRESH_SECONDS,
@@ -83,11 +85,15 @@ class VmViewScreen(VmActionScreen):
     def _paint(self) -> None:
         rec, pal = self.record, self.app.get_css_variables()
         facts = rec.facts
-        glyph, label = status_line(rec, None)
-        tone = {"●": pal["success"], "○": pal["muted"]}[glyph]
+        glyph, label = status_line(rec, None, shutdown=self.app.shutdowns.state(rec))
+        tone = {"●": pal["success"], "○": pal["muted"], "◐": pal["accent"]}[glyph]
         status = Text(glyph + " ", style=tone)
         status.append(label)
         self.query_one("#vm-view-status", Static).update(status)
+        stuck = self.query_one("#vm-stuck", Static)
+        held = self.app.shutdowns.state(rec) == "stuck"
+        stuck.update(Text("! " + still_running_line(rec.name), style=pal["warning"]) if held else "")
+        stuck.display = held
         caption = f"live from VM {rec.vmid}" + (f" · refreshes every {VIEW_REFRESH_SECONDS} s" if rec.status == "running" else "")
         self.query_one("#vm-live-caption", Static).update(Text(caption, style=pal["muted"]))
         rows = [("VM ID", str(rec.vmid)), ("Cores", str(rec.cores)), ("Memory", f"{rec.memory_gb} GB")]

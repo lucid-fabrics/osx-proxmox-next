@@ -16,6 +16,7 @@ from ..gpu_setup import CardChanged, VmOption
 from ..services import fetch_vm_info
 from ..widgets.rows import ChoiceRow, Option
 from .base import ConfirmDialog
+from .gpu_choose import CHOOSE_LABEL
 from .gpu_run import Guidance
 
 MARKS = {"ok": "✓", "fail": "✗", "warn": "!", "info": "·"}
@@ -216,9 +217,10 @@ class AttachMixin:
         pal = self.app.get_css_variables()
         choices = [Option(str(o.vmid), o.name or f"VM {o.vmid}", o.eligible or o.status == "running")
                    for o in options] or [Option("", "none")]
-        rows: list[Widget] = [ChoiceRow("Mac", choices, str(usable[0].vmid) if usable else "", id="g-pick")]
+        rows: list[Widget] = [ChoiceRow("Mac", choices, str(usable[0].vmid) if usable else "", label_width=CHOOSE_LABEL, id="g-pick")]
         if nvidia:
-            rows.append(ChoiceRow("Driver", [Option("latest", "Latest")], "latest", id="g-driver", hint_lines=0))
+            rows.append(ChoiceRow("Driver", [Option("latest", "Latest")], "latest", label_width=CHOOSE_LABEL, id="g-driver",
+                                  hint_lines=0))
         widgets: list[Widget] = [
             Static(Text("Pick the Mac that gets the card", style="bold"), id="g-run-title"),
             Static(Text("The host is ready. The Mac must have finished its install.", style=pal["muted"])),

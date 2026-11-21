@@ -60,6 +60,8 @@ Home is the list of your Macs. Each Mac is a card with a live thumbnail of its s
 
 Pressing `enter` on a card opens a large live screen of that Mac with its facts from `qm config` and the same action keys as Home. A Mac with an install in progress opens the Build screen instead. When you ask a Mac to shut down and it is still running a minute later, the screen says so and offers Force stop, but it never forces anything by itself.
 
+![VM view](/img/screenshots/tui-vm-view.png)
+
 ### New Mac
 
 New Mac is a single screen, not a wizard. Every row is prefilled from what the host reports, and left and right change a choice. The panel on the right shows how much of the host's CPU, memory and disk the Mac would use, and a short summary of what happens when you press `enter`. Errors appear in a fixed two-row area and move the focus to the first row that needs attention.
@@ -76,6 +78,8 @@ Build is one pipeline: check the host, download macOS, rehearse every step, crea
 
 Host check lists the failing checks first, each with one sentence on why it matters, and then one line for the checks that passed. When a safe automatic fix exists, `f` shows the exact commands, asks for confirmation, runs them with live output and checks again. Checks without a safe fix only explain the problem.
 
+![Host check](/img/screenshots/tui-host-check.png)
+
 ### Graphics card
 
 Passing a graphics card to a Mac is shown as three moments instead of a long walkthrough.
@@ -85,6 +89,8 @@ In the first moment you choose the card and the Mac and approve the whole plan o
 ![Graphics card](/img/screenshots/tui-gpu.png)
 
 If a BIOS setting has to change, a screen titled "One thing only you can do" lists the settings with their menu path and a QR code, offers to restart into the BIOS and checks again. A host whose BIOS is already right never sees it.
+
+![BIOS screen](/img/screenshots/tui-gpu-bios.png)
 
 In the second moment the pipeline runs: back up the files, set up the host, restart, check the card is free, attach it to the Mac and start it. The restart step shows what a restart affects right now, including any Mac with an install in progress. After the restart the flow continues without asking again, unless the plan no longer matches what was approved.
 

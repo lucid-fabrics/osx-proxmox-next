@@ -185,7 +185,7 @@ async def test_the_optional_early_binding_row_shows_and_changes_the_plan(tmp_pat
     async with app.run_test(size=SIZE) as pilot:
         screen = await at_choose(pilot, app, env)
         assert screen.preview.plan["optional"] is True
-        assert screen.query_one("#g-optional").display and "Early binding" in row(screen, "#g-optional")
+        assert screen.query_one("#g-optional").display and "Early bind" in row(screen, "#g-optional")
         files_before = len(screen.preview.plan["changes"])
         screen.query_one("#g-optional", ChoiceRow).set_value("on", notify=True)
         await F.settle(pilot, lambda: screen.preview is not None and screen.preview.optional)
@@ -315,6 +315,33 @@ async def test_a_vm_that_cannot_take_the_card_is_a_refusal_with_its_reason(tmp_p
         assert screen.query_one("#g-primary", Button).disabled
         await pilot.press("enter")                                    # a disabled primary does nothing
         assert app.screen is screen and screen.s.state["gpu"] is None
+
+
+@F.tui
+async def test_the_choose_labels_are_10_wide_so_the_display_hint_fits_one_row_at_100_columns(tmp_path):
+    env = amd_env(tmp_path, cpu="intel")
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await at_choose(pilot, app, env)
+        assert row(screen, "#g-display").startswith(" Display   \u2039 ")        # the label column is 10 wide
+        lines = screen.query_one("#g-display")._lines(screen.query_one("#g-display").size.width)
+        assert "Best performance. Plug a screen into the card." in [t.plain.strip() for t in lines]
+
+
+@F.tui
+async def test_under_90_columns_every_need_value_sits_on_its_own_row_under_its_label(tmp_path):
+    env = amd_env(tmp_path, cpu="intel")
+    app = NextApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        screen = await at_choose(pilot, app, env)
+        rows = [t for t in screen.query_one("#g-need")._layout(30)]
+        text = [t.plain for t in rows]
+        assert text == ["✓ BIOS settings", "  already right", "● Host setup", "  3 files change",
+                        "● One restart", "  about 3 min", "● Attach to the Mac", "  automatic"]
+    wide = NextApp()
+    async with wide.run_test(size=SIZE) as pilot:                       # wide: the values sit beside the labels
+        screen = await at_choose(pilot, wide, env)
+        assert not screen.query_one("#g-need").stack
 
 
 @F.tui
@@ -623,7 +650,14 @@ async def test_the_bios_screen_lists_the_settings_and_restarts_into_the_bios_aft
         assert screen.query_one("#g-recheck", Button).label.plain == "Check again"
         order = [b.id for b in screen.query("#g-bios-foot Button")]
         assert order == ["g-recheck", "g-primary-bios"]               # the primary button is the right one
-        assert F.text_of(screen.query_one("#g-note")) == "Cannot find it? The BIOS search finds settings by name."
+        code, cols = screen.query_one("#g-bios-code"), screen.query_one("#g-bios-cols")
+        assert code.region.height == len(screen.bios_view["qr"]) and code.region.bottom <= cols.region.bottom  # whole
+        note = screen.query_one("#g-note")
+        assert F.text_of(note) == "Cannot find it? The BIOS search finds settings by name."
+        assert note.region.width >= len(F.text_of(note)) and note.region.bottom <= screen.query_one("#g-bios-foot").region.y
+        wrapped = screen.query_one("#g-bios-rows")._layout(30)           # a narrow column: steps keep a hanging indent
+        steps = [t.plain for t in wrapped[next(i for i, t in enumerate(wrapped) if t.plain.startswith("1 ")):]]
+        assert steps[0].startswith("1 ") and all(t.startswith("  ") for t in steps[1:] if t and not t[0].isdigit())
         for key in ("Restart into BIOS", "Check again"):
             assert key in keys(app)
         await pilot.press("enter")
@@ -657,6 +691,26 @@ async def test_the_bios_screen_says_settings_when_more_than_one_must_change(tmp_
         rows = F.text_of(screen.query_one("#g-bios-rows"))
         assert "Change the settings, then save and exit (often F10)" in rows
         assert "\u2717 " in rows and rows.count("\u2717") == 2
+
+
+@F.tui
+async def test_the_qr_code_is_whole_at_100_x_30_and_the_link_replaces_it_when_the_height_cannot_hold_it(tmp_path):
+    env = bios_env(tmp_path)
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await at_choose(pilot, app, env)
+        await pilot.press("enter")
+        await mode(pilot, screen, "bios")
+        code, cols = screen.query_one("#g-bios-code"), screen.query_one("#g-bios-cols")
+        assert code.region.height == len(screen.bios_view["qr"]) and code.region.bottom <= cols.region.bottom
+    (tmp_path / "short").mkdir()
+    short_env, short = bios_env(tmp_path / "short"), NextApp()
+    async with short.run_test(size=(100, 24)) as pilot:                  # a cut-off code cannot be scanned
+        screen = await at_choose(pilot, short, short_env)
+        await pilot.press("enter")
+        await mode(pilot, screen, "bios")
+        assert not screen.query("#g-bios-qr")
+        assert "Same steps with pictures on your phone:" in " ".join(F.text_of(w) for w in screen.query("#g-bios-left Static"))
 
 
 @F.tui

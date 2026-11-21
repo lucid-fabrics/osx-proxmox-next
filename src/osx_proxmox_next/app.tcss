@@ -68,6 +68,7 @@ KeyBar { background: $surface; }
 #new-strip:focus { border: dashed $accent; background: $surface; }
 #new-strip.empty { height: 5; }
 #resume { height: 1; margin-top: 1; }
+#stuck { height: 1; display: none; }
 #selected-line { dock: bottom; height: 1; }
 
 VmCard {
@@ -89,6 +90,7 @@ VmCard.compact .card-status { width: 1fr; }
 
 #vm-view { height: 1fr; padding: 1 2 0 2; }
 #vm-view-head { height: 1; margin-bottom: 1; }
+#vm-stuck { height: 1; display: none; }
 #vm-view-title { width: 1fr; text-style: bold; }
 #vm-view-status { width: auto; }
 #vm-view-body { height: 1fr; }
@@ -202,7 +204,7 @@ ModalScreen { align: center middle; background: $background 70%; }
 #g-form > ChoiceRow { margin-bottom: 1; }
 #g-reason { height: auto; }
 #g-safe { height: auto; margin-top: 1; }
-#g-side { width: 38; margin-left: 1; padding-left: 2; border-left: solid $edge; height: 100%; }
+#g-side { width: 34; margin-left: 1; padding-left: 2; border-left: solid $edge; height: 100%; }
 #g-side .side-title { color: $muted; height: 1; margin-bottom: 1; }
 GpuScreen.narrow #g-side { width: 30; padding-left: 1; margin-left: 0; }
 #g-need { margin-bottom: 1; }
@@ -227,7 +229,9 @@ GpuScreen.narrow #g-side { width: 30; padding-left: 1; margin-left: 0; }
 #g-bios-qr { width: 30; height: 100%; margin-left: 1; padding-left: 3; border-left: solid $edge; }
 #g-bios-code { height: auto; width: auto; }
 #g-bios-caption { height: auto; }
-#g-bios-foot { height: 1; dock: bottom; margin-bottom: 1; }
+#g-bios-foot { height: 1; dock: bottom; align-horizontal: right; }
+#g-note.bios-note { dock: bottom; height: 1; margin-bottom: 1; }
+#g-result.when-text { display: none; }
 #g-bios-foot Button { margin-left: 2; }
 GpuScreen #g-pick-info { height: auto; margin-top: 1; }
 #g-typed { width: 20; }

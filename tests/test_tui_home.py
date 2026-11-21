@@ -164,6 +164,30 @@ async def test_v_switches_a_wide_terminal_to_the_list(monkeypatch):
 
 
 @F.tui
+async def test_the_list_rows_sit_directly_under_each_other_and_all_show_at_100_x_30(monkeypatch):
+    """Design round 2, item 1: each list row is one row high, whatever the card rows were before `v`."""
+    F.patch_host(monkeypatch, drivers={107: F.installing_driver(18)})
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await home(pilot, app)
+        await pilot.press("v")
+        await F.settle(pilot, lambda: all(c.compact for c in screen.cards()))
+        await pilot.pause(0.3)
+        rows = [c.region for c in screen.cards()]
+        assert len(rows) == 3 and all(r.height == 1 for r in rows)
+        assert [rows[1].y - rows[0].y, rows[2].y - rows[1].y] == [1, 1]
+        assert all(r.bottom <= screen.size.height for r in rows)        # all three are on screen
+        plain = F.text_of(screen.cards()[0].query_one(".card-status"))
+        assert plain.startswith("\u25cf macos-sequoia")
+        for idx, bold in ((0, True), (1, False)):                        # only the selected row's name is bold
+            line = screen.cards()[idx]._compact_line()
+            name = line.plain.index(screen.cards()[idx].record.name)
+            style = line.get_style_at_offset(app.console, name)
+            assert bool(style.bold) == bold and style.color is None      # the name keeps the text colour
+            assert line.get_style_at_offset(app.console, 0).color is not None   # the glyph carries the status colour
+
+
+@F.tui
 async def test_resizing_across_the_threshold_switches_the_layout(monkeypatch):
     F.patch_host(monkeypatch)
     app = NextApp()
@@ -578,3 +602,81 @@ async def test_installing_vms_are_seen_through_the_driver_state(monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         screen = await home(pilot, app)
         assert screen.drivers[107].installing
+
+
+# ── design round 2, item 5: a Mac that ignores the shutdown request ──
+
+def test_the_shutdown_tracker_says_shutting_then_stuck_after_60_seconds_and_forgets_a_stopped_mac():
+    from osx_proxmox_next.screens.shutdown import ShutdownTracker, still_running_line
+    now = {"t": 100.0}
+    tracker = ShutdownTracker(clock=lambda: now["t"])
+    rec = F.three_vms()[0]
+    assert tracker.state(rec) == ""
+    tracker.ask(rec.vmid)
+    assert tracker.state(rec) == "shutting"
+    now["t"] = 159.9
+    assert tracker.state(rec) == "shutting"
+    now["t"] = 160.0
+    assert tracker.state(rec) == "stuck"
+    rec.status = "stopped"                                    # it did power off in the end
+    assert tracker.state(rec) == "" and rec.vmid not in tracker.asked
+    assert still_running_line("macos-sequoia") == (
+        "macos-sequoia is still running. macOS may be waiting on a dialog. s offers Force stop.")
+
+
+@F.tui
+async def test_home_shows_shutting_down_then_the_still_running_line_and_s_offers_force_stop(monkeypatch):
+    F.patch_host(monkeypatch)
+    qm = F.QmRecorder()
+    monkeypatch.setattr("osx_proxmox_next.screens.vm_actions.get_proxmox_adapter", lambda: qm)
+    app = NextApp()
+    now = {"t": 1000.0}
+    app.shutdowns.clock = lambda: now["t"]
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await home(pilot, app)
+        await pilot.press("s")
+        await pilot.press("enter")                                          # Shut down
+        await F.settle(pilot, lambda: ("shutdown", "101") in qm.calls)
+        await F.settle(pilot, lambda: 101 in app.shutdowns.asked)
+        screen.refresh_now()
+        await F.settle(pilot, lambda: "◐ shutting down" in F.text_of(screen.cards()[0].query_one(".card-status")))
+        assert not screen.query_one("#stuck").display
+        now["t"] += 61
+        screen.refresh_now()
+        await F.settle(pilot, lambda: screen.query_one("#stuck").display)
+        assert F.text_of(screen.query_one("#stuck")) == (
+            "! macos-sequoia is still running. macOS may be waiting on a dialog. s offers Force stop.")
+        await pilot.press("s")
+        assert app.focused.name == "stop"                                  # Force stop is focused, not pressed
+        assert ("stop", "101") not in qm.calls                             # never forced by itself
+        await pilot.press("escape")
+        await pilot.press("s")
+        await pilot.press("enter")
+        await F.settle(pilot, lambda: ("stop", "101") in qm.calls)
+        await F.settle(pilot, lambda: 101 not in app.shutdowns.asked)
+
+
+@F.tui
+async def test_the_vm_view_shows_the_same_still_running_line(monkeypatch):
+    F.patch_host(monkeypatch)
+    from osx_proxmox_next.services import VmInfo
+    info = VmInfo(101, "macos-sequoia", "running", F.three_vms()[0].config_raw)
+    monkeypatch.setattr("osx_proxmox_next.screens.vm_view.fetch_vm_info", lambda vmid, adapter=None: info)
+    monkeypatch.setattr("osx_proxmox_next.screens.vm_view.get_proxmox_adapter", lambda: None)
+    app = NextApp()
+    now = {"t": 5.0}
+    app.shutdowns.clock = lambda: now["t"]
+    async with app.run_test(size=SIZE) as pilot:
+        await home(pilot, app)
+        await pilot.press("enter")
+        from osx_proxmox_next.screens.vm_view import VmViewScreen
+        await F.settle(pilot, lambda: isinstance(app.screen, VmViewScreen))
+        view = app.screen
+        assert not view.query_one("#vm-stuck").display
+        app.shutdowns.ask(101)
+        view._paint()
+        assert "shutting down" in F.text_of(view.query_one("#vm-view-status"))
+        now["t"] += 60
+        view._paint()
+        assert view.query_one("#vm-stuck").display
+        assert F.text_of(view.query_one("#vm-stuck")).endswith("is still running. macOS may be waiting on a dialog. s offers Force stop.")

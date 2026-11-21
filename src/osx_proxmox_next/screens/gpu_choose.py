@@ -33,6 +33,7 @@ from .gpu_before import BeforeDialog
 log = logging.getLogger(__name__)
 
 # the Display row words (the command line keeps its own wording in gpu_setup.DISPLAY_OPTIONS)
+CHOOSE_LABEL = 10   # the label column of the choose rows (the mockup)
 DISPLAY_LABELS = {"gpu": "Monitor on the card", "console": "Keep the Proxmox console"}
 DISPLAY_HINTS = {
     "gpu": ["Best performance. Plug a screen into the card.", "Other choice: keep the Proxmox console"],
@@ -71,12 +72,15 @@ class ChooseMixin:
         options = [Option(c.bdf, short_card_name(c.name), c.selectable) for c in self.cards]
         first = usable[0].bdf if usable else (self.cards[0].bdf if self.cards else "")
         return [
-            ChoiceRow("Card", options, first, id="g-card"),
-            ChoiceRow("Mac", [Option(LATER, "Decide later")], LATER, id="g-mac", hint_lines=0),
+            ChoiceRow("Card", options, first, label_width=CHOOSE_LABEL, id="g-card"),
+            ChoiceRow("Mac", [Option(LATER, "Decide later")], LATER, label_width=CHOOSE_LABEL, id="g-mac",
+                      hint_lines=0),
             ChoiceRow("Display", [Option(v, DISPLAY_LABELS[v]) for v, _l, _d in DISPLAY_OPTIONS], "gpu",
-                      id="g-display"),
-            ChoiceRow("Driver", [Option("latest", "Latest")], "latest", id="g-driver", hint_lines=0),
-            ChoiceRow("Early binding", [Option("off", "Skip"), Option("on", "Write it")], "off", id="g-optional"),
+                      label_width=CHOOSE_LABEL, id="g-display"),
+            ChoiceRow("Driver", [Option("latest", "Latest")], "latest", label_width=CHOOSE_LABEL, id="g-driver",
+                      hint_lines=0),
+            ChoiceRow("Early bind", [Option("off", "Skip"), Option("on", "Write it")], "off",
+                      label_width=CHOOSE_LABEL, id="g-optional"),
             Static("", id="g-reason"),
         ]
 
@@ -297,7 +301,9 @@ class ChooseMixin:
         elif not any(c.selectable for c in self.cards):
             rows = [Line(Text(NO_CARD, style=pal["error"]), wrap=True)]
         try:
-            self.query_one("#g-need", Lines).set_lines(rows)
+            need = self.query_one("#g-need", Lines)
+            need.set_stack(self.size.width < 90)
+            need.set_lines(rows)
             self.query_one("#g-part", Static).update(part)
             for widget in (self.query_one("#g-part", Static), self.query_one("#g-part-title", Static)):
                 widget.display = bool(part.plain)

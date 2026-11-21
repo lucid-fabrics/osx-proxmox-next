@@ -165,7 +165,10 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
         return self.box_buttons[-1][1] if self.box_buttons else "Go"
 
     def on_resize(self) -> None:
-        self.set_class(self.size.width < 90, "narrow")
+        narrow = self.size.width < 90
+        self.set_class(narrow, "narrow")
+        for lines in self.query("#g-need"):
+            lines.set_stack(narrow)   # under 90 columns every value sits on its own row under its label
 
     def on_mount(self) -> None:
         self.s.state["resume_cmd"] = self.s.state.get("resume_cmd") or "osx-next-cli gpu-setup"
@@ -286,6 +289,8 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
         except Exception:  # noqa: BLE001 - mode without a result line
             return
         box.update(Text(text, style=self.app.get_css_variables()["error" if fail else "foreground"]))
+        if box.has_class("when-text"):   # a row only while there is something to say (the BIOS screen needs the room)
+            box.display = bool(text)
 
     async def set_mode(self, mode: str, widgets: list[Widget]) -> None:
         self.mode = mode

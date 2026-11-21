@@ -15,6 +15,7 @@ from textual.screen import ModalScreen
 from . import __version__
 from .preflight import PreflightCheck, run_preflight
 from .screens.base import ConfirmDialog, HelpScreen
+from .screens.shutdown import ShutdownTracker
 from .services import VmRecord
 from .services.host_facts import HostFacts, load_host_facts
 from .theme import OSX_NEXT, THEME_NAME
@@ -65,6 +66,7 @@ class NextApp(App):
         self.host_checks: list[PreflightCheck] | None = None
         self.host_label = ""
         self.vm_records: list[VmRecord] = []
+        self.shutdowns = ShutdownTracker()
         self._facts: HostFacts | None = None
         # The stylesheet reads the theme's variables while it is parsed, which is before on_mount.
         self.register_theme(OSX_NEXT)

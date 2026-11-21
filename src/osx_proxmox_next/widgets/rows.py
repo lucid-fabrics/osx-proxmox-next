@@ -53,9 +53,11 @@ class ChoiceRow(Widget, can_focus=True):
     """
 
     def __init__(self, label: str, options: list[Option], value: str = "", *, hint_lines: int = 1,
-                 drop_long: bool = False, id: str | None = None, classes: str | None = None) -> None:
+                 drop_long: bool = False, label_width: int = LABEL_WIDTH, id: str | None = None,
+                 classes: str | None = None) -> None:
         super().__init__(id=id, classes=classes)
         self.label = label
+        self.label_width = label_width  # the label column: the graphics card rows use 10, as in the mockup
         self.options = options
         self.detail = ""
         self.hint: "str | Text" = ""
@@ -105,15 +107,15 @@ class ChoiceRow(Widget, can_focus=True):
     def on_click(self, event) -> None:
         self.focus()
         width = self.size.width
-        if event.x < LABEL_WIDTH + 2:
+        if event.x < self.label_width + 2:
             return
-        self.action_step(-1 if event.x < (width + LABEL_WIDTH) // 2 else 1)
+        self.action_step(-1 if event.x < (width + self.label_width) // 2 else 1)
 
     # ── drawing ──────────────────────────────────────────────────────
 
     def _lines(self, width: int) -> list[Text]:
         pal = self.app.get_css_variables()
-        line = Text(" " + self.label.ljust(LABEL_WIDTH), style=pal["muted"])
+        line = Text(" " + self.label.ljust(self.label_width), style=pal["muted"])
         cur = self.current
         usable = sum(1 for o in self.options if o.enabled) > 1
         edge = pal["accent"] if usable else pal["muted"]
@@ -122,7 +124,7 @@ class ChoiceRow(Widget, can_focus=True):
         line.append(cur.label if cur else self.value, style="bold")
         if usable:
             line.append(" \u203a", style=edge)
-        pad = " " * (LABEL_WIDTH + 1)
+        pad = " " * (self.label_width + 1)
         under: list[Text] = []
         if self.detail:
             tail = " \u00b7 " + self.detail
