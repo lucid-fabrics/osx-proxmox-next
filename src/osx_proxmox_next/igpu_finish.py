@@ -349,7 +349,7 @@ def _put_back(pve: ProxmoxAdapter, vmid: int, original: dict[str, str | None]) -
 
 
 def _read_payload_result(pve: ProxmoxAdapter, ref: str) -> str:
-    path = pve.pvesm("path", ref).output.strip()
+    path = pve.volume_path(ref)
     return igpu_engine.read_result(path) if path else ""
 
 

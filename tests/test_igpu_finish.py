@@ -89,6 +89,9 @@ class Pve:
     def pvesm(self, *a):
         return CommandResult(True, 0, "/dev/payload")
 
+    def volume_path(self, ref):
+        return "/dev/payload"
+
     def run(self, argv):
         return self.qm(*argv[1:]) if argv[0] == "qm" else CommandResult(True, 0, "")
 

@@ -1125,7 +1125,7 @@ function restore_picker_timeout() {
   local vmid="$1" vol path loop mnt rc=1 _i
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || return 1
-  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$vol") || return 1
   loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
   for _i in 1 2 3 4 5; do
     partprobe "$loop" 2>/dev/null || true
@@ -1182,6 +1182,22 @@ function post_install() {
 # ── Vendor-neutral GPU helpers begin ──
 # Bash twin of src/osx_proxmox_next/gpu.py (detection, vfio/IOMMU/BAR checks,
 # hostpci and MMIO-window args). Vendor profiles (NullMoth below) sit on top.
+# The path of a volume, made usable first. PVE 9 leaves guest logical volumes inactive after a boot (and a
+# rolled-back thin volume keeps the activation-skip flag), so a stopped VM's disk may be missing from /dev.
+# An LV (lvm, lvmthin) is activated with -K; zfs, rbd and files need nothing. Mirrors ProxmoxAdapter.volume_path
+# and planner.activate_volume_snippet.
+function pve_vol_path() {
+  local p
+  p=$(pvesm path "$1" 2>/dev/null) || return 1
+  case "$p" in
+    /dev/zvol/*|/dev/rbd*|rbd:*) ;;
+    /dev/*)
+      if lvs "$p" >/dev/null 2>&1; then
+        lvchange -ay -K "$p" >/dev/null 2>&1 || { echo "ERROR: could not activate the disk $p" >&2; return 1; }
+      fi ;;
+  esac
+  echo "$p"
+}
 GPU_ISSUES=()
 GPU_WARNS=()
 GPU_HINTS=()
@@ -1426,7 +1442,7 @@ function nullmoth_oc_patch() {
   local nkept=0 vmid="$1" action="$2" zip="${3:-}" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
-  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$vol") || return 1
   loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     partprobe "$loop" 2>/dev/null || true
@@ -1753,7 +1769,7 @@ function nullmoth_choose_version() {
   echo "${reply:-latest}"
 }
 
-function nullmoth_payload_result() { nullmoth_engine result "$(pvesm path "$1" 2>/dev/null)" 2>/dev/null || true; }
+function nullmoth_payload_result() { nullmoth_engine result "$(pve_vol_path "$1")" 2>/dev/null || true; }
 
 # Download and verify the driver, build the payload disk, boot recovery and stage it inside macOS.
 # $1 vmid $2 release (latest or a tag) $3 macos. Sets NM_TAG, NM_PAYLOAD_REF, NM_PAYLOAD_FILE. Mirrors the first half of nullmoth_finish.finish.
@@ -8373,7 +8389,7 @@ function gpu_oc_boot_args() {
   local nkept=0 vmid="$1" action="$2" args="${3:-}" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
-  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$vol") || return 1
   loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     partprobe "$loop" 2>/dev/null || true
@@ -8668,7 +8684,7 @@ function igpu_oc_patch() {
   local nkept=0 vmid="$1" action="$2" vol path loop mnt rc=1 _i old_trap
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found"; return 1; }
-  path=$(pvesm path "$vol" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$vol") || return 1
   loop=$(losetup -fP --show "$path" 2>/dev/null) || return 1
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     partprobe "$loop" 2>/dev/null || true
@@ -8812,7 +8828,7 @@ function igpu_wait_first_boot() {
     qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
     if [ "$tahoe" == "yes" ] && (( $(date +%s) - last >= IGPU_RESULT_POLL )); then
       last=$(date +%s)
-      res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+      res=$(igpu_engine result "$(pve_vol_path "$ref")" 2>/dev/null || true)
       case "$res" in installed*|failed:*|"not installed:"*) sleep "$IGPU_RESULT_GRACE"; return 1 ;; esac
     fi
     sleep 10
@@ -8846,7 +8862,7 @@ function igpu_staging_started() {
   t0=$(date +%s)
   while :; do
     qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
-    res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+    res=$(igpu_engine result "$(pve_vol_path "$ref")" 2>/dev/null || true)
     [ -n "$res" ] && return 0
     (( $(date +%s) - t0 >= wait )) && return 1
     sleep 5
@@ -8861,7 +8877,7 @@ function igpu_wait_staged() {
   t0=$(date +%s)
   while (( $(date +%s) - t0 < timeout )); do
     qm status "$vmid" 2>/dev/null | grep -q 'status: stopped' && return 0
-    res=$(igpu_engine result "$(pvesm path "$ref" 2>/dev/null)" 2>/dev/null || true)
+    res=$(igpu_engine result "$(pve_vol_path "$ref")" 2>/dev/null || true)
     case "$res" in
       staged*|failed:*) igpu_wait_stopped "$vmid" "$IGPU_STAGE_GRACE" || true; return 0 ;;
     esac
@@ -8911,7 +8927,7 @@ function igpu_stage() {
     qm stop "$vmid" >/dev/null 2>&1 || true
     igpu_wait_stopped "$vmid" 120 || true
   fi
-  path=$(pvesm path "$payload_ref" 2>/dev/null) || return 1
+  path=$(pve_vol_path "$payload_ref") || return 1
   staged=$(igpu_engine result "$path")
   [ "$staged" == "staged" ] || { msg_error "Staging failed: ${staged:-the script left no result}. Is the macOS disk encrypted (FileVault)?"; return 1; }
   msg_ok "Staged the graphics package"
@@ -9002,7 +9018,7 @@ function igpu_finish() {
     else echo -e "${INFO}${YW}The guest did not power off within $((IGPU_FIRSTBOOT_TIMEOUT / 60)) minutes, so it was stopped.${CL}"; fi
     igpu_wait_stopped "$vmid" 120 || true
   fi
-  result=$(igpu_engine result "$(pvesm path "$payload_ref" 2>/dev/null)" 2>/dev/null || true)
+  result=$(igpu_engine result "$(pve_vol_path "$payload_ref")" 2>/dev/null || true)
   igpu_drop_disk "$vmid" sata2
   rm -f "$payload"
   printf '{"package_installed": %s, "package_result": %s}' "$([ "$result" == "installed" ] && echo true || echo false)" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$result")" | igpu_engine state-write "$vmid" >/dev/null 2>&1 || true
@@ -11105,7 +11121,7 @@ OC_IMPORT_OUT="$("${IMPORT_CMD[@]}" "$VMID" "$OC_DISK" "$STORAGE" --format raw 2
 OC_DISK_REF="$(get_disk_ref "$OC_IMPORT_OUT" "$STORAGE" "$VMID" "OpenCore")"
 qm set "$VMID" --ide0 "${OC_DISK_REF},media=disk" >/dev/null
 # Fix GPT header corruption on thin-provisioned LVM after importdisk
-OC_DEV=$(pvesm path "$OC_DISK_REF" 2>/dev/null) || true
+OC_DEV=$(pve_vol_path "$OC_DISK_REF" 2>/dev/null) || true
 if [ -n "$OC_DEV" ] && [ -b "$OC_DEV" ]; then
   dd if="$OC_DISK" of="$OC_DEV" bs=512 count=2048 conv=notrunc 2>/dev/null || true
 fi

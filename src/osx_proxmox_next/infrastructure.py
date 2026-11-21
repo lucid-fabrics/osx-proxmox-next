@@ -71,6 +71,16 @@ class ProxmoxAdapter:
     def pvesm(self, *args: str) -> CommandResult:
         return self.run(["pvesm", *args])
 
+    def volume_path(self, ref: str) -> str:
+        """The device or file of a volume, made usable first: PVE 9 leaves guest logical volumes inactive after
+        a boot (and a rolled-back thin volume keeps the activation-skip flag), so a disk that a stopped VM
+        owns may not exist in /dev yet. Empty when the volume has no path."""
+        path = self.pvesm("path", ref).output.strip()
+        if path.startswith("/dev/") and not path.startswith(("/dev/zvol/", "/dev/rbd")):
+            if self.run(["lvs", path]).ok:    # an LV (lvm, lvmthin); zfs, rbd and files need nothing
+                self.run(["lvchange", "-ay", "-K", path])
+        return path
+
     def pvesh(self, *args: str) -> CommandResult:
         return self.run(["pvesh", *args])
 
