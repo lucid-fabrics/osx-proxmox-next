@@ -236,7 +236,8 @@ GpuScreen.narrow #g-side { width: 30; padding-left: 1; margin-left: 0; }
 GpuScreen #g-pick-info { height: auto; margin-top: 1; }
 #g-typed { width: 20; }
 #changes-box { width: 92%; height: 80%; }
-#changes-scroll { height: 1fr; }
+#changes-scroll { height: 1fr; overflow-x: hidden; }
+#changes-text { width: 100%; }
 
 /* ---- Before you continue --------------------------------------------- */
 

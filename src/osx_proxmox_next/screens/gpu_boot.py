@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+import textwrap
+
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
@@ -15,6 +18,25 @@ FIRST_START = "The first start takes up to 2 minutes."
 ON_THE_CARD = "This Mac's screen now lives on the card, not in Proxmox."
 ON_CONSOLE = "The card does the acceleration. Keep using the Proxmox console."
 QUESTION = "Do you see the macOS desktop?"
+
+
+HELP_WIDTH = 44   # the text width of the box at 100 columns
+
+
+def reflow_help(text: str, width: int = HELP_WIDTH) -> str:
+    """The CLI's help text wrapped for a narrow box: each numbered item is one paragraph that wraps under its own
+    number, so a line break never falls inside a sentence."""
+    out: list[str] = []
+    for block in text.split("\n"):
+        if re.match(r"\s+\d\.", block) or not out or out[-1] == "" or not block.startswith(" "):
+            out.append(block.rstrip())
+        else:   # a continuation line of the item above
+            out[-1] += " " + block.strip()
+    lines = []
+    for para in out:
+        indent = "   " if re.match(r"\s+\d\.", para) else ""
+        lines += textwrap.wrap(para, width, subsequent_indent=indent + ("  " if indent else "")) or [""]
+    return "\n".join(lines)
 
 
 class BootMixin:
@@ -32,7 +54,7 @@ class BootMixin:
         s = self.s
         chosen = s.state["gpu"]
         if troubleshooting:
-            return Text("\n\n".join(TROUBLESHOOTING.values()))
+            return Text("\n\n".join(reflow_help(t) for t in TROUBLESHOOTING.values()))
         if chosen["vendor"] == "amd":
             body = Text(FIRST_START + "\n" + (ON_THE_CARD if s.state["display"] == "gpu" else ON_CONSOLE))
         else:

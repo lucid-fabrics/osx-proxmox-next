@@ -40,12 +40,22 @@ __all__ = ["GpuScreen", "ChangesDialog"]
 KEPT_LINE = "Anything you edited since is kept and reported."
 
 
+def undo_progress_text(plan: list[str], finished: int) -> str:
+    """The undo in progress: ✓ for each line done, ◐ for the one at work, the rest waiting."""
+    lines = [l for l in plan if not l.startswith("The host needs")]
+    rows = [("✓ " if i < finished else "◐ " if i == finished else "  ") + line for i, line in enumerate(lines)]
+    return "\n".join(["Undoing..."] + ([""] + rows if rows else []))
+
+
 class ChangesDialog(ModalScreen):
     """Every change of the plan in one scrolling dialog: files, commands, VM settings, backups. The VM steps are
     one plain line each; x shows the exact commands instead."""
 
     BINDINGS = [Binding("escape", "close", "Close"), Binding("enter", "close", "Close"),
-                Binding("p", "close", "Close"), Binding("x", "exact", "Exact commands")]
+                Binding("p", "close", "Close"), Binding("x", "exact", "Exact commands"),
+                Binding("down", "scroll_by(1)", show=False), Binding("up", "scroll_by(-1)", show=False),
+                Binding("pagedown", "scroll_page(1)", show=False), Binding("pageup", "scroll_page(-1)", show=False),
+                Binding("home", "scroll_edge(0)", show=False), Binding("end", "scroll_edge(1)", show=False)]
 
     def __init__(self, text: str, exact_text: str | None = None) -> None:
         super().__init__()
@@ -70,6 +80,22 @@ class ChangesDialog(ModalScreen):
 
     def on_mount(self) -> None:
         self.query_one("#changes-scroll", VerticalScroll).focus()
+
+    def _scroll_to(self, y: float) -> None:
+        """Move at once, never animated: a key pressed again mid-glide used to restart the glide, and the text
+        moved about one line in fourteen presses."""
+        box = self.query_one("#changes-scroll", VerticalScroll)
+        box.scroll_to(y=max(0, min(box.max_scroll_y, y)), animate=False)
+
+    def action_scroll_by(self, lines: int) -> None:
+        self._scroll_to(self.query_one("#changes-scroll", VerticalScroll).scroll_y + lines)
+
+    def action_scroll_page(self, direction: int) -> None:
+        box = self.query_one("#changes-scroll", VerticalScroll)
+        self._scroll_to(box.scroll_y + direction * max(1, box.size.height - 1))
+
+    def action_scroll_edge(self, end: int) -> None:
+        self._scroll_to(self.query_one("#changes-scroll", VerticalScroll).max_scroll_y if end else 0)
 
     def action_exact(self) -> None:
         self.exact = not self.exact
@@ -423,6 +449,10 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, Boo
         self.app.push_screen(ConfirmDialog("Put everything back?", lines, confirm="Put everything back",
                                            danger=True), answer)
 
+    def _undo_progress(self, plan: list[str], finished: int) -> None:
+        self.progress = undo_progress_text(plan, finished)
+        self.paint_run()
+
     def _undo(self, allow_stop: bool) -> None:
         s = self.s
 
@@ -440,5 +470,13 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, Boo
             else:
                 self.say(text, fail=True)
 
-        self.job(lambda: s.undo(allow_stop=allow_stop), done, "Undoing...")
+        try:
+            plan = s.undo_plan()
+        except Exception:  # noqa: BLE001 - the list only shows progress
+            plan = []
+
+        def paint(finished: int) -> None:
+            self.app.call_from_thread(self._undo_progress, plan, finished)
+
+        self.job(lambda: s.undo(allow_stop=allow_stop, progress=paint), done, undo_progress_text(plan, 0))
 

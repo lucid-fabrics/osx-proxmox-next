@@ -892,12 +892,15 @@ class Session:
 
     # ── undo ─────────────────────────────────────────────────────────
 
-    def undo(self, allow_stop: bool = False) -> tuple[bool, list[str]]:
+    def undo(self, allow_stop: bool = False, progress: Callable[[int], None] | None = None) -> tuple[bool, list[str]]:
         """Revert VM settings, then host files. Returns (ok, messages). Safe to run twice.
 
         Only what this tool wrote is reverted; anything changed since stays as the user left it and is
-        reported. Nothing to revert (no record, the VM is gone, the attach was refused) is a success."""
+        reported. Nothing to revert (no record, the VM is gone, the attach was refused) is a success.
+        *progress* is told how many lines of undo_plan() are done, before each Mac and each file group."""
         from .executor import apply_plan
+        tick = progress or (lambda _n: None)
+        finished = 0
         messages: list[str] = []
         ok = True
         self.undo_kept = 0
@@ -914,6 +917,8 @@ class Session:
                 self._forget_vm(vmid)
                 messages.append(f"VM {vmid}: nothing to revert (the attach did not change it).")
                 continue
+            tick(finished)
+            finished += len(self._oc_undo_lines(record, "")) + 1
             info = fetch_vm_info(vmid, adapter=self.pve)
             if info is not None and not (info.config_raw or "").strip():
                 # qm config failed: keep the record, undo can be run again
@@ -957,7 +962,9 @@ class Session:
                 ok = False
                 messages.append(f"VM {vmid}: restoring failed. Log: {result.log_path}")
         had_record = host_setup._p(self.root, host_setup.STATE_FILE).exists()
+        tick(finished)
         res = host_setup.undo_host(self.state, self.root, self.run)
+        tick(finished + len(res["restored"]))
         ok = ok and res["ok"]
         self.undo_kept += len(res["kept"])
         messages += [("Removed " if path in res["removed"] else "Restored ") + path for path in res["restored"]]
@@ -978,19 +985,33 @@ class Session:
         return ok, messages
 
     def undo_plan(self) -> list[str]:
-        """What undo would do, in the words of its result: a line per file and per Mac, and the restart."""
+        """What undo would do, in the order undo does it and in the words of its result: a line per Mac (and its
+        OpenCore change), a line per file, and the restart."""
         lines: list[str] = []
         first: dict[str, bool] = {}
         for c in self.state["host_changes"]:
             if not c.get("reverted"):
                 first.setdefault(c["path"], c["existed"])
+        for vmid in list(self.state["vm_records"]) + [v for v in gpu.record_vmids() if v not in self.state["vm_records"]]:
+            record = load_record(vmid)
+            if record is not None:
+                name = self._vm_name_suffix(vmid).strip()
+                lines += self._oc_undo_lines(record, name or f"VM {vmid}")   # the same record undo reads
+                lines.append(f"Take the card off {name} (VM {vmid})" if name else f"Take the card off VM {vmid}")
         for path in reversed(list(first)):
             lines.append(("Restore " if first[path] else "Remove ") + path)
-        for vmid in list(self.state["vm_records"]) + [v for v in gpu.record_vmids() if v not in self.state["vm_records"]]:
-            if load_record(vmid) is not None:
-                name = self._vm_name_suffix(vmid).strip()
-                lines.append(f"Take the card off {name} (VM {vmid})" if name else f"Take the card off VM {vmid}")
         return lines + (["The host needs one restart afterwards."] if first else [])
+
+    def _oc_undo_lines(self, record: AttachRecord, who: str) -> list[str]:
+        """The OpenCore change undo makes for this record (the step build_detach_steps adds), in plain words."""
+        if record.oc == "gpu":
+            dev = gpu._read_hex(Path(self.root) / "sys/bus/pci/devices" / f"{record.bdf}.0" / "device")
+            args = amd_host.boot_args_for(dev) if dev is not None else ()
+            what = " ".join(args)
+            return [f"Take {what} out of {who}'s OpenCore settings" if what else f"Restore {who}'s OpenCore settings"]
+        if record.oc == "igpu":
+            return [f"Restore {who}'s OpenCore settings"]
+        return []
 
     def card_holders(self) -> list[gpu.Holder]:
         """Other VMs that hold the chosen card right now (the Mac being set up is left out)."""

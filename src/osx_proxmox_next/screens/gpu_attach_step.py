@@ -25,6 +25,15 @@ MARKS = {"ok": "✓", "fail": "✗", "warn": "!", "info": "·"}
 NOT_FREE = "Card is not free yet"
 
 
+def failure_lines(result: Any) -> list[str]:
+    """The real error of the step that failed (its ERROR lines, else its last two), then the log path."""
+    bad = next((r for r in result.results if not r.ok), None)
+    lines = [ln.strip() for ln in (bad.output if bad else "").splitlines() if ln.strip()]
+    shown = [ln for ln in lines if ln.startswith("ERROR")][:2] or lines[-2:]
+    out = [f"{bad.title} failed:"] if bad and shown else []
+    return out + [ln[:90] for ln in shown] + [f"Log: {result.log_path}"]
+
+
 class AttachMixin(CardBusyMixin):
     """Stage 6 (verify), stage 7 (attach) and the Mac pick that "decide later" ends with."""
 
@@ -199,7 +208,7 @@ class AttachMixin(CardBusyMixin):
             self._nvidia_done(result)
             return
         if not result.ok:
-            self._guidance(Guidance("Attaching failed", [f"Log: {result.log_path}"], "Try again", self.step_attach,
+            self._guidance(Guidance("Attaching failed", failure_lines(result), "Try again", self.step_attach,
                                     fail=("attach", "Attaching failed")))
             return
         self.end_phase("attach")

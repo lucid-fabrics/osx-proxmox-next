@@ -741,7 +741,7 @@ async def test_undo_stops_a_running_mac_it_changed_and_reports_a_failure(tmp_pat
     s = env.session()
     s.state["vm_records"].append(100)
     s.save()
-    monkeypatch.setattr(gpu_setup.Session, "undo", lambda self, allow_stop=False: (False, [f"stop={allow_stop}", "VM 100: restoring failed."]))
+    monkeypatch.setattr(gpu_setup.Session, "undo", lambda self, allow_stop=False, progress=None: (False, [f"stop={allow_stop}", "VM 100: restoring failed."]))
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await at_choose(pilot, app, env, session=env.session())

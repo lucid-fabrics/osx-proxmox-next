@@ -279,3 +279,23 @@ def test_a_snapshot_section_is_never_read_as_the_live_config():
     raw = "onboot: 0\nhostpci0: 0000:06:00,pcie=1\n\n[before-upgrade]\nonboot: 1\nhostpci1: 0000:07:00\nsnaptime: 5\n"
     cfg = gpu.parse_config(raw)
     assert cfg == {"onboot": "0", "hostpci0": "0000:06:00,pcie=1"}
+
+
+FORMS = ["0000:06:00,pcie=1", "06:00,pcie=1", "0000:06:00.0,pcie=1,x-vga=1", "06:00.1", "host=0000:06:00.0,pcie=1",
+         "0000:06:00.0;0000:06:00.1,pcie=1", "06:00.0;06:00.1"]
+
+
+def test_a_vm_holds_the_card_in_every_form_a_hostpci_value_can_name_it(tmp_path):
+    for n, form in enumerate(FORMS):
+        env = host(tmp_path / str(n), {106: ("stopped", f"hostpci0: {form}\nonboot: 1\n")})
+        found = gpu.gpu_holders(env.qm, "0000:06:00", 100)
+        assert [(h.vmid, h.onboot) for h in found] == [(106, True)], form
+        assert gpu.gpu_users(env.qm, "0000:06:00", 100) == [(106, False)], form
+    other = host(tmp_path / "other", {106: ("stopped", "hostpci0: 0000:07:00.0,pcie=1\nonboot: 1\n")})
+    assert gpu.gpu_holders(other.qm, "0000:06:00", 100) == []
+
+
+def test_a_resource_mapping_holds_the_card_and_a_snapshot_never_hides_the_boot_flag(tmp_path):
+    assert gpu.hostpci_bdfs({"hostpci0": "mapping=gpu0"}, {"gpu0": {"0000:06:00"}}) == {"hostpci0": {"0000:06:00"}}
+    env = host(tmp_path / "b", {106: ("stopped", "hostpci0: 0000:06:00.0,pcie=1,x-vga=1\nonboot: 1\n\n[snap1]\nonboot: 0\n")})
+    assert [(h.vmid, h.onboot) for h in gpu.gpu_holders(env.qm, "0000:06:00", 100)] == [(106, True)]

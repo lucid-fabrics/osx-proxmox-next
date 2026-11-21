@@ -249,7 +249,14 @@ class RunMixin:
             self.failed[g.fail[0]] = g.fail[1]
         self.run_worker(self.show_run(g.title, g.lines, buttons, g.tone, g.muted), exclusive=True,
                         group="gpu-mode")
-        self.set_actions(g.action, g.secondary[1] if g.secondary else None)
+        action = g.action
+        if g.fail:   # a retry shows itself at once: no stale failure title or cross while it runs
+            key = g.fail[0]
+
+            def action() -> None:
+                self.failed.pop(key, None)
+                self.run_worker(self.step_in_run(g.action, True), exclusive=True, group="gpu-mode")
+        self.set_actions(action, g.secondary[1] if g.secondary else None)
 
     # ── stage 4: the host ────────────────────────────────────────────
 
