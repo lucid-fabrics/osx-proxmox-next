@@ -703,7 +703,7 @@ async def test_the_no_signal_help_fits_100x30_and_names_the_current_screens(tmp_
         assert len(text.splitlines()) <= 12
         assert F.text_of(screen.query_one("#g-more")) == ""            # no "more lines" hint: nothing to scroll
         assert screen.query_one("#g-box-scroll").max_scroll_y == 0
-        for current in ("HDMI", "Your Macs", "press u", "press g", "Keep the Proxmox console"):
+        for current in ("HDMI", "Your Macs", "Press u", "press g", "Keep the Proxmox console"):
             assert current in " ".join(text.split())
         assert "gpu-setup" not in text and "Monitor on the GPU" not in text
         assert screen.focused is screen.query_one("#g-back", Button)
