@@ -157,6 +157,7 @@ class GpuScreen(Readable, ChooseMixin, BiosMixin, RunMixin, RestartMixin, Attach
         self._apply_base: int | None = None   # host changes already recorded when the host apply began
         self._restart_armed = 0.0          # enter does nothing in the restart box before this moment
         self._restarting = False
+        self.helping = False               # the no-signal help is open over the first-boot question
 
     # ── layout ───────────────────────────────────────────────────────
 
@@ -183,6 +184,8 @@ class GpuScreen(Readable, ChooseMixin, BiosMixin, RunMixin, RestartMixin, Attach
                     ("enter", "Set it up", "screen.primary"), ("p", "See every change", "screen.changes"),
                     ("esc", "Cancel", "screen.back"), ("?", "Help", "app.help")]
         chosen = self.s.state["gpu"]
+        if self.mode == "first_boot" and self.helping:
+            return [("↑↓", "Scroll", None), ("enter", "Back", "screen.primary"), ("esc", "Back", "screen.back")]
         if self.mode == "first_boot" and chosen and chosen["vendor"] != "nvidia":
             items = [("y", "Yes, all good", "screen.yes"), ("n", "No, help me", "screen.no")]
         elif self.mode == "bios":
@@ -236,6 +239,9 @@ class GpuScreen(Readable, ChooseMixin, BiosMixin, RunMixin, RestartMixin, Attach
     def action_back(self) -> None:
         if self.working:
             self.app.notify("Wait for this step to finish. It is quick, and leaving now could stop it half done.")
+            return
+        if self.mode == "first_boot" and self.helping:
+            self._help_back()
             return
         super().action_back()
 

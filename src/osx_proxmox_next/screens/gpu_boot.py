@@ -11,7 +11,6 @@ from textual.widget import Widget
 from textual.widgets import Button, Static
 
 from ..gpu_flow import short_card_name
-from ..gpu_setup import TROUBLESHOOTING
 from .reading import ReadScroll
 
 LOOK_AT_MONITOR = "Look at the monitor plugged into the card"
@@ -19,6 +18,13 @@ FIRST_START = "The first start takes up to 2 minutes."
 ON_THE_CARD = "This Mac's screen now lives on the card, not in Proxmox."
 ON_CONSOLE = "The card does the acceleration. Keep using the Proxmox console."
 QUESTION = "Do you see the macOS desktop?"
+NO_SIGNAL_HELP = (
+    "  1. Use an HDMI cable. DisplayPort stays black on several cards.\n"
+    "  2. Plug the monitor into the card, not the motherboard, and switch it on before the Mac starts.\n"
+    "  3. In Your Macs, stop the Mac, then start it again.\n"
+    "  4. Still black? Press u to put everything back, or press g and choose \"Keep the Proxmox console\".\n"
+    "  5. Last try: reset the NVRAM from the OpenCore menu at start-up."
+)
 
 
 HELP_WIDTH = 44   # the text width of the box at 100 columns
@@ -55,7 +61,7 @@ class BootMixin:
         s = self.s
         chosen = s.state["gpu"]
         if troubleshooting:
-            return Text("\n\n".join(reflow_help(t) for t in TROUBLESHOOTING.values()))
+            return Text(reflow_help(NO_SIGNAL_HELP))
         if chosen["vendor"] == "amd":
             body = Text(FIRST_START + "\n" + (ON_THE_CARD if s.state["display"] == "gpu" else ON_CONSOLE))
         else:
@@ -82,8 +88,8 @@ class BootMixin:
         if nvidia:
             buttons = [Button("Done", id="g-done", classes="primary")]
         elif troubleshooting:
-            buttons = [Button("Back", id="g-back", classes="secondary"),
-                       Button("Yes, all good", id="g-yes", classes="primary")]
+            buttons = [Button("Back", id="g-back", classes="primary"),
+                       Button("It works now", id="g-yes", classes="secondary")]
         else:
             buttons = [Button("No, help me", id="g-no", classes="secondary"),
                        Button("Yes, all good", id="g-yes", classes="primary")]
@@ -98,21 +104,32 @@ class BootMixin:
             Static(Text("Not happy with it? u puts the host and the Mac back exactly as they were.",
                         style=pal["muted"]), id="g-run-note"),
         ]
-        self.box_buttons = [("g-yes", "Done" if nvidia else "Yes, all good", "primary")]
+        self.helping = troubleshooting
+        self.box_buttons = [("g-back", "Back", "primary")] if troubleshooting else \
+            [("g-yes", "Done" if nvidia else "Yes, all good", "primary")]
         await self.set_mode("first_boot", widgets)
-        again = lambda: self.run_worker(self._show_first_boot(), exclusive=True, group="gpu-mode")  # noqa: E731
-        self.set_actions(self.action_yes, again if troubleshooting else self.action_no)
-        self.query_one(f"#{buttons[-1].id}", Button).focus()
+        if troubleshooting:   # enter and esc both go back to the question; the second button records success
+            self.set_actions(self._help_back, self._help_works)
+        else:
+            self.set_actions(self.action_yes, self.action_no)
+        self.query_one(f"#{buttons[0 if troubleshooting else -1].id}", Button).focus()
+
+    def _help_back(self) -> None:
+        self.run_worker(self._show_first_boot(), exclusive=True, group="gpu-mode")
+
+    def _help_works(self) -> None:
+        self.helping = False
+        self.action_yes()
 
     def action_yes(self) -> None:
-        if self.mode != "first_boot" or self.working:
+        if self.mode != "first_boot" or self.working or self.helping:
             return
         self.s.finish()
         self.run_worker(self._show_finished(), exclusive=True, group="gpu-mode")
 
     def action_no(self) -> None:
         s = self.s
-        if self.mode != "first_boot" or s.state["gpu"]["vendor"] == "nvidia":
+        if self.mode != "first_boot" or self.helping or s.state["gpu"]["vendor"] == "nvidia":
             return
         self.run_worker(self._show_first_boot(troubleshooting=True), exclusive=True, group="gpu-mode")
 

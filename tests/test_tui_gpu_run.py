@@ -674,7 +674,7 @@ async def test_yes_finishes_and_no_shows_the_troubleshooting(tmp_path):
         screen = await at_first_boot(pilot, app, env)
         await pilot.press("n")
         await mode(pilot, screen, "first_boot")
-        assert "No signal on the monitor" in box(screen) and box(screen).startswith("No signal? Try these")
+        assert "Use an HDMI cable" in box(screen) and box(screen).startswith("No signal? Try these")
         assert screen.query_one("#g-back", Button) and screen.query_one("#g-yes", Button)
         await pilot.click("#g-back")
         await mode(pilot, screen, "first_boot")
@@ -688,6 +688,67 @@ async def test_yes_finishes_and_no_shows_the_troubleshooting(tmp_path):
         await pilot.press("enter")                                   # start a new setup
         await F.settle(pilot, lambda: screen.mode == "choose" and bool(screen.query("#g-card")))
         assert not screen.s.state["finished"]
+
+
+@F.tui
+async def test_the_no_signal_help_fits_100x30_and_names_the_current_screens(tmp_path):
+    env = amd_env(tmp_path)
+    app = NextApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await at_first_boot(pilot, app, env)
+        await pilot.press("n")
+        await F.settle(pilot, lambda: screen.helping and bool(screen.query("#g-back")))
+        await pilot.pause(0.3)
+        text = F.text_of(screen.query_one("#g-box-text"))
+        assert len(text.splitlines()) <= 12
+        assert F.text_of(screen.query_one("#g-more")) == ""            # no "more lines" hint: nothing to scroll
+        assert screen.query_one("#g-box-scroll").max_scroll_y == 0
+        for current in ("HDMI", "Your Macs", "press u", "press g", "Keep the Proxmox console"):
+            assert current in " ".join(text.split())
+        assert "gpu-setup" not in text and "Monitor on the GPU" not in text
+        assert screen.focused is screen.query_one("#g-back", Button)
+        assert F.text_of(screen.query_one("#g-yes", Button).label) == "It works now"
+        assert [(k, label) for k, label, _ in screen.footer_items()] == \
+            [("↑↓", "Scroll"), ("enter", "Back"), ("esc", "Back")]
+
+
+@F.tui
+async def test_enter_and_esc_on_the_no_signal_help_go_back_without_recording_success(tmp_path):
+    env = amd_env(tmp_path)
+    app = NextApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await at_first_boot(pilot, app, env)
+        for key in ("enter", "escape"):
+            await pilot.press("n")
+            await F.settle(pilot, lambda: screen.helping and bool(screen.query("#g-back")))
+            await pilot.press(key)
+            await F.settle(pilot, lambda: not screen.helping and bool(screen.query("#g-no")))
+            assert "Do you see the macOS desktop?" in box(screen)
+            assert screen.mode == "first_boot" and not screen.s.state["finished"]
+            assert app.screen is screen
+        await pilot.press("n")
+        await F.settle(pilot, lambda: screen.helping and bool(screen.query("#g-back")))
+        await pilot.click("#g-yes")                                    # "It works now" is the one that records it
+        await mode(pilot, screen, "finished")
+        assert screen.s.state["finished"]
+
+
+def test_no_screen_or_widget_text_sends_the_user_to_the_old_flow():
+    import pathlib
+    import re
+    import osx_proxmox_next
+    root = pathlib.Path(osx_proxmox_next.__file__).parent
+    bad = re.compile(r"gpu-setup again|Monitor on the GPU|\bwizard\b|\bstep 2\b|\bStep 4\b")
+    hits = []
+    for folder in ("screens", "widgets"):
+        for path in (root / folder).glob("*.py"):
+            for n, line in enumerate(path.read_text().splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith(("#", "from ", "import ")) or "wizard_state" in line:
+                    continue
+                if bad.search(line):
+                    hits.append(f"{path.name}:{n}: {stripped}")
+    assert not hits, hits
 
 
 @F.tui
