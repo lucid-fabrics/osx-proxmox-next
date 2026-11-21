@@ -578,7 +578,7 @@ async def test_s_on_a_running_mac_asks_shut_down_or_force_stop(monkeypatch):
         await pilot.press("s")
         await pilot.press("tab")
         await pilot.press("enter")
-        await F.settle(pilot, lambda: ("stop", "101") in qm.calls)
+        await F.settle(pilot, lambda: ("stop", "101", "--overrule-shutdown", "1") in qm.calls)
 
 
 @F.tui
@@ -648,11 +648,11 @@ async def test_home_shows_shutting_down_then_the_still_running_line_and_s_offers
             "! macos-sequoia is still running. macOS may be waiting on a dialog. s offers Force stop.")
         await pilot.press("s")
         assert app.focused.name == "stop"                                  # Force stop is focused, not pressed
-        assert ("stop", "101") not in qm.calls                             # never forced by itself
+        assert not [c for c in qm.calls if c[0] == "stop"]                 # never forced by itself
         await pilot.press("escape")
         await pilot.press("s")
         await pilot.press("enter")
-        await F.settle(pilot, lambda: ("stop", "101") in qm.calls)
+        await F.settle(pilot, lambda: ("stop", "101", "--overrule-shutdown", "1") in qm.calls)
         await F.settle(pilot, lambda: 101 not in app.shutdowns.asked)
 
 

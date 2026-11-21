@@ -7,13 +7,20 @@ from collections.abc import Callable
 
 from ..services import VmRecord
 
-__all__ = ["STILL_RUNNING_SECONDS", "ShutdownTracker", "still_running_line"]
+__all__ = ["STILL_RUNNING_SECONDS", "ShutdownTracker", "shutdown_timed_out", "still_running_line"]
 
 STILL_RUNNING_SECONDS = 60
 
 
 def still_running_line(name: str) -> str:
     return f"{name} is still running. macOS may be waiting on a dialog. s offers Force stop."
+
+
+def shutdown_timed_out(output: str) -> bool:
+    """True when `qm shutdown` gave up waiting for the guest ("VM quit/powerdown failed - got timeout"), as opposed
+    to failing for a real reason. A lock timeout means nothing was requested, so it is not this."""
+    text = output.lower()
+    return ("timeout" in text or "timed out" in text) and "lock" not in text
 
 
 class ShutdownTracker:
@@ -23,9 +30,10 @@ class ShutdownTracker:
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self.clock = clock
         self.asked: dict[int, float] = {}
+        self.forcing: set[int] = set()      # Macs with a Force stop under way
 
     def ask(self, vmid: int) -> None:
-        self.asked[vmid] = self.clock()
+        self.asked.setdefault(vmid, self.clock())   # asking again does not restart the 60 seconds
 
     def forget(self, vmid: int) -> None:
         self.asked.pop(vmid, None)

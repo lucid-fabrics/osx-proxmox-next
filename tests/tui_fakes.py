@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import threading
 import time
 
 from osx_proxmox_next.defaults import CpuInfo
@@ -148,6 +149,39 @@ class QmRecorder:
         from osx_proxmox_next.infrastructure import CommandResult
         self.calls.append(args)
         return CommandResult(self.ok, 0 if self.ok else 1, "" if self.ok else "boom")
+
+
+class BlockingQm:
+    """A Proxmox whose `qm shutdown` blocks like the real one when macOS ignores the request: it holds the VM lock
+    until released, then fails with its timeout. While the lock is held a plain `qm stop` cannot get it, and
+    `--overrule-shutdown 1` takes over and ends the shutdown. *overrule*: False models a Proxmox without the option."""
+
+    def __init__(self, overrule: bool = True, locked: bool = True,
+                 timeout_output: str = "VM quit/powerdown failed - got timeout"):
+        self.calls: list[tuple] = []
+        self.release = threading.Event()
+        self.locked = locked
+        self.overrule = overrule
+        self.timeout_output = timeout_output
+
+    def qm(self, *args):
+        from osx_proxmox_next.infrastructure import CommandResult
+        self.calls.append(args)
+        if args[0] == "shutdown":
+            self.release.wait(20)
+            return CommandResult(False, 255, self.timeout_output)
+        if args[0] == "stop":
+            if "--overrule-shutdown" in args:
+                if not self.overrule:
+                    return CommandResult(False, 2, "Unknown option: overrule-shutdown")
+                self.locked = False
+                self.release.set()
+                return CommandResult(True, 0, "")
+            if self.locked and not self.release.is_set():
+                return CommandResult(False, 255, "can't lock file '/var/lock/qemu-server/lock-101.conf' - got timeout")
+            self.locked = False
+            return CommandResult(True, 0, "")
+        return CommandResult(True, 0, "")
 
 
 def tui(fn):

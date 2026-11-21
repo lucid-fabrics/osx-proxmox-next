@@ -7,6 +7,7 @@ import logging
 from ..services import VmRecord, get_proxmox_adapter
 from .base import OsxScreen
 from .dialogs import EditDialog, RemoveDialog, StopDialog
+from .shutdown import shutdown_timed_out
 
 log = logging.getLogger(__name__)
 
@@ -33,8 +34,12 @@ class VmActionScreen(OsxScreen):
             return
 
         def chosen(choice: str | None) -> None:
-            if choice in ("shutdown", "stop"):
-                self._qm(record, choice, f"{'Shutting down' if choice == 'shutdown' else 'Stopping'} {record.name}")
+            if choice == "shutdown":
+                self.app.shutdowns.ask(record.vmid)        # recorded now: the card says "shutting down" at once
+                self._qm(record, "shutdown", f"Shutting down {record.name}")
+                self.after_change()
+            elif choice == "stop":
+                self._force_stop(record)
 
         stuck = self.app.shutdowns.state(record) == "stuck"   # it ignored the request: Force stop is the offer
         self.app.push_screen(StopDialog(record, force_first=stuck), chosen)
@@ -49,14 +54,47 @@ class VmActionScreen(OsxScreen):
         self.run_worker(work, thread=True, exit_on_error=False)
 
     def _qm_done(self, record: VmRecord, command: str, ok: bool, output: str) -> None:
-        if ok and command == "shutdown":
-            self.app.shutdowns.ask(record.vmid)
-        elif command == "stop":
-            self.app.shutdowns.forget(record.vmid)
+        tracker = self.app.shutdowns
+        if command == "shutdown" and not ok:
+            if record.vmid not in tracker.asked or record.vmid in tracker.forcing:
+                self.after_change()                        # a Force stop took over and ended the request
+                return
+            if shutdown_timed_out(output):                 # macOS ignored the request: the hint takes over
+                self.app.notify(f"{record.name}: shutdown timed out", severity="warning")
+                self.after_change()
+                return
+            tracker.forget(record.vmid)
         if ok:
             self.app.notify(f"{record.name}: {command} done")
         else:
             self.app.notify(f"{record.name}: {command} failed. {output[:120]}", severity="error")
+        self.after_change()
+
+    def _force_stop(self, record: VmRecord) -> None:
+        """Cut the power, even while a `qm shutdown` that macOS ignores still holds the VM lock."""
+        tracker = self.app.shutdowns
+        pending = record.vmid in tracker.asked
+        tracker.forcing.add(record.vmid)
+        self.app.notify(f"Stopping {record.name}...")
+
+        def work() -> None:
+            vmid = str(record.vmid)
+            # the lock is taken: --overrule-shutdown goes first; an older Proxmox lacks the option, so plain stop follows
+            tries = [("--overrule-shutdown", "1"), ()] if pending else [(), ("--overrule-shutdown", "1")]
+            result = get_proxmox_adapter().qm("stop", vmid, *tries[0])
+            if not result.ok:
+                result = get_proxmox_adapter().qm("stop", vmid, *tries[1])
+            self.app.call_from_thread(self._force_stop_done, record, result.ok, result.output)
+
+        self.run_worker(work, thread=True, exit_on_error=False)
+
+    def _force_stop_done(self, record: VmRecord, ok: bool, output: str) -> None:
+        self.app.shutdowns.forcing.discard(record.vmid)
+        if ok:
+            self.app.shutdowns.forget(record.vmid)
+            self.app.notify(f"{record.name}: stop done")
+        else:                                              # still running: the hint stays
+            self.app.notify(f"{record.name}: stop failed. {output[:120]}", severity="error")
         self.after_change()
 
     # ── edit / remove / gpu ──────────────────────────────────────────
