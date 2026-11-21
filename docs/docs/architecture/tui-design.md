@@ -58,7 +58,7 @@ Home is the list of your Macs. Each Mac is a card with a live thumbnail of its s
 
 ### VM view
 
-Pressing `enter` on a card opens a large live screen of that Mac with its facts from `qm config` and the same action keys as Home. A Mac with an install in progress opens the Build screen instead. When you ask a Mac to shut down and it is still running a minute later, the screen says so and offers Force stop, but it never forces anything by itself.
+Pressing `enter` on a card opens a large live screen of that Mac with its facts from `qm config` and the same action keys as Home. A Mac with an install in progress opens the Build screen instead. When you ask a Mac to shut down and it is still running a minute later, the screen says so and offers Force stop, but it never forces anything by itself. The request is recorded the moment you ask, so the card says shutting down at once, and Force stop works while `qm shutdown` still holds the VM lock.
 
 ![VM view](/img/screenshots/tui-vm-view.png)
 
