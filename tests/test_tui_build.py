@@ -66,6 +66,13 @@ async def open_build(pilot, app, screen):
     await F.settle(pilot, lambda: app.screen is screen and screen.is_attached)
 
 
+async def pipeline_over(pilot, screen, predicate) -> None:
+    """Wait until *predicate* holds and the pipeline worker has returned. `failed` and `done` are set on the worker
+    thread before its last redraw, so the timeline and the latest box are only guaranteed painted once it ended."""
+    await F.settle(pilot, predicate)
+    await screen.workers.wait_for_complete()
+
+
 def timeline(screen) -> str:
     return F.text_of(screen.query_one("#timeline"))
 
@@ -164,7 +171,7 @@ async def test_a_failed_host_check_stops_at_phase_one_and_offers_the_host_check(
         bad = deps(preflight=lambda: [PreflightCheck("dmg2img available", False, "")])
         screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=bad))
         await open_build(pilot, app, screen)
-        await F.settle(pilot, lambda: screen.pipe.failed == "check")
+        await pipeline_over(pilot, screen, lambda: screen.pipe.failed == "check")
         assert "✗ Check this host" in timeline(screen) and "· Download macOS" in timeline(screen)
         latest = F.text_of(screen.query_one("#latest"))
         assert latest.startswith("\u2717 dmg2img is not installed") and "available" not in latest
@@ -198,7 +205,7 @@ async def test_h_does_nothing_when_the_failure_is_not_the_host(monkeypatch):
         bad = deps(dry_run=lambda steps, on_step=None: SimpleNamespace(ok=False, log_path=Path("/tmp/x.log")))
         screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=bad))
         await open_build(pilot, app, screen)
-        await F.settle(pilot, lambda: screen.pipe.failed == "rehearse")
+        await pipeline_over(pilot, screen, lambda: screen.pipe.failed == "rehearse")
         await pilot.press("h")
         assert app.screen is screen
         assert "Retry" in keys(app) and "Open host check" not in keys(app)
@@ -218,7 +225,7 @@ async def test_a_failed_create_shows_the_log_tail_and_the_rollback_hints(monkeyp
     async with app.run_test(size=SIZE) as pilot:
         screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=deps(live=live)))
         await open_build(pilot, app, screen)
-        await F.settle(pilot, lambda: screen.pipe.failed == "create")
+        await pipeline_over(pilot, screen, lambda: screen.pipe.failed == "create")
         latest = F.text_of(screen.query_one("#latest"))
         assert "Creating the VM failed. Log: /tmp/live.log" in latest
         assert "FAIL 3/14: step 2 (rc=5)" in latest and "Log tail" in latest
@@ -234,7 +241,7 @@ async def test_a_manual_install_ends_with_a_line_about_the_proxmox_console(monke
     async with app.run_test(size=SIZE) as pilot:
         screen = BuildScreen(CONFIG, False, pipeline=BuildPipeline(CONFIG, False, deps=deps()))
         await open_build(pilot, app, screen)
-        await F.settle(pilot, lambda: screen.pipe.done)
+        await pipeline_over(pilot, screen, lambda: screen.pipe.done)
         assert "The VM is created." in note(screen) and "Proxmox console of VM 105" in note(screen)
         assert "post-install --vmid 105 --execute" in note(screen)
         assert "Install macOS" not in timeline(screen) and "✓ Ready" in timeline(screen)
@@ -330,7 +337,7 @@ async def test_the_driver_log_drives_the_substeps_and_the_latest_lines(monkeypat
         # the install finishes
         box["state"] = DriverState(seen=["recovery", "erase", "installer", "restarts", "first_start", "ready"],
                                    started_at=time.time(), finished=True, alive=False, exists=True)
-        await F.settle(pilot, lambda: screen.pipe.done)
+        await pipeline_over(pilot, screen, lambda: screen.pipe.done)
         assert "✓ Ready at Setup Assistant" in timeline(screen)
         assert "Finish Setup Assistant on the screen above" in note(screen)
         assert "post-install --vmid 105 --execute" in note(screen)
