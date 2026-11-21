@@ -303,13 +303,14 @@ class RunMixin:
         return go
 
     async def _ask_host(self, lines: list[str], typed: bool) -> None:
+        # the action is set before the typed field appears, so a key pressed the moment the field shows still works
+        self.set_actions(lambda: self._ask_go() if self._ask_go else None)
         await self.show_run("This differs from what you approved" if self.s.approval else "Apply these changes",
                             lines, [("g-ask", "Apply these changes", "primary")], "warn")
         if typed:
             box = self.query_one("#g-box", Vertical)
             await box.mount(Static(f'Type "{CONFIRM_PHRASE}" to continue'), Input(id="g-typed"),
                             before=self.query_one("#g-box-buttons"))
-        self.set_actions(lambda: self._ask_go() if self._ask_go else None)
 
     def _apply_host(self, plan: dict, typed: bool) -> None:
         s = self.s
