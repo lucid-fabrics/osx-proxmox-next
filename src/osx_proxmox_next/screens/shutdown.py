@@ -32,11 +32,22 @@ class ShutdownTracker:
         self.asked: dict[int, float] = {}
         self.forcing: set[int] = set()      # Macs with a Force stop under way
 
-    def ask(self, vmid: int) -> None:
-        self.asked.setdefault(vmid, self.clock())   # asking again does not restart the 60 seconds
+    def ask(self, vmid: int) -> bool:
+        """Record the request. True when this call created the record (the one that may forget it later);
+        asking again does not restart the 60 seconds."""
+        if vmid in self.asked:
+            return False
+        self.asked[vmid] = self.clock()
+        return True
 
     def forget(self, vmid: int) -> None:
         self.asked.pop(vmid, None)
+
+    def keep_only(self, vmids: set[int]) -> None:
+        """Forget the Macs that no longer exist: a new Mac given the same VM ID must not inherit their request."""
+        for vmid in [v for v in self.asked if v not in vmids]:
+            del self.asked[vmid]
+            self.forcing.discard(vmid)
 
     def state(self, record: VmRecord) -> str:
         """"" (not asked, or already off), "shutting" (asked a moment ago) or "stuck" (still running after 60 s)."""

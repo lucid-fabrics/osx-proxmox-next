@@ -224,11 +224,12 @@ class HomeScreen(VmActionScreen):
         self.run_worker(self._load, thread=True, exclusive=True, group="home-load", exit_on_error=False)
 
     def _load(self) -> None:
+        listed = True
         try:
             records = list_macos_vm_records()
         except Exception:  # noqa: BLE001
             log.debug("VM list failed", exc_info=True)
-            records = []
+            records, listed = [], False
         drivers = {r.vmid: read_driver_state(r.vmid) for r in records}
         try:
             free = detect_storage_free_gb()
@@ -236,7 +237,7 @@ class HomeScreen(VmActionScreen):
             free = {}
         resume = self._resume_text(records)
         try:
-            self.app.call_from_thread(self._show, records, drivers, free, resume)
+            self.app.call_from_thread(self._show, records, drivers, free, resume, listed)
         except Exception:  # noqa: BLE001 - closing
             pass
 
@@ -256,8 +257,10 @@ class HomeScreen(VmActionScreen):
         return f"▸ Graphics card setup{who} is {moment}."
 
     async def _show(self, records: list[VmRecord], drivers: dict[int, DriverState], free: dict[str, int],
-                    resume: str) -> None:
+                    resume: str, listed: bool = True) -> None:
         self.app.vm_records = records  # type: ignore[attr-defined]
+        if listed:                                         # a failed listing says nothing about which Macs exist
+            self.app.shutdowns.keep_only({r.vmid for r in records})
         selected = self.current_record()
         keep = selected.vmid if selected else None
         same = [r.vmid for r in records] == [r.vmid for r in self.records] and self.loaded
