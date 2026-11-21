@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,7 +18,7 @@ from .services import fetch_vm_info
 from .gpu_setup import INTEL_DISPLAY_NOTE, NVIDIA_DISPLAY_NOTE, CardChanged, GpuCard, Session
 from .nullmoth import NOTICE_BODY, NOTICE_TITLE
 
-__all__ = ["LATER", "REBOOT_SECONDS", "Before", "Preview", "approval_record", "attach_differs", "build_before",
+__all__ = ["LATER", "Choice", "same_plan", "REBOOT_SECONDS", "Before", "Preview", "approval_record", "attach_differs", "build_before",
            "build_preview", "changes_text", "needs_typed", "plan_fingerprint", "plan_for_approval", "plan_lines",
            "preview_vm_plan", "replan_attach", "card_facts", "stop_mac", "need_rows", "part_steps", "short_card_name", "vm_fingerprint", "card_verdict"]
 
@@ -25,6 +26,11 @@ LATER = "later"
 REBOOT_SECONDS = "about 3 min"
 
 _VERDICTS = {"native": "Works in macOS without extra drivers", "nullmoth": "Works with the NullMoth driver (beta)"}
+
+
+# The iGPU attach script names the SHA-256 of the cached zips. That hash only appears once the zip is downloaded,
+# and the patcher checks it against the verified download right before it unpacks, so it stays out of the digest.
+_SHA_ENV = re.compile(r"(IGPU_(?:WEX|AMFI)_SHA256=)[0-9a-fA-F]*")
 
 
 def plan_fingerprint(plan: dict) -> str:
@@ -38,7 +44,7 @@ def vm_fingerprint(bdf: str, vmid: int | None, display: str, steps: list) -> str
     """A stable digest of the VM settings an attach would write. Stopping a running Mac is not part of
     it: whether the Mac is running changes between the approval and the attach."""
     body = {"bdf": bdf, "vm": vmid, "display": display,
-            "steps": [s.argv for s in steps if not s.title.lower().startswith("stop")]}
+            "steps": [[_SHA_ENV.sub(r"\1", a) for a in s.argv] for s in steps if not s.title.lower().startswith("stop")]}
     return hashlib.sha1(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
 
@@ -84,6 +90,7 @@ class Preview:
     typed_needed: bool = False    # a hard warning or the only-display-adapter stop wants the typed phrase
     host_pending: list[str] = field(default_factory=list)   # attach findings the host setup will fix
     optional: bool = False        # the optional early binding is written too
+    typed_extra: list[str] = field(default_factory=list)   # warnings only the typed plan has (not on SSH ...)
 
     @property
     def bios_failing(self) -> list:
@@ -113,19 +120,45 @@ def preview_vm_plan(s: Session, card: GpuCard, vmid: int, display: str) -> tuple
         return s.preview_vm(card, vmid, display, True), pending
 
 
-def build_preview(s: Session, card: GpuCard, vmid: int | None, display: str, *, optional: bool = False,
-                  typed: bool = False) -> Preview:
+@dataclass
+class Choice:
+    """The card, the Mac and the settings one preview is worked out for."""
+    card: GpuCard
+    vmid: int | None = None
+    display: str = "console"
+    optional: bool = False
+
+
+def _extra_lines(plain: dict, typed: dict) -> list[str]:
+    """What the plan with the phrase typed says that the plain plan does not (an SSH warning, for one)."""
+    seen = set(plan_lines(plain))
+    return [t for t in plan_lines(typed) if t not in seen and not t.startswith("OK: ")]
+
+
+def build_preview(s: Session, choice: Choice, typed: bool = False) -> Preview:
     """The BIOS items, host plan and attach plan of one choice. *typed*: the user typed "I understand"."""
+    card, vmid, display, optional = choice.card, choice.vmid, choice.display, choice.optional
+    extra: list[str] = []
     try:
         prev = s.preview(card, allow_no_console=False, write_optional=optional)
         wants = needs_typed(prev["plan"])
-        if wants and typed:  # the phrase is typed: show the plan as it will run
-            prev = s.preview(card, allow_no_console=True, write_optional=optional)
+        if wants:
+            with_phrase = s.preview(card, allow_no_console=True, write_optional=optional)
+            if typed:  # the phrase is typed: show the plan as it will run
+                prev = with_phrase
+            else:      # the dialog must show every warning of the plan that will run after the phrase
+                extra = _extra_lines(prev["plan"], with_phrase["plan"])
     except CardChanged as exc:
         return Preview(card, vmid, display, error=str(exc))
     vm_plan, pending = preview_vm_plan(s, card, vmid, display) if vmid is not None else (None, [])
     return Preview(card, vmid, display, prev["items"], prev["plan"], vm_plan, typed_needed=wants,
-                   host_pending=pending, optional=optional)
+                   host_pending=pending, optional=optional, typed_extra=extra)
+
+
+def same_plan(a: Preview, b: Preview) -> bool:
+    """Both previews would write the same host files and commands and the same VM settings."""
+    rec_a, rec_b = approval_record(a, typed=False, release=""), approval_record(b, typed=False, release="")
+    return rec_a["host_fp"] == rec_b["host_fp"] and rec_a["vm_fp"] == rec_b["vm_fp"]
 
 
 def approval_record(prev: Preview, *, typed: bool, release: str) -> dict:
@@ -208,6 +241,7 @@ def build_before(prev: Preview) -> Before:
         if line.startswith(("OK: ", "Refused: ")):
             continue
         (out.notes if line.startswith(("Note: ", "Manual step: ")) else out.warnings).append(line)
+    out.warnings += prev.typed_extra
     if prev.vm_plan is not None:
         out.notes += list(prev.vm_plan.hints)
         out.warnings += ["Warning: " + w for w in prev.vm_plan.warnings]
@@ -220,10 +254,10 @@ def build_before(prev: Preview) -> Before:
     return out
 
 
-def card_facts(name: str, bdf: str, headline: str, detail: str, fields: list[str]) -> str:
+def card_facts(card: GpuCard, fields: list[str]) -> str:
     """The card and the host in plain lines, for the top of "See every change"."""
-    lines = [f"Card: {name}", f"Address: {bdf}"]
-    lines += [t for t in (headline, detail) if t]
+    lines = [f"Card: {card.name}", f"Address: {card.bdf}"]
+    lines += [t for t in (card.headline, card.detail) if t]
     if fields:
         lines += ["", "This host: " + "   ".join(fields)]
     return "\n".join(lines) + "\n"

@@ -95,7 +95,7 @@ async def test_a_hands_off_build_reaches_the_install_phase_with_the_live_screen(
         for line in ("✓ Checked this host", "✓ Downloaded macOS", "✓ Rehearsed all 14 steps",
                      "✓ Created VM 105", "◐ Installing macOS", "· Ready"):
             assert line in text
-        assert "◐ Booting the recovery" in text or "Booting" in text
+        assert "  · Booting the recovery\n" in text
         assert "Safe to close." in note(screen) and "this view is back when you reopen osx-next" in note(screen)
         assert "elapsed" in F.text_of(screen.query_one("#build-elapsed")) and "usually 30 to 45 min" in F.text_of(screen.query_one("#build-elapsed"))
         assert F.text_of(screen.query_one("#build-title")) == "Building macos-sequoia"

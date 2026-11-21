@@ -164,7 +164,8 @@ async def test_p_opens_every_change_with_the_card_and_the_host_facts(tmp_path):
         text = F.text_of(dialog.query_one("#changes-text"))
         assert "Address: 0000:06:00" in text and "Card: " in text and "This host: CPU:" in text
         assert "each file is backed up first" in text and host_setup.BACKUP_ROOT in text
-        assert "--- /etc/modprobe.d" in text or "/etc/modprobe.d/vfio.conf" in text
+        assert ("--- /etc/modprobe.d/osx-proxmox-next-vfio.conf  (Bind the card to vfio-pci before its driver loads)"
+                in text)
         assert "VM 100 settings (a config snapshot is saved first):" in text and "qm set 100" in text
         await pilot.press("escape")
         assert app.screen is screen
@@ -317,7 +318,8 @@ async def test_a_vm_that_cannot_take_the_card_is_a_refusal_with_its_reason(tmp_p
 
 
 @F.tui
-async def test_only_display_adapter_is_careful_and_needs_the_typed_phrase(tmp_path, applied):
+async def test_only_display_adapter_is_careful_and_needs_the_typed_phrase(tmp_path, applied, monkeypatch):
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
     env = Env(tmp_path)
     host_card(env.root, boot_vga=True)
     app = NextApp()
@@ -330,6 +332,8 @@ async def test_only_display_adapter_is_careful_and_needs_the_typed_phrase(tmp_pa
         assert isinstance(dialog, BeforeDialog)
         warnings = F.text_of(dialog.query_one("#before-warnings"))
         assert "Careful: This card is the only display adapter" in warnings.replace("\n  ", " ")
+        assert "You are not on an SSH session. Make sure you can log in over the network before you reboot." in \
+            warnings.replace("\n  ", " ")                        # SF1: the warning of the plan that will run
         assert "Refused:" not in warnings and dialog.query_one("#before-go", Button).disabled
         assert "Type I understand to continue" in F.text_of(dialog.query_one(".before-label"))
         field = dialog.query_one("#g-confirm", Input)
@@ -342,6 +346,26 @@ async def test_only_display_adapter_is_careful_and_needs_the_typed_phrase(tmp_pa
         await mode(pilot, screen, "run")
         approval = screen.s.approval
         assert approval["typed"] and approval["allow_no_console"] and 4 in screen.s.state["done"]
+
+
+@F.tui
+async def test_the_dialog_opens_again_when_the_plan_changed_after_the_phrase(tmp_path, applied):
+    env = Env(tmp_path)
+    host_card(env.root, boot_vga=True)
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await at_choose(pilot, app, env)
+        await pilot.press("enter")
+        dialog = app.screen
+        assert isinstance(dialog, BeforeDialog)
+        env.qm.vms[100] = ("stopped", SEQUOIA.replace("args: ", "args: -smbios type=1 "))   # the Mac was edited meanwhile
+        dialog.query_one("#g-confirm", Input).value = CONFIRM_PHRASE
+        await F.settle(pilot, lambda: not dialog.query_one("#before-go", Button).disabled)
+        await pilot.press("enter")
+        await F.settle(pilot, lambda: app.screen is not dialog and isinstance(app.screen, BeforeDialog))
+        again = app.screen
+        assert again is not dialog and again.query_one("#before-go", Button).disabled   # the phrase is asked again
+        assert screen.s.approval is None and "The plan changed while you were reading it" in screen.result_text
 
 
 @F.tui

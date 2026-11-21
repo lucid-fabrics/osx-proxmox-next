@@ -13,6 +13,7 @@ from textual.widgets import Button, Static
 from .. import nullmoth_cli, nullmoth_finish
 from ..gpu_flow import (
     LATER,
+    Choice,
     Preview,
     approval_record,
     build_before,
@@ -20,6 +21,7 @@ from ..gpu_flow import (
     card_verdict,
     need_rows,
     part_steps,
+    same_plan,
     short_card_name,
 )
 from ..gpu_setup import DISPLAY_OPTIONS, GpuCard, VmOption
@@ -255,7 +257,7 @@ class ChooseMixin:
 
         def runner() -> None:
             try:
-                result = build_preview(s, card, vmid, display, optional=optional, typed=typed)
+                result = build_preview(s, Choice(card, vmid, display, optional), typed)
             except Exception as exc:  # noqa: BLE001
                 log.exception("GPU preview failed")
                 result = Preview(card, vmid, display, error=f"Could not work this out: {exc}")
@@ -352,12 +354,24 @@ class ChooseMixin:
         """The warnings are accepted. A typed "I understand" changes the host plan (the only-display-adapter
         override), so the plan that will run is worked out again with it before anything is stored."""
         if typed and prev.typed_needed:
-            card, vmid, display = prev.card, prev.vmid, prev.display
+            assert prev.card is not None
+            choice = Choice(prev.card, prev.vmid, prev.display, prev.optional)
             self.working = True
-            self.job(lambda: build_preview(self.s, card, vmid, display, optional=prev.optional, typed=True),
-                     lambda fresh: self._shared_check(fresh, typed, ack))
+            self.job(lambda: build_preview(self.s, choice, typed=True),
+                     lambda fresh: self._typed_planned(prev, fresh, typed, ack))
             return
         self._shared_check(prev, typed, ack)
+
+    def _typed_planned(self, shown: Preview, fresh: Preview, typed: bool, ack: bool) -> None:
+        """The plan worked out with the phrase typed must be the one the dialog showed; when the host or the
+        Mac changed in between, the dialog is opened again with what would run now."""
+        if not fresh.error and not same_plan(shown, fresh):
+            self.preview = fresh
+            self.paint_preview()
+            self.say("The plan changed while you were reading it. Check it again.", fail=True)
+            self.approve()
+            return
+        self._shared_check(fresh, typed, ack)
 
     def _shared_check(self, prev: Preview, typed: bool, ack: bool) -> None:
         card = prev.card

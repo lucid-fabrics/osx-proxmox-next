@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from rich.text import Text
@@ -23,6 +24,17 @@ WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
 
 def clock(secs: float | None) -> str:
     return "" if secs is None else f"{int(secs) // 60}:{int(secs) % 60:02d}"
+
+
+@dataclass
+class Guidance:
+    """A box in the run view: a title, its lines, one primary action and optionally a second button on its left."""
+    title: str
+    lines: list[str]
+    label: str
+    action: Callable[[], None]
+    secondary: tuple[str, Callable[[], None]] | None = None
+    tone: str = "fail"
 
 
 class RunMixin:
@@ -178,14 +190,13 @@ class RunMixin:
     def set_actions(self, primary: Callable[[], None] | None, secondary: Callable[[], None] | None = None) -> None:
         self._primary_action, self._secondary_action = primary, secondary
 
-    def _guidance(self, title: str, lines: list[str], label: str, action: Callable[[], None],
-                  secondary: tuple[str, Callable[[], None]] | None = None, tone: str = "fail") -> None:
+    def _guidance(self, g: Guidance) -> None:
         """A box with one primary action (and optionally a second button on its left), in the run view."""
-        buttons = [("g-primary-run", label, "primary")]
-        if secondary:
-            buttons.insert(0, ("g-secondary", secondary[0], "secondary"))
-        self.run_worker(self.show_run(title, lines, buttons, tone), exclusive=True, group="gpu-mode")
-        self.set_actions(action, secondary[1] if secondary else None)
+        buttons = [("g-primary-run", g.label, "primary")]
+        if g.secondary:
+            buttons.insert(0, ("g-secondary", g.secondary[0], "secondary"))
+        self.run_worker(self.show_run(g.title, g.lines, buttons, g.tone), exclusive=True, group="gpu-mode")
+        self.set_actions(g.action, g.secondary[1] if g.secondary else None)
 
     # ── stage 4: the host ────────────────────────────────────────────
 
@@ -202,9 +213,10 @@ class RunMixin:
         if not s.plan_needs_work(plan) and not plan["refusals"] and s.state.get("verify_retry"):
             s.state["verify_retry"] = False
             s.save()
-            self._guidance("The verify step found a problem, but there is nothing left for this tool to change.",
-                           ["Fix the failing item in the verify list (see the docs), then check again."],
-                           "Check again", lambda: (s.goto(6), self.drive()), tone="warn")
+            self._guidance(Guidance(
+                "The verify step found a problem, but there is nothing left for this tool to change.",
+                ["Fix the failing item in the verify list (see the docs), then check again."],
+                "Check again", lambda: (s.goto(6), self.drive()), tone="warn"))
             return
         if (plan.get("optional") or not s.plan_needs_work(plan)) and not plan["refusals"]:
             s.complete(4, skipped=True)
@@ -257,7 +269,8 @@ class RunMixin:
             if not res["ok"]:
                 self.say(f"Failed: {res['error']}" + (" The files were put back." if res["rolled_back"] else ""),
                          fail=True)
-                self._guidance("The host setup did not finish", [res["error"]], "Try again", lambda: self.step_host())
+                self._guidance(Guidance("The host setup did not finish", [res["error"]], "Try again",
+                                        lambda: self.step_host()))
                 return
             self.end_phase("host")
             s.state["backup_dir"] = res["backup_dir"]

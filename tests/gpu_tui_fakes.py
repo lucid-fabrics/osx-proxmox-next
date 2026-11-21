@@ -9,7 +9,7 @@ import tui_fakes as F
 from gpu_fakes import add_card, write
 from osx_proxmox_next import gpu_setup
 from osx_proxmox_next.executor import ApplyResult, StepResult
-from osx_proxmox_next.gpu_flow import approval_record, build_preview
+from osx_proxmox_next.gpu_flow import Choice, approval_record, build_preview
 from osx_proxmox_next.screens.gpu import GpuScreen
 from osx_proxmox_next.screens.home import HomeScreen
 from osx_proxmox_next.widgets.chrome import KeyBar
@@ -82,7 +82,7 @@ def reboot_host(env: Env, boot: str = "later\n") -> None:
 def approved(s, card_bdf: str = "06:00", vmid: int | None = 100, display: str = "gpu", **over) -> dict:
     """Choose *card_bdf* for *vmid* and store the approval the screen would have stored for it."""
     card = next(c for c in s.scan() if card_bdf in c.bdf)
-    prev = build_preview(s, card, vmid, display)
+    prev = build_preview(s, Choice(card, vmid, display))
     s.choose(card_bdf, vmid, display, ack=card.vendor == "nvidia")
     record = {**approval_record(prev, typed=False, release=""), **over}
     s.approve(record)

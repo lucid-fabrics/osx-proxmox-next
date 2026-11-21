@@ -338,7 +338,7 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, AttachMixin, BootMixin, OsxScr
             if prev is None or prev.error or prev.card is None:
                 return
             card = prev.card
-            head = card_facts(card.name, card.bdf, card.headline, card.detail, self.host_fields)
+            head = card_facts(card, self.host_fields)
             self.app.push_screen(ChangesDialog(changes_text(prev.plan, prev.vm_plan, prev.vmid, head)))
         elif self.mode in ("run", "bios", "first_boot"):
             self.run_worker(self._changes_from_state, thread=True, exit_on_error=False, group="gpu-changes")

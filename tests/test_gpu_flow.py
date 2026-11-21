@@ -6,11 +6,11 @@ from types import SimpleNamespace
 import pytest
 
 from gpu_fakes import add_card, write
-from osx_proxmox_next import gpu, host_setup, intel_host
+from osx_proxmox_next import gpu, host_setup, igpu_attach, intel_host
 from osx_proxmox_next.gpu_flow import (
-    Preview, approval_record, attach_differs, build_before, build_preview, card_facts, card_verdict, changes_text,
+    Choice, Preview, approval_record, attach_differs, build_before, build_preview, card_facts, card_verdict, changes_text,
     need_rows, needs_typed, part_steps, plan_fingerprint, plan_for_approval, plan_lines, preview_vm_plan,
-    replan_attach, short_card_name, stop_mac, vm_fingerprint)
+    replan_attach, same_plan, short_card_name, stop_mac, vm_fingerprint)
 from osx_proxmox_next.gpu_setup import GpuCard
 from test_gpu_setup import SEQUOIA, Env, ready
 
@@ -79,7 +79,8 @@ def test_the_verdict_under_the_card_is_one_plain_sentence_per_kind():
 
 
 def test_the_card_facts_head_names_the_card_its_address_and_the_host():
-    text = card_facts("Radeon RX 6600", "0000:06:00", "Works natively", "Navi 23.", ["CPU: INTEL", "IOMMU: on"])
+    text = card_facts(GpuCard("0000:06:00", "amd", 0x73FF, "Radeon RX 6600", "native", "Works natively", "Navi 23."),
+                      ["CPU: INTEL", "IOMMU: on"])
     assert text == ("Card: Radeon RX 6600\nAddress: 0000:06:00\nWorks natively\nNavi 23.\n\n"
                     "This host: CPU: INTEL   IOMMU: on\n")
 
@@ -92,11 +93,11 @@ def test_a_card_on_its_host_driver_previews_without_a_refusal(tmp_path, vendor, 
     env = env_with(tmp_path, vendor, device, audio, bdf)
     s = env.session()
     card = card_of(s, bdf[5:])
-    prev = build_preview(s, card, 100, "gpu" if vendor == 0x1002 else "console")
+    prev = build_preview(s, Choice(card, 100, "gpu" if vendor == 0x1002 else "console"))
     assert prev.refusals == [] and prev.error == ""
     assert len(prev.host_pending) == 1 and gpu.BINDING_ISSUE in prev.host_pending[0]
     assert prev.vm_plan.ok and prev.vm_plan.steps                       # the steps are shown, so they can be approved
-    assert ("●", "Host setup", "3 files change") in need_rows(prev) or any(r[1] == "Host setup" for r in need_rows(prev))
+    assert ("●", "Host setup", "3 files change") in need_rows(prev)
     raw = s.preview_vm(card, 100, prev.display, True)
     assert raw.issues and gpu.is_host_readiness_issue(raw.issues[0])    # without the assumption it would refuse
 
@@ -107,7 +108,7 @@ def test_the_plan_approved_before_the_setup_equals_the_plan_after_the_restart(tm
     env = env_with(tmp_path, vendor, device, audio, bdf)
     s = env.session()
     display = "gpu" if vendor == 0x1002 else "console"
-    before = build_preview(s, card_of(s, bdf[5:]), 100, display)
+    before = build_preview(s, Choice(card_of(s, bdf[5:]), 100, display))
     s.choose(bdf[5:], 100, display, ack=vendor == 0x10DE)
     ready(env)
     rebind(env)                                                       # the host setup ran and the host restarted
@@ -123,7 +124,7 @@ def test_the_plan_approved_before_the_setup_equals_the_plan_after_the_restart(tm
 def test_a_vm_side_problem_is_still_a_refusal_on_a_card_on_its_host_driver(tmp_path):
     env = env_with(tmp_path, vms={100: ("stopped", "name: plain\n")})
     s = env.session()
-    prev = build_preview(s, card_of(s), 100, "gpu")
+    prev = build_preview(s, Choice(card_of(s), 100, "gpu"))
     assert prev.refusals and "not a macOS VM made by this tool" in prev.refusals[0]
     assert prev.host_pending and prev.vm_plan.steps == []
 
@@ -176,28 +177,28 @@ def test_the_intel_igpu_findings_the_host_setup_fixes_are_left_out_under_the_ass
 def test_the_before_dialog_has_the_warnings_the_notes_and_the_notice_in_todays_words(tmp_path):
     env = env_with(tmp_path, vendor=0x10DE, device=0x2504, audio=0x228E, bdf="0000:01:00")
     s = env.session()
-    prev = build_preview(s, card_of(s, "01:00"), 100, "console")
+    prev = build_preview(s, Choice(card_of(s, "01:00"), 100, "console"))
     before = build_before(prev)
     assert before.nvidia and not before.empty and before.notice_title == "NVIDIA GPU support (Beta)"
     assert "Warning: The guest must run macOS 15.5 or newer. Older Sequoia builds are not supported." in before.warnings
     assert before.notice_lead.startswith("NVIDIA: the Proxmox console goes black")
     assert not before.phrase
-    assert build_before(build_preview(s, card_of(s, "01:00"), None, "console")).nvidia   # not tied to a Mac
+    assert build_before(build_preview(s, Choice(card_of(s, "01:00"), None, "console"))).nvidia   # not tied to a Mac
 
 
 def test_a_clean_host_has_nothing_to_confirm(tmp_path):
     env = env_with(tmp_path)
     s = env.session()
-    assert build_before(build_preview(s, card_of(s), 100, "gpu")).empty
+    assert build_before(build_preview(s, Choice(card_of(s), 100, "gpu"))).empty
 
 
 def test_the_only_display_adapter_wants_the_typed_phrase_and_the_phrase_lifts_the_stop(tmp_path):
     env = env_with(tmp_path)
     write(env.root, "/sys/bus/pci/devices/0000:06:00.0/boot_vga", "1\n")
     s = env.session()
-    prev = build_preview(s, card_of(s), 100, "gpu")
+    prev = build_preview(s, Choice(card_of(s), 100, "gpu"))
     assert prev.typed_needed and any(line.startswith("Careful: ") for line in build_before(prev).warnings)
-    typed = build_preview(s, card_of(s), 100, "gpu", typed=True)
+    typed = build_preview(s, Choice(card_of(s), 100, "gpu"), typed=True)
     assert typed.plan["refusals"] == [] and prev.plan["refusals"]       # the phrase lifts the stop
     assert approval_record(typed, typed=True, release="")["allow_no_console"] is True
     assert approval_record(prev, typed=False, release="")["allow_no_console"] is False
@@ -222,7 +223,7 @@ def test_a_plan_that_differs_from_the_approval_is_made_again_without_the_old_phr
 def test_the_attach_check_compares_the_fingerprint_and_a_missing_one_always_asks(tmp_path):
     env = env_with(tmp_path, driver="vfio-pci")
     s = env.session()
-    prev = build_preview(s, card_of(s), 100, "gpu")
+    prev = build_preview(s, Choice(card_of(s), 100, "gpu"))
     s.choose("06:00", 100, "gpu")
     plan = s.vm_plan(allow_stop=True)
     record = approval_record(prev, typed=False, release="")
@@ -278,7 +279,7 @@ def test_the_panel_rows_and_your_part_follow_the_preview(tmp_path):
     env = env_with(tmp_path, driver="vfio-pci")
     ready(env)
     s = env.session()
-    prev = build_preview(s, card_of(s), None, "gpu")
+    prev = build_preview(s, Choice(card_of(s), None, "gpu"))
     rows = need_rows(prev)
     assert rows[0] == ("✓", "BIOS settings", "already right") and all(r[1] != "Attach to the Mac" for r in rows)
     assert part_steps(prev)[0] == ("Press enter", "")
@@ -292,9 +293,47 @@ def test_the_panel_rows_and_your_part_follow_the_preview(tmp_path):
 def test_the_changes_text_has_the_head_the_files_and_the_vm_steps(tmp_path):
     env = env_with(tmp_path)
     s = env.session()
-    prev = build_preview(s, card_of(s), 100, "gpu")
+    prev = build_preview(s, Choice(card_of(s), 100, "gpu"))
     text = changes_text(prev.plan, prev.vm_plan, 100, "HEAD\n")
     assert text.startswith("HEAD\n") and "Host files and commands (each file is backed up first, in " in text
     assert "VM 100 settings (a config snapshot is saved first):" in text and "01. " in text
     assert "No Mac is chosen yet" in changes_text(prev.plan, None, None)
     assert "nothing to change on the host" in changes_text(host_setup.new_plan(), None, 100)
+
+
+def test_the_before_dialog_lists_the_not_on_ssh_warning_of_the_plan_that_will_run(tmp_path, monkeypatch):
+    """SF1: the card is the host's only display and the user is not on SSH: the warning is shown before the phrase."""
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    env = env_with(tmp_path)
+    write(env.root, "/sys/bus/pci/devices/0000:06:00.0/boot_vga", "1\n")
+    s = env.session()
+    prev = build_preview(s, Choice(card_of(s), 100, "gpu"))
+    ssh = "Warning: You are not on an SSH session. Make sure you can log in over the network before you reboot."
+    assert ssh in build_before(prev).warnings
+    assert ssh in plan_lines(build_preview(s, Choice(card_of(s), 100, "gpu"), typed=True).plan)
+    assert plan_fingerprint(prev.plan) == plan_fingerprint(build_preview(s, Choice(card_of(s), 100, "gpu"), typed=True).plan)
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.2 5000 10.0.0.1 22")   # on SSH there is nothing extra to say
+    assert ssh not in build_before(build_preview(s, Choice(card_of(s), 100, "gpu"))).warnings
+
+
+def test_same_plan_tells_a_changed_plan_from_an_unchanged_one(tmp_path):
+    env = env_with(tmp_path)
+    s = env.session()
+    card = card_of(s)
+    assert same_plan(build_preview(s, Choice(card, 100, "gpu")), build_preview(s, Choice(card, 100, "gpu")))
+    assert not same_plan(build_preview(s, Choice(card, 100, "gpu")), build_preview(s, Choice(card, 100, "console")))
+    shown = build_preview(s, Choice(card, 100, "gpu"))
+    env.qm.vms[100] = ("stopped", SEQUOIA.replace("args: ", "args: -smbios type=1 "))   # the Mac was edited
+    assert not same_plan(shown, build_preview(s, Choice(card, 100, "gpu")))
+
+
+def test_the_igpu_attach_fingerprint_survives_the_zips_landing_in_the_cache(tmp_path):
+    """N4: the zip hash is in the attach script only once the file is there. It must not make the attach differ."""
+    wex, amfi = tmp_path / "wex.zip", tmp_path / "amfi.zip"
+    before = [igpu_attach.oc_step("100", "attach", "Patch OpenCore", wex, amfi)]
+    wex.write_bytes(b"wex"), amfi.write_bytes(b"amfi")
+    after = [igpu_attach.oc_step("100", "attach", "Patch OpenCore", wex, amfi)]
+    assert before[0].argv != after[0].argv                                  # the raw scripts do differ
+    assert vm_fingerprint("0000:00:02", 100, "console", before) == vm_fingerprint("0000:00:02", 100, "console", after)
+    other = [igpu_attach.oc_step("100", "restore", "Patch OpenCore", wex, amfi)]
+    assert vm_fingerprint("0000:00:02", 100, "console", other) != vm_fingerprint("0000:00:02", 100, "console", after)

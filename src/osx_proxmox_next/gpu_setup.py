@@ -96,6 +96,14 @@ TROUBLESHOOTING = _BLACK_BOX
 
 
 @dataclass
+class VmAsk:
+    """The Mac, the display choice and the NullMoth acknowledgement an attach plan is worked out for."""
+    vmid: int | None
+    display: str
+    ack: bool
+
+
+@dataclass
 class GpuCard:
     bdf: str
     vendor: str  # "amd" | "nvidia" | "intel"
@@ -719,16 +727,20 @@ class Session:
 
     def vm_plan(self, allow_stop: bool = False) -> nullmoth.AttachPlan:
         self.target()  # raises CardChanged when the card moved
-        return self._vm_plan(self.state["gpu"], self.state["vm"], self.state["display"],
-                             self.state["ack_nullmoth"], allow_stop)
+        return self._vm_plan(self.state["gpu"], self._ask(self.state["vm"], self.state["display"],
+                                                          self.state["ack_nullmoth"]), allow_stop)
 
     def preview_vm(self, card: "GpuCard", vmid: int, display: str, ack: bool) -> nullmoth.AttachPlan:
         """The attach plan *card* and *vmid* would get, before anything is chosen. A running VM is
         planned as if it were stopped: the run asks before stopping it."""
-        return self._vm_plan(self._chosen_of(card, self.root), vmid, display, ack, True)
+        return self._vm_plan(self._chosen_of(card, self.root), self._ask(vmid, display, ack), True)
 
-    def _vm_plan(self, chosen: dict, vmid: int | None, display: str, ack: bool,
-                 allow_stop: bool) -> nullmoth.AttachPlan:
+    @staticmethod
+    def _ask(vmid: int | None, display: str, ack: bool) -> "VmAsk":
+        return VmAsk(vmid, display, ack)
+
+    def _vm_plan(self, chosen: dict, ask: "VmAsk", allow_stop: bool) -> nullmoth.AttachPlan:
+        vmid, display, ack = ask.vmid, ask.display, ask.ack
         if vmid is None:
             plan = nullmoth.AttachPlan(0)
             plan.issues.append("No VM chosen yet. Create or pick a macOS VM first.")
@@ -751,7 +763,8 @@ class Session:
     def vm_plan_for(self, vmid: int, allow_stop: bool = True) -> nullmoth.AttachPlan:
         """The attach plan of the chosen card for another Mac than the saved one (the pick after "decide later")."""
         self.target()
-        return self._vm_plan(self.state["gpu"], vmid, self.state["display"], self.state["ack_nullmoth"], allow_stop)
+        return self._vm_plan(self.state["gpu"], self._ask(vmid, self.state["display"], self.state["ack_nullmoth"]),
+                             allow_stop)
 
     def intel_plan(self, vmid: int, allow_stop: bool = False, chosen: dict | None = None) -> nullmoth.AttachPlan:
         """The iGPU attach preflight and plan. The downloads are not done here; the plan names where they go."""
