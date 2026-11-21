@@ -184,6 +184,8 @@ ModalScreen { align: center middle; background: $background 70%; }
 .dialog.danger { border: solid $error; }
 .dialog-title { height: 1; text-style: bold; }
 .dialog-line { height: auto; }
+.dialog-more { height: 1; }
+#choice-scroll, #help-scroll { height: auto; overflow-x: hidden; }
 .dialog-line.mono { color: $foreground; }
 .dialog-buttons { height: 1; align-horizontal: right; }
 .dialog-buttons Button { margin-left: 2; }
@@ -191,7 +193,6 @@ ModalScreen { align: center middle; background: $background 70%; }
 .dialog-field Static { width: auto; }
 .dialog-field Input { width: 10; }
 #help-box { width: 66; }
-#help-scroll { height: auto; max-height: 20; }
 #e-note, #remove-log { height: auto; color: $muted; }
 
 /* ---- Graphics card ---------------------------------------------------- */
@@ -220,7 +221,8 @@ GpuScreen.narrow #g-side { width: 30; padding-left: 1; margin-left: 0; }
 #g-box.fail { border: solid $error; }
 #g-box-title { height: 1; }
 #g-box-text { height: auto; margin: 1 0; }
-#g-box-scroll { height: auto; max-height: 14; }
+#g-box-scroll { height: auto; max-height: 14; overflow-x: hidden; }
+#g-more { height: 1; }
 #g-box-buttons { height: 1; align-horizontal: right; margin-top: 1; }
 #g-box-buttons Button { margin-left: 2; }
 #g-run-note { height: auto; dock: bottom; margin-bottom: 1; }

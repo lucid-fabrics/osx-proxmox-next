@@ -39,8 +39,8 @@ class BeforeDialog(ModalScreen):
         Binding("escape", "cancel", "Cancel"),
         Binding("up", "read(-1)", "Read on", show=False),
         Binding("down", "read(1)", "Read on", show=False),
-        Binding("pageup", "read(-5)", "Read on", show=False),
-        Binding("pagedown", "read(5)", "Read on", show=False),
+        Binding("pageup", "page(-1)", "Read on", show=False),
+        Binding("pagedown", "page(1)", "Read on", show=False),
     ]
 
     def __init__(self, before: Before) -> None:
@@ -164,6 +164,11 @@ class BeforeDialog(ModalScreen):
     def action_read(self, delta: int) -> None:
         if self.before.notice_body:
             self.query_one("#before-notice", NoticeScroll).scroll_relative(y=delta, animate=False)
+
+    def action_page(self, direction: int) -> None:
+        if self.before.notice_body:
+            box = self.query_one("#before-notice", NoticeScroll)
+            box.scroll_relative(y=direction * max(1, box.size.height - 1), animate=False)
 
     def action_go(self) -> None:
         if self._typed() and self._acked():

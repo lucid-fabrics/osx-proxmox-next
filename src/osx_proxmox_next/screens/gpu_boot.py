@@ -6,12 +6,13 @@ import re
 import textwrap
 
 from rich.text import Text
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.widget import Widget
 from textual.widgets import Button, Static
 
 from ..gpu_flow import short_card_name
 from ..gpu_setup import TROUBLESHOOTING
+from .reading import ReadScroll
 
 LOOK_AT_MONITOR = "Look at the monitor plugged into the card"
 FIRST_START = "The first start takes up to 2 minutes."
@@ -91,8 +92,8 @@ class BootMixin:
                    id="g-run-title"),
             Horizontal(Static(self.timeline(True), id="g-timeline"),
                        Vertical(Static(Text(self._boot_title(nvidia, troubleshooting), style="bold"), id="g-box-title"),
-                                VerticalScroll(Static(body, id="g-box-text"), id="g-box-scroll"),
-                                Static("", id="g-result"), Horizontal(*buttons, id="g-box-buttons"), id="g-box"),
+                                ReadScroll(Static(body, id="g-box-text"), id="g-box-scroll"),
+                                Static("", id="g-more"), Static("", id="g-result"), Horizontal(*buttons, id="g-box-buttons"), id="g-box"),
                        id="g-run-cols"),
             Static(Text("Not happy with it? u puts the host and the Mac back exactly as they were.",
                         style=pal["muted"]), id="g-run-note"),
@@ -118,7 +119,8 @@ class BootMixin:
     async def _show_finished(self) -> None:
         widgets: list[Widget] = [
             Static(Text("Setup finished", style="bold"), id="g-run-title"),
-            VerticalScroll(Static(Text(self.s.summary()), id="g-box-text"), id="g-box-scroll"),
+            ReadScroll(Static(Text(self.s.summary()), id="g-box-text"), id="g-box-scroll"),
+            Static("", id="g-more"),
             Static("", id="g-result"),
             Horizontal(Button("Start a new setup", id="g-new", classes="primary"), id="g-box-buttons"),
         ]

@@ -7,11 +7,12 @@ import textwrap
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Static
 
 from ..widgets.chrome import KeyBar, TopBar
+from .reading import READ_BINDINGS, ReadScroll, Readable, box_room
 
 __all__ = ["OsxScreen", "HelpScreen", "ChoiceDialog", "ConfirmDialog", "Choice"]
 
@@ -126,14 +127,17 @@ def help_groups(entries: list[tuple[str, str]]) -> list[tuple[str, list[tuple[st
     return [(name, rows) for name, rows in groups.items() if rows]
 
 
-class HelpScreen(ModalScreen):
-    """Every key of the screen underneath."""
+class HelpScreen(Readable, ModalScreen):
+    """Every key of the screen underneath. It scrolls when the keys are taller than the terminal."""
 
+    read_scroll = "help-scroll"
+    read_more = "help-more"
     BINDINGS = [
         Binding("escape", "close", "Close"),
         Binding("question_mark", "close", "Close"),
         Binding("f1", "close", "Close"),
         Binding("enter", "close", "Close"),
+        *READ_BINDINGS,
     ]
 
     def __init__(self, title: str, entries: list[tuple[str, str]]) -> None:
@@ -160,18 +164,23 @@ class HelpScreen(ModalScreen):
         with Vertical(id="help-box", classes="dialog"):
             yield Static(f"Keys on {self.title_text}", classes="dialog-title")
             yield Static("", classes="blank")
-            with VerticalScroll(id="help-scroll"):
+            with ReadScroll(id="help-scroll"):
                 yield Static(self._keys_text(self._inner()), id="help-keys")
+            yield Static("", id="help-more", classes="dialog-more")
             yield Static("", classes="blank")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Close", id="close", classes="secondary")
-        yield KeyBar([("esc", "Close", "screen.close")])
+        yield KeyBar([("↑↓", "Read on", None), ("esc", "Close", "screen.close")])
+
+    def read_room(self) -> int:
+        return box_room(self.app.size.height, self.query_one("#help-box"))
 
     def _inner(self) -> int:
         return max(40, min(66, int(self.app.size.width * 0.96)) - 8)
 
     def on_mount(self) -> None:
         self.query_one("#close", Button).focus()
+        self.read_refit()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss()
@@ -189,10 +198,13 @@ class Choice:
         self.kind = kind  # "primary" | "danger" | "secondary"
 
 
-class ChoiceDialog(ModalScreen[str]):
-    """A title, a few lines and a row of buttons. Dismisses with the chosen value, "" on esc."""
+class ChoiceDialog(Readable, ModalScreen[str]):
+    """A title, a few lines and a row of buttons. Dismisses with the chosen value, "" on esc. Lines taller than
+    the terminal scroll."""
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    read_scroll = "choice-scroll"
+    read_more = "choice-more"
+    BINDINGS = [Binding("escape", "cancel", "Cancel"), *READ_BINDINGS]
 
     def __init__(self, title: str, lines: list[str], choices: list[Choice], focus: str = "",
                  danger: bool = False, mono: bool = False) -> None:
@@ -208,16 +220,22 @@ class ChoiceDialog(ModalScreen[str]):
         with Vertical(id="choice-box", classes="dialog danger" if self.danger else "dialog"):
             yield Static(self.title_text, classes="dialog-title")
             yield Static("", classes="blank")
-            for line in self.lines:
-                yield Static(Text(line), classes="dialog-line mono" if self.mono else "dialog-line")
+            with ReadScroll(id="choice-scroll"):
+                for line in self.lines:
+                    yield Static(Text(line), classes="dialog-line mono" if self.mono else "dialog-line")
+            yield Static("", id="choice-more", classes="dialog-more")
             yield Static("", classes="blank")
             with Horizontal(classes="dialog-buttons"):
                 for choice in self.choices:
                     yield Button(choice.label, id=f"choice-{choice.value}", classes=choice.kind, name=choice.value)
         yield KeyBar([("tab", "Next", None), ("enter", "Choose", None), ("esc", "Cancel", "screen.cancel")])
 
+    def read_room(self) -> int:
+        return box_room(self.app.size.height, self.query_one("#choice-box"))
+
     def on_mount(self) -> None:
         self.query_one(f"#choice-{self.focus_value}", Button).focus()
+        self.read_refit()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()

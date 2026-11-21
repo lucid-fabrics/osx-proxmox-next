@@ -14,7 +14,7 @@ from typing import Any
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widget import Widget
@@ -32,6 +32,7 @@ from .gpu_boot import BootMixin
 from .gpu_choose import ChooseMixin
 from .gpu_restart import RestartMixin
 from .gpu_run import Guidance, RunMixin
+from .reading import READ_BINDINGS, ReadScroll, Readable
 
 log = logging.getLogger(__name__)
 
@@ -47,15 +48,14 @@ def undo_progress_text(plan: list[str], finished: int) -> str:
     return "\n".join(["Undoing..."] + ([""] + rows if rows else []))
 
 
-class ChangesDialog(ModalScreen):
+class ChangesDialog(Readable, ModalScreen):
     """Every change of the plan in one scrolling dialog: files, commands, VM settings, backups. The VM steps are
     one plain line each; x shows the exact commands instead."""
 
+    read_scroll = "changes-scroll"
+    read_more = "changes-more"
     BINDINGS = [Binding("escape", "close", "Close"), Binding("enter", "close", "Close"),
-                Binding("p", "close", "Close"), Binding("x", "exact", "Exact commands"),
-                Binding("down", "scroll_by(1)", show=False), Binding("up", "scroll_by(-1)", show=False),
-                Binding("pagedown", "scroll_page(1)", show=False), Binding("pageup", "scroll_page(-1)", show=False),
-                Binding("home", "scroll_edge(0)", show=False), Binding("end", "scroll_edge(1)", show=False)]
+                Binding("p", "close", "Close"), Binding("x", "exact", "Exact commands"), *READ_BINDINGS]
 
     def __init__(self, text: str, exact_text: str | None = None) -> None:
         super().__init__()
@@ -67,9 +67,9 @@ class ChangesDialog(ModalScreen):
         with Vertical(id="changes-box", classes="dialog"):
             yield Static("Every change", classes="dialog-title")
             yield Static("", classes="blank")
-            with VerticalScroll(id="changes-scroll"):
+            with ReadScroll(id="changes-scroll"):
                 yield Static(Text(self.body_text), id="changes-text")
-            yield Static("", classes="blank")
+            yield Static("", id="changes-more", classes="dialog-more")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Close", id="close", classes="secondary")
         yield KeyBar(self._keys(), id="changes-keys")
@@ -79,28 +79,19 @@ class ChangesDialog(ModalScreen):
                 ("esc", "Close", "screen.close")]
 
     def on_mount(self) -> None:
-        self.query_one("#changes-scroll", VerticalScroll).focus()
+        self.query_one("#changes-scroll", ReadScroll).focus()
+        self.read_refit()
 
-    def _scroll_to(self, y: float) -> None:
-        """Move at once, never animated: a key pressed again mid-glide used to restart the glide, and the text
-        moved about one line in fourteen presses."""
-        box = self.query_one("#changes-scroll", VerticalScroll)
-        box.scroll_to(y=max(0, min(box.max_scroll_y, y)), animate=False)
-
-    def action_scroll_by(self, lines: int) -> None:
-        self._scroll_to(self.query_one("#changes-scroll", VerticalScroll).scroll_y + lines)
-
-    def action_scroll_page(self, direction: int) -> None:
-        box = self.query_one("#changes-scroll", VerticalScroll)
-        self._scroll_to(box.scroll_y + direction * max(1, box.size.height - 1))
-
-    def action_scroll_edge(self, end: int) -> None:
-        self._scroll_to(self.query_one("#changes-scroll", VerticalScroll).max_scroll_y if end else 0)
+    def read_refit(self) -> None:
+        """The box is a fixed 80 percent of the screen and the scroll takes the rest: only the hint changes."""
+        self.call_after_refresh(self.show_more)
 
     def action_exact(self) -> None:
         self.exact = not self.exact
         self.query_one("#changes-text", Static).update(Text(self.exact_text if self.exact else self.body_text))
         self.query_one("#changes-keys", KeyBar).set_items(self._keys())
+        self.query_one("#changes-scroll", ReadScroll).read_to(0)
+        self.read_refit()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss()
@@ -109,7 +100,7 @@ class ChangesDialog(ModalScreen):
         self.dismiss()
 
 
-class GpuScreen(ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, BootMixin, OsxScreen):
+class GpuScreen(Readable, ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, BootMixin, OsxScreen):
     """The graphics card flow. Modes: choose, bios, run, first boot, finished."""
 
     BINDINGS = [
@@ -122,7 +113,11 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, Boo
         Binding("y", "yes", "Yes, all good"),
         Binding("n", "no", "No, help me"),
         Binding("escape", "back", "Leave"),
+        Binding("pageup", "read_page(-1)", show=False),
+        Binding("pagedown", "read_page(1)", show=False),
     ]
+    read_scroll = "g-box-scroll"
+    read_more = "g-more"
     HELP_TITLE = "Graphics card"
     HELP_EXTRA = [("←  →  h  l", "Change the choice on this row")]
 
@@ -207,7 +202,15 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, Boo
     def _primary_label(self) -> str:
         return self.box_buttons[-1][1] if self.box_buttons else "Go"
 
+    def read_room(self) -> int:
+        """Rows for the text box: what the columns have, less the border and padding of the box around it."""
+        parent = self._reader().parent
+        if parent is not None and parent.id == "g-box":
+            return self.query_one("#g-run-cols").size.height - 4
+        return self.query_one("#gpu").content_size.height
+
     def on_resize(self) -> None:
+        self.read_refit()
         narrow = self.size.width < 90
         self.set_class(narrow, "narrow")
         for lines in self.query("#g-need"):
@@ -353,6 +356,7 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, Boo
             return
         await body.remove_children()
         await body.mount(*widgets)
+        self.read_refit()
         self.refresh_footer()
         for bar in self.query(TopBar):
             bar.set_crumb(self.crumb())
@@ -383,6 +387,9 @@ class GpuScreen(ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, Boo
         self.action_primary()
 
     def action_row(self, delta: int) -> None:
+        if self.mode in ("run", "first_boot", "finished") and self.query("#g-box-scroll"):
+            self.action_read_line(delta)           # the text box is taller than the terminal: up and down read it
+            return
         widgets = [w for w in self.query("#g-form ChoiceRow, #g-form FieldRow Input") if w.display and
                    all(a.display for a in w.ancestors if a is not self.screen and hasattr(a, "display"))]
         if not widgets:

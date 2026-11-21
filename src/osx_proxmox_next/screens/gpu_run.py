@@ -14,6 +14,7 @@ from textual.widgets import Button, Input, Static
 from .. import host_setup
 from ..gpu_flow import needs_typed, plan_for_approval, plan_lines, short_card_name
 from ..gpu_setup import CONFIRM_PHRASE
+from .reading import ReadScroll
 
 TIMELINE_WIDTH = 40
 WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
@@ -174,7 +175,8 @@ class RunMixin:
             Horizontal(
                 Static(self.timeline(), id="g-timeline"),
                 Vertical(Static(Text(title, style="bold"), id="g-box-title"),
-                         Static(box_text, id="g-box-text"), Static("", id="g-result"),
+                         ReadScroll(Static(box_text, id="g-box-text"), id="g-box-scroll"),
+                         Static("", id="g-more"), Static("", id="g-result"),
                          Horizontal(*[Button(label, id=bid, classes=kind) for bid, label, kind in buttons],
                                     id="g-box-buttons"),
                          id="g-box", classes=tone),
@@ -206,6 +208,7 @@ class RunMixin:
             self.query_one("#g-timeline", Static).update(self.timeline())
             if self.progress:
                 self.query_one("#g-box-text", Static).update(Text(self.progress))
+                self.read_refit()
         except Exception:  # noqa: BLE001 - not in the run view yet
             pass
 
