@@ -357,6 +357,7 @@ async def test_the_attach_is_refused_with_the_reason_and_the_user_can_pick_anoth
         assert box(screen).startswith("The Mac cannot take the card yet") and "Refused:" in box(screen)
         assert [b.id for b in screen.query("#g-box-buttons Button")] == ["g-secondary", "g-primary-run"]
         assert screen.query_one("#g-secondary", Button).label.plain == "Pick another Mac"
+        await F.settle(pilot, lambda: not screen.working and screen._secondary_action is not None)   # the click needs both
         await pilot.click("#g-secondary")
         await F.settle(pilot, lambda: bool(screen.query("#g-pick")))
         assert screen.s.state["vm"] is None and applied == []
