@@ -36,6 +36,8 @@ The TUI shows three moments instead of eight numbered steps: one screen to choos
 
 In the TUI, the card, the Mac and the display are rows on one screen (`g` on a Mac preselects it), the right panel lists only what this host needs (BIOS settings, host setup, one restart, the attach), `p` shows every file line, command and VM setting, and `enter` approves the whole plan once, including the attach that runs after the restart. The BIOS screen only appears when a setting must change. After the restart, opening the flow again runs the check and the attach without asking again, unless the plan changed since you approved it. `u` puts everything back.
 
+![The one restart box in the TUI, listing the VMs the restart shuts down](/img/tui/gpu_restart_onboot.png)
+
 Steps that this host does not need show as `skipped`. Detection comes first: the tool reads your CPU, board, boot loader and IOMMU state itself and only asks what it cannot know.
 
 1. **Scan.** One card per graphics card found, with a verdict: works natively, works with NullMoth (beta), or not supported with the reason in one line. Cards held by a running VM or by the host are flagged. `host console` only appears when the host really uses the card (it is the boot GPU and a host driver or `efifb`/`simplefb` holds it); a boot GPU that sits on `vfio-pci` just shows *The firmware shows its boot screen on this card.*
