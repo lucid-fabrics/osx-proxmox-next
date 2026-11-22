@@ -6699,7 +6699,11 @@ SWEEP_BATCH = 64
 
 # the release error and the GitHub call are the iGPU engine's (one implementation, one rate-limit message)
 ReleaseError = _gpu.ReleaseError
-github_get = _gpu.github_get
+
+
+def github_get(url):
+    """The iGPU engine's GitHub call, looked up when called so every default argument below follows it."""
+    return _gpu.github_get(url)
 
 
 def data_dir():

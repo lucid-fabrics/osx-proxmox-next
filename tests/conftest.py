@@ -80,16 +80,22 @@ GITHUB_FAKE = {
     "b00t0x/WhateverXe-Graphics": [
         ("v0.4.1", False, "WhateverXe-Graphics-0.4.1.pkg", "2026-10-02T00:00:00Z", "4" * 64),
     ],
+    "nullmoth/nvidia-macos-driver": [
+        ("v2.9", False, "nullmoth-nvidia-v2.9.tar.gz", "2026-11-10T00:00:00Z", "9" * 64),
+        ("v2.8.1", False, "nullmoth-nvidia-v2.8.1.tar.gz", "2026-10-10T00:00:00Z", "8" * 64),
+    ],
 }
+SUMS_NAMES = {"nullmoth/nvidia-macos-driver": "SHA256SUMS.txt"}
 
 
 def fake_github_releases(repo: str) -> list[dict]:
     """The releases API payload for *repo* from GITHUB_FAKE, with a digest on every asset."""
+    sums = SUMS_NAMES.get(repo, "SHA256SUMS")
     return [{"tag_name": tag, "prerelease": pre, "draft": False, "published_at": when,
              "assets": [{"name": name, "digest": "sha256:" + sha,
                          "browser_download_url": f"https://github.com/{repo}/releases/download/{tag}/{name}"},
-                        {"name": "SHA256SUMS", "digest": "sha256:" + "0" * 64,
-                         "browser_download_url": f"https://github.com/{repo}/releases/download/{tag}/SHA256SUMS"}]}
+                        {"name": sums, "digest": "sha256:" + "0" * 64,
+                         "browser_download_url": f"https://github.com/{repo}/releases/download/{tag}/{sums}"}]}
             for tag, pre, name, when, sha in GITHUB_FAKE[repo]]
 
 
