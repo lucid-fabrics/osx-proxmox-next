@@ -177,6 +177,7 @@ async def test_removing_with_the_button_and_the_disk_images_kept(monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("d")
+        await F.settle_query(pilot, app, "#confirm-id", "the destroy dialog")
         app.screen.query_one("#confirm-id", Input).value = "101"
         await pilot.pause()
         await pilot.click("#remove")
@@ -195,6 +196,7 @@ async def test_a_failed_removal_shows_the_rollback_hints(monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("d")
+        await F.settle_query(pilot, app, "#confirm-id", "the destroy dialog")
         app.screen.query_one("#confirm-id", Input).value = "101"
         await pilot.pause()
         app.screen.action_remove()
@@ -213,6 +215,7 @@ async def test_removing_a_vm_that_is_gone_or_that_crashes_the_worker(monkeypatch
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("d")
+        await F.settle_query(pilot, app, "#confirm-id", "the destroy dialog")
         app.screen.query_one("#confirm-id", Input).value = "101"
         await pilot.pause()
         app.screen.action_remove()
@@ -222,6 +225,7 @@ async def test_removing_a_vm_that_is_gone_or_that_crashes_the_worker(monkeypatch
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("d")
+        await F.settle_query(pilot, app, "#confirm-id", "the destroy dialog")
         app.screen.query_one("#confirm-id", Input).value = "101"
         await pilot.pause()
         app.screen.action_remove()
@@ -304,6 +308,7 @@ async def test_changing_only_the_disk_size_enables_apply_and_grows_the_main_disk
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("e")
+        await F.settle_query(pilot, app, "#apply", "the edit dialog")
         assert app.screen.query_one("#apply", Button).disabled
         field(app, "e-disk").value = "32"
         await pilot.pause()
@@ -409,6 +414,7 @@ async def test_an_edit_dialog_offers_a_nic_model_the_app_does_not_know(monkeypat
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("e")
+        await F.settle_query(pilot, app, "#e-nic", "the edit dialog")
         row = app.screen.query_one("#e-nic")
         assert [o.value for o in row.options] == ["virtio", "vmxnet3", "e1000-82545em"] and row.value == "virtio"
         assert app.screen.query_one("#e-start", Checkbox).value is False
@@ -427,9 +433,11 @@ async def test_edit_from_the_vm_view_and_remove_leaves_the_view(monkeypatch):
         from osx_proxmox_next.screens.vm_view import VmViewScreen
         await F.settle(pilot, lambda: isinstance(app.screen, VmViewScreen))
         await pilot.press("e")
+        await F.settle(pilot, lambda: isinstance(app.screen, EditDialog), what="the edit dialog")
         assert isinstance(app.screen, EditDialog)
         await pilot.press("escape")
         await pilot.press("d")
+        await F.settle_query(pilot, app, "#confirm-id", "the destroy dialog")
         app.screen.query_one("#confirm-id", Input).value = "101"
         await pilot.pause()
         app.screen.action_remove()
@@ -449,6 +457,7 @@ async def test_the_edit_dialog_defaults_to_the_main_disk_and_the_arrows_move_bet
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("e")
+        await F.settle_query(pilot, app, "#e-disk .field-suffix", "the edit dialog")
         assert F.text_of(app.screen.query_one("#e-disk .field-suffix")) == "GB more on virtio0 \u00b7 local-lvm"
         assert app.focused is field(app, "e-name")
         await pilot.press("down")

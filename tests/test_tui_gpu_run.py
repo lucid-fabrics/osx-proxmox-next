@@ -491,7 +491,8 @@ async def test_a_failed_nvidia_setup_stops_with_the_reason(tmp_path, monkeypatch
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await start(pilot, app, env, session=env.session())
-        await F.settle(pilot, lambda: box(screen).startswith("The driver is not confirmed") if screen.query("#g-box-title") else False)
+        await F.settle(pilot, lambda: box(screen).startswith("The driver is not confirmed"),
+                       what="the failed-driver box")
         assert "the guest said no" in box(screen) and nullmoth.FAILED_NOTE in box(screen)
         assert screen.s.state["step"] == 7 and screen.query_one("#g-box").has_class("fail")
 
@@ -808,6 +809,8 @@ async def test_undo_stops_a_running_mac_it_changed_and_reports_a_failure(tmp_pat
     async with app.run_test(size=SIZE) as pilot:
         screen = await at_choose(pilot, app, env, session=env.session())
         await pilot.press("u")
+        await F.settle(pilot, lambda: "Running VMs that were changed are stopped first: 100." in dialog_text(app.screen),
+                       what="the undo dialog text")
         assert "Running VMs that were changed are stopped first: 100." in dialog_text(app.screen)
         await pilot.press("tab")
         await pilot.press("enter")

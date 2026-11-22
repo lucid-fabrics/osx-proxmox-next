@@ -53,6 +53,7 @@ async def test_the_card_block_warns_about_vms_that_start_with_the_host_and_notes
         assert card.endswith("Not offered: AMD GPU (no Apple driver)")      # the other device: one muted line, last
         assert card.index("Works in macOS") < card.index(SEVERAL) < card.index("Not offered")
         await pilot.press("enter")
+        await F.settle_query(pilot, app, "#before-warnings", "the before dialog")
         warnings = flat(F.text_of(app.screen.query_one("#before-warnings")))
         assert SEVERAL in warnings and gpu_setup.gpu.shared_note([103, 106]) in warnings
 
@@ -381,6 +382,8 @@ async def test_the_undo_question_names_the_mac_that_has_the_card(tmp_path, appli
         screen = await start(pilot, app, env, session=s)
         await F.settle(pilot, lambda: box(screen).startswith("Time for the one restart") if screen.mode == "run" else False)
         await pilot.press("u")
+        await F.settle(pilot, lambda: "Take the card off macos-sequoia (VM 100)" in dialog_text(app.screen),
+                       what="the take-the-card-off dialog text")
         assert "Take the card off macos-sequoia (VM 100)" in dialog_text(app.screen)
 
 
@@ -401,10 +404,12 @@ async def test_p_shows_plain_lines_and_x_toggles_the_exact_commands(tmp_path):
         assert "run: update-initramfs" in plain and "Hands the card (0000:06:00,pcie=1) to VM 100 as hostpci0" in plain
         assert "bash -c" not in plain and "qm set" not in plain
         await pilot.press("x")
+        await F.settle(pilot, lambda: "qm set" in F.text_of(dialog.query_one("#changes-text")), what="the exact commands")
         exact = F.text_of(dialog.query_one("#changes-text"))
         assert "qm set 100 --hostpci0 0000:06:00,pcie=1" in exact and "This host:" in exact
         assert "x Plain summary" in keys(app)
         await pilot.press("x")
+        await F.settle(pilot, lambda: F.text_of(dialog.query_one("#changes-text")) == plain, what="the plain summary")
         assert F.text_of(dialog.query_one("#changes-text")) == plain and "x Exact commands" in keys(app)
         await pilot.press("escape")
         assert app.screen is not dialog
