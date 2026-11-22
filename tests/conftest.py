@@ -103,3 +103,15 @@ def _no_github(monkeypatch):
         repo = url.split("/repos/")[1].split("/releases")[0]
         return fake_github_releases(repo)
     monkeypatch.setattr("osx_proxmox_next.igpu_engine.github_get", fake)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_pci_devices(monkeypatch, tmp_path):
+    """The driver update looks at the passed-through device on /sys. A CI runner has real PCI devices at the addresses
+    the fakes use, so by default the look-up finds nothing (the record decides). Tests of the look-up give a root."""
+    from osx_proxmox_next import driver_engine
+
+    real = driver_engine.live_kind
+    empty = str(tmp_path / "no-sysfs")
+    monkeypatch.setattr(driver_engine, "live_kind", lambda cfg, root="/sys": real(cfg, empty if str(root) == "/sys" else root))
+    monkeypatch.setenv("SYSFS_ROOT", empty)

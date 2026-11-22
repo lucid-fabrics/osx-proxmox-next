@@ -66,7 +66,7 @@ def host(tmp_path):
     env = {"PATH": f"{bin_dir}:{Path(sys.executable).parent}:/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path), "TEMP_DIR": str(tmp_path),
            "GPU_STATE_DIR": str(tmp_path / "gpu"), "DRIVER_STATE_DIR": str(state), "IGPU_STATE_DIR": str(tmp_path / "igpu"),
            "QM_DIR": str(qm_dir), "QM_LOG": str(tmp_path / "qm.log"), "IGPU_CACHE": str(cache), "PYTHONPATH": str(REPO / "src"),
-           "IGPU_DEVICES_OFFLINE": "1", "IGPU_DEVICES_CACHE": str(tmp_path / "dc")}
+           "SYSFS_ROOT": str(tmp_path / "no-sysfs"), "IGPU_DEVICES_OFFLINE": "1", "IGPU_DEVICES_CACHE": str(tmp_path / "dc")}
     body = STUBS + "declare -A OC_COMPONENT_URLS OC_COMPONENT_SHA256\n" + BLOCK
     script = tmp_path / "block.sh"
     script.write_text(body)
