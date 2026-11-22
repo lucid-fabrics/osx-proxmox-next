@@ -24,6 +24,9 @@ def has_update(vmid: int, base: str | None = None) -> bool:
     if not record:
         return False
     latest = latest_map(base)
+    for name, version in (record.get("latest") or {}).items():     # what the update that wrote the record knew as newest
+        if name not in latest or engine.is_newer(version, latest.get(name)):
+            latest[name] = version
     have = engine.installed_versions(record)
     return any(engine.is_newer(latest.get(name), have.get(name)) for name in engine.COMPONENTS[record["kind"]])
 

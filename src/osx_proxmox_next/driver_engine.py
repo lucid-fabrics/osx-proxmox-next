@@ -7,6 +7,7 @@ diffs the two), so the record format, the plan lines and the refusal texts have 
 One record per Mac: STATE_DIR/<vmid>.json with the kind (nvidia, intel or amd) and the installed components.
 The lock and the state of a run in progress live in driver_state.py, which the bash installer embeds next to this file.
 """
+import hashlib
 import json
 import os
 import re
@@ -17,20 +18,20 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, read_json as _read_json, read_update, release_lock, resume_index, state_dir,
-        step_titles, unfinished, update_path, write_json as _write_json, write_update,
+        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, resume_index,
+        state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, read_json as _read_json, read_update, release_lock, resume_index, state_dir,
-        step_titles, unfinished, update_path, write_json as _write_json, write_update,
+        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, resume_index,
+        state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
 IGPU_DIR = "/var/lib/osx-proxmox-next/igpu"
 KINDS = ("nvidia", "intel", "amd")
 SNAPSHOT_PREFIX = "osx-next-driver-"
-SNAPSHOT_RE = re.compile(r"^osx-next-driver-\d{8}-\d{4}(?:\d{2})?$")
+SNAPSHOT_RE = re.compile(r"^osx-next-driver-\d{8}-\d{4}(?:\d{2})?\Z")
 NO_SNAPSHOT_PHRASE = "no snapshot"
 CHECK_MAX_AGE = 24 * 3600
 
@@ -51,6 +52,8 @@ REFUSE_CARD_CHANGED = ("The card setup of this Mac changed after the snapshot wa
                        "point the Mac at a card the host no longer prepares. Nothing was changed.")
 REFUSE_NEWER_SNAPSHOTS = "Newer snapshots exist (%s). Proxmox cannot roll back past them. Nothing was changed."
 REFUSE_NOT_STOPPED = "The Mac is not stopped, so its OpenCore disk is not touched."
+REFUSE_MAPS_HELD = ("Device maps still hold the disks of VM %s (%s), so they cannot be rolled back or removed. Nothing was "
+                    "changed. Remove them with: %s (then try again).")
 UP_TO_DATE = "Up to date: nothing to do."
 NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothing can undo the update if it goes wrong. "
                        "Type '%s' to go on without one." % NO_SNAPSHOT_PHRASE)
@@ -59,7 +62,7 @@ TEXTS = {"REFUSE_INSTALLING": REFUSE_INSTALLING, "REFUSE_CARD_SETUP": REFUSE_CAR
          "REFUSE_NOTHING_TO_UNDO": REFUSE_NOTHING_TO_UNDO, "UP_TO_DATE": UP_TO_DATE,
          "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
          "REFUSE_CARD_CHANGED": REFUSE_CARD_CHANGED, "REFUSE_NEWER_SNAPSHOTS": REFUSE_NEWER_SNAPSHOTS,
-         "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED}
+         "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED, "REFUSE_MAPS_HELD": REFUSE_MAPS_HELD}
 VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
 SNAPSHOT_TYPES = ("zfspool", "lvmthin", "rbd", "cephfs", "btrfs")
 SNAPSHOT_FILE_TYPES = ("dir", "nfs", "cifs", "glusterfs")
@@ -103,12 +106,18 @@ def read_record(vmid, base=None, igpu_base=None):
     return from_igpu_state(vmid, old) if old else {}
 
 
-def write_record(vmid, kind, components, base=None, previous=None, snapshot="", card=""):
+def write_record(vmid, kind, components, base=None, previous=None, snapshot="", card="", latest=None, fingerprint=""):
     """Write the record. *previous* (the components before an update), *snapshot* and *card* (the hostpci0 the snapshot
-    was taken with) let "undo the driver update" restore the versions and refuse when the card setup changed."""
+    was taken with) let "undo the driver update" restore the versions and refuse when the card setup changed. *latest*
+    is what the update that wrote it knew as the newest release, so Home shows the marker after an undo before any
+    check ran. *fingerprint* is the identity of the Mac's disks right now (see volume_fingerprint)."""
     if kind not in KINDS:
         raise ValueError("unknown kind %r" % kind)
     data = {"vmid": int(vmid), "kind": kind, "components": list(components), "updated": now_iso()}
+    if latest:
+        data["latest"] = dict(latest)
+    if fingerprint:
+        data["fingerprint"] = fingerprint
     if previous is not None:
         data["previous"] = list(previous)
     if snapshot:
@@ -131,8 +140,65 @@ def revert_record(vmid, base=None):
     return True
 
 
+def stamp_record(vmid, fingerprint, base=None):
+    """Put the identity of the Mac's disks into its record (after an update or an undo, when the record is true)."""
+    data = _read_json(record_path(vmid, base))
+    if not data:
+        return False
+    if fingerprint:
+        data["fingerprint"] = fingerprint
+    else:
+        data.pop("fingerprint", None)
+    _write_json(record_path(vmid, base), data)
+    return True
+
+
 def installed_versions(record):
     return {c["name"]: c.get("version", "") for c in record.get("components", []) if "name" in c}
+
+
+# ── what the disks say (a record can be wrong after a manual `qm rollback`) ──
+
+def volume_fingerprint(ids):
+    """One short identity of a set of volume identities (the LV uuids of the Mac's disks), or '' when none is known.
+    A thin LVM rollback makes a new logical volume, so a rolled back Mac has another one."""
+    ids = sorted(i for i in ids if i)
+    return hashlib.sha256("\n".join(ids).encode()).hexdigest()[:24] if ids else ""
+
+
+def record_trusted(record, fingerprint):
+    """False when the record was made for other disks than the Mac has now (a rollback happened since). A record
+    without a fingerprint, or a Mac whose disks give none, is trusted: nothing says otherwise."""
+    saved = record.get("fingerprint", "")
+    return not (saved and fingerprint and saved != fingerprint)
+
+
+def dm_name(path):
+    """The device-mapper name of the logical volume at *path*: /dev/pve/vm-9-disk-1 -> pve-vm--9--disk--1."""
+    path = str(path or "")
+    if path.startswith("/dev/mapper/"):
+        return path[len("/dev/mapper/"):]
+    parts = path.split("/")
+    if len(parts) == 4 and parts[1] == "dev" and parts[2] not in ("zvol", "disk", "mapper") and parts[3]:
+        return parts[2].replace("-", "--") + "-" + parts[3].replace("-", "--")
+    return ""
+
+
+def stale_maps(dmsetup_ls, paths):
+    """The partition maps (name p1, name-part1) that `dmsetup ls` shows for the logical volumes at *paths*."""
+    wanted = {dm_name(p) for p in paths} - {""}
+    found = []
+    for line in (dmsetup_ls or "").splitlines():
+        name = line.split("\t", 1)[0].split(None, 1)[0] if line.strip() else ""
+        m = re.match(r"^(.+?)(?:p|-part)\d+$", name)
+        if m and m.group(1) in wanted:
+            found.append(name)
+    return sorted(set(found))
+
+
+def maps_held_text(vmid, names):
+    """The refusal when partition maps still hold a Mac's disks: names them and gives the exact command."""
+    return REFUSE_MAPS_HELD % (vmid, ", ".join(names), "; ".join("dmsetup remove " + n for n in names))
 
 
 # ── versions ─────────────────────────────────────────────────────────
@@ -383,9 +449,11 @@ def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     if cmd == "record" and len(argv) == 3:
         _emit(read_record(argv[2]))
-    elif cmd == "write" and len(argv) in (5, 6, 8):
+    elif cmd == "write" and len(argv) in (5, 6, 8, 9, 10):
         _emit(write_record(argv[2], argv[3], json.loads(argv[4]), previous=json.loads(argv[5]) if len(argv) > 5 else None,
-                           snapshot=argv[6] if len(argv) == 8 else "", card=argv[7] if len(argv) == 8 else ""))
+                           snapshot=argv[6] if len(argv) > 7 else "", card=argv[7] if len(argv) > 7 else "",
+                           latest=json.loads(argv[8]) if len(argv) > 8 else None,
+                           fingerprint=argv[9] if len(argv) > 9 else ""))
     elif cmd == "revert" and len(argv) == 3:
         return 0 if revert_record(argv[2]) else 1
     elif cmd == "component" and len(argv) in (4, 7):
@@ -397,8 +465,18 @@ def main(argv):
     elif cmd == "facts" and len(argv) >= 4:
         flag = argv[4] if len(argv) > 4 and argv[4] in ("supported", "unsupported") else ""
         sys.stdout.write("\n".join(before_facts(argv[2], argv[3], flag != "unsupported", argv[5 if flag else 4:])) + "\n")
-    elif cmd == "steps" and len(argv) == 4:
-        sys.stdout.write("\n".join("%s %s" % p for p in step_titles(argv[2], argv[3])) + "\n")
+    elif cmd == "steps" and len(argv) in (4, 5):
+        sys.stdout.write("\n".join("%s %s" % p for p in plan_steps(argv[2], argv[3], argv[4:] != ["stopped"])) + "\n")
+    elif cmd == "fingerprint":
+        sys.stdout.write(volume_fingerprint(sys.stdin.read().split()) + "\n")
+    elif cmd == "trusted" and len(argv) == 4:
+        return 0 if record_trusted(read_record(argv[2]), argv[3]) else 1
+    elif cmd == "stamp" and len(argv) == 4:
+        return 0 if stamp_record(argv[2], argv[3]) else 1
+    elif cmd == "stale-maps":
+        sys.stdout.write("\n".join(stale_maps(sys.stdin.read(), argv[2:])) + "\n")
+    elif cmd == "maps-held" and len(argv) >= 4:
+        sys.stdout.write(maps_held_text(argv[2], argv[3:]) + "\n")
     elif cmd == "snapshot-name":
         sys.stdout.write(snapshot_name() + "\n")
     elif cmd == "snapshot-argv" and len(argv) == 5:
@@ -427,7 +505,8 @@ def main(argv):
         return run_update_command(cmd, argv[2:])
     else:
         sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|steps|snapshot-name|"
-                         "snapshot-argv|tool-snapshots|snapshot-support|text|from-igpu|compare|unfinished|update-*|failure-text|kind ...\n")
+                         "snapshot-argv|tool-snapshots|snapshot-support|text|from-igpu|compare|unfinished|update-*|failure-text|kind|"
+                         "fingerprint|trusted|stamp|stale-maps|maps-held ...\n")
         return 64
     return 0
 

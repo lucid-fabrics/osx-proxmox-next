@@ -387,3 +387,68 @@ def test_the_command_line_the_bash_installer_uses(base, monkeypatch, tmp_path):
     (igpu / "104.json").write_text('{"whateverxe_version": "1.2"}')
     assert run_main("from-igpu", "104")[0] == 0 and e.read_record(104, base)["kind"] == "intel"
     assert run_main("bogus")[0] == 64
+
+
+# ── fix wave 2 ───────────────────────────────────────────────────────
+
+def test_a_plan_lists_the_stop_only_when_the_mac_runs():
+    assert [i for i, _t in e.plan_steps("nvidia", "NullMoth v3", True)][0] == "stop"
+    stopped = e.plan_steps("nvidia", "NullMoth v3", False)
+    assert [i for i, _t in stopped] == ["snapshot", "takeoff", "stage", "putback", "start", "verify"]
+    assert [i for i, _t in e.plan_steps("amd", "the driver", False)] == ["snapshot", "replace", "start"]
+
+
+def test_an_undo_has_steps_like_an_update():
+    assert [i for i, _t in e.undo_titles()] == ["stop", "release", "rollback", "start"]
+    assert [t for _i, t in e.undo_titles(done=True)][0] == "Stopped the Mac"
+
+
+def test_the_fingerprint_tells_a_rolled_back_mac_from_the_one_the_record_was_made_for():
+    assert e.volume_fingerprint([]) == "" and e.volume_fingerprint(["", ""]) == ""
+    fp = e.volume_fingerprint(["b", "a"])
+    assert fp == e.volume_fingerprint(["a", "b"]) and fp != e.volume_fingerprint(["a", "c"])
+    assert e.record_trusted({}, fp) and e.record_trusted({"fingerprint": fp}, fp) and e.record_trusted({"fingerprint": fp}, "")
+    assert not e.record_trusted({"fingerprint": fp}, "other")
+
+
+def test_a_record_carries_the_fingerprint_and_what_was_known_as_newest(base):
+    e.write_record(9, "nvidia", [comp("NullMoth", "v3")], base, fingerprint="abc", latest={"NullMoth": "v3"})
+    data = e.read_record(9, base)
+    assert data["fingerprint"] == "abc" and data["latest"] == {"NullMoth": "v3"}
+    assert e.stamp_record(9, "def", base) and e.read_record(9, base)["fingerprint"] == "def"
+    assert e.stamp_record(9, "", base) and "fingerprint" not in e.read_record(9, base)
+    assert not e.stamp_record(10, "x", base)
+    e.write_record(9, "nvidia", [comp("NullMoth", "v3")], base, previous=[comp("NullMoth", "v2")], latest={"NullMoth": "v3"})
+    assert e.revert_record(9, base) and e.read_record(9, base)["latest"] == {"NullMoth": "v3"}      # an undo keeps what it knew
+
+
+def test_device_map_names_come_from_the_logical_volume():
+    assert e.dm_name("/dev/pve/vm-980-disk-2") == "pve-vm--980--disk--2"
+    assert e.dm_name("/dev/mapper/pve-vm--980--disk--2") == "pve-vm--980--disk--2"
+    assert e.dm_name("/dev/zvol/rpool/vm-1-disk-0") == "" and e.dm_name("/var/lib/vz/images/9/x.qcow2") == ""
+    listing = "pve-vm--980--disk--2p1\t(253:12)\npve-vm--980--disk--2\t(253:4)\npve-vm--980--disk--20p1\t(253:7)\nother-p1\t(253:9)\n"
+    assert e.stale_maps(listing, ["/dev/pve/vm-980-disk-2"]) == ["pve-vm--980--disk--2p1"]     # not disk 20's, not the LV itself
+    assert e.stale_maps("No devices found", ["/dev/pve/vm-980-disk-2"]) == [] and e.stale_maps("", []) == []
+    text = e.maps_held_text(980, ["a", "b"])
+    assert "VM 980" in text and "dmsetup remove a; dmsetup remove b" in text and "Nothing was changed" in text
+
+
+def test_the_command_line_runs_the_new_helpers(capsys, base):
+    def call(*argv, stdin=""):
+        import io as _io, sys as _sys
+        old = _sys.stdin
+        _sys.stdin = _io.StringIO(stdin)
+        try:
+            code = e.main(["driver_engine.py", *argv])
+        finally:
+            _sys.stdin = old
+        return code, capsys.readouterr().out.strip()
+    assert call("fingerprint", stdin="b a\n") == (0, e.volume_fingerprint(["a", "b"]))
+    assert call("stale-maps", "/dev/pve/vm-9-disk-1", stdin="pve-vm--9--disk--1p1\t(1:1)\n") == (0, "pve-vm--9--disk--1p1")
+    assert call("maps-held", "9", "x")[1].endswith("(then try again).")
+    assert call("steps", "nvidia", "NullMoth v3", "stopped")[1].splitlines()[0] == "snapshot Save a snapshot"
+    assert call("steps", "nvidia", "NullMoth v3")[1].splitlines()[0] == "stop Stop the Mac"
+    code, _out = call("write", "9", "nvidia", json.dumps([comp("NullMoth", "v3")]), "[]", "snap", "0000:01:00", json.dumps({"NullMoth": "v3"}), "fp1")
+    assert code == 0 and e.read_record(9)["fingerprint"] == "fp1" and e.read_record(9)["latest"] == {"NullMoth": "v3"}
+    assert call("trusted", "9", "fp1")[0] == 0 and call("trusted", "9", "other")[0] == 1
+    assert call("stamp", "9", "fp2")[0] == 0 and e.read_record(9)["fingerprint"] == "fp2"

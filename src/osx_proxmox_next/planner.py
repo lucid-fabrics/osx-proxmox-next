@@ -443,10 +443,13 @@ def mount_oc_disk_script(vid: str, ro: bool = False, require_stopped: bool = Fal
         "{ [ -n \"$OC_VOL\" ] || { echo 'ERROR: no ide0 (OpenCore) disk found'; false; }; } && "
         "OC_PATH=$(pvesm path \"$OC_VOL\") && "
         + activate_volume_snippet("OC_PATH")
-        + "OC_MNT=$(mktemp -d) && export OC_MNT && "
+        # the trap is set before the loop device exists, so nothing between losetup and the trap can leak it; it frees
+        # the mount (lazily when busy), the loop device and the folder whatever ends the shell (also INT and TERM)
+        + "OC_MNT=$(mktemp -d) && export OC_MNT && OC_LOOP='' && "
+        "trap '{ umount \"$OC_MNT\" 2>/dev/null || umount -l \"$OC_MNT\" 2>/dev/null; }; "
+        "[ -z \"$OC_LOOP\" ] || losetup -d \"$OC_LOOP\" 2>/dev/null; "
+        "rmdir \"$OC_MNT\" 2>/dev/null' EXIT && trap 'exit 130' INT TERM && "
         "OC_LOOP=$(losetup -fP --show \"$OC_PATH\") && "
-        "trap 'umount $OC_MNT 2>/dev/null; losetup -d $OC_LOOP 2>/dev/null; "
-        "rmdir $OC_MNT 2>/dev/null' EXIT && trap 'exit 130' INT TERM && "
         # losetup -fP does not guarantee the partition node exists yet, the
         # kernel creates it asynchronously and mount fails with
         # "Can't lookup blockdev" on slower storage

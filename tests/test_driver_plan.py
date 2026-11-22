@@ -45,8 +45,11 @@ def test_an_nvidia_mac_with_an_older_driver_gets_an_update_plan(target):
     lines = plan.lines()
     assert lines[0] == "Update the NVIDIA driver of macos-sequoia (VM 9)"
     assert lines[1] == "  NullMoth: v2.8.1 to v2.9"
-    assert "  4. Stage NullMoth v2.9" in lines and "The Mac stops for about 10 minutes." in lines
+    assert "  3. Stage NullMoth v2.9" in lines and "The Mac stops for about 10 minutes." in lines    # stopped: nothing to stop
+    assert not any("Stop the Mac" in l for l in lines)
     assert plan.step_name() == "NullMoth v2.9"
+    running = driver_plan.prepare(9, pve=DPve(status="running")).lines()
+    assert "  1. Stop the Mac" in running and "  4. Stage NullMoth v2.9" in running    # "Stop the Mac" only when it runs
 
 
 def test_the_plan_for_a_mac_that_is_up_to_date_has_nothing_to_do(target):
@@ -216,11 +219,17 @@ def test_storage_that_cannot_snapshot_is_said_and_older_snapshots_are_listed(tar
 def test_the_commands_are_written_out(target):
     write("nvidia", NullMoth="v1")
     nv = driver_plan.commands(driver_plan.prepare(9, pve=DPve()))
-    assert nv[0] == "qm shutdown 9 --timeout 120" and nv[1].startswith("qm snapshot 9 osx-next-driver-")
-    assert "qm set 9 --delete hostpci0" in nv and nv[-1].startswith("qm rollback 9 osx-next-driver-")
+    assert nv[0].startswith("qm snapshot 9 osx-next-driver-") and not any("shutdown" in c for c in nv)   # the Mac is stopped
+    assert driver_plan.commands(driver_plan.prepare(9, pve=DPve(status="running")))[0] == "qm shutdown 9 --timeout 120"
+    assert "qm set 9 --delete hostpci0" in nv and nv[-1].startswith("qm rollback 9 osx-next-driver-") and "(r, driver-undo)" in nv[-1]
+    assert any(c.startswith("qm set 9 --sata1 ") and "--sata2 " in c and "order=sata1" in c for c in nv)   # recovery and payload disks
+    assert any("AMFIPass.kext" in c for c in nv)
+    write("intel", WhateverXe="1", **{"WhateverXe_Graphics": "1"})
+    intel = driver_plan.commands(driver_plan.prepare(9, pve=DPve()))
+    assert any(c.startswith("qm set 9 --sata1 ") for c in intel) and any("WhateverXe.kext and AMFIPass.kext" in c for c in intel)
     write("amd", Lilu="1")
     amd = driver_plan.commands(driver_plan.prepare(9, pve=DPve()))
-    assert "qm set 9 --delete hostpci0" not in amd and any("OpenCore disk" in c for c in amd)
+    assert "qm set 9 --delete hostpci0" not in amd and any("OpenCore disk" in c for c in amd) and not any("--sata1" in c for c in amd)
 
 
 def test_targets_resolve_each_kind_from_the_releases_the_engines_name(monkeypatch):

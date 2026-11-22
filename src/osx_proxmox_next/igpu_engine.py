@@ -753,28 +753,41 @@ def render_payload_file(name, pkg_sha256):
     return (data_dir() / name).read_text().replace("@PKG_SHA256@", pkg_sha256)
 
 
-def _attach_loop(img, run):
-    """Attach *img* to a loop device with its partitions and return the partition node, or ("", message)."""
-    code, out = run(["losetup", "-fP", "--show", str(img)], 60)
+def _attach_loop(img, run, read_only=False):
+    """Attach *img* to a loop device with its partitions and return the partition node, or ("", message). *read_only*
+    makes the loop device itself read only, so nothing can write the image through it (the guest may be using it). The
+    loop device is detached again whenever the partition does not appear or this is interrupted."""
+    argv = ["losetup", "-fP", "--show"] + (["-r"] if read_only else []) + [str(img)]
+    code, out = run(argv, 60)
     loop = out.strip()
     if code != 0 or not loop:
         return "", "could not attach the payload image: " + out.strip()
     part = loop + "p1"
-    for _ in range(10):
-        run(["partprobe", loop], 20)
-        if run(["test", "-b", part], 5)[0] == 0:
-            return loop, part
+    try:
+        for _ in range(10):
+            run(["partprobe", loop], 20)
+            if run(["test", "-b", part], 5)[0] == 0:
+                return loop, part
+    except BaseException:
+        run(["losetup", "-d", loop], 20)
+        raise
     run(["losetup", "-d", loop], 20)
     return "", "the payload partition never appeared"
 
 
 def _release(mnt, loop, run):
-    """Unmount, remove the mount folder and free the loop device. A folder that is still a mount point is left
-    alone: removing it recursively would delete the files of the payload image itself."""
-    code, _msg = run(["umount", mnt], 60)
-    if code == 0:
-        os.rmdir(mnt)
-        run(["losetup", "-d", loop], 20)
+    """Unmount (lazily when busy), free the loop device and remove the mount folder: every part is tried, so one that
+    fails leaves nothing else behind. Only an empty folder is removed, never one that is still a mount point."""
+    if mnt:
+        code, _msg = run(["umount", mnt], 60)
+        if code != 0:
+            run(["umount", "-l", mnt], 60)
+    run(["losetup", "-d", loop], 20)
+    if mnt:
+        try:
+            os.rmdir(mnt)
+        except OSError:
+            pass
 
 
 def build_payload(pkg, out, run=default_run):
@@ -792,38 +805,38 @@ def build_payload(pkg, out, run=default_run):
     loop, part = _attach_loop(out, run)
     if not loop:
         return False, part
-    code, msg = run(["mkfs.vfat", "-F", "32", "-n", PAYLOAD_LABEL, part], 120)
-    if code != 0:
-        run(["losetup", "-d", loop], 20)
-        return False, "mkfs.vfat failed: " + msg.strip()
-    mnt = tempfile.mkdtemp(prefix="igpu-payload-")
-    code, msg = run(["mount", part, mnt], 60)
-    if code != 0:
-        os.rmdir(mnt)
-        run(["losetup", "-d", loop], 20)
-        return False, "could not mount the payload image: " + msg.strip()
+    mnt = ""
     try:
-        shutil.copyfile(pkg, os.path.join(mnt, "WhateverXe-Graphics.pkg"))
-        for src, name in PAYLOAD_FILES:
-            (Path(mnt) / name).write_text(render_payload_file(src, pkg_sha))
+        code, msg = run(["mkfs.vfat", "-F", "32", "-n", PAYLOAD_LABEL, part], 120)
+        if code != 0:
+            return False, "mkfs.vfat failed: " + msg.strip()
+        mnt = tempfile.mkdtemp(prefix="igpu-payload-")
+        code, msg = run(["mount", part, mnt], 60)
+        if code != 0:
+            return False, "could not mount the payload image: " + msg.strip()
+        try:
+            shutil.copyfile(pkg, os.path.join(mnt, "WhateverXe-Graphics.pkg"))
+            for src, name in PAYLOAD_FILES:
+                (Path(mnt) / name).write_text(render_payload_file(src, pkg_sha))
+        finally:
+            run(["sync"], 120)
     finally:
-        run(["sync"], 120)
         _release(mnt, loop, run)
     return True, "payload disk built (%d MB)" % PAYLOAD_MB
 
 
 def read_result(img, run=default_run):
-    """The text the guest left in result.txt on the payload disk, or '' (the guest must not be writing it)."""
-    loop, part = _attach_loop(img, run)
+    """The text the guest left in result.txt on the payload disk, or '' (the guest must not be writing it). The image is
+    only read: the loop device is read only and the mount too, and both are released on every way out."""
+    loop, part = _attach_loop(img, run, read_only=True)
     if not loop:
         return ""
-    mnt = tempfile.mkdtemp(prefix="igpu-result-")
-    code, _msg = run(["mount", "-o", "ro", part, mnt], 60)
-    if code != 0:
-        os.rmdir(mnt)
-        run(["losetup", "-d", loop], 20)
-        return ""
+    mnt = ""
     try:
+        mnt = tempfile.mkdtemp(prefix="igpu-result-")
+        code, _msg = run(["mount", "-o", "ro", part, mnt], 60)
+        if code != 0:
+            return ""
         return _read(os.path.join(mnt, "result.txt")) or ""
     finally:
         _release(mnt, loop, run)

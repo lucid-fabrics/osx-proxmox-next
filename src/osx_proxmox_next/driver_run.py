@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from . import driver_amd, driver_engine as engine, driver_intel, driver_nvidia, driver_snapshot
+from . import driver_amd, driver_disks, driver_engine as engine, driver_intel, driver_nvidia, driver_snapshot
 from .driver_core import DriverError, RunEnv, RunResult, Updater, stop_mac
 from .driver_plan import DriverPlan, prepare
 from .driver_targets import Choice
 from .gpu import parse_config
-from .igpu_finish import _drop_disk
+from .igpu_finish import FinishError, _drop_disk
 
 __all__ = ["finish_interrupted", "put_back", "remove_safety_snapshot", "run_update", "undo_target"]
 
@@ -29,7 +29,8 @@ def _record(u: Updater) -> None:
                                       comp.get("source", ""), now)
     previous = [engine.component(n["name"], n["version"]) for n in u.state.get("previous", [])]
     engine.write_record(u.vmid, u.plan.kind, list(kept.values()), u.env.base, previous, u.state.get("snapshot", ""),
-                        u.state.get("card", ""))
+                        u.state.get("card", ""), latest=u.plan.target.versions() if u.plan.target else None,
+                        fingerprint=driver_disks.fingerprint(u.pve, u.live_cfg()))
 
 
 def _execute(u: Updater) -> RunResult:
@@ -44,7 +45,10 @@ def _execute(u: Updater) -> RunResult:
             if failed:
                 result.notes.append("Could not remove these older driver snapshots: " + ", ".join(failed))
         u.state.update(phase="done", error="")
-        u.persist()   # stays until the first boot question is answered: a reopened screen asks it again
+        if u.env.ask_first_boot:
+            u.persist()   # stays until the first boot question is answered: a reopened screen asks it again
+        else:
+            engine.clear_update(u.vmid, u.env.base)   # a command line run asks nothing: nothing waits for an answer
         result.ok = True
     except Exception as exc:  # noqa: BLE001 - every failure ends the same way: the run is kept and says what it left
         result.error = _abandon(u, exc)
@@ -141,32 +145,56 @@ def _drop_added_disks(vmid: int, env: RunEnv, name: str) -> None:
     then = parse_config(env.pve.qm("config", str(vmid), "--snapshot", name).output)
     for slot in ("sata1", "sata2"):
         if slot in now and slot not in then:
-            _drop_disk(env.pve, vmid, slot)
+            _drop_disk(env.pve, vmid, slot, strict=True)
+
+
+def _step(env: RunEnv, sid: str, state: str, titles: dict[str, tuple[str, str]]) -> None:
+    env.on_step(sid, state)
+    if state != "active":
+        env.on_event(titles[sid][1] if state == "done" else titles[sid][0] + " failed")
 
 
 def put_back(vmid: int, env: RunEnv) -> str:
     """Undo the driver update: the Mac's disks go back to the newest driver snapshot of this tool and the record goes
-    back to the previous version. Returns the snapshot."""
+    back to the previous version. Reports each step through env.on_step (stop, release, rollback, start). Returns the
+    snapshot. The disks are released (no device map or loop device holds them) before anything is removed or rolled back."""
     if not engine.acquire_lock(vmid, env.base):
         raise DriverError(engine.REFUSE_LOCKED)
+    titles = {sid: (now, past) for (sid, now), (_s, past) in zip(engine.undo_titles(), engine.undo_titles(done=True))}
+    current, was_running = "", False
     try:
         name = undo_target(vmid, env)
         was_running = "stopped" not in env.pve.qm("status", str(vmid)).output
+        current = "stop"
+        _step(env, "stop", "active", titles)
         stop_mac(env, vmid)
+        _step(env, "stop", "done", titles)
+        current = "release"
+        _step(env, "release", "active", titles)
+        driver_snapshot.release_disks(env.pve, vmid)
         _drop_added_disks(vmid, env, name)
-        try:
-            driver_snapshot.rollback(env.pve, vmid, name)
-        except driver_snapshot.SnapshotError:
-            if was_running:
-                env.pve.qm("start", str(vmid))
-            raise
+        _step(env, "release", "done", titles)
+        current = "rollback"
+        _step(env, "rollback", "active", titles)
+        driver_snapshot.rollback(env.pve, vmid, name)
         engine.revert_record(vmid, env.base)
+        engine.stamp_record(vmid, driver_disks.fingerprint(env.pve, parse_config(env.pve.qm("config", str(vmid)).output)), env.base)
         engine.clear_update(vmid, env.base)
+        _step(env, "rollback", "done", titles)
+        current = "start"
+        _step(env, "start", "active", titles)
         res = env.pve.qm("start", str(vmid))
+        _step(env, "start", "done" if res.ok else "fail", titles)
         env.on_event(f"Undid the driver update: the Mac is back to {name}"
                      + ("" if res.ok else ". It did not start: start it from your Macs page"))
         return name
-    except driver_snapshot.SnapshotError as exc:
+    except Exception as exc:    # noqa: BLE001 - whatever stops an undo ends it the same way: the failed step, the Mac running again
+        if current:      # a step was under way: it failed, and a Mac this undo stopped runs again unless Proxmox locked it
+            env.on_step(current, "fail")
+            if was_running and current != "stop" and "lock: rollback" not in env.pve.qm("config", str(vmid)).output:
+                env.pve.qm("start", str(vmid))
+        if isinstance(exc, DriverError):
+            raise
         raise DriverError(str(exc)) from exc
     finally:
         engine.release_lock(vmid, env.base)

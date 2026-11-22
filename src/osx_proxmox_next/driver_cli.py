@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -44,9 +45,20 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--finish", action="store_true", help="Continue the update that was cut off")
     update.add_argument("--macos", default="", help="When the Mac's description or name does not say which macOS it runs")
     update.add_argument("--iso-dir", default="", help="Folder that caches the downloads")
+    update.add_argument("--snapshot-name", default="", dest="snapshot_name", help=argparse.SUPPRESS)   # the name a screen showed
+    update.add_argument("--ask-first-boot", action="store_true", dest="ask_first_boot", help=argparse.SUPPRESS)   # the TUI asks
     undo = sub.add_parser("driver-undo", help="Undo the last driver update: put the Mac back to its driver snapshot")
     undo.add_argument("--vmid", type=int, required=True, help="VM ID of the Mac")
     undo.add_argument("--yes", action="store_true", help="Do not ask for confirmation")
+
+
+def _term_is_interrupt() -> None:
+    """A TERM (a closed terminal, a kill) ends the run the way Ctrl-C does: the finally blocks run, so the lock, the loop
+    devices and the mounts of the run are released. Only the main thread can install a handler."""
+    try:
+        signal.signal(signal.SIGTERM, lambda _n, _f: (_ for _ in ()).throw(KeyboardInterrupt()))
+    except ValueError:
+        pass
 
 
 def _bad_vmid(vmid: int) -> bool:
@@ -76,10 +88,25 @@ def _choice(args: argparse.Namespace) -> Choice:
 def status_data(vmid: int, plan: DriverPlan, latest_error: str = "") -> dict:
     snaps = driver_snapshot.list_tool(get_proxmox_adapter(), vmid)
     judged = plan.judged() if plan.target else {"state": "", "rows": []}
-    return {"vmid": vmid, "name": plan.name, "kind": plan.kind, "refused": plan.refusals,
+    running = _running_step(vmid)
+    refused = [r for r in plan.refusals if not (running and r == engine.REFUSE_LOCKED)]     # the running update says it better
+    return {"vmid": vmid, "name": plan.name, "kind": plan.kind, "refused": refused,
             "installed": plan.installed if plan.installed_known else None,
             "latest": plan.target.versions() if plan.target else {}, "state": judged["state"],
-            "snapshots": snaps, "unfinished": plan.interrupted, "latest_error": latest_error}
+            "snapshots": snaps, "unfinished": plan.interrupted, "latest_error": latest_error,
+            "updating": bool(running), "step": running}
+
+
+def _running_step(vmid: int) -> str:
+    """The step of the update that is running for this Mac right now, like `3 of 7: Take the card off`, else ''."""
+    state = engine.read_update(vmid)
+    if not state or not engine.lock_holder(vmid):
+        return ""
+    steps = state.get("steps", [])
+    for n, row in enumerate(steps, 1):
+        if row.get("state") == "active":
+            return f"{n} of {len(steps)}: {row.get('title', '')}"
+    return "starting"
 
 
 def run_status(args: argparse.Namespace) -> int:
@@ -89,12 +116,17 @@ def run_status(args: argparse.Namespace) -> int:
     data = status_data(args.vmid, plan)
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
-        return 0 if not plan.refusals else 2
+        return 0 if not data["refused"] else 2
     for line in plan.refusals:
-        print(f"REFUSED: {line}")
+        if not (data["updating"] and line == engine.REFUSE_LOCKED):    # the running update says it better below
+            print(f"REFUSED: {line}")
     if plan.refusals and not plan.kind:
         return 2
     print(f"VM {args.vmid} {plan.name}: {engine.CARD_NAME.get(plan.kind, '?')} card")
+    if data["updating"]:
+        print(f"Updating: the driver is being updated now (step {data['step']}). Run driver-status again when it is done.")
+        print("Driver snapshots: " + (", ".join(data["snapshots"]) or "none"))
+        return 0
     if plan.interrupted:
         print("The driver update stopped before it finished. Finish it: osx-next-cli driver-update --vmid %d --finish --yes"
               " (or undo it: osx-next-cli driver-undo --vmid %d)." % (args.vmid, args.vmid))
@@ -115,7 +147,8 @@ def _confirm(prompt: str, yes: bool, ask: Callable[[str], str]) -> bool:
 
 def _env(args: argparse.Namespace, say: Callable[[str], None]) -> RunEnv:
     return RunEnv(get_proxmox_adapter(), QmConsole(args.vmid), Path(args.iso_dir or DEFAULT_ISO_DIR),
-                  on_event=lambda m: say(f"  {m}"), no_snapshot=args.no_snapshot)
+                  on_event=lambda m: say(f"  {m}"), no_snapshot=args.no_snapshot,
+                  ask_first_boot=getattr(args, "ask_first_boot", False))
 
 
 def _gate(args: argparse.Namespace, plan: DriverPlan, ask: Callable[[str], str]) -> int | None:
@@ -143,7 +176,8 @@ def run_update_command(args: argparse.Namespace, ask: Callable[[str], str] = inp
         return 2
     if args.finish:
         return _finish(args, say)
-    plan = prepare(args.vmid, _choice(args), reinstall=args.reinstall)
+    _term_is_interrupt()
+    plan = prepare(args.vmid, _choice(args), reinstall=args.reinstall, snapshot=getattr(args, "snapshot_name", ""))
     for line in plan.lines():
         print(line)
     if not plan.ok:
@@ -164,6 +198,7 @@ def run_update_command(args: argparse.Namespace, ask: Callable[[str], str] = inp
 
 
 def _finish(args: argparse.Namespace, say: Callable[[str], None]) -> int:
+    _term_is_interrupt()
     try:
         return _report(finish_interrupted(args.vmid, _env(args, say)), say)
     except DriverError as exc:
@@ -177,7 +212,7 @@ def _report(result, say: Callable[[str], None]) -> int:
     if not result.ok:
         say(f"The update did not finish: {result.error}")
         return 1
-    say("Done. " + result.detail + ".")
+    say("Done. " + result.detail[:1].upper() + result.detail[1:] + ".")
     if result.snapshot:
         say(f"Driver snapshot {result.snapshot} is kept. driver-undo goes back to it.")
     return 0
@@ -186,6 +221,7 @@ def _report(result, say: Callable[[str], None]) -> int:
 def run_undo(args: argparse.Namespace, ask: Callable[[str], str] = input) -> int:
     if _bad_vmid(args.vmid):
         return 2
+    _term_is_interrupt()
     env = RunEnv(get_proxmox_adapter(), on_event=lambda m: print(f"  {m}"))
     try:
         name = undo_target(args.vmid, env)

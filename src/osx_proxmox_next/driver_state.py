@@ -23,6 +23,9 @@ STEPS = {
             ("replace", "Replace the kexts", "Replaced the kexts"), ("start", "Start the Mac", "Started the Mac")),
 }
 STEPS["intel"] = STEPS["nvidia"]
+# "Undo the driver update": the same list shape, so the screen draws it like an update
+UNDO_STEPS = (("stop", "Stop the Mac", "Stopped the Mac"), ("release", "Release the disks", "Released the disks"),
+              ("rollback", "Put the snapshot back", "Put the snapshot back"), ("start", "Start the Mac", "Started the Mac"))
 _HELD = {}
 
 
@@ -49,6 +52,16 @@ def write_json(path, data):
 def step_titles(kind, name="the driver", done=False):
     """(id, title) for each step of an update, in order. *done* gives the past-tense line the run list shows."""
     return [(sid, (past if done else now).format(name=name)) for sid, now, past in STEPS[kind]]
+
+
+def undo_titles(done=False):
+    """(id, title) for each step of an undo, in order."""
+    return [(sid, past if done else now) for sid, now, past in UNDO_STEPS]
+
+
+def plan_steps(kind, name="the driver", running=True):
+    """The steps a plan lists: "Stop the Mac" only when the Mac is running (a stopped one has nothing to stop)."""
+    return [(sid, title) for sid, title in step_titles(kind, name) if running or sid != "stop"]
 
 
 # ── the lock ─────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import driver_engine as engine_rec, nullmoth, nullmoth_engine as engine
+from . import driver_disks, driver_engine as engine_rec, nullmoth, nullmoth_engine as engine
 from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .downloader import DownloadError
@@ -270,15 +270,17 @@ def finish(
         raise
     conclude(pve, vmid, payload, result, on_event, clock, sleep, find_ip, probe)
     if result.verified:
-        _record_driver(vmid, pick, result)
+        _record_driver(vmid, pick, result, pve)
     return result
 
 
-def _record_driver(vmid: int, pick: dict, result: FinishResult) -> None:
-    """Remember which NullMoth this Mac has, for driver-status and updates."""
+def _record_driver(vmid: int, pick: dict, result: FinishResult, pve: ProxmoxAdapter | None = None) -> None:
+    """Remember which NullMoth this Mac has, for driver-status and updates (with the identity of its disks, so a later
+    manual rollback is noticed)."""
     try:
+        fingerprint = driver_disks.fingerprint(pve, parse_config(pve.qm("config", str(vmid)).output)) if pve else ""
         engine_rec.write_record(vmid, "nvidia", [engine_rec.component(
-            "NullMoth", pick["tag"], pick["tag"], pick.get("sha", ""), pick.get("source", ""))])
+            "NullMoth", pick["tag"], pick["tag"], pick.get("sha", ""), pick.get("source", ""))], fingerprint=fingerprint)
     except OSError as exc:
         result.notes.append(f"Could not record the installed driver version ({exc}); driver-status will not know it.")
 

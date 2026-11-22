@@ -115,7 +115,7 @@ def run(u: Updater) -> None:
     u.say("Started the Mac again")
     accel = env.accel or igpu_engine.check_accel
     ok, detail = accel(clock=env.clock, sleep=env.sleep)
-    u.result.detail = "macOS uses the iGPU" if ok else "the iGPU is not used yet (" + str(detail) + ")"
+    u.result.detail = "macOS uses the iGPU" if ok else "The iGPU is not used yet (" + str(detail) + ")"
     if not ok:
         u.result.notes.append("The host did not see macOS use the iGPU yet: " + str(detail))
     u.end("verify")

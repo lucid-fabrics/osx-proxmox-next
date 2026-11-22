@@ -12,6 +12,7 @@ from .driver_targets import Choice
 __all__ = ["log_path", "spawn_update"]
 
 TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+SNAPSHOT_NAME = re.compile(r"^osx-next-driver-\d{8}-\d{4}(?:\d{2})?\Z")
 
 
 def log_path(vmid: int) -> str:
@@ -19,10 +20,15 @@ def log_path(vmid: int) -> str:
 
 
 def spawn_update(vmid: int, choice: Choice, finish: bool = False, accept_risk: bool = False,
-                 no_snapshot: bool = False, popen=subprocess.Popen) -> str:
+                 no_snapshot: bool = False, snapshot: str = "", popen=subprocess.Popen) -> str:
     """Run the update with every question already answered in the TUI. Returns the log path. Release tags are checked
-    before they become arguments."""
-    argv = [sys.executable, "-m", "osx_proxmox_next.cli", "driver-update", "--vmid", str(int(vmid)), "--yes"]
+    before they become arguments. *snapshot* is the name the screen showed: the run uses exactly that one."""
+    argv = [sys.executable, "-m", "osx_proxmox_next.cli", "driver-update", "--vmid", str(int(vmid)), "--yes",
+            "--ask-first-boot"]
+    if snapshot:
+        if not SNAPSHOT_NAME.match(snapshot):
+            raise ValueError(f"{snapshot!r} is not a snapshot name of this tool")
+        argv += ["--snapshot-name", snapshot]
     for flag, value in (("--version", choice.nullmoth), ("--wex-version", choice.wex),
                         ("--graphics-version", choice.graphics), ("--macos", choice.macos)):
         if value:

@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import driver_engine as engine, driver_oc, driver_snapshot, host_setup, igpu_engine
+from . import driver_disks, driver_engine as engine, driver_oc, driver_snapshot, host_setup, igpu_engine
 from .driver_targets import Choice, Target, detect_kind, resolve
 from .gpu import parse_config
 from .igpu_attach import TAHOE_NOTE, UNSUPPORTED_MACOS, UNSUPPORTED_NOTE
@@ -69,7 +69,7 @@ class DriverPlan:
         if self.nothing_to_do:
             return out + [engine.UP_TO_DATE]
         out.append("Steps:")
-        out += [f"  {n}. {t}" for n, (_i, t) in enumerate(engine.step_titles(self.kind, self.step_name()), 1)]
+        out += [f"  {n}. {t}" for n, (_i, t) in enumerate(engine.plan_steps(self.kind, self.step_name(), self.running), 1)]
         out += engine.before_facts(self.kind, self.snapshot, self.snapshot_ok, self.older_snapshots)
         out += ["Warning: " + w for w in self.warnings]
         return out
@@ -84,16 +84,23 @@ class DriverPlan:
 
 def commands(plan: DriverPlan) -> list[str]:
     """The Proxmox commands of an update, written out (the `x` view of "See every change"). The VM ID is a number and
-    the snapshot name is made by this tool; nothing else is spliced in."""
+    the snapshot name is made by this tool; nothing else is spliced in. Only what really happens is listed: the stop only
+    when the Mac runs, the recovery and payload disks, the OpenCore kext swap."""
     v = str(plan.vmid)
-    out = [f"qm shutdown {v} --timeout 120", f"qm snapshot {v} {plan.snapshot} --description "
-           f"\"{engine.snapshot_description(plan.version_label)}\""]
-    if plan.kind != "amd":
-        out += [f"qm set {v} --delete hostpci0", f"qm set {v} --vga std", "(recovery boots, the payload disk stages the driver)",
-                f"qm set {v} --hostpci0 <as it was>  --vga <as it was>  --args <as it was>"]
+    out = [f"qm shutdown {v} --timeout 120"] if plan.running else []
+    out.append(f"qm snapshot {v} {plan.snapshot} --description \"{engine.snapshot_description(plan.version_label)}\"")
+    if plan.kind == "amd":
+        out.append("(the OpenCore disk is mounted: Lilu.kext and WhateverGreen.kext are replaced)")
     else:
-        out += ["(the OpenCore disk is mounted: Lilu.kext and WhateverGreen.kext are replaced)"]
-    return out + [f"qm start {v}", f"qm rollback {v} {plan.snapshot}   (u, driver-undo)"]
+        out += [f"qm set {v} --delete hostpci0",
+                f"qm set {v} --sata1 <macOS {plan.macos or 'recovery'} recovery image> --sata2 <payload disk with the driver> "
+                "--boot order=sata1;virtio0;ide0",
+                f"qm set {v} --vga std",
+                "(recovery boots and the payload disk stages the driver inside macOS; both disks are then removed)"]
+        out.append("(the OpenCore disk is mounted: WhateverXe.kext and AMFIPass.kext are replaced)" if plan.kind == "intel"
+                   else "(the OpenCore disk is mounted: AMFIPass.kext is replaced when it is another version)")
+        out.append(f"qm set {v} --hostpci0 <as it was>  --vga <as it was>  --args <as it was>  --boot <as it was>")
+    return out + [f"qm start {v}", f"qm rollback {v} {plan.snapshot}   (r, driver-undo)"]
 
 
 def card_setup_waiting(vmid: int) -> bool:
@@ -118,25 +125,37 @@ def cfg_refusals(vmid: int, cfg: dict[str, str], base: str | None = None, resumi
     return out
 
 
-def installed_versions(pve: ProxmoxAdapter, vmid: int, kind: str, running: bool) -> tuple[dict[str, str], bool]:
-    """(versions, known). The record first; an AMD Mac without one is read from its OpenCore disk (only while it is
-    stopped: the disk is not mounted under a running Mac)."""
-    have = engine.installed_versions(engine.read_record(vmid))
-    if have:
-        return {n: v for n, v in have.items() if n in engine.COMPONENTS[kind] or n == "AMFIPass"}, True
-    if kind == "amd" and not running:
+DISK_COMPONENTS = {"amd": ("Lilu", "WhateverGreen"), "intel": ("WhateverXe",)}
+
+
+def installed_versions(pve: ProxmoxAdapter, vmid: int, kind: str, running: bool,
+                       cfg: dict[str, str] | None = None) -> tuple[dict[str, str], bool]:
+    """(versions, known). What the Mac itself says wins over the record: the kexts on a stopped Mac's OpenCore disk
+    (Lilu and WhateverGreen for AMD, WhateverXe for Intel; the disk is not mounted under a running Mac). A record made for
+    other disks than the Mac has now (a manual rollback happened since) is not believed, and one that disagrees with the
+    OpenCore disk is not either: the versions are then unknown or the disk's."""
+    record = engine.read_record(vmid)
+    have = {n: v for n, v in engine.installed_versions(record).items() if n in engine.COMPONENTS[kind] or n == "AMFIPass"}
+    if have and cfg is not None and not driver_disks.record_is_true(pve, vmid, record, cfg):
+        have = {}
+    if kind in DISK_COMPONENTS and not running:
         try:
-            found = driver_oc.read_versions(pve, vmid, list(engine.COMPONENTS["amd"]))
+            found = driver_oc.read_versions(pve, vmid, list(DISK_COMPONENTS[kind]))
         except driver_oc.OcError:
-            return {}, False
+            found = {}
         found = {n: v for n, v in found.items() if v}
-        return found, bool(found)
-    return {}, False
+        if found:
+            if any(n in have and engine.compare(have[n], v) != 0 for n, v in found.items()):
+                have = {}       # the disk disagrees: what the record says about the other parts is stale too
+            have.update(found)
+    return have, bool(have)
 
 
 def prepare(vmid: int, choice: Choice | None = None, pve: ProxmoxAdapter | None = None, reinstall: bool = False,
-            get: Callable | None = None, base: str | None = None, resume: dict | None = None) -> DriverPlan:
-    """Work out an update of *vmid* to *choice* (the latest when empty). Reads Proxmox and GitHub, changes nothing."""
+            get: Callable | None = None, base: str | None = None, resume: dict | None = None,
+            snapshot: str = "") -> DriverPlan:
+    """Work out an update of *vmid* to *choice* (the latest when empty). Reads Proxmox and GitHub, changes nothing.
+    The snapshot name is made here, once: *snapshot* is the name a screen already showed, which the run then uses."""
     pve = pve or get_proxmox_adapter()
     plan = DriverPlan(vmid, reinstall=reinstall)
     info = fetch_vm_info(vmid, adapter=pve)
@@ -157,9 +176,9 @@ def prepare(vmid: int, choice: Choice | None = None, pve: ProxmoxAdapter | None 
     except igpu_engine.ReleaseError as exc:
         plan.refusals.append(str(exc))
         return plan
-    plan.installed, plan.installed_known = installed_versions(pve, vmid, plan.kind, plan.running)
+    plan.installed, plan.installed_known = installed_versions(pve, vmid, plan.kind, plan.running, plan.cfg)
     plan.verdict = plan.judged()["state"]
-    plan.snapshot = engine.snapshot_name()
+    plan.snapshot = snapshot if engine.SNAPSHOT_RE.match(snapshot or "") else engine.snapshot_name()
     plan.snapshot_ok, plan.snapshot_reason = driver_snapshot.check_support(pve, plan.cfg)
     plan.older_snapshots = driver_snapshot.list_tool(pve, vmid)
     return plan

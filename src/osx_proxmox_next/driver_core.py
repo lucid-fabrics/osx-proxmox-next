@@ -47,6 +47,7 @@ class RunEnv:
     find_ip: Callable[[str], str] = nullmoth_engine.find_guest_ip
     probe: Callable[[str, int], bool] = nullmoth_engine.port_open
     accel: Callable | None = None                  # Intel: the host-side check that macOS uses the iGPU
+    ask_first_boot: bool = False                   # the TUI that started the run asks "do you see the desktop?" afterwards
 
 
 @dataclass

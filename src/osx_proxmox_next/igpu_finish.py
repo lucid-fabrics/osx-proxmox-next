@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import driver_engine, igpu_engine, igpu_watchdog
+from . import driver_disks, driver_engine, igpu_engine, igpu_watchdog
 from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .executor import apply_plan
@@ -119,12 +119,19 @@ def _import_disk(pve: ProxmoxAdapter, vmid: int, path: Path, storage: str) -> st
     return m.group(1)
 
 
-def _drop_disk(pve: ProxmoxAdapter, vmid: int, slot: str) -> None:
-    """Detach *slot* and delete the volume it held (the unused entry it leaves behind)."""
+def _drop_disk(pve: ProxmoxAdapter, vmid: int, slot: str, strict: bool = False) -> None:
+    """Detach *slot* and delete the volume it held (the unused entry it leaves behind). The partition maps and loop
+    devices that hold the volume go first; when one remains the volume could not be removed: *strict* raises
+    FinishError with the command, else it is left as an unused disk (this runs while another error is being handled)."""
     cfg = parse_config(pve.qm("config", str(vmid)).output)
     ref = cfg.get(slot, "").split(",", 1)[0]
     if not ref:
         return
+    try:
+        driver_disks.release_maps(pve, vmid, driver_disks.volume_paths(pve, [ref]))
+    except driver_disks.MapsHeld as exc:
+        if strict:
+            raise FinishError(str(exc)) from exc
     pve.qm("set", str(vmid), "--delete", slot)
     cfg = parse_config(pve.qm("config", str(vmid)).output)
     for key, value in cfg.items():
@@ -259,7 +266,7 @@ def finish(
         raise FinishError("Attaching the iGPU failed" + (f" at: {failed.title}" if failed else "")
                           + f". Log: {applied.log_path}. Undo with: gpu-setup --undo")
     pve.qm("set", str(vmid), "--boot", POST_INSTALL_BOOT_ORDER)
-    _record_state(vmid, dict(state, package_installed=False), result)
+    _record_state(vmid, dict(state, package_installed=False), result, pve)
     _enable_watchdog(pve, vmid, result, on_event)
 
     on_event("First boot with the iGPU: the guest installs the graphics package and powers off")
@@ -276,7 +283,7 @@ def finish(
         wait_stopped(pve, vmid, 120, clock, sleep)
     result.result = _read_payload_result(pve, payload_ref)
     result.installed = result.result == "installed"
-    _record_state(vmid, {"package_installed": result.installed, "package_result": result.result}, result)
+    _record_state(vmid, {"package_installed": result.installed, "package_result": result.result}, result, pve)
     _drop_disk(pve, vmid, "sata2")
     payload.unlink(missing_ok=True)
     if result.installed and not apply_plan(
@@ -293,13 +300,14 @@ def finish(
     return result
 
 
-def _record_state(vmid: int, update: dict, result: FinishResult) -> None:
+def _record_state(vmid: int, update: dict, result: FinishResult, pve: ProxmoxAdapter | None = None) -> None:
     """Remember what was installed in this VM (igpu-report and the status output read it)."""
     try:
         data = igpu_engine.write_state(vmid, update)
         record = driver_engine.from_igpu_state(vmid, data)
         if record:
-            driver_engine.write_record(vmid, "intel", record["components"])
+            fingerprint = driver_disks.fingerprint(pve, parse_config(pve.qm("config", str(vmid)).output)) if pve else ""
+            driver_engine.write_record(vmid, "intel", record["components"], fingerprint=fingerprint)
     except OSError as exc:
         result.notes.append(f"Could not record the installed versions ({exc}); igpu-report will not list them.")
 

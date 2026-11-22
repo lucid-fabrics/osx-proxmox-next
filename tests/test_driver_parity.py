@@ -50,13 +50,47 @@ exit 0
 """
 
 
+PVESM = """#!/bin/sh
+case "$1" in
+  path) echo "/dev/pve/${2#*:}" ;;
+  *) echo 'Name Type Status'; echo 'local-lvm lvmthin active' ;;
+esac
+"""
+# what udev and kpartx leave on a Mac's logical volumes: $QM_DIR/maps lists the partition maps, `stuck` makes them stay,
+# loops_<lv> lists loop devices on a volume, uuids lists "<path> <lv uuid>"
+DMSETUP = """#!/bin/sh
+echo "dmsetup $*" >> "$QM_DIR/dm.log"
+case "$1" in
+  ls) if [ -s "$QM_DIR/maps" ]; then cat "$QM_DIR/maps"; else echo "No devices found"; fi ;;
+  remove) [ -f "$QM_DIR/stuck" ] && exit 1; grep -v "^$2	" "$QM_DIR/maps" > "$QM_DIR/maps.new"; mv "$QM_DIR/maps.new" "$QM_DIR/maps" ;;
+esac
+exit 0
+"""
+LOSETUP = """#!/bin/sh
+echo "losetup $*" >> "$QM_DIR/dm.log"
+case "$1" in
+  -j) f="$QM_DIR/loops_$(basename "$2")"; [ -f "$f" ] && cat "$f"; exit 0 ;;
+esac
+exit 0
+"""
+LVS = """#!/bin/sh
+for last; do :; done
+[ -f "$QM_DIR/uuids" ] && grep "^$last " "$QM_DIR/uuids" | sed 's/^[^ ]* /  /' | grep . && exit 0
+exit 5
+"""
+KPARTX = """#!/bin/sh
+echo "kpartx $*" >> "$QM_DIR/dm.log"
+exit 0
+"""
+
+
 @pytest.fixture
 def host(tmp_path):
     qm_dir = tmp_path / "qm"
     qm_dir.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name, body in (("qm", QM), ("pvesm", "#!/bin/sh\necho 'Name Type Status'\necho 'local-lvm lvmthin active'\n")):
+    for name, body in (("qm", QM), ("pvesm", PVESM), ("dmsetup", DMSETUP), ("losetup", LOSETUP), ("lvs", LVS), ("kpartx", KPARTX), ("lvchange", "#!/bin/sh\nexit 0\n")):
         (bin_dir / name).write_text(body)
         (bin_dir / name).chmod(0o755 | stat.S_IXUSR)
     (qm_dir / "snaps").write_text("")
@@ -94,8 +128,8 @@ def write_record(host, kind, **versions):
     (host.state / "109.json").write_text(json.dumps({"vmid": 109, "kind": kind, "components": comps(**versions)}))
 
 
-def py_lines(kind, installed, target, snapshot, ok=True, older=()):
-    plan = DriverPlan(109, "macos-sequoia", kind, "sequoia", False, installed, True, Target(kind, target), "update", snapshot=snapshot,
+def py_lines(kind, installed, target, snapshot, ok=True, older=(), running=False):
+    plan = DriverPlan(109, "macos-sequoia", kind, "sequoia", running, installed, True, Target(kind, target), "update", snapshot=snapshot,
                       snapshot_ok=ok, older_snapshots=list(older))
     return plan.lines()
 
@@ -140,10 +174,13 @@ def test_the_bash_commands_are_wired_and_documented_in_the_dispatch():
 def test_the_bash_plan_lines_are_the_python_plan_lines(host):
     snap = "osx-next-driver-20261121-1030"
     snippet = (STUB_NULLMOTH + "DRIVER_VERSIONS='{\"NullMoth\": \"v2.9\"}'\nDRIVER_TARGET=$(cat <<'J'\n" + json.dumps(NV) + "\nJ\n)\n"
-               f"driver_print_plan 109 macos-sequoia nvidia '{{\"NullMoth\": \"v2.8.1\"}}' \"$DRIVER_TARGET\" {snap} yes\n")
+               f"driver_print_plan 109 macos-sequoia nvidia '{{\"NullMoth\": \"v2.8.1\"}}' \"$DRIVER_TARGET\" {snap} yes no\n")
     out = host.run(snippet).stdout.splitlines()
     assert out == py_lines("nvidia", {"NullMoth": "v2.8.1"}, NV, snap)
-    out = host.run(snippet.replace(f"{snap} yes", f"{snap} no")).stdout.splitlines()
+    assert not any("Stop the Mac" in l for l in out)                      # a stopped Mac has nothing to stop
+    running = host.run(snippet.replace(f"{snap} yes no", f"{snap} yes yes")).stdout.splitlines()
+    assert running == py_lines("nvidia", {"NullMoth": "v2.8.1"}, NV, snap, running=True) and "  1. Stop the Mac" in running
+    out = host.run(snippet.replace(f"{snap} yes no", f"{snap} no no")).stdout.splitlines()
     assert out == py_lines("nvidia", {"NullMoth": "v2.8.1"}, NV, snap, ok=False)
     older = "osx-next-driver-20261101-0900"
     (host.qm_dir / "snaps").write_text(older + "\n")
@@ -188,14 +225,17 @@ def test_the_bash_refusal_texts_are_the_engine_texts(host):
 def test_bash_status_matches_the_python_status(host, capsys, monkeypatch):
     write_record(host, "nvidia", NullMoth="v2.8.1")
     out = host.run(STUB_NULLMOTH + "driver_status_command 109\n").stdout.splitlines()
-    assert out[0] == "VM 109 macos-sequoia: NVIDIA card" and out[1] == "Installed: NullMoth v2.8.1" and out[2] == "Driver snapshots: none"
+    assert out == ["VM 109 macos-sequoia: NVIDIA card", "Installed: NullMoth v2.8.1", "Latest:    NullMoth v2.9",
+                   "A newer driver is available.", "Driver snapshots: none"]                       # the lines the Python status prints
     (host.qm_dir / "snaps").write_text("osx-next-driver-20261120-0900\n")
     data = json.loads(host.run(STUB_NULLMOTH + "driver_status_command 109 --json\n").stdout)
-    assert data == {"vmid": 109, "kind": "nvidia", "installed": {"NullMoth": "v2.8.1"}, "snapshots": ["osx-next-driver-20261120-0900"],
-                    "unfinished": False}
+    assert data == {"vmid": 109, "kind": "nvidia", "installed": {"NullMoth": "v2.8.1"}, "latest": {"NullMoth": "v2.9"}, "state": "update",
+                    "snapshots": ["osx-next-driver-20261120-0900"], "unfinished": False, "updating": False, "step": ""}
     (host.state / "109.json").unlink()
     out = host.run(STUB_NULLMOTH + "gpu_record_load() { REC_VENDOR=nvidia; return 0; }\ndriver_status_command 109\n").stdout
-    assert "Installed: installed version unknown" in out
+    assert "Installed: installed version unknown" in out and "The installed version is not known." in out
+    write_record(host, "nvidia", NullMoth="v2.9")
+    assert "Up to date." in host.run(STUB_NULLMOTH + "driver_status_command 109\n").stdout
 
 
 @needs_bash4
@@ -510,7 +550,8 @@ def test_bash_refuses_a_release_name_that_is_not_one_and_the_oc_disk_of_a_runnin
     res = host.run("driver_oc_kext 109 versions Lilu.kext\n", expect=1)
     assert res.stderr.strip() == engine.REFUSE_NOT_STOPPED and not [c for c in host.calls() if c.startswith(("losetup",))]
     body = DRIVER[DRIVER.index("function driver_oc_kext()"):DRIVER.index("# ── the lock")]
-    assert "trap 'umount" in body and "EXIT" in body and "INT TERM" in body and "-o ro" in body and "python3 -I -" in body
+    assert "umount -l" in body and "EXIT" in body and "INT TERM" in body and "-o ro" in body and "python3 -I -" in body
+    assert body.index("trap '") < body.index("losetup -fP")                  # the trap is set before the loop device exists
 
 
 def test_undoing_the_card_setup_forgets_the_driver_record_in_both_twins():
@@ -520,3 +561,139 @@ def test_undoing_the_card_setup_forgets_the_driver_record_in_both_twins():
     assert [s.argv for s in steps][-2:] == [["rm", "-f", str(gpu.record_path(109))], ["rm", "-f", str(engine.record_path(109))]]
     assert ('rm -f "$(gpu_record_path "$vmid")"\n  # the card is gone, so is the record of its driver (a later card may be another kind)\n'
             '  rm -f "${DRIVER_STATE_DIR:-/var/lib/osx-proxmox-next/drivers}/${vmid}.json"') in BASH
+
+
+# ── fix wave 2: the same rules in bash ───────────────────────────────
+
+def maps(host, *names, stuck=False):
+    (host.qm_dir / "maps").write_text("".join(f"{n}\t(253:5)\n" for n in names))
+    if stuck:
+        (host.qm_dir / "stuck").write_text("1")
+
+
+def dm_log(host):
+    path = host.qm_dir / "dm.log"
+    return path.read_text().splitlines() if path.exists() else []
+
+
+MAP2, MAP1 = "pve-vm--9--disk--2p1", "pve-vm--9--disk--1p1"
+
+
+@needs_bash4
+def test_bash_releases_the_maps_and_loops_of_a_macs_volumes_and_refuses_with_the_exact_command(host):
+    maps(host, MAP2, MAP1)
+    (host.qm_dir / "loops_vm-9-disk-2").write_text("/dev/loop4\n")
+    out = host.run("driver_release_disks 109\n").stdout
+    log = dm_log(host)
+    assert out == "" and f"dmsetup remove {MAP2}" in log and f"dmsetup remove {MAP1}" in log and "losetup -d /dev/loop4" in log
+    assert "kpartx -d /dev/pve/vm-9-disk-2" in log
+    maps(host, MAP2, stuck=True)
+    out = host.run("driver_release_disks 109\n", expect=1).stdout
+    assert out == engine.maps_held_text(109, [MAP2]) + "\n"              # the text and the command are the Python twin's
+    assert f"dmsetup remove {MAP2}" in out and "Nothing was changed" in out
+
+
+@needs_bash4
+def test_bash_undo_releases_before_the_rollback_and_a_map_that_stays_stops_it(host):
+    write_record(host, "nvidia", NullMoth="v2.9")
+    (host.qm_dir / "snaps").write_text(SNAP + "\n")
+    (host.qm_dir / "status").write_text("running\n")
+    maps(host, MAP2)
+    out = host.run("driver_undo_command 109 --yes\n").stdout
+    assert f"dmsetup remove {MAP2}" in dm_log(host) and "  Released the disks" in out and "  Put the snapshot back" in out
+    assert "Done. VM 109 is back to " + SNAP + "." in out
+    assert host.calls().index("rollback 109 " + SNAP) > 0
+    host.run("true")
+    (host.qm_dir / "snaps").write_text(SNAP + "\n")
+    maps(host, MAP2, stuck=True)
+    (host.qm_dir / "status").write_text("stopped\n")
+    before = len([c for c in host.calls() if c.startswith("rollback")])
+    out = host.run("driver_undo_command 109 --yes\n", expect=1).stdout
+    assert f"ERROR: {engine.maps_held_text(109, [MAP2])}" in out
+    assert len([c for c in host.calls() if c.startswith("rollback")]) == before          # qm rollback never ran: no lock: rollback
+    assert not (host.state / "109.lock").exists()
+
+
+@needs_bash4
+def test_bash_names_the_unlock_command_when_proxmox_left_the_rollback_lock(host):
+    write_record(host, "nvidia", NullMoth="v2.9")
+    (host.qm_dir / "snaps").write_text(SNAP + "\n")
+    (host.qm_dir / "rollback_fails").write_text("1")
+    with open(host.qm_dir / "config", "a") as f:
+        f.write("lock: rollback\n")
+    out = host.run("driver_undo_command 109 --yes\n", expect=1).stdout
+    assert "The rollback lock is still set, so the Mac stays stopped. Check its disks, then run: qm unlock 109" in out
+    assert "start 109" not in host.calls() and not (host.state / "109.lock").exists()
+
+
+@needs_bash4
+def test_bash_drops_a_disk_after_releasing_its_maps_and_strict_mode_stops_when_one_stays(host):
+    host.config(sata1="local-lvm:vm-9-disk-2,media=disk")
+    maps(host, MAP2)
+    host.run("igpu_drop_disk 109 sata1\n")
+    assert f"dmsetup remove {MAP2}" in dm_log(host) and "set 109 --delete sata1" in host.calls()
+    host.config(sata1="local-lvm:vm-9-disk-2,media=disk")
+    maps(host, MAP2, stuck=True)
+    assert host.run("igpu_drop_disk 109 sata1\n").stdout == ""                 # best effort: an error is being handled
+    host.config(sata1="local-lvm:vm-9-disk-2,media=disk")
+    assert host.run("igpu_drop_disk 109 sata1 strict\n", expect=1).stdout == engine.maps_held_text(109, [MAP2]) + "\n"
+
+
+@needs_bash4
+def test_bash_trusts_the_opencore_disk_over_the_record_and_the_disks_over_a_record_of_other_disks(host):
+    write_record(host, "amd", Lilu="1.7.2", WhateverGreen="1.7.0")
+    disk = 'driver_oc_kext() { echo \'{"Lilu.kext": "1.6.8", "WhateverGreen.kext": "1.6.7"}\'; }\n'
+    out = host.run(disk + 'driver_installed 109 amd no\n').stdout
+    assert json.loads(out) == {"Lilu": "1.6.8", "WhateverGreen": "1.6.7"}
+    out = host.run(disk + 'driver_installed 109 amd yes\n').stdout              # a running Mac's disk is not mounted: the record
+    assert json.loads(out) == {"Lilu": "1.7.2", "WhateverGreen": "1.7.0"}
+    (host.state / "109.json").unlink()
+    out = host.run('driver_oc_kext() { echo \'{"WhateverXe.kext": "0.8.0"}\'; }\ndriver_installed 109 intel no\n').stdout
+    assert json.loads(out) == {"WhateverXe": "0.8.0"}                           # Intel without a record: WhateverXe from the disk
+    write_record(host, "intel", WhateverXe="0.8.3", WhateverXe_Graphics="0.4.4")
+    out = host.run('driver_oc_kext() { echo \'{"WhateverXe.kext": "0.8.0"}\'; }\ndriver_installed 109 intel no\n').stdout
+    assert json.loads(out) == {"WhateverXe": "0.8.0"}                           # the disk disagrees: the record is dropped whole
+    uuids = host.qm_dir / "uuids"
+    uuids.write_text("/dev/pve/vm-9-disk-1 AAA\n")
+    fp = host.run("driver_fingerprint 109\n").stdout.strip()
+    assert fp == engine.volume_fingerprint(["AAA"])
+    write_record(host, "nvidia", NullMoth="v3.0")
+    rec = json.loads((host.state / "109.json").read_text())
+    rec["fingerprint"] = fp
+    (host.state / "109.json").write_text(json.dumps(rec))
+    assert json.loads(host.run("driver_installed 109 nvidia yes\n").stdout) == {"NullMoth": "v3.0"}
+    uuids.write_text("/dev/pve/vm-9-disk-1 ZZZ\n")                              # a rollback made a new volume
+    assert json.loads(host.run("driver_installed 109 nvidia yes\n").stdout) == {}
+
+
+@needs_bash4
+def test_bash_status_while_an_update_runs_says_updating_with_the_step(host):
+    write_record(host, "nvidia", NullMoth="v2.8.1")
+    steps = [{"id": i, "title": t, "done": d, "state": st} for (i, t), (_i, d), st in zip(
+        engine.step_titles("nvidia", "NullMoth v2.9"), engine.step_titles("nvidia", "NullMoth v2.9", done=True),
+        ["done", "done", "active", "pending", "pending", "pending", "pending"])]
+    engine.write_update(109, {"kind": "nvidia", "phase": "running", "steps": steps}, str(host.state))
+    out = host.run(HOLD_LOCK + STUB_NULLMOTH + "driver_status_command 109; rc=$?; kill $holder; exit $rc\n").stdout
+    assert "Updating: the driver is being updated now (step 3 of 7: Take the card off)." in out
+    assert "Installed" not in out and "Latest" not in out and "Up to date" not in out
+    data = json.loads(host.run(HOLD_LOCK + STUB_NULLMOTH + "driver_status_command 109 --json; rc=$?; kill $holder; exit $rc\n").stdout)
+    assert data["updating"] is True and data["step"] == "3 of 7: Take the card off"
+
+
+@needs_bash4
+def test_a_bash_amd_update_names_the_versions_it_replaced_and_the_one_it_kept(host):
+    write_record(host, "amd", Lilu="1.7.9", WhateverGreen="1.6.0")
+    zips = {}
+    for name in ("Lilu", "WhateverGreen"):
+        path = host.cache / f"{name}.zip"
+        path.write_bytes(name.encode())
+        zips[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    snippet = ('OC_COMPONENT_URLS=([Lilu]="https://x/releases/download/1.7.2/Lilu.zip" [WhateverGreen]="https://x/releases/download/1.7.0/WhateverGreen.zip")\n'
+               f'OC_COMPONENT_SHA256=([Lilu]="{zips["Lilu"]}" [WhateverGreen]="{zips["WhateverGreen"]}")\n'
+               'driver_oc_kext() { echo "oc_kext $*" >> "$QM_DIR/oc.log"; }\nDRIVER_VERSION_TEXT="1.7.2, 1.7.0"\ncfg=$(qm config 109)\n'
+               'DRIVER_INSTALLED=\'{"Lilu": "1.7.9", "WhateverGreen": "1.6.0"}\'\n'
+               f'driver_target amd "" "" ""\ndriver_apply 109 amd "$cfg" sequoia {SNAP} yes "" no macos-sequoia\n')
+    out = host.run(snippet).stdout
+    assert "OK: Replaced WhateverGreen 1.7.0. Lilu 1.7.9 is newer than the pin and was kept" in out     # the Python twin's line
+    rec = engine.read_record(109, str(host.state))
+    assert rec["latest"] == {"Lilu": "1.7.2", "WhateverGreen": "1.7.0"} and "fingerprint" not in rec      # no LV: nothing to tell

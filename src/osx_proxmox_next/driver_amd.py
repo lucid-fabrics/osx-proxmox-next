@@ -42,5 +42,5 @@ def run(u: Updater) -> None:
     if u.begin("start"):
         u.start()
         u.end("start")
-    u.result.detail = ("the kexts that were behind are now the pinned versions" if u.result.kept
-                       else "the kexts on the OpenCore disk are the pinned versions")
+    u.result.detail = ("The kexts that were behind are now the pinned versions" if u.result.kept
+                       else "The kexts on the OpenCore disk are the pinned versions")

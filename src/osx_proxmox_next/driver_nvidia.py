@@ -71,7 +71,8 @@ def run(u: Updater) -> None:
     if u.begin("stage"):
         u.need_stopped()          # a resumed run goes on from here: the Mac stopped and the card off, whatever the rows say
         u.need_card_off()
-        job = StageJob(vmid, pve, env.console, storage, u.say, env.clock, env.sleep)
+        job = StageJob(vmid, pve, env.console, storage, lambda m: u.say(m.replace("graphics package", "NullMoth driver")),
+                       env.clock, env.sleep)
         try:
             payload_ref = _stage(u, job, payload, recovery)
         except FinishError as exc:

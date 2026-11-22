@@ -121,7 +121,7 @@ def test_an_nvidia_update_runs_every_step_and_records_the_new_version(tmp_path, 
     plan.snapshot_ok = True
     plan.older_snapshots = [OLD_SNAP]
     pve.bash_output = ['{"AMFIPass.kext": "1.4.1"}']
-    res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
+    res = driver_run.run_update(plan, env_for(pve, rec, tmp_path, ask_first_boot=True))
     assert res.ok and res.snapshot == NEW_SNAP and "a note" in res.notes
     assert [s for s in rec.steps if s[1] == "done"] == [(i, "done") for i in ("stop", "snapshot", "takeoff", "stage", "putback", "start", "verify")]
     calls = calls_after_snapshot(pve)
@@ -250,7 +250,7 @@ def test_without_snapshot_support_the_phrase_is_needed(tmp_path, stubs, rec):
     with pytest.raises(DriverError, match="no snapshot"):
         driver_run.run_update(plan, env_for(pve, rec, tmp_path))
     assert not pve.calls                                               # refused before anything happened
-    res = driver_run.run_update(plan, env_for(pve, rec, tmp_path, no_snapshot=True))
+    res = driver_run.run_update(plan, env_for(pve, rec, tmp_path, no_snapshot=True, ask_first_boot=True))
     assert res.ok and res.snapshot == "" and not pve.calls_of("snapshot")
     assert any("Going on without a snapshot" in e for e in engine.read_update(9)["events"])
 
@@ -525,7 +525,7 @@ def test_an_interrupted_update_is_finished_from_where_the_card_came_off(tmp_path
     engine.lock_path(9).write_text("999999999\n")                      # its process is gone: nobody holds the flock
     cut_off = mac(hostpci0=None, vga="std", boot="order=sata1;virtio0;ide0", sata1="local-lvm:vm-9-disk-20,media=disk", sata2="local-lvm:vm-9-disk-21,media=disk")
     pve = DPve(cfg=cut_off, snapshots=[NEW_SNAP], bash_output=['{"AMFIPass.kext": "%s"}' % driver_nvidia.AMFIPASS.version])
-    res = driver_run.finish_interrupted(9, env_for(pve, rec, tmp_path, ))
+    res = driver_run.finish_interrupted(9, env_for(pve, rec, tmp_path, ask_first_boot=True))
     assert res.ok, res.error
     assert pve.calls_of("snapshot") == [] and ("set", "9", "--delete", "hostpci0") not in pve.calls   # snapshot and take-off are not repeated
     assert ("set", "9", "--delete", "sata1") in pve.calls and ("set", "9", "--delete", "sata2") in pve.calls   # leftovers of the cut-off run
@@ -589,3 +589,25 @@ def test_a_start_that_fails_fails_the_amd_update(tmp_path, amd_zips, rec):
     plan = plan_for("amd", pve)
     plan.target = amd_target()
     assert "Could not start VM 9: no memory" in driver_run.run_update(plan, env_for(pve, rec, tmp_path)).error
+
+
+def test_a_command_line_update_clears_its_state_and_a_tui_update_keeps_it_for_the_first_boot_question(tmp_path, stubs, rec):
+    pve = DPve(status="running", snapshots=[OLD_SNAP], bash_output=['{"AMFIPass.kext": "1.4.1"}'])
+    plan = plan_for("nvidia", pve, nv_target().components, {"NullMoth": "v2.8.1"})
+    plan.target, plan.snapshot_ok = nv_target(), True
+    assert driver_run.run_update(plan, env_for(pve, rec, tmp_path)).ok
+    assert engine.read_update(9) == {}                            # nothing waits for an answer: no question later
+    assert engine.read_record(9)["components"][0]["version"] == "v2.9"
+    pve2 = DPve(status="running", snapshots=[OLD_SNAP], bash_output=['{"AMFIPass.kext": "1.4.1"}'])
+    plan2 = plan_for("nvidia", pve2, nv_target().components, {"NullMoth": "v2.8.1"})
+    plan2.target, plan2.snapshot_ok = nv_target(), True
+    assert driver_run.run_update(plan2, env_for(pve2, rec, tmp_path, ask_first_boot=True)).ok
+    assert engine.read_update(9)["phase"] == "done"              # the screen that started it asks, and clears it when answered
+
+
+def test_the_run_uses_the_snapshot_name_of_its_plan(tmp_path, stubs, rec):
+    pve = DPve(status="stopped", bash_output=['{"AMFIPass.kext": "1.4.1"}'])
+    plan = plan_for("nvidia", pve, nv_target().components)
+    plan.target, plan.snapshot_ok, plan.snapshot = nv_target(), True, "osx-next-driver-20200102-030405"
+    assert driver_run.run_update(plan, env_for(pve, rec, tmp_path)).snapshot == "osx-next-driver-20200102-030405"
+    assert pve.snapshots == ["osx-next-driver-20200102-030405"]

@@ -51,7 +51,7 @@ def bash_runs(pve):
 
 
 def finish(pve, rec, tmp_path):
-    return driver_run.finish_interrupted(9, env_for(pve, rec, tmp_path))
+    return driver_run.finish_interrupted(9, env_for(pve, rec, tmp_path, ask_first_boot=True))
 
 
 # ── B1: Finish looks at the Mac again ────────────────────────────────
@@ -185,12 +185,12 @@ def test_an_amd_update_replaces_only_the_kext_that_is_behind(tmp_path, amd_zips,
     pve = DPve(bash_output="VERSION 1.7.0\n", snapshots=[OLD_SNAP])
     plan = plan_for("amd", pve, installed={"Lilu": "1.7.9", "WhateverGreen": "1.6.9"})   # Lilu is newer than the pin
     plan.target = amd_target()
-    res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
+    res = driver_run.run_update(plan, env_for(pve, rec, tmp_path, ask_first_boot=True))
     assert res.ok, res.error
     script = [r for r in pve.runs if r[0] == "bash"][0][2]
     assert "replace WhateverGreen.kext" in script and "replace Lilu.kext" not in script
     assert {c["name"]: c["version"] for c in engine.read_record(9)["components"]} == {"Lilu": "1.7.9", "WhateverGreen": "1.7.0"}
-    assert "the kexts that were behind" in res.detail and "Lilu 1.7.9 is newer than the pin" in " ".join(engine.read_update(9)["events"])
+    assert "The kexts that were behind" in res.detail and "Lilu 1.7.9 is newer than the pin" in " ".join(engine.read_update(9)["events"])
     assert any(line.startswith("  Lilu: 1.7.9 is newer than 1.7.2, kept") for line in plan.lines())
 
 

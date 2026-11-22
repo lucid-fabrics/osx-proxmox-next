@@ -88,7 +88,7 @@ def test_a_dry_run_prints_the_plan_and_changes_nothing(host, capsys):
     assert run("driver-update", "--vmid", "109", "--dry-run") == 0
     out = capsys.readouterr().out
     assert "Update the NVIDIA driver of macos-sequoia (VM 109)" in out and "  NullMoth: v2.8.1 to v2.9" in out
-    assert "  4. Stage NullMoth v2.9" in out and "DRY RUN - nothing is changed." in out and host["ran"] == []
+    assert "  3. Stage NullMoth v2.9" in out and "Stop the Mac" not in out and "DRY RUN - nothing is changed." in out and host["ran"] == []
     assert run("driver-update", "--vmid", "109", "--dry-run", "--version", "v2.8.2") == 0
     assert "NullMoth: v2.8.1 to v2.8.2" in capsys.readouterr().out
 
@@ -233,10 +233,37 @@ def test_the_detached_spawn_passes_only_checked_tags(tmp_path, monkeypatch):
     path = driver_spawn.spawn_update(109, Choice("v2.8.1", "", "", "sequoia"), finish=True, accept_risk=True, no_snapshot=True,
                                      popen=lambda argv, **kw: seen.update(argv=argv, kw=kw))
     assert path.endswith("d109.log")
-    assert seen["argv"][7:] == ["--version", "v2.8.1", "--macos", "sequoia", "--finish", "--accept-nullmoth-risk", "--no-snapshot", "--reinstall"]
+    assert seen["argv"][7:] == ["--ask-first-boot", "--version", "v2.8.1", "--macos", "sequoia", "--finish", "--accept-nullmoth-risk",
+                                "--no-snapshot", "--reinstall"]
     assert seen["argv"][3:7] == ["driver-update", "--vmid", "109", "--yes"] and seen["kw"]["start_new_session"] is True
     with pytest.raises(ValueError):
         driver_spawn.spawn_update(109, Choice("v2.9; rm -rf /"), popen=lambda *a, **k: None)
+
+
+def test_the_detached_spawn_uses_the_snapshot_name_the_screen_showed(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(driver_spawn, "log_path", lambda vmid: str(tmp_path / f"d{vmid}.log"))
+    driver_spawn.spawn_update(109, Choice(), snapshot=NEW_SNAP, popen=lambda argv, **kw: seen.update(argv=argv))
+    assert seen["argv"][seen["argv"].index("--snapshot-name") + 1] == NEW_SNAP
+    with pytest.raises(ValueError):          # the name becomes an argument of qm: only this tool's own names pass
+        driver_spawn.spawn_update(109, Choice(), snapshot="base; rm -rf /", popen=lambda *a, **k: None)
+
+
+def test_the_run_takes_the_snapshot_name_it_was_given_not_a_new_one(host, capsys):
+    assert run("driver-update", "--vmid", "109", "--yes", "--accept-nullmoth-risk", "--snapshot-name", "osx-next-driver-20200101-000000") == 0
+    plan, _env = host["ran"][0]
+    assert plan.snapshot == "osx-next-driver-20200101-000000"
+    assert run("driver-update", "--vmid", "109", "--yes", "--accept-nullmoth-risk", "--snapshot-name", "x; y") == 0
+    assert host["ran"][1][0].snapshot.startswith("osx-next-driver-") and host["ran"][1][0].snapshot != "x; y"   # a bad name is ignored
+
+
+def test_a_command_line_run_clears_its_state_and_a_tui_run_keeps_it_for_the_first_boot_question():
+    from osx_proxmox_next.driver_core import RunEnv
+    assert RunEnv(None).ask_first_boot is False
+    args = driver_cli.argparse.Namespace(vmid=109, iso_dir="", no_snapshot=False)
+    assert driver_cli._env(args, print).ask_first_boot is False
+    args.ask_first_boot = True
+    assert driver_cli._env(args, print).ask_first_boot is True
 
 
 def test_the_log_of_a_detached_update_is_in_var_log():
@@ -265,3 +292,39 @@ def test_the_home_marker_reads_local_files_and_checks_github_once_a_day(monkeypa
     monkeypatch.setattr(driver_check, "latest_known", offline)
     assert driver_check.refresh_if_due([109], now=1000.0 + 90000) is False
     assert driver_check.latest_map()["Lilu"] == "1.7.2"
+
+
+# ── fix wave 2 ───────────────────────────────────────────────────────
+
+def test_status_while_an_update_runs_says_updating_with_the_step_and_no_verdict(host, capsys):
+    from driver_fakes import foreign_lock
+    steps = [{"id": i, "title": t, "done": d, "state": st} for (i, t), (_i, d), st in zip(
+        engine.step_titles("nvidia", "NullMoth v2.9"), engine.step_titles("nvidia", "NullMoth v2.9", done=True),
+        ["done", "done", "active", "pending", "pending", "pending", "pending"])]
+    engine.write_update(109, {"kind": "nvidia", "phase": "running", "steps": steps})
+    held = foreign_lock(engine.lock_path(109))
+    try:
+        assert run("driver-status", "--vmid", "109") == 0
+        out = capsys.readouterr().out
+        assert "Updating: the driver is being updated now (step 3 of 7: Take the card off)." in out
+        assert "REFUSED" not in out and "not known" not in out and "newer driver" not in out and "Up to date" not in out
+        assert run("driver-status", "--vmid", "109", "--json") == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["updating"] is True and data["step"] == "3 of 7: Take the card off"
+    finally:
+        held.close()
+    assert run("driver-status", "--vmid", "109", "--json") in (0, 2)
+    assert json.loads(capsys.readouterr().out)["updating"] is False          # nobody runs it now
+
+
+def test_a_finished_run_says_done_with_a_capital(host, capsys):
+    host["result"] = RunResult(True, detail="the kexts on the OpenCore disk are the pinned versions", snapshot=NEW_SNAP)
+    assert run("driver-update", "--vmid", "109", "--yes", "--accept-nullmoth-risk") == 0
+    assert "Done. The kexts on the OpenCore disk are the pinned versions." in capsys.readouterr().out
+
+
+def test_the_home_marker_stays_after_an_undo_before_any_check_ran():
+    engine.write_record(109, "nvidia", comps(NullMoth="v2.8.1"), latest={"NullMoth": "v2.9"})     # what the update knew as newest
+    assert driver_check.has_update(109)
+    engine.write_record(109, "nvidia", comps(NullMoth="v2.9"), latest={"NullMoth": "v2.9"})
+    assert not driver_check.has_update(109)
