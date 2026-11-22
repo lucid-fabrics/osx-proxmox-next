@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .. import arm64
 from ..arm64 import Arm64Config, validate_arm64_config
 from ..defaults import HOST_RAM_RESERVE_MB
 from ..domain import MIN_DISK_GB, MIN_MEMORY_MB, VmConfig, validate_config
@@ -150,6 +151,7 @@ def validate_new_mac(
 _ARM64_ISSUE_ROWS = (
     (r"^VMID", "vmid"), (r"^VM name", "name"), (r"CPU cores", "cores"), (r"RAM", "memory"), (r"GB disk", "disk"),
     (r"^Storage", "storage"), (r"^Bridge", "bridge"), (r"^VLAN", "vlan"),
+    (r"^Source", "macos"),   # no pinned release in this build: the arm64 choice itself cannot be built yet
 )
 
 
@@ -175,6 +177,7 @@ def validate_arm64_new_mac(
     config = Arm64Config(
         vmid=int(vmid), name=state.name.strip(), storage=state.storage.strip(), cores=int(cores),
         memory_mb=int(memory_mb), disk_gb=int(disk), bridge=state.bridge.strip(), vlan=int(vlan or 0),
+        source_ref=arm64.DEFAULT_SOURCE_REF, source_sha256=arm64.DEFAULT_SOURCE_SHA256,   # read now, so a release pin set later is used
     )
     for issue in validate_arm64_config(config):
         for pattern, row in _ARM64_ISSUE_ROWS:

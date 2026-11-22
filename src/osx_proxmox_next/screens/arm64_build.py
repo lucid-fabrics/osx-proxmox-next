@@ -10,7 +10,7 @@ from textual.widgets import RichLog
 
 from ..arm64 import Arm64Config
 from ..arm64_cloudinit import LOG_PATH, STATUS_PATH
-from ..arm64_planner import build_arm64_plan
+from ..arm64_planner import build_arm64_plan, host_key_path
 from ..domain import PlanStep
 from ..executor import StepResult, apply_plan
 from .base import OsxScreen
@@ -66,6 +66,8 @@ class Arm64BuildScreen(OsxScreen):
         if self.ok:
             self._say(f"The runner VM {self.config.vmid} is starting. It builds the beta on its first boot (about 10 minutes).\n"
                       f"Progress: {STATUS_PATH} inside the runner, log: {LOG_PATH}.\n"
+                      f"Log in from this host: ssh -i {host_key_path(self.config.vmid)} snapintosh@<runner address> "
+                      f"(the address is in the VM's Summary page).\n"
                       "The Mac-free install of macOS itself is not in this beta build yet.")
         else:
             self._say("Stopped. Nothing else was changed; fix the cause and run again, or remove the VM with: "

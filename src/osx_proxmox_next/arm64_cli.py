@@ -11,6 +11,8 @@ from .arm64 import (
     DEFAULT_CORES,
     DEFAULT_DISK_GB,
     DEFAULT_MEMORY_MB,
+    DEFAULT_SOURCE_REF,
+    DEFAULT_SOURCE_SHA256,
     DEFAULT_SOURCE_URL,
     Arm64Config,
     validate_arm64_config,
@@ -36,10 +38,14 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
         cmd.add_argument("--bridge", default="vmbr0")
         cmd.add_argument("--vlan", type=int, default=0)
         cmd.add_argument("--cpuunits", type=int, default=0, help="CPU weight (0 = Proxmox default)")
-        cmd.add_argument("--ssh-key-file", default="", help="Public key file for the runner's login")
+        cmd.add_argument("--ssh-key-file", default="",
+                         help="Public key file for the runner's login (default: a key is made on this host, see /root/.ssh)")
         cmd.add_argument("--gpu-pci", default="", help="Pass this free host GPU to the runner (default off)")
         cmd.add_argument("--source-url", default=DEFAULT_SOURCE_URL, help="Archive of this repository ({ref} is replaced)")
-        cmd.add_argument("--source-ref", default="main", help="Branch, tag or commit the runner builds from")
+        cmd.add_argument("--source-ref", default=DEFAULT_SOURCE_REF, help="Release tag or full commit id the runner builds from")
+        cmd.add_argument("--source-sha256", default=DEFAULT_SOURCE_SHA256, help="sha256 of the archive at the ref (the runner refuses any other)")
+        cmd.add_argument("--renderer-url", default="", help="Renderer tarball to build from instead of the release one (with --renderer-sha256)")
+        cmd.add_argument("--renderer-sha256", default="")
         if name == "plan":
             cmd.add_argument("--json", action="store_true", help="Print the plan as JSON")
         else:
@@ -57,6 +63,7 @@ def _config(args: argparse.Namespace) -> Arm64Config:
         vmid=args.vmid, name=args.name, storage=args.storage, cores=args.cores, memory_mb=args.memory,
         disk_gb=args.disk, bridge=args.bridge, vlan=args.vlan, cpu_units=args.cpuunits, ssh_public_key=key,
         gpu_pci=args.gpu_pci, source_url=args.source_url, source_ref=args.source_ref,
+        source_sha256=args.source_sha256, renderer_url=args.renderer_url, renderer_sha256=args.renderer_sha256,
     )
 
 

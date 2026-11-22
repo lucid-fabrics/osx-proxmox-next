@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import tui_fakes as F
+import pytest
+from arm64_fakes import pin_release
 from osx_proxmox_next.app import NextApp
 from osx_proxmox_next.executor import ApplyResult, StepResult
 from osx_proxmox_next.models.wizard_state import NewMacState, validate_arm64_new_mac
@@ -12,6 +14,11 @@ from osx_proxmox_next.screens.new_mac import NewMacScreen
 from osx_proxmox_next.widgets.rows import ChoiceRow, ExpandRow, FieldRow
 
 SIZE = (100, 30)
+
+
+@pytest.fixture(autouse=True)
+def _pinned(monkeypatch):
+    pin_release(monkeypatch)
 
 
 def presets():
@@ -137,7 +144,7 @@ async def test_enter_creates_the_runner_through_its_own_build_screen(monkeypatch
         assert execute is True and steps[3].argv[:5] == ["qm", "create", "105", "--name", "macos-arm64"]
         assert build.ok and build.crumb() == "macos-arm64"
         log = "\n".join(line.text for line in build.query_one("#arm64-log").lines)
-        assert "[4/9] Create the runner VM" in log and "starts" not in log
+        assert "[4/10] Create the runner VM" in log and "starts" not in log
         assert "is starting" in log and "not in this beta build yet" in log
         await pilot.press("escape")
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen))
@@ -146,7 +153,7 @@ async def test_enter_creates_the_runner_through_its_own_build_screen(monkeypatch
 def build_screen_after(monkeypatch, apply):
     from osx_proxmox_next.arm64 import Arm64Config
     monkeypatch.setattr("osx_proxmox_next.screens.arm64_build.apply_plan", apply)
-    return Arm64BuildScreen(Arm64Config(vmid=478, name="macos27-runner", storage="sn850x"))
+    return Arm64BuildScreen(Arm64Config(vmid=478, name="macos27-runner", storage="sn850x", source_ref="v0.9.0", source_sha256="a" * 64))
 
 
 @F.tui
@@ -186,3 +193,10 @@ def test_blank_and_non_ascii_digits_are_errors_not_crashes():
     assert config is None and "vmid" in errors
     errors, config = validate_arm64_new_mac(state(vlan="  "), presets())
     assert errors == {} and config.vlan == 0
+
+
+def test_a_build_without_a_pinned_release_marks_the_arm64_choice(monkeypatch):
+    monkeypatch.setattr("osx_proxmox_next.arm64.DEFAULT_SOURCE_REF", "")
+    monkeypatch.setattr("osx_proxmox_next.arm64.DEFAULT_SOURCE_SHA256", "")
+    errors, config = validate_arm64_new_mac(state(), presets())
+    assert config is None and list(errors) == ["macos"] and "no pinned release" in errors["macos"]

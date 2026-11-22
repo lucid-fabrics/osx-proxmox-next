@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from arm64_fakes import pin_release
 from osx_proxmox_next import arm64_cli
 from osx_proxmox_next.cli import build_parser, run_cli
 from osx_proxmox_next.executor import ApplyResult, StepResult
@@ -16,6 +17,7 @@ KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc runner@host"
 @pytest.fixture(autouse=True)
 def _private_cwd(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)    # a dry run writes its log under ./generated
+    pin_release(monkeypatch)
 
 
 def test_the_command_is_registered():
@@ -59,7 +61,7 @@ def test_apply_execute_runs_the_plan_and_reports_the_first_failure(monkeypatch, 
     assert run_cli(["arm64", "apply", "--vmid", "478", "--name", "macos27-runner", "--storage", "sn850x",
                     "--execute"]) == 1
     out = capsys.readouterr().out
-    assert seen == [(9, True)] and "FAIL Create the runner VM\nstorage is full" in out
+    assert seen == [(10, True)] and "FAIL Create the runner VM\nstorage is full" in out
 
 
 def test_the_ssh_key_file_is_read_into_the_plan(tmp_path, capsys):
@@ -94,3 +96,38 @@ def test_uninstall_dry_run_lists_the_destroy_steps(capsys, tmp_path):
 def test_uninstall_refuses_an_out_of_range_vmid(capsys):
     assert run_cli(["arm64", "uninstall", "--vmid", "5"]) == 2
     assert "VMID must be between" in capsys.readouterr().out
+
+
+def test_a_build_without_a_pinned_release_asks_for_the_ref_and_checksum(capsys, monkeypatch):
+    monkeypatch.setattr(arm64_cli, "DEFAULT_SOURCE_REF", "")
+    monkeypatch.setattr(arm64_cli, "DEFAULT_SOURCE_SHA256", "")
+    assert run_cli(BASE) == 2
+    out = capsys.readouterr().out
+    assert "ERROR: Source ref" in out and "ERROR: Source sha256" in out and "--source-ref" in out
+
+
+def test_a_branch_is_refused_as_the_source_ref(capsys):
+    assert run_cli([*BASE, "--source-ref", "main"]) == 2
+    assert "not a branch" in capsys.readouterr().out
+
+
+def test_the_source_pin_and_a_local_renderer_reach_the_setup_script(capsys):
+    from arm64_fakes import RENDERER_SHA
+    ref, sha = "c" * 40, "d" * 64
+    argv = [*BASE, "--json", "--source-ref", ref, "--source-sha256", sha, "--source-url", "http://192.168.1.50:8000/{ref}.tar.gz",
+            "--renderer-url", "http://192.168.1.50:8000/r.tar.gz", "--renderer-sha256", RENDERER_SHA]
+    assert run_cli(argv) == 0
+    steps = json.loads(capsys.readouterr().out)
+    script = next(s for s in steps if s["title"] == "Write the cloud-init file")["argv"][4]
+    assert f"http://192.168.1.50:8000/{ref}.tar.gz" in script and sha in script and f"RENDERER_SHA256={RENDERER_SHA}" in script
+
+
+def test_a_renderer_url_without_its_checksum_is_refused(capsys):
+    assert run_cli([*BASE, "--renderer-url", "https://example.com/r.tar.gz"]) == 2
+    assert "together" in capsys.readouterr().out
+
+
+def test_every_plan_gives_the_runner_a_login_key(capsys):
+    assert run_cli([*BASE, "--json"]) == 0
+    titles = [s["title"] for s in json.loads(capsys.readouterr().out)]
+    assert "Make the runner's SSH key" in titles

@@ -9,7 +9,7 @@ The wizard offers a second kind of Mac next to the OpenCore ones: **macOS 27 arm
 
 ## How it works
 
-The wizard creates one normal Proxmox VM, the **runner**: a Debian 13 x86-64 cloud image that you can see and manage in the Proxmox UI. On its first boot the runner downloads the `arm64/` folder of this repository, builds our QEMU, the renderer and the boot firmware inside itself, and runs the macOS guest there. Nothing is installed on the Proxmox host itself. Destroying the VM removes everything.
+The wizard creates one normal Proxmox VM, the **runner**: a Debian 13 x86-64 cloud image that you can see and manage in the Proxmox UI. On its first boot the runner downloads the `arm64/` folder of this repository at a pinned release tag or commit and refuses the download unless its sha256 matches, fetches the renderer sources as one more checksummed tarball (a release asset of this project), builds our QEMU, the renderer and the boot firmware inside itself, and runs the macOS guest there. Nothing is installed on the Proxmox host itself. Destroying the VM removes everything.
 
 ```
 Proxmox host
@@ -19,6 +19,8 @@ Proxmox host
 ```
 
 Graphics run on lavapipe (software Vulkan) by default. If the host has a spare GPU you can pass it to the runner (CLI option `--gpu-pci`, off by default).
+
+Every runner gets a login: the wizard makes an ed25519 key on the Proxmox host (`/root/.ssh/osx-next-arm64-<vmid>`, mode 600) or uses the public key you pass with `--ssh-key-file`. Log in with `ssh -i /root/.ssh/osx-next-arm64-<vmid> snapintosh@<runner address>`. `arm64 uninstall` removes the key with the VM, and only acts on a VM that carries the `osx-next-arm64` tag the wizard puts on its runners.
 
 ## What it needs
 
@@ -64,6 +66,8 @@ osx-next-cli arm64 uninstall --vmid 478 --execute
 ```
 
 Useful options: `--cores`, `--memory`, `--disk`, `--bridge`, `--vlan`, `--cpuunits`, `--ssh-key-file`, `--gpu-pci`.
+
+The source the runner builds from is pinned: `--source-ref` takes a release tag (`v1.2`) or a full commit id (never a branch) and `--source-sha256` the checksum of its archive. A release build carries both as defaults. `--source-url` (with `{ref}`) and `--renderer-url` with `--renderer-sha256` point the runner at your own copies, for example on a local web server.
 
 ## Licenses
 

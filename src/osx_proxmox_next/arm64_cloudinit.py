@@ -31,7 +31,11 @@ as_user() {{ runuser -l {user} -c "$*"; }}
 
 say fetching-source
 mkdir -p {install}
-curl -fL --retry 3 {url} | tar -xz -C {install} --strip-components=2 --wildcards '*/arm64/*'
+archive=$(mktemp)
+curl -fL -sS --retry 3 -o "$archive" {url}
+echo {sha}"  $archive" | sha256sum -c - || {{ echo "the source archive does not match its checksum, nothing was unpacked" >&2; exit 1; }}
+tar -xzf "$archive" -C {install} --strip-components=2 --wildcards '*/arm64/*'
+rm -f "$archive"
 chown -R {user}:{user} {install}
 
 say installing-packages
@@ -43,7 +47,7 @@ apt-get install -y --no-install-recommends $packages
 as_user 'command -v rustup >/dev/null || {{ set -o pipefail; curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal; }}'
 
 say building
-as_user {snap} build -j "$(nproc)"
+as_user {envs}{snap} build -j "$(nproc)"
 as_user {snap} build --only mesa
 
 say installing-macos
@@ -57,9 +61,17 @@ esac
 """
 
 
+def _renderer_env(config: Arm64Config) -> str:
+    """`env RENDERER_URL=... RENDERER_SHA256=... ` when the build reads the renderer from somewhere else, else nothing."""
+    if not config.renderer_url:
+        return ""
+    return f"env {quote('RENDERER_URL=' + config.renderer_url)} {quote('RENDERER_SHA256=' + config.renderer_sha256)} "
+
+
 def render_setup_script(config: Arm64Config) -> str:
     return _SETUP.format(status=quote(STATUS_PATH), log=quote(LOG_PATH), install=quote(INSTALL_DIR),
-                         url=quote(config.archive_url), user=RUNNER_USER,
+                         url=quote(config.archive_url), sha=quote(config.source_sha256), user=RUNNER_USER,
+                         envs=_renderer_env(config),
                          snap=quote(f"{INSTALL_DIR}/snapintosh"))
 
 

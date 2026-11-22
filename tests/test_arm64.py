@@ -5,11 +5,12 @@ import dataclasses
 
 import pytest
 
+from arm64_fakes import REF, RENDERER_SHA, SHA
 from osx_proxmox_next.arm64 import DEFAULT_SOURCE_URL, Arm64Config, validate_arm64_config
 
 
 def good(**kw) -> Arm64Config:
-    base = dict(vmid=478, name="macos27-runner", storage="local-lvm")
+    base = dict(vmid=478, name="macos27-runner", storage="local-lvm", source_ref=REF, source_sha256=SHA)
     base.update(kw)
     return Arm64Config(**base)
 
@@ -22,8 +23,8 @@ def test_the_defaults_are_valid_and_sized_for_the_beta():
 
 
 def test_the_archive_url_names_the_ref():
-    assert good(source_ref="feat/arm64-macos27-beta").archive_url == (
-        "https://github.com/lucid-fabrics/osx-proxmox-next/archive/feat/arm64-macos27-beta.tar.gz")
+    assert good(source_ref="v0.9.1").archive_url == (
+        "https://github.com/lucid-fabrics/osx-proxmox-next/archive/v0.9.1.tar.gz")
     assert "{ref}" in DEFAULT_SOURCE_URL
 
 
@@ -40,11 +41,19 @@ def test_the_archive_url_names_the_ref():
     (dict(ssh_public_key="not a key"), "SSH public key"),
     (dict(ssh_public_key="ssh-ed25519 AAAA $(id)"), "SSH public key"),
     (dict(gpu_pci="03:00"), "GPU address"), (dict(gpu_pci="0000:03:00.0,x-vga=1"), "GPU address"),
-    (dict(source_url="http://example.com/{ref}.tar.gz"), "Source URL"),
+    (dict(source_url="ftp://example.com/{ref}.tar.gz"), "Source URL"),
     (dict(source_url="https://example.com/a b/{ref}"), "Source URL"),
     (dict(source_url="https://example.com/$(id)"), "Source URL"),
     (dict(source_ref=""), "Source ref"), (dict(source_ref="a..b"), "Source ref"),
     (dict(source_ref="main; id"), "Source ref"), (dict(source_ref="-x"), "Source ref"),
+    (dict(source_ref="main"), "not a branch"), (dict(source_ref="feat/arm64-macos27-beta"), "not a branch"),
+    (dict(source_ref="a1b2c3d4"), "not a branch"), (dict(source_ref="A" * 40), "not a branch"),
+    (dict(source_sha256=""), "Source sha256"), (dict(source_sha256="a" * 63), "Source sha256"),
+    (dict(source_sha256="G" * 64), "Source sha256"),
+    (dict(renderer_url="https://example.com/r.tar.gz"), "together"),
+    (dict(renderer_sha256="b" * 64), "together"),
+    (dict(renderer_url="https://example.com/r;id", renderer_sha256="b" * 64), "Renderer URL"),
+    (dict(renderer_url="https://example.com/r.tar.gz", renderer_sha256="xyz"), "Renderer sha256"),
 ])
 def test_each_bad_value_is_refused(change, needle):
     issues = validate_arm64_config(good(**change))
@@ -54,11 +63,21 @@ def test_each_bad_value_is_refused(change, needle):
 @pytest.mark.parametrize("change", [
     dict(vlan=100), dict(cpu_units=100), dict(gpu_pci="0000:03:00.0"), dict(gpu_pci="03:00.0"),
     dict(ssh_public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc user@host"),
-    dict(ssh_public_key="ecdsa-sha2-nistp256 AAAAE2VjZHNh=="), dict(source_ref="a1b2c3d4"),
+    dict(ssh_public_key="ecdsa-sha2-nistp256 AAAAE2VjZHNh=="), dict(source_ref="a" * 40), dict(source_ref="v1.2"),
+    dict(source_url="http://192.168.1.50:8000/{ref}.tar.gz"),
+    dict(renderer_url="file:///srv/r/arm64-renderer-1.tar.gz", renderer_sha256="b" * 64),
+    dict(renderer_url="https://example.com/r.tar.gz", renderer_sha256="b" * 64),
     dict(source_url="https://example.com:8443/archive/{ref}.tar.gz"),
 ])
 def test_good_optional_values_pass(change):
     assert validate_arm64_config(good(**change)) == []
+
+
+def test_the_defaults_name_no_branch_and_a_checksum_is_mandatory():
+    from osx_proxmox_next.arm64 import DEFAULT_SOURCE_REF, DEFAULT_SOURCE_SHA256
+    assert DEFAULT_SOURCE_REF not in ("main", "master", "HEAD")
+    assert validate_arm64_config(Arm64Config(vmid=478, name="macos27-runner", storage="local-lvm")), "an unpinned config must be refused"
+    assert not DEFAULT_SOURCE_SHA256 or len(DEFAULT_SOURCE_SHA256) == 64
 
 
 def test_the_config_is_a_plain_dataclass():
