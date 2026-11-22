@@ -116,13 +116,21 @@ def test_bash_undo_removes_the_disks_the_update_added_that_a_manual_rollback_kep
 
 
 @needs_bash4
-def test_bash_records_each_disk_the_staging_imports_while_an_update_runs(host):
-    (host.state).mkdir(parents=True, exist_ok=True)
+def test_bash_records_each_disk_the_staging_imports_only_while_a_driver_run_holds_the_lock(host):
+    host.state.mkdir(parents=True, exist_ok=True)
     engine.write_update(109, {"kind": "intel", "steps": []}, str(host.state))
-    out = host.run('qm() { if [ "$1" == importdisk ] || [ "$1" == disk ]; then echo "successfully imported disk \'local-lvm:vm-109-disk-5\'"; fi; }\n'
-                   'DRIVER_VMID=109\nigpu_import_disk 109 /x.img local-lvm\nDRIVER_VMID=\nigpu_import_disk 109 /y.img local-lvm\n').stdout
+    imports = ('qm() { if [ "$1" == importdisk ] || [ "$1" == disk ]; then echo "successfully imported disk \'local-lvm:vm-109-disk-5\'"; fi; }\n')
+    out = host.run(imports + 'DRIVER_VMID=109\ndriver_lock_acquire 109\nigpu_import_disk 109 /x.img local-lvm\ndriver_lock_release 109\n'
+                   'engine_after=$(driver_engine update-get 109 disks)\nigpu_import_disk 109 /y.img local-lvm\n').stdout
     assert out.split() == ["local-lvm:vm-109-disk-5"] * 2
-    assert engine.read_update(109, str(host.state))["disks"] == ["local-lvm:vm-109-disk-5"]      # only the run's own import counts
+    assert engine.read_update(109, str(host.state))["disks"] == ["local-lvm:vm-109-disk-5"]      # the import after the run is not recorded
+
+
+@needs_bash4
+def test_a_card_setup_after_a_driver_run_in_the_same_shell_leaves_no_state_of_a_stopped_update(host):
+    imports = ('qm() { if [ "$1" == importdisk ] || [ "$1" == disk ]; then echo "successfully imported disk \'local-lvm:vm-109-disk-5\'"; fi; }\n')
+    host.run(imports + 'DRIVER_VMID=109\ndriver_lock_acquire 109\ndriver_lock_release 109\nigpu_import_disk 109 /y.img local-lvm >/dev/null\n')
+    assert not (host.state / "109.update.json").exists() and engine.unfinished(109, str(host.state)) == {}
 
 
 @needs_bash4
@@ -154,10 +162,10 @@ def test_bash_reading_the_opencore_disk_of_a_running_mac_refuses_and_leaves_no_m
 
 @needs_bash4
 def test_bash_first_boot_text_is_the_python_text(host):
-    for result, waited, idle, stopped in (("staged", 700, 650, "yes"), ("", 1500, 30, "no"), ("failed: installer error (try 1 of 3)", 100, 0, "no"),
-                                          ("not installed: WhateverXe not loaded (try 1 of 3)", 100, 0, "no")):
-        out = host.run(f'driver_engine first-boot-text "{result}" {waited} {idle} {stopped}\n').stdout.strip()
-        assert out == engine.first_boot_text(result, waited, idle, stopped == "yes")
+    for result, waited, idle in (("staged", 700, 650), ("", 1500, 30), ("failed: installer error (try 1 of 3)", 100, 0),
+                                 ("not installed: WhateverXe not loaded (try 1 of 3)", 100, 0)):
+        out = host.run(f'driver_engine first-boot-text "{result}" {waited} {idle}\n').stdout.strip()
+        assert out == engine.first_boot_text(result, waited, idle)
 
 
 @needs_bash4
@@ -181,3 +189,18 @@ def test_bash_watch_ends_at_once_when_the_mac_powers_itself_off(host):
     (host.qm_dir / "status").write_text("stopped\n")
     out = host.run("IGPU_FIRSTBOOT_TIMEOUT=60 DRIVER_POLL=1\ndriver_watch_first_boot 109 ref no; echo \"rc=$? stuck=$DRIVER_STUCK\"\n").stdout
     assert "rc=0 stuck=no" in out
+
+
+@needs_bash4
+def test_bash_forgets_a_disk_it_deleted_and_never_removes_one_by_a_reused_id(host):
+    engine.write_update(109, {"kind": "nvidia", "phase": "failed", "steps": [], "disks": [MINE]}, str(host.state))
+    host.config(sata2=MINE)
+    host.run("DRIVER_VMID=109\ndriver_lock_acquire 109\nigpu_drop_disk 109 sata2\ndriver_lock_release 109\n")
+    assert engine.read_update(109, str(host.state))["disks"] == []
+    host.config(unused1=MINE, unused2=MINE + "0")
+    host.run("driver_drop_unused 109\n")
+    assert f"unused1: {MINE}" in (host.qm_dir / "config").read_text()              # not the run's any more
+    engine.write_update(109, {"kind": "nvidia", "phase": "failed", "steps": [], "disks": [MINE]}, str(host.state))
+    host.run("driver_drop_unused 109\n")
+    cfg = (host.qm_dir / "config").read_text()
+    assert "unused1" not in cfg and f"unused2: {MINE}0" in cfg                      # exact id, not a prefix or a pattern

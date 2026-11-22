@@ -81,8 +81,9 @@ def record_is_true(pve: ProxmoxAdapter, vmid: int, record: dict, cfg: dict[str, 
 
 
 def own_disks(state: dict) -> list[str]:
-    """The volumes a run created, from its own record (the recovery and payload disks): nothing else is ever matched."""
-    return [r for r in dict.fromkeys([*state.get("disks", []), state.get("payload_ref", "")]) if r]
+    """The volumes a run created and still owns, from its own record (the recovery and payload disks, written down when they
+    were imported and forgotten when the tool deleted them): nothing else is ever matched."""
+    return [r for r in dict.fromkeys(state.get("disks", [])) if r]
 
 
 def drop_unused(pve: ProxmoxAdapter, vmid: int, refs: list[str]) -> list[str]:

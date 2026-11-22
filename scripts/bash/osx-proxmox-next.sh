@@ -1882,7 +1882,7 @@ function nullmoth_guest_address() {
 function nullmoth_first_boot() {
   local vmid="$1" parsed state detail kexts display ip note old_trap
   msg_info "First boot with the card: the guest turns on remote access, installs the driver and restarts (about 10 minutes)"
-  { qm status "$vmid" 2>/dev/null | grep -q 'status: running' || { qm start "$vmid" >/dev/null && { [ -z "${DRIVER_VMID:-}" ] || echo "  Started the Mac"; }; }; } || { msg_error "Could not start VM $vmid"; nullmoth_cleanup "$vmid"; return 1; }
+  { qm status "$vmid" 2>/dev/null | grep -q 'status: running' || { qm start "$vmid" >/dev/null && { ! driver_run_active "$vmid" || echo "  Started the Mac"; }; }; } || { msg_error "Could not start VM $vmid"; nullmoth_cleanup "$vmid"; return 1; }
   old_trap=$(trap -p INT TERM)
   # shellcheck disable=SC2064
   trap "nullmoth_cleanup '$vmid'; exit 130" INT TERM
@@ -8234,13 +8234,13 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -8548,11 +8548,11 @@ def finish_facts(kind, snapshot="", undo=""):
 
 # ── the first boot that never reports ────────────────────────────────
 
-def first_boot_text(result, waited, idle, stopped):
+def first_boot_text(result, waited, idle):
     """Why an Intel update's first boot with the card ended without the package installed, in words. *result* is what the
     guest left on the payload disk ('' or 'staged' when it never ran), *waited* the seconds the host waited, *idle* the
-    seconds the Mac's disks did nothing at the end, *stopped* True when the host had to stop the Mac (it did not power
-    off by itself). What was seen first, then what to do."""
+    seconds the Mac's disks did nothing at the end. What was seen first, then what to do (whether the Mac runs is the
+    failure text's to say)."""
     said = (result or "").strip()
     if said and said != "staged":
         return "The graphics package is not installed: %s." % re.sub(r"^not installed: ", "", said)
@@ -8563,7 +8563,7 @@ def first_boot_text(result, waited, idle, stopped):
     return (seen + ". The graphics package needs WhateverXe running: when the iGPU does not start under it, macOS panics in "
             "IntelAccelerator::probe, with or without this update. A kernel console shows it (osx-next-cli igpu-watchdog "
             "<vmid>, then start the Mac). If the Mac does the same after r (undo), the iGPU setup is the cause, not the "
-            "update. The Mac was left %s." % ("stopped" if stopped else "as it is"))
+            "update.")
 
 
 # ── snapshots ────────────────────────────────────────────────────────
@@ -8751,8 +8751,8 @@ def main(argv):
         sys.stdout.write("\n".join(stale_maps(sys.stdin.read(), argv[2:])) + "\n")
     elif cmd == "maps-held" and len(argv) >= 4:
         sys.stdout.write(maps_held_text(argv[2], argv[3:]) + "\n")
-    elif cmd == "first-boot-text" and len(argv) == 6:
-        sys.stdout.write(first_boot_text(argv[2], float(argv[3]), float(argv[4]), argv[5] == "yes") + "\n")
+    elif cmd == "first-boot-text" and len(argv) == 5:
+        sys.stdout.write(first_boot_text(argv[2], float(argv[3]), float(argv[4])) + "\n")
     elif cmd == "snapshot-name":
         sys.stdout.write(snapshot_name() + "\n")
     elif cmd == "snapshot-argv" and len(argv) == 5:
@@ -8776,7 +8776,7 @@ def main(argv):
     elif cmd == "unfinished" and len(argv) == 3:
         _emit(unfinished(argv[2]))
     elif cmd in ("update-init", "update-resume", "update-begin", "update-end", "update-fail", "update-set", "update-clear",
-                 "update-get", "update-add-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
+                 "update-get", "update-add-disk", "update-forget-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
                  "snapshot-date",
                  "newer-than", "all-snapshots"):
         return run_update_command(cmd, argv[2:])
@@ -8826,8 +8826,10 @@ def update_state_command(cmd, args):
     elif cmd == "update-resume":
         reset_for_resume(state)
         state.update(phase="running", error="")
-    elif cmd == "update-add-disk":
-        add_disk(state, args[1])
+    elif cmd in ("update-add-disk", "update-forget-disk"):
+        if not state:                 # no run is going or cut off for this Mac: there is nothing to write a disk into
+            return 0
+        (add_disk if cmd == "update-add-disk" else forget_disk)(state, args[1])
     elif cmd == "update-begin":                   # exit 3: a resumed run finished this step before the point it goes on from
         if not begin_step(state, args[1]):
             return 3
@@ -9060,6 +9062,12 @@ def add_disk(state, ref):
     disks = state.setdefault("disks", [])
     if ref and ref not in disks:
         disks.append(ref)
+
+
+def forget_disk(state, ref):
+    """The tool deleted this volume itself: it is no longer one of the run's disks. A volume id is reused by the next
+    disk Proxmox makes, so an id that stays recorded after its volume is gone could one day name a disk of the user's."""
+    state["disks"] = [r for r in state.get("disks", []) if r != ref]
 
 
 def begin_step(state, sid):
@@ -9964,7 +9972,7 @@ function igpu_import_disk() {
   [ -n "$ref" ] || { echo "$out" >&2; return 1; }
   # a driver update writes down every disk it creates, so a Mac rolled back by hand that keeps one as an unused disk can
   # have exactly that one removed
-  [ "${DRIVER_VMID:-}" != "$vmid" ] || driver_engine update-add-disk "$vmid" "$ref" >/dev/null 2>&1 || true
+  ! driver_run_active "$vmid" || driver_engine update-add-disk "$vmid" "$ref" >/dev/null 2>&1 || true
   echo "$ref"
 }
 
@@ -9979,6 +9987,8 @@ function igpu_drop_disk() {
   qm set "$vmid" --delete "$slot" >/dev/null 2>&1 || true
   key=$(qm config "$vmid" 2>/dev/null | sed -n "s/^\(unused[0-9]*\): ${ref//\//\\/}\(,.*\)\?\$/\1/p" | head -1)
   [ -z "$key" ] || qm set "$vmid" --delete "$key" >/dev/null 2>&1 || true
+  # the volume is gone: a volume id is reused, so it is no longer one of the update's disks
+  ! driver_run_active "$vmid" || driver_engine update-forget-disk "$vmid" "$ref" >/dev/null 2>&1 || true
 }
 
 # 0 once stage.sh left any result on the payload disk or the VM halted, 1 after $3 seconds without. Mirrors igpu_finish._staging_started.
@@ -10179,6 +10189,7 @@ function igpu_drop_disk_ref() {
   local vmid="$1" ref="$2" key
   key=$(qm config "$vmid" 2>/dev/null | sed -n "s/^\(unused[0-9]*\): ${ref//\//\\/}\(,.*\)\?\$/\1/p" | head -1)
   [ -z "$key" ] || qm set "$vmid" --delete "$key" >/dev/null 2>&1 || true
+  ! driver_run_active "$vmid" || driver_engine update-forget-disk "$vmid" "$ref" >/dev/null 2>&1 || true
 }
 
 # The one line shown for a recommended iGPU card. $1 = a GPU_CARDS line. Mirrors GpuCard.detected_line.
@@ -10496,7 +10507,11 @@ function driver_lock_acquire() {
   printf '%s\n%s\n%s\n' "$$" "$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null)" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" >"$f"
 }
 
-function driver_lock_release() { rm -f "$(driver_lock_file "$1")"; exec {DRIVER_LOCK_FD}>&- 2>/dev/null || true; }
+function driver_lock_release() { rm -f "$(driver_lock_file "$1")"; exec {DRIVER_LOCK_FD}>&- 2>/dev/null || true; unset DRIVER_LOCK_FD; }
+
+# 0 while this shell holds the driver lock of a Mac: a driver update or undo is running here. A card setup that runs later in the
+# same shell is not one, and must not write into the state of a driver run or say what a driver run says. $1 vmid
+function driver_run_active() { [ -n "${DRIVER_LOCK_FD:-}" ] && [ "${DRIVER_VMID:-}" == "$1" ]; }
 
 # Sets DRIVER_KIND (nvidia, intel, amd or nothing), DRIVER_KIND_CONFLICT and DRIVER_KIND_READABLE (yes|no). The card on the
 # host decides (PCI class 0x03: a USB controller or a NIC is no card); the records must agree with it. $1 vmid $2 qm config
@@ -10690,10 +10705,10 @@ function driver_prune_older() {
 function driver_drop_unused() {
   local vmid="$1" ref key out gone=""
   local -a refs
-  mapfile -t refs < <({ driver_engine update-get "$vmid" disks | gpu_json '"\n".join(d or [])'; driver_engine update-get "$vmid" payload_ref | gpu_json 'd or ""'; } | sed '/^$/d' | awk '!seen[$0]++')
+  mapfile -t refs < <(driver_engine update-get "$vmid" disks | gpu_json '"\n".join(d or [])' | sed '/^$/d' | awk '!seen[$0]++')
   for ref in "${refs[@]}"; do
     [ -n "$ref" ] || continue
-    key=$(qm config "$vmid" 2>/dev/null | sed -n "s/^\(unused[0-9]*\): ${ref//\//\\/}\(,.*\)\?\$/\1/p" | head -1)
+    key=$(qm config "$vmid" 2>/dev/null | awk -F': ' -v r="$ref" '$1 ~ /^unused[0-9]+$/ { split($2, a, ","); if (a[1] == r) { print $1; exit } }')
     [ -n "$key" ] || continue
     if ! out=$(driver_release_paths "$vmid" $(driver_disk_paths "$vmid" "$ref")); then echo "$out"; return 1; fi
     qm set "$vmid" --delete "$key" >/dev/null 2>&1 && gone="${gone:+$gone, }$ref"
@@ -10930,7 +10945,7 @@ function driver_run_intel() {
     silent=no
     case "$result" in ""|staged) silent=yes ;; esac       # the guest never ran its script: starting it again would only repeat that
     [ "$silent" == yes ] || qm start "$vmid" >/dev/null 2>&1 || true
-    msg_error "$(driver_engine first-boot-text "$result" "$DRIVER_WAITED" "$DRIVER_IDLE" "$silent")"
+    msg_error "$(driver_engine first-boot-text "$result" "$DRIVER_WAITED" "$DRIVER_IDLE")"
     return 1
   fi
   driver_igpu_oc_patch "$vmid" mark || echo -e "${INFO}${YW}Could not note the installed package on the OpenCore disk.${CL}"

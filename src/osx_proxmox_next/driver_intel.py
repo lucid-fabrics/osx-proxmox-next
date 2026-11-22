@@ -16,7 +16,7 @@ from .executor import apply_plan
 from .igpu_attach import oc_step
 from .planner import stopped_guard
 from .igpu_finish import (
-    FIRSTBOOT_TIMEOUT, FinishError, StageJob, _drop_disk, _read_payload_result, _storage_of, stage_recovery,
+    FIRSTBOOT_TIMEOUT, FinishError, StageJob, _read_payload_result, _storage_of, stage_recovery,
     wait_stopped, watch_first_boot,
 )
 from .oc_builder import ensure_igpu_assets
@@ -79,7 +79,7 @@ def run(u: Updater) -> None:
         u.need_card_off()
         if u.resumed:
             for slot in ("sata1", "sata2"):
-                _drop_disk(pve, vmid, slot)
+                u.drop_disk(slot)
         job = StageJob(vmid, pve, env.console, _storage_of(u.plan.cfg), u.say, env.clock, env.sleep, tahoe,
                        tuple(igpu_engine.vm_settings(0, "")["args_add"]), u.track_disk)
         try:
@@ -107,13 +107,13 @@ def run(u: Updater) -> None:
         pve.qm("stop", str(vmid))
         wait_stopped(pve, vmid, 120, env.clock, env.sleep)
     result = _read_payload_result(pve, ref)
-    _drop_disk(pve, vmid, "sata2")
+    u.drop_disk("sata2")
     payload.unlink(missing_ok=True)
     if result != "installed":
         silent = result in ("", "staged")        # the guest never ran its script: starting it again would only repeat that
         if not silent:
             pve.qm("start", str(vmid))
-        raise DriverError(engine.first_boot_text(result, boot.waited, boot.idle, silent))
+        raise DriverError(engine.first_boot_text(result, boot.waited, boot.idle))
     if not apply_plan([guarded_step(vmid, "mark", "Note in OpenCore that the graphics package is installed")],
                       execute=True, adapter=pve).ok:
         u.result.notes.append("Could not note the installed package on the OpenCore disk.")

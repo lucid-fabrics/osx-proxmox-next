@@ -99,10 +99,10 @@ def run(u: Updater) -> None:
 
 
 def _stage(u: Updater, job: StageJob, payload: Path, recovery: Path) -> str:
-    from .igpu_finish import _drop_disk, stage_recovery
+    from .igpu_finish import stage_recovery
     if u.resumed:   # a run that was cut off may have left its two disks behind
         for slot in ("sata1", "sata2"):
-            _drop_disk(u.pve, u.vmid, slot)
+            u.drop_disk(slot)
     payload_ref = stage_recovery(job, payload, recovery, u.staging_cfg())
     err = u.env.console.restore_picker_timeout() if u.env.console else ""
     if err:

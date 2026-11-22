@@ -210,6 +210,12 @@ def add_disk(state, ref):
         disks.append(ref)
 
 
+def forget_disk(state, ref):
+    """The tool deleted this volume itself: it is no longer one of the run's disks. A volume id is reused by the next
+    disk Proxmox makes, so an id that stays recorded after its volume is gone could one day name a disk of the user's."""
+    state["disks"] = [r for r in state.get("disks", []) if r != ref]
+
+
 def begin_step(state, sid):
     """Start a step. False, changing nothing, for a step that a resumed run finished before the point it goes on from."""
     row = _row(state, sid)

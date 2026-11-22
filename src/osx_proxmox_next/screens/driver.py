@@ -367,7 +367,7 @@ class DriverScreen(OsxScreen):
         if plan.refusals:
             return
         if plan.interrupted:         # what Finish does: no new snapshot, no "saved first"
-            facts = engine.finish_facts(plan.kind, self._state().get("snapshot", "") or (plan.older_snapshots or [""])[-1])
+            facts = engine.finish_facts(plan.kind, self._state().get("snapshot", ""))
             rows = [Line(Text.assemble(("✓ ", pal["success"]), fact), wrap=True, hang=2) for fact in facts]
         else:
             facts = engine.before_facts(plan.kind, plan.snapshot, plan.snapshot_ok)

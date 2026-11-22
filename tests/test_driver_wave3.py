@@ -103,9 +103,45 @@ def test_an_unused_disk_that_is_the_runs_own_is_removed_and_the_macs_own_stays()
     assert driver_disks.drop_unused(pve, 9, []) == []
 
 
-def test_the_payload_ref_of_a_staged_run_counts_as_its_own():
-    assert driver_disks.own_disks({"disks": ["a"], "payload_ref": "b"}) == ["a", "b"]
+def test_only_the_disks_a_run_wrote_down_and_still_owns_are_its_own():
+    assert driver_disks.own_disks({"disks": ["a", "a", ""], "payload_ref": "b"}) == ["a"]     # the payload ref is for Finish, not for removal
     assert driver_disks.own_disks({}) == []
+
+
+def test_a_disk_the_tool_deleted_is_forgotten_so_a_reused_volume_id_is_never_removed(tmp_path, rec):
+    """Proxmox gives the next new disk the lowest free id: a user's data disk can take the id of the payload disk the tool
+    deleted, and a rollback then lists it as unused. Nothing of the user's is removed by an id the tool no longer owns."""
+    pve = nv_pve(status="stopped", cfg=mac(sata2=MINE, unused0=THEIRS), snapshots=[NEW_SNAP])
+    updater = driver_core.Updater(plan_for("nvidia", pve, nv_target().components), env_for(pve, rec, tmp_path))
+    updater.track_disk(MINE)
+    updater.drop_disk("sata2")                                   # the tool deletes its payload disk
+    assert engine.read_update(9)["disks"] == []
+    pve.cfg["unused1"] = MINE                                    # later the user's new disk gets the same id and a rollback lists it
+    updater.persist()
+    assert driver_disks.drop_unused(pve, 9, driver_disks.own_disks(engine.read_update(9))) == []
+    assert pve.cfg["unused1"] == MINE
+
+
+def test_a_disk_a_step_deleted_behind_the_runs_back_is_forgotten_at_the_end(tmp_path, rec):
+    pve = nv_pve(status="stopped", cfg=mac(sata2=MINE), snapshots=[NEW_SNAP])
+    updater = driver_core.Updater(plan_for("nvidia", pve, nv_target().components), env_for(pve, rec, tmp_path))
+    updater.track_disk(MINE)
+    updater.track_disk("local-lvm:vm-9-disk-12")
+    updater.forget_gone_disks()                                  # the second one is not on the Mac any more
+    assert engine.read_update(9)["disks"] == [MINE]
+
+
+def test_an_add_or_forget_for_a_mac_with_no_run_writes_nothing(tmp_path, monkeypatch):
+    """A card setup that runs after a driver update in the same shell must not leave a state file that looks like a
+    stopped update."""
+    monkeypatch.setenv("DRIVER_STATE_DIR", str(tmp_path))
+    assert engine.main(["x", "update-add-disk", "9", MINE]) == 0 and engine.main(["x", "update-forget-disk", "9", MINE]) == 0
+    assert not engine.update_path(9).exists() and engine.unfinished(9) == {}
+    engine.write_update(9, {"kind": "nvidia", "steps": []})
+    engine.main(["x", "update-add-disk", "9", MINE])
+    assert engine.read_update(9)["disks"] == [MINE]
+    engine.main(["x", "update-forget-disk", "9", MINE])
+    assert engine.read_update(9)["disks"] == []
 
 
 def test_undo_removes_the_payload_disk_a_manual_rollback_left_as_unused(tmp_path, rec):
@@ -322,19 +358,18 @@ def test_a_stuck_mac_with_a_result_is_not_called_stuck(clock, monkeypatch):
 
 
 def test_the_text_says_what_was_seen_and_what_to_do_when_the_guest_never_ran():
-    text = engine.first_boot_text("staged", 700, 650, True)
+    text = engine.first_boot_text("staged", 700, 650)
     assert "did not report back within 11 minutes" in text and "the staged package never ran" in text
     assert "its disks did nothing for the last 10 minutes" in text and "stopped at startup" in text
     assert "IntelAccelerator::probe" in text and "osx-next-cli igpu-watchdog <vmid>" in text and "iGPU setup is the cause" in text
-    assert text.endswith("The Mac was left stopped.")
-    busy = engine.first_boot_text("", 1500, 30, False)
-    assert "did nothing" not in busy and "within 25 minutes" in busy and busy.endswith("The Mac was left as it is.")
+    busy = engine.first_boot_text("", 1500, 30)
+    assert "did nothing" not in busy and "within 25 minutes" in busy and "was left" not in busy and "was left" not in text
 
 
 def test_a_failure_the_guest_reported_is_told_as_it_said_it():
-    assert engine.first_boot_text("failed: installer error (try 1 of 3)", 100, 0, False) == (
+    assert engine.first_boot_text("failed: installer error (try 1 of 3)", 100, 0) == (
         "The graphics package is not installed: failed: installer error (try 1 of 3).")
-    assert engine.first_boot_text("not installed: WhateverXe not loaded (try 1 of 3)", 100, 0, False) == (
+    assert engine.first_boot_text("not installed: WhateverXe not loaded (try 1 of 3)", 100, 0) == (
         "The graphics package is not installed: WhateverXe not loaded (try 1 of 3).")
 
 
@@ -346,7 +381,7 @@ def test_an_intel_update_whose_mac_never_reports_stops_it_and_leaves_it_stopped(
     plan = plan_for("intel", pve, installed={"WhateverXe": "1.2.0"})
     plan.target = intel_target()
     res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
-    assert not res.ok and "stopped at startup" in res.error and "The Mac was left stopped." in res.error
+    assert not res.ok and "stopped at startup" in res.error
     assert ("stop", "9") in pve.calls and not [c for c in pve.calls if c[0] == "start" and pve.calls.index(c) > pve.calls.index(("stop", "9"))]
     assert any("did nothing for 10 minutes" in e for e in rec.events)
     assert "The Mac is stopped." in res.error                    # the failure text agrees with the Mac

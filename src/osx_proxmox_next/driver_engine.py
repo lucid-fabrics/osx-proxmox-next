@@ -18,13 +18,13 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -332,11 +332,11 @@ def finish_facts(kind, snapshot="", undo=""):
 
 # ── the first boot that never reports ────────────────────────────────
 
-def first_boot_text(result, waited, idle, stopped):
+def first_boot_text(result, waited, idle):
     """Why an Intel update's first boot with the card ended without the package installed, in words. *result* is what the
     guest left on the payload disk ('' or 'staged' when it never ran), *waited* the seconds the host waited, *idle* the
-    seconds the Mac's disks did nothing at the end, *stopped* True when the host had to stop the Mac (it did not power
-    off by itself). What was seen first, then what to do."""
+    seconds the Mac's disks did nothing at the end. What was seen first, then what to do (whether the Mac runs is the
+    failure text's to say)."""
     said = (result or "").strip()
     if said and said != "staged":
         return "The graphics package is not installed: %s." % re.sub(r"^not installed: ", "", said)
@@ -347,7 +347,7 @@ def first_boot_text(result, waited, idle, stopped):
     return (seen + ". The graphics package needs WhateverXe running: when the iGPU does not start under it, macOS panics in "
             "IntelAccelerator::probe, with or without this update. A kernel console shows it (osx-next-cli igpu-watchdog "
             "<vmid>, then start the Mac). If the Mac does the same after r (undo), the iGPU setup is the cause, not the "
-            "update. The Mac was left %s." % ("stopped" if stopped else "as it is"))
+            "update.")
 
 
 # ── snapshots ────────────────────────────────────────────────────────
@@ -535,8 +535,8 @@ def main(argv):
         sys.stdout.write("\n".join(stale_maps(sys.stdin.read(), argv[2:])) + "\n")
     elif cmd == "maps-held" and len(argv) >= 4:
         sys.stdout.write(maps_held_text(argv[2], argv[3:]) + "\n")
-    elif cmd == "first-boot-text" and len(argv) == 6:
-        sys.stdout.write(first_boot_text(argv[2], float(argv[3]), float(argv[4]), argv[5] == "yes") + "\n")
+    elif cmd == "first-boot-text" and len(argv) == 5:
+        sys.stdout.write(first_boot_text(argv[2], float(argv[3]), float(argv[4])) + "\n")
     elif cmd == "snapshot-name":
         sys.stdout.write(snapshot_name() + "\n")
     elif cmd == "snapshot-argv" and len(argv) == 5:
@@ -560,7 +560,7 @@ def main(argv):
     elif cmd == "unfinished" and len(argv) == 3:
         _emit(unfinished(argv[2]))
     elif cmd in ("update-init", "update-resume", "update-begin", "update-end", "update-fail", "update-set", "update-clear",
-                 "update-get", "update-add-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
+                 "update-get", "update-add-disk", "update-forget-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
                  "snapshot-date",
                  "newer-than", "all-snapshots"):
         return run_update_command(cmd, argv[2:])
@@ -610,8 +610,10 @@ def update_state_command(cmd, args):
     elif cmd == "update-resume":
         reset_for_resume(state)
         state.update(phase="running", error="")
-    elif cmd == "update-add-disk":
-        add_disk(state, args[1])
+    elif cmd in ("update-add-disk", "update-forget-disk"):
+        if not state:                 # no run is going or cut off for this Mac: there is nothing to write a disk into
+            return 0
+        (add_disk if cmd == "update-add-disk" else forget_disk)(state, args[1])
     elif cmd == "update-begin":                   # exit 3: a resumed run finished this step before the point it goes on from
         if not begin_step(state, args[1]):
             return 3

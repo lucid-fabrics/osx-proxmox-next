@@ -42,6 +42,7 @@ def _execute(u: Updater) -> RunResult:
         _record(u)
         if u.state.get("snapshot"):        # one snapshot of this tool per Mac (also after the snapshot step): none left over
             u.replace_older_snapshots(u.state["snapshot"])
+        u.forget_gone_disks()
         u.state.update(phase="done", error="")
         if u.env.ask_first_boot:
             u.persist()   # stays until the first boot question is answered: a reopened screen asks it again
@@ -71,7 +72,7 @@ def _leftover_disks(u: Updater) -> None:
     stage = next((r["state"] for r in u.state["steps"] if r["id"] == "stage"), "")
     if stage in ("active", "fail") and not u.running():
         for slot in ("sata1", "sata2"):
-            _drop_disk(u.pve, u.vmid, slot)
+            u.drop_disk(slot)
 
 
 def _abandon(u: Updater, exc: Exception) -> str:
@@ -86,6 +87,10 @@ def _abandon(u: Updater, exc: Exception) -> str:
     try:
         _leftover_disks(u)
     except Exception:  # noqa: BLE001 - a rollback drops what is left
+        pass
+    try:
+        u.forget_gone_disks()
+    except Exception:  # noqa: BLE001 - the record of disks is a courtesy of the failure path
         pass
     snap = u.state.get("snapshot", "")
     message = f"{exc} {engine.failure_text(u.state, u.running())}" + FINISH_HINT % u.vmid

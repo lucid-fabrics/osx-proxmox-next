@@ -13,7 +13,7 @@ from . import driver_engine as engine, driver_snapshot, nullmoth_engine
 from .domain import MAX_VMID, MIN_VMID
 from .driver_plan import DriverPlan
 from .gpu import parse_config
-from .igpu_finish import wait_stopped
+from .igpu_finish import _drop_disk, wait_stopped
 from .infrastructure import ProxmoxAdapter
 from .planner import POST_INSTALL_BOOT_ORDER
 from .unattended import QmConsole
@@ -215,6 +215,23 @@ class Updater:
         """A volume this run just created (recovery or payload disk): written down at once, so a cut-off run or a manual
         rollback that leaves it as an unused disk can have exactly that one removed."""
         engine.add_disk(self.state, ref)
+        self.persist()
+
+    def drop_disk(self, slot: str) -> None:
+        """Detach *slot* and delete its volume (best effort, as the staging cleanup is), and forget it as one of this run's
+        disks: a volume id is reused, so a recorded id of a deleted volume must not stay."""
+        ref = self.live_cfg().get(slot, "").split(",", 1)[0]
+        _drop_disk(self.pve, self.vmid, slot)
+        if ref:
+            engine.forget_disk(self.state, ref)
+            self.persist()
+
+    def forget_gone_disks(self) -> None:
+        """Whatever a step deleted behind this run's back (the staging cleanup, the first boot check): every recorded disk
+        that is no longer on the Mac, as a slot or an unused disk, is forgotten."""
+        present = {v.split(",", 1)[0] for v in self.live_cfg().values()}
+        for ref in [r for r in self.state.get("disks", []) if r not in present]:
+            engine.forget_disk(self.state, ref)
         self.persist()
 
     def take_card_off(self) -> None:
