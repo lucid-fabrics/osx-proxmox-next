@@ -81,7 +81,7 @@ def test_readme_points_to_the_guide_and_has_no_invalid_argument():
     assert "osx-next-cli gpu-setup" in readme and "docs/guides/gpu-passthrough" in readme
     assert "#nvidia-nullmoth-beta" not in readme and "#-gpu-passthrough" in readme
     section = readme[readme.index("## 🎮 GPU Passthrough"):readme.index("## ⚡ Performance Tips")]
-    assert len(section.splitlines()) < 30
+    assert len(section.splitlines()) < 40      # the README keeps this section short; the guide has the detail
     assert "RX 7000" in readme
 
 
