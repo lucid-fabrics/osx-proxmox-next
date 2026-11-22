@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from osx_proxmox_next import nullmoth_engine as eng
+from osx_proxmox_next.igpu_engine import github_get as real_github_get  # bound before the autouse fake replaces it
 
 BASE = eng.DOWNLOAD_PREFIX
 
@@ -166,7 +167,7 @@ def test_github_get_decodes_and_maps_errors(monkeypatch):
         seen["auth"] = req.get_header("Authorization")
         return Resp(b'[{"a": 1}]')
     monkeypatch.setattr(eng.urllib.request, "urlopen", ok)
-    assert eng.github_get("https://api.github.com/x") == [{"a": 1}] and seen["auth"] == "Bearer t"
+    assert real_github_get("https://api.github.com/x") == [{"a": 1}] and seen["auth"] == "Bearer t"
 
     def http(code):
         def raiser(req, timeout=0):
@@ -175,10 +176,16 @@ def test_github_get_decodes_and_maps_errors(monkeypatch):
     for code, text in ((403, "rate limit"), (429, "rate limit"), (404, "no such release"), (500, "HTTP 500")):
         monkeypatch.setattr(eng.urllib.request, "urlopen", http(code))
         with pytest.raises(eng.ReleaseError, match=text):
-            eng.github_get("https://api.github.com/x")
+            real_github_get("https://api.github.com/x")
     monkeypatch.setattr(eng.urllib.request, "urlopen", lambda req, timeout=0: Resp(b"not json"))
     with pytest.raises(eng.ReleaseError, match="Could not reach GitHub"):
-        eng.github_get("https://api.github.com/x")
+        real_github_get("https://api.github.com/x")
+
+
+def test_the_nullmoth_github_call_follows_the_engine_it_comes_from(monkeypatch):
+    """Default arguments bind eng.github_get once; it must still reach the (patched) iGPU engine call."""
+    monkeypatch.setattr("osx_proxmox_next.igpu_engine.github_get", lambda url: [{"from": url}])
+    assert eng.list_releases.__defaults__[0]("u") == [{"from": "u"}]
 
 
 FW_SCRIPT = '''#!/bin/bash

@@ -11,7 +11,7 @@ import pytest
 
 from gpu_fakes import add_card
 from nullmoth_fakes import GUID, FakeQm, MAC_CFG, add_dev, write_oc
-from osx_proxmox_next import amd_host, gpu, gpu_attach, nullmoth
+from osx_proxmox_next import amd_host, driver_engine, gpu, gpu_attach, nullmoth
 
 REPO = Path(__file__).resolve().parent.parent
 PATCHER = REPO / "src/osx_proxmox_next/data/gpu/oc_boot_args.py"
@@ -172,7 +172,8 @@ def test_detach_restores_exactly_what_was_there(tmp_path):
     rec = gpu.AttachRecord(100, "0000:06:00", "amd", hostpci0=None, args="-cpu host", vga="std", vga_changed=True)
     steps = gpu.build_hostpci_detach_steps(100, "-cpu host " + HOTPLUG, True, record=rec, profile=amd_host.AMD_PROFILE)
     assert [s.argv[2:] for s in steps[:3]] == [["100", "--delete", "hostpci0"], ["100", "--args", "-cpu host"], ["100", "--vga", "std"]]
-    assert steps[-1].argv == ["rm", "-f", str(gpu.record_path(100))]
+    assert steps[-2].argv == ["rm", "-f", str(gpu.record_path(100))]
+    assert steps[-1].argv == ["rm", "-f", str(driver_engine.record_path(100))]      # the card is gone, so is its driver record
 
 
 def test_detach_restores_a_pre_existing_hostpci0_and_removes_added_args():
@@ -187,7 +188,7 @@ def test_detach_restores_a_pre_existing_hostpci0_and_removes_added_args():
 def test_detach_with_nothing_to_change_only_forgets_the_record():
     rec = gpu.AttachRecord(100, "0000:06:00", "amd", args="-cpu host")
     steps = gpu.build_hostpci_detach_steps(100, "-cpu host", False, record=rec)
-    assert [s.title for s in steps] == ["Forget the recorded settings"]
+    assert [s.title for s in steps] == ["Forget the recorded settings", "Forget the driver record (the card is gone)"]
 
 
 # ── AMD attach ───────────────────────────────────────────────────────
@@ -269,7 +270,7 @@ def test_prepare_detach_amd_uses_the_record_and_the_gpu_patcher(tmp_path):
     titles = [s.title for s in plan.steps]
     assert titles[:2] == ["Verify VM is stopped", "Restore the previous OpenCore config"]
     assert "GPU_BOOT_ARGS=" not in plan.steps[1].argv[2] and '"$OC_MNT/EFI/OC" restore' in plan.steps[1].argv[2]
-    assert "Restore the display setting" in titles and titles[-1] == "Forget the recorded settings"
+    assert "Restore the display setting" in titles and titles[-2:] == ["Forget the recorded settings", "Forget the driver record (the card is gone)"]
     assert not gpu_attach.prepare_detach(100, adapter=FakeQm({})).ok
     running = gpu_attach.prepare_detach(100, adapter=FakeQm({100: ("running", cfg)}))
     assert not running.ok and "qm stop 100" in running.issues[0]

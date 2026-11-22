@@ -53,7 +53,8 @@ class BeforeDialog(ModalScreen):
         with Vertical(id="before-box", classes="dialog warn"):
             with Horizontal(id="before-head"):
                 yield Static("Before you continue", classes="dialog-title")
-                yield Static("asked once, never again", classes="muted before-once")
+                if b.once:
+                    yield Static("asked once, never again", classes="muted before-once")
             yield Static("", classes="blank")
             if b.warnings:
                 yield Static(Text("\n".join(self._bang(line, self._inner()) for line in b.warnings),
@@ -67,19 +68,19 @@ class BeforeDialog(ModalScreen):
                                    id="before-notice")
                 yield Static("", id="before-more")
             if b.phrase:
-                yield self._phrase_row("g-confirm", f"Type {CONFIRM_PHRASE} to continue")
+                yield self._phrase_row("g-confirm", f"Type {self._phrase()} to continue")
             if b.nvidia:
                 yield Static(Text(ACK_LABEL, style=pal["muted"]), id="before-ack-label")
                 yield self._phrase_row("g-ack", f"Type {ACK_PHRASE} to confirm")
             yield Static("", classes="blank")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="before-cancel", classes="secondary")
-                yield Button("Set it up", id="before-go", classes="primary", disabled=self._locked())
+                yield Button(b.go_label or "Set it up", id="before-go", classes="primary", disabled=self._locked())
         yield KeyBar(self._keys(), id="before-keys")
 
     def _keys(self) -> list[tuple]:
         """enter is named only while it does it: with a phrase still to type it does nothing."""
-        go = [] if self._locked_now() else [("enter", "Set it up", None)]
+        go = [] if self._locked_now() else [("enter", self.before.go_label or "Set it up", None)]
         return [("↑↓", "Read on", None), ("tab", "Next field", None), *go, ("esc", "Cancel", "screen.cancel")]
 
     def _locked_now(self) -> bool:
@@ -103,12 +104,15 @@ class BeforeDialog(ModalScreen):
         return Horizontal(Static(label, classes="before-label"), Input(id=input_id, select_on_focus=False),
                           classes="before-phrase")
 
+    def _phrase(self) -> str:
+        return self.before.phrase_text or CONFIRM_PHRASE
+
     def _locked(self) -> bool:
         """"Set it up" waits for every phrase this dialog asks for."""
         return self.before.phrase or self.before.nvidia
 
     def _typed(self) -> bool:
-        return not self.before.phrase or self.query_one("#g-confirm", Input).value.strip() == CONFIRM_PHRASE
+        return not self.before.phrase or self.query_one("#g-confirm", Input).value.strip() == self._phrase()
 
     def _acked(self) -> bool:
         return not self.before.nvidia or self.query_one("#g-ack", Input).value.strip() == ACK_PHRASE

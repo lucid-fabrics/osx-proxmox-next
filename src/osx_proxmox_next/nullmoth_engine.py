@@ -52,7 +52,11 @@ SWEEP_BATCH = 64
 
 # the release error and the GitHub call are the iGPU engine's (one implementation, one rate-limit message)
 ReleaseError = _gpu.ReleaseError
-github_get = _gpu.github_get
+
+
+def github_get(url):
+    """The iGPU engine's GitHub call, looked up when called so every default argument below follows it."""
+    return _gpu.github_get(url)
 
 
 def data_dir():
@@ -256,26 +260,26 @@ def build_payload(out, files, run=_gpu.default_run):
     loop, part = _gpu._attach_loop(out, run)
     if not loop:
         return False, part
-    code, msg = run(["mkfs.vfat", "-F", "32", "-n", PAYLOAD_LABEL, part], 120)
-    if code != 0:
-        run(["losetup", "-d", loop], 20)
-        return False, "mkfs.vfat failed: " + msg.strip()
-    mnt = tempfile.mkdtemp(prefix="nullmoth-payload-")
-    code, msg = run(["mount", part, mnt], 60)
-    if code != 0:
-        os.rmdir(mnt)
-        run(["losetup", "-d", loop], 20)
-        return False, "could not mount the payload image: " + msg.strip()
+    mnt = ""
     try:
-        for name, (kind, value) in files.items():
-            if kind == "copy":
-                shutil.copyfile(value, os.path.join(mnt, name))
-            else:
-                Path(mnt, name).write_text(value)
-    except OSError as exc:
-        return False, "could not fill the payload image: %s" % exc
+        code, msg = run(["mkfs.vfat", "-F", "32", "-n", PAYLOAD_LABEL, part], 120)
+        if code != 0:
+            return False, "mkfs.vfat failed: " + msg.strip()
+        mnt = tempfile.mkdtemp(prefix="nullmoth-payload-")
+        code, msg = run(["mount", part, mnt], 60)
+        if code != 0:
+            return False, "could not mount the payload image: " + msg.strip()
+        try:
+            for name, (kind, value) in files.items():
+                if kind == "copy":
+                    shutil.copyfile(value, os.path.join(mnt, name))
+                else:
+                    Path(mnt, name).write_text(value)
+        except OSError as exc:
+            return False, "could not fill the payload image: %s" % exc
+        finally:
+            run(["sync"], 300)
     finally:
-        run(["sync"], 300)
         _gpu._release(mnt, loop, run)
     return True, "payload disk built (%d MB)" % size_mb
 

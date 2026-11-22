@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import logging
 
+from .. import driver_engine as engine
+from ..driver_plan import card_setup_waiting
+from ..gpu import parse_config
 from ..services import VmRecord, get_proxmox_adapter
 from .base import OsxScreen
 from .dialogs import EditDialog, RemoveDialog, StopDialog
@@ -128,4 +131,19 @@ class VmActionScreen(OsxScreen):
 
     def action_gpu(self) -> None:
         record = self.current_record()
+        if record is not None and self._has_driver_screen(record):
+            from .driver import DriverScreen     # a Mac with a card (or an update that stopped): its driver
+            self.app.push_screen(DriverScreen(record.vmid, record.name))
+            return
         self.app.action_gpu(record.vmid if record else None)
+
+    @staticmethod
+    def _has_driver_screen(record: VmRecord) -> bool:
+        """An update that stopped decides first, whatever the Mac's hardware says (its card may be off right now). Else
+        a graphics card (PCI class 0x03) on hostpci: a USB controller or a NIC is not one."""
+        if engine.unfinished(record.vmid):
+            return True
+        if not record.facts.has_gpu or card_setup_waiting(record.vmid):
+            return False
+        kind, readable = engine.live_kind(parse_config(record.config_raw))
+        return bool(kind) or not readable

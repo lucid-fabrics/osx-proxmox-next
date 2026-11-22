@@ -40,6 +40,8 @@ EMBEDS = {
     "igpu_power_watchdog.py": ("GPU_EMBED_IGPU_WATCHDOG", PKG / "data/gpu/igpu_power_watchdog.py"),
     "igpu_diag.py": ("GPU_EMBED_IGPU_DIAG", PKG / "data/gpu/igpu_diag.py"),
     "osx-next-power-watchdog@.service": ("GPU_EMBED_IGPU_WATCHDOG_UNIT", PKG / "data/gpu/osx-next-power-watchdog@.service"),
+    "driver_engine.py": ("GPU_EMBED_DRIVER_ENGINE", PKG / "driver_engine.py"),
+    "oc_kext.py": ("GPU_EMBED_OC_KEXT", PKG / "data/gpu/oc_kext.py"),
 }
 
 
@@ -96,7 +98,8 @@ def test_embedded_engines_are_usable_standalone(bash, tmp_path):
     assert set(out.stdout.split()) == {"bios_guide.py", "bios_paths.json", "host_setup.py", "igpu_engine.py", "intel_devices.txt",
                                        "igpu_firstboot.sh", "igpu_stage.sh", "igpu_launchd.plist",
                                        "igpu_power_watchdog.py", "igpu_diag.py", "osx-next-power-watchdog@.service",
-                                       "nullmoth_engine.py", "nm_stage.sh", "nm_firstboot.sh", "nm_launchd.plist"}
+                                       "nullmoth_engine.py", "nm_stage.sh", "nm_firstboot.sh", "nm_launchd.plist",
+                                       "driver_engine.py", "driver_state.py", "oc_kext.py"}
     assert out.returncode == 64
 
 

@@ -268,6 +268,15 @@ osx-next-cli download --macos ventura --force
 # Check host readiness
 osx-next-cli preflight
 
+# Show which graphics driver a Mac has and whether a newer one exists
+osx-next-cli driver-status --vmid 101
+
+# Update the graphics driver of a Mac that has a card (snapshot first)
+osx-next-cli driver-update --vmid 101
+
+# Undo the last driver update (the Mac goes back to its driver snapshot)
+osx-next-cli driver-undo --vmid 101
+
 # BETA: hands-off install - run right after apply --execute; erases the new
 # VM disk, drives the whole install, ends at Setup Assistant
 osx-next-cli install-unattended --vmid 910
@@ -485,6 +494,14 @@ osx-next-cli gpu-setup --undo     # put everything back
 Laptop NVIDIA GPUs are not supported: the scan marks them "not supported (laptop NVIDIA)" (judged by the lspci name: Laptop, Mobile, Max-Q or a chip name ending in M) and recommends the Intel iGPU instead.
 
 NVIDIA support relies on NullMoth, a community driver tested by its own community: this tool downloads the driver, verifies it and installs it for you, but we take no responsibility for the driver or its install. AMD cards and the host setup steps (kernel command line, vfio binding, host reboot) are covered by tests but not yet tried on real hardware. Full guide with the supported-cards matrix and a page per BIOS vendor: [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough).
+
+### Updating the driver
+Press `g` on a Mac that has a card: the Driver row shows what is installed and what is newer, and enter updates it after one approval (a snapshot is saved first).
+`r` undoes the driver update. The Intel update is beta. The shell does the same, and the [guide](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough#updating-the-driver) has the detail per card.
+```bash
+osx-next-cli driver-status --vmid 101                    # installed, newest, snapshots; driver-update updates (--dry-run previews)
+osx-next-cli driver-undo --vmid 101                      # undo the driver update (osx-proxmox-next.sh has all three commands too)
+```
 
 ---
 
@@ -756,6 +773,10 @@ For a VM created before v0.26, fix it in place:
 
 Avoid changing the SMBIOS model to dodge the warning if you already have iCloud/iMessage working, since those are bound to the `MacPro7,1` identity.
 
+### How do I update the NVIDIA, Intel or AMD driver?
+
+Press `g` on the Mac in the TUI and press enter on the Driver line, or run `osx-next-cli driver-update --vmid <id>`. It saves a snapshot first, so `r` in the TUI (or `osx-next-cli driver-undo --vmid <id>`) can undo the driver update. See [Updating the driver](#updating-the-driver).
+
 ### My desktop wallpaper is white or blank
 
 This usually means macOS is running without GPU acceleration (the default `vga: std` framebuffer). Dynamic wallpapers in particular do not render in software mode. Pass through a supported AMD GPU for full acceleration, or pick a static wallpaper.
@@ -769,6 +790,28 @@ osx-next-cli download --macos <version> --force
 ```
 
 In the TUI, switch the **Download** row under **More** on the New Mac screen to **On**. Note this only refreshes the image for new installs; it does not modify the EFI of a VM you already created.
+
+### Can you run macOS in a virtual machine on Proxmox?
+
+Yes. osx-proxmox-next creates a macOS VM on Proxmox VE 9 in one command: it builds the OpenCore bootloader, downloads the official Apple recovery image, generates a SMBIOS identity, and boots the installer. macOS Monterey 12, Ventura 13, Sonoma 14, Sequoia 15, and Tahoe 26 are supported.
+
+### Does macOS work on AMD CPUs under Proxmox?
+
+Yes. AMD hosts are auto-detected and run with Cascadelake-Server CPU emulation. Intel hosts (including 12th gen+ hybrid and Xeon) get the correct CPU mode automatically. No configuration needed.
+
+### How long does it take to install macOS on Proxmox?
+
+About 5 minutes of setup in the TUI, then the macOS installer runs unattended. Download time depends on your connection (recovery image is ~0.9 GB, downloaded once and cached).
+
+### Is GPU passthrough supported?
+
+Yes. `osx-next-cli gpu-setup` walks you through it, including the BIOS and the host setup. See [GPU Passthrough](#-gpu-passthrough).
+
+### Is running macOS in a VM legal?
+
+This project is for testing, lab use, and learning. Apple's license terms govern where macOS may run; you are responsible for compliance in your region.
+
+More: [full FAQ in the docs](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/faq).
 
 ---
 
@@ -812,26 +855,6 @@ This project is free and open source. Sponsors keep it alive and shape what gets
 - ❤️ 1 donor $10 BMC Jul 15
 
 _Want to join them? [Sponsor on GitHub](https://github.com/sponsors/lucid-fabrics)_
----
-
-## ❓ FAQ
-
-**Can you run macOS in a virtual machine on Proxmox?**
-Yes. osx-proxmox-next creates a macOS VM on Proxmox VE 9 in one command: it builds the OpenCore bootloader, downloads the official Apple recovery image, generates a SMBIOS identity, and boots the installer. macOS Monterey 12, Ventura 13, Sonoma 14, Sequoia 15, and Tahoe 26 are supported.
-
-**Does macOS work on AMD CPUs under Proxmox?**
-Yes. AMD hosts are auto-detected and run with Cascadelake-Server CPU emulation. Intel hosts (including 12th gen+ hybrid and Xeon) get the correct CPU mode automatically. No configuration needed.
-
-**How long does it take to install macOS on Proxmox?**
-About 5 minutes of setup in the TUI, then the macOS installer runs unattended. Download time depends on your connection (recovery image is ~0.9 GB, downloaded once and cached).
-
-**Is GPU passthrough supported?**
-Yes. `osx-next-cli gpu-setup` walks you through it, including the BIOS and the host setup. See [GPU Passthrough](#-gpu-passthrough).
-
-**Is running macOS in a VM legal?**
-This project is for testing, lab use, and learning. Apple's license terms govern where macOS may run; you are responsible for compliance in your region.
-
-More: [full FAQ in the docs](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/faq).
 
 ---
 

@@ -342,9 +342,11 @@ def _iso_build_script(tree: Path, iso_tmp: Path) -> str:
         f"sgdisk -Z {qi} >/dev/null && "
         f"sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {qi} >/dev/null && "
         f"ILOOP=$(losetup -fP --show {qi}) && "
-        "partprobe $ILOOP 2>/dev/null; "
+        # a bare partprobe re-reads every disk of the host (partition maps on the logical volumes of running VMs), so
+        # it only runs once the loop device is known
+        "{ [ -n \"$ILOOP\" ] && { partprobe \"$ILOOP\" 2>/dev/null; "
         "for _i in $(seq 1 10); do [ -b \"${ILOOP}p1\" ] && break; sleep 1; "
-        "partprobe $ILOOP 2>/dev/null; done; "
+        "partprobe \"$ILOOP\" 2>/dev/null; done; true; }; }; "
         "[ -b \"${ILOOP}p1\" ] && "
         "mkfs.fat -F 32 -n OPENCORE ${ILOOP}p1 >/dev/null && "
         "mount ${ILOOP}p1 $IMNT && "
@@ -440,13 +442,20 @@ def ensure_amfipass(dest_dir: Path, on_progress: ProgressCallback = None) -> Pat
     return _fetch_component("AMFIPass", AMFIPASS, dest_dir, on_progress)
 
 
+def ensure_component(name: str, dest_dir: Path, on_progress: ProgressCallback = None) -> Path:
+    """Return the verified release zip of a pinned OpenCore component (Lilu, WhateverGreen, ...), downloading it
+    when missing. A checksum mismatch raises ChecksumError and is never retried."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return _fetch_component(name, OC_COMPONENTS[name], dest_dir, on_progress)
+
+
 class IgpuAssets(dict):
     """name -> downloaded path; `picks` holds the chosen WhateverXe and Graphics releases."""
 
     picks: dict
 
 
-def ensure_igpu_assets(dest_dir: Path, rom_key: str, on_progress: ProgressCallback = None,
+def ensure_igpu_assets(dest_dir: Path, rom_key: str | None, on_progress: ProgressCallback = None,
                        wex: str = igpu_engine.LATEST, graphics: str = igpu_engine.LATEST,
                        get=None) -> IgpuAssets:
     """Download (and verify) everything the iGPU setup needs: the two kext zips, the option ROM for
@@ -457,9 +466,10 @@ def ensure_igpu_assets(dest_dir: Path, rom_key: str, on_progress: ProgressCallba
     picks = igpu_engine.select_assets(wex, graphics, get)
     wanted = {"whateverxe": Component(picks["whateverxe"]["version"], picks["whateverxe"]["url"],
                                       picks["whateverxe"]["sha256"]),
-              "amfipass": AMFIPASS_MOD, "rom": IGPU_ROMS[rom_key],
-              "graphics": Component(picks["graphics"]["version"], picks["graphics"]["url"],
-                                    picks["graphics"]["sha256"])}
+              "amfipass": AMFIPASS_MOD}
+    if rom_key:   # an update of a Mac that has its ROM on the host already needs none
+        wanted["rom"] = IGPU_ROMS[rom_key]
+    wanted["graphics"] = Component(picks["graphics"]["version"], picks["graphics"]["url"], picks["graphics"]["sha256"])
     assets = IgpuAssets({name: _fetch_component(name, comp, dest_dir, on_progress) for name, comp in wanted.items()})
     assets.picks = picks
     return assets

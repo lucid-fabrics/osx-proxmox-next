@@ -286,8 +286,45 @@ def test_a_busy_mount_is_never_deleted_recursively(tmp_path):
     ok, _msg = eng.build_payload(str(pkg), str(tmp_path / "img"), run)
     mnt = Path(next(c for c in run.calls if c[0] == "mount")[-1])
     assert ok and (mnt / "WhateverXe-Graphics.pkg").exists()  # still there: nothing removed the files
-    assert ["losetup", "-d", "/dev/loop9"] not in run.calls  # and the loop device still backs the mount
+    assert ["umount", "-l", str(mnt)] in run.calls            # a busy mount is detached lazily, then the folder is only rmdir'ed
+    # the loop device is asked to detach whatever happened to the unmount: the kernel keeps it until the last user is gone
+    assert run.calls[-1] == ["losetup", "-d", "/dev/loop9"]
     assert eng.read_result(tmp_path / "i", DiskRun(result="x", umount_fails=True)) == "x"
+
+
+def test_a_result_is_read_through_a_read_only_loop_device_and_every_exit_releases_it(tmp_path):
+    run = DiskRun(result="installed")
+    assert eng.read_result(tmp_path / "i", run) == "installed"
+    attach = next(c for c in run.calls if c[0] == "losetup")
+    assert attach[:4] == ["losetup", "-fP", "--show", "-r"]            # the guest may be writing the disk: never through us
+    assert run.calls[-1] == ["losetup", "-d", "/dev/loop9"]
+
+    class Killed(DiskRun):
+        def __call__(self, argv, timeout=20):
+            if argv[0] == "mount":
+                raise KeyboardInterrupt
+            return super().__call__(argv, timeout)
+
+    killed = Killed()
+    with pytest.raises(KeyboardInterrupt):
+        eng.read_result(tmp_path / "i", killed)
+    assert ["losetup", "-d", "/dev/loop9"] in killed.calls
+
+
+def test_a_payload_build_that_is_killed_while_filling_the_disk_still_releases_it(tmp_path):
+    pkg = tmp_path / "p.pkg"
+    pkg.write_bytes(b"pkg")
+
+    class Killed(DiskRun):
+        def __call__(self, argv, timeout=20):
+            if argv[0] == "sync":
+                raise KeyboardInterrupt
+            return super().__call__(argv, timeout)
+
+    run = Killed()
+    with pytest.raises(KeyboardInterrupt):
+        eng.build_payload(str(pkg), str(tmp_path / "img"), run)
+    assert ["losetup", "-d", "/dev/loop9"] in run.calls and "umount" in run.names()
 
 
 def test_payload_result(tmp_path):

@@ -55,6 +55,23 @@ def _private_gpu_state_dir(monkeypatch, tmp_path_factory):
     monkeypatch.setattr("osx_proxmox_next.gpu.STATE_DIR", tmp_path_factory.mktemp("gpu-state"))
 
 
+@pytest.fixture(autouse=True)
+def _private_driver_state_dir(monkeypatch, tmp_path_factory):
+    """Driver records, locks and the daily release check never touch the host's /var/lib folder."""
+    monkeypatch.setenv("DRIVER_STATE_DIR", str(tmp_path_factory.mktemp("driver-state")))
+    monkeypatch.setenv("IGPU_STATE_DIR", str(tmp_path_factory.mktemp("igpu-state")))
+
+
+@pytest.fixture
+def other_pid():
+    """The pid of a live process that is not the test: what another running update looks like."""
+    import subprocess
+    proc = subprocess.Popen(["sleep", "30"])
+    yield proc.pid
+    proc.kill()
+    proc.wait()
+
+
 GITHUB_FAKE = {
     "b00t0x/WhateverXe": [
         ("0.9.0", False, "WhateverXe-0.9.0-RELEASE.zip", "2026-11-01T00:00:00Z", "9" * 64),
@@ -63,16 +80,22 @@ GITHUB_FAKE = {
     "b00t0x/WhateverXe-Graphics": [
         ("v0.4.1", False, "WhateverXe-Graphics-0.4.1.pkg", "2026-10-02T00:00:00Z", "4" * 64),
     ],
+    "nullmoth/nvidia-macos-driver": [
+        ("v2.9", False, "nullmoth-nvidia-v2.9.tar.gz", "2026-11-10T00:00:00Z", "9" * 64),
+        ("v2.8.1", False, "nullmoth-nvidia-v2.8.1.tar.gz", "2026-10-10T00:00:00Z", "8" * 64),
+    ],
 }
+SUMS_NAMES = {"nullmoth/nvidia-macos-driver": "SHA256SUMS.txt"}
 
 
 def fake_github_releases(repo: str) -> list[dict]:
     """The releases API payload for *repo* from GITHUB_FAKE, with a digest on every asset."""
+    sums = SUMS_NAMES.get(repo, "SHA256SUMS")
     return [{"tag_name": tag, "prerelease": pre, "draft": False, "published_at": when,
              "assets": [{"name": name, "digest": "sha256:" + sha,
                          "browser_download_url": f"https://github.com/{repo}/releases/download/{tag}/{name}"},
-                        {"name": "SHA256SUMS", "digest": "sha256:" + "0" * 64,
-                         "browser_download_url": f"https://github.com/{repo}/releases/download/{tag}/SHA256SUMS"}]}
+                        {"name": sums, "digest": "sha256:" + "0" * 64,
+                         "browser_download_url": f"https://github.com/{repo}/releases/download/{tag}/{sums}"}]}
             for tag, pre, name, when, sha in GITHUB_FAKE[repo]]
 
 
@@ -86,3 +109,15 @@ def _no_github(monkeypatch):
         repo = url.split("/repos/")[1].split("/releases")[0]
         return fake_github_releases(repo)
     monkeypatch.setattr("osx_proxmox_next.igpu_engine.github_get", fake)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_pci_devices(monkeypatch, tmp_path):
+    """The driver update looks at the passed-through device on /sys. A CI runner has real PCI devices at the addresses
+    the fakes use, so by default the look-up finds nothing (the record decides). Tests of the look-up give a root."""
+    from osx_proxmox_next import driver_engine
+
+    real = driver_engine.live_kind
+    empty = str(tmp_path / "no-sysfs")
+    monkeypatch.setattr(driver_engine, "live_kind", lambda cfg, root="/sys": real(cfg, empty if str(root) == "/sys" else root))
+    monkeypatch.setenv("SYSFS_ROOT", empty)

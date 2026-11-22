@@ -16,7 +16,7 @@ from pathlib import Path
 from shlex import quote as shquote
 from collections.abc import Callable, Iterable
 
-from . import host_setup
+from . import driver_engine, host_setup
 from .domain import PlanStep
 from .infrastructure import ProxmoxAdapter
 from .preflight import has_initcall_blacklist
@@ -580,6 +580,8 @@ def build_hostpci_detach_steps(
             steps.append(PlanStep(title=title, argv=argv, risk="action" if key == "hostpci0" else "info"))
         steps.append(PlanStep(title="Forget the recorded settings",
                               argv=["rm", "-f", str(record_path(vmid))]))
+        steps.append(PlanStep(title="Forget the driver record (the card is gone)",
+                              argv=["rm", "-f", str(driver_engine.record_path(vmid))]))
         return steps
     if has_hostpci0:
         steps.append(PlanStep(
