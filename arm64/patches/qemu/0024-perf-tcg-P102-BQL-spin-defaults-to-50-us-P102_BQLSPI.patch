@@ -1,0 +1,26 @@
+From 8df7ee62c81bc602b0eec0cd23c1fa11994a7094 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Sat, 21 Nov 2026 01:59:46 -0500
+Subject: [PATCH] perf(tcg): P102 BQL spin defaults to 50 us (P102_BQLSPIN=0
+ turns it off)
+
+---
+ system/cpus.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/system/cpus.c b/system/cpus.c
+index d477636836..7e27245274 100644
+--- a/system/cpus.c
++++ b/system/cpus.c
+@@ -579,9 +579,9 @@ void rust_bql_mock_lock(void)
+  * P102_BQLSPIN=US: a contended bql_lock polls (look, then trylock) for up to
+  * US microseconds before it blocks in the kernel. Waking a sleeping waiter
+  * through futex inside a nested KVM guest costs about 12 us while the holder
+- * keeps the lock for about 1 us. Off (0) by default.
++ * keeps the lock for about 1 us. 50 us when unset, 0 turns it off.
+  */
+-static int64_t p102_bqlspin_ns;
++static int64_t p102_bqlspin_ns = 50 * 1000;
+ static uint64_t p102_bql_cont, p102_bql_hit;
+ 
+ static int64_t p102_now_ns(void)

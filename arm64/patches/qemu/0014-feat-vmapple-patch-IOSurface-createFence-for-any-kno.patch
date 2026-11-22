@@ -1,0 +1,674 @@
+From 4d79bd71ff73d5d0a3d56f16f1fd534023f67e8a Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(vmapple): patch IOSurface createFence for any known
+ macOS 27 build
+
+P79: the guest's IOSurface fence code is patched per queue. The matcher
+(iofence-match.c, no QEMU dependencies so it is testable offline)
+finds createIOFence by shape (word 2 and the masked BL distance),
+validates the decoded constants and requires the SHA-256 of the 64 KiB
+kext text to be a row of a small per-build table (26A428, 26B131).
+Unknown shapes are refused and logged with the values for a new row.
+Rescans when the kext text is in RAM twice.
+---
+ hw/vmapple/iofence-match.c         | 341 +++++++++++++++++++++++++++++
+ hw/vmapple/iofence-match.h         |  56 +++++
+ hw/vmapple/iofence-patch.c         | 183 ++++++++++++++++
+ hw/vmapple/meson.build             |   2 +-
+ hw/vmapple/vmapple.c               |   2 +
+ include/hw/vmapple/iofence-patch.h |  14 ++
+ 6 files changed, 597 insertions(+), 1 deletion(-)
+ create mode 100644 hw/vmapple/iofence-match.c
+ create mode 100644 hw/vmapple/iofence-match.h
+ create mode 100644 hw/vmapple/iofence-patch.c
+ create mode 100644 include/hw/vmapple/iofence-patch.h
+
+diff --git a/hw/vmapple/iofence-match.c b/hw/vmapple/iofence-match.c
+new file mode 100644
+index 0000000000..b918f43a63
+--- /dev/null
++++ b/hw/vmapple/iofence-match.c
+@@ -0,0 +1,341 @@
++/*
++ * P79 matcher (R6b), see iofence-match.h.
++ *
++ * Pattern, with the build-dependent immediates masked out:
++ *
++ *   createIOFence (9 words, and an identical twin 0x24 later):
++ *     bti c ; cbz x1, +0x18 ; ldr w8, [x0, #imm] ; mov x0, x1 ; mov x1, x2 ;
++ *     mov x2, x8 ; b stub ; mov x0, #0 ; ret
++ *   imm: any ldr w8,[x0,#imm] (moves between builds: 0xf8, 0x100).
++ *   stub (the b target, same for both copies, decoded from the b):
++ *     adrp x17 ; add x17,x17,#imm ; ldr x16,[x17] ; braa x16, x17
++ *   createFence(IOFence **, mode, id, cb, p, p, flags): 12 fixed words.
++ *   BL distance from slot 15 to createFence: any positive distance a BL
++ *   reaches, 4-aligned; it is whatever the build has, and it must equal the
++ *   table row's.
++ *
++ * Nothing is accepted on the masked shape alone: the SHA-256 of 64 KiB around
++ * createIOFence has to be one of the table's builds, and then every constant
++ * decoded from the image (ldr imm, BL distance, ret0, callee hash) has to
++ * equal that row. Anything else is refused and logged with the values needed
++ * to add a row.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifdef P79_STANDALONE
++#define _GNU_SOURCE
++#include <glib.h>
++#include <inttypes.h>
++#include <stdio.h>
++#include <string.h>
++#include "iofence-match.h"
++#else
++#include "qemu/osdep.h"
++#include "hw/vmapple/iofence-match.h"
++#endif
++
++#define P79_RET0_MAX    0x40000
++
++static const P79Row p79_table[] = {
++    {   /* 27.0 */
++        .build = "26A428", .ldr_imm = 0xf8, .bl_dist = 0xf8a848,
++        .ret0 = -0x25d0, .queue_off = 0x60, .serial_off = 0x550,
++        .sha_fence =
++        "0194088f5cede9a5dd231cc621f830d1de626be6f5f344f796183d838f89a209",
++        .sha_c7 =
++        "517bf6f104b57ef3ceee49fc469ead2d5319f84b2c16e1f013ae1f0cec555e65",
++    },
++    {   /* 27.2.1 */
++        .build = "26B131", .ldr_imm = 0x100, .bl_dist = 0xf97910,
++        .ret0 = -0x25d0, .queue_off = 0x60, .serial_off = 0x550,
++        .sha_fence =
++        "3172d250f37f81d4a6b512f8bf37f3ee4050ebc555b27151ebd461bdeafbed7d",
++        .sha_c7 =
++        "2e8a40b4fbda270f907ae1d960ead16b32737dc90b3e7622259021119a7165e8",
++    },
++};
++
++/* createFence(IOFence **, unsigned, unsigned, cb, void *, void *, unsigned) */
++static const uint32_t p79_c7[] = {
++    0xd503245f, 0xd503237f, 0xd10103ff, 0xa9024ff4, 0xa9037bfd, 0x9100c3fd,
++    0xaa0603e8, 0xaa0503e6, 0xaa0403e5, 0xaa0303e4, 0xaa0203e3, 0xaa0103f3,
++};
++
++const P79Row *p79_rows(size_t *n)
++{
++    *n = G_N_ELEMENTS(p79_table);
++    return p79_table;
++}
++
++static uint32_t rd32(const uint8_t *p)
++{
++    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
++           (uint32_t)p[3] << 24;
++}
++
++/* absolute target of the `b` at word 6 of the body at RAM offset `at` */
++static uint64_t b_target(uint32_t w, uint64_t at)
++{
++    int64_t t = w & 0x3ffffff;
++    if (t & (1 << 25)) {
++        t -= 1 << 26;
++    }
++    return at + 24 + (uint64_t)(t * 4);
++}
++
++int p79_shape_ok(const uint8_t *p, uint32_t *ldr_imm)
++{
++    static const uint32_t fixed[] = {
++        [0] = 0xd503245f,       /* bti c */
++        [1] = 0xb40000c1,       /* cbz x1, +0x18 */
++        [3] = 0xaa0103e0,       /* mov x0, x1 */
++        [4] = 0xaa0203e1,       /* mov x1, x2 */
++        [5] = 0xaa0803e2,       /* mov x2, x8 */
++        [7] = 0xd2800000,       /* mov x0, #0 */
++        [8] = 0xd65f03c0,       /* ret */
++    };
++    uint32_t w[9];
++
++    for (int i = 0; i < 9; i++) {
++        w[i] = rd32(p + 4 * i);
++    }
++    for (int i = 0; i < 9; i++) {
++        if (i != 2 && i != 6 && w[i] != fixed[i]) {
++            return 0;
++        }
++    }
++    /* ldr w8, [x0, #imm] (unsigned offset, 32-bit): mask keeps size, opc, Rn, Rt */
++    if ((w[2] & 0xffc003ff) != 0xb9400008 || (w[6] >> 26) != 5) {
++        return 0;
++    }
++    if (ldr_imm) {
++        *ldr_imm = ((w[2] >> 10) & 0xfff) * 4;
++    }
++    return 1;
++}
++
++/* adrp x17 ; add x17,x17,#imm ; ldr x16,[x17] ; braa x16, x17 */
++static int stub_ok(const uint8_t *ram, uint64_t size, uint64_t t)
++{
++    if ((t & 3) || t + 16 > size) {
++        return 0;
++    }
++    return (rd32(ram + t) & 0x9f00001f) == 0x90000011 &&
++           (rd32(ram + t + 4) & 0xffc003ff) == 0x91000231 &&
++           rd32(ram + t + 8) == 0xf9400230 &&
++           rd32(ram + t + 12) == 0xd71f0a11;
++}
++
++static char *sha_at(const uint8_t *ram, uint64_t size, uint64_t at)
++{
++    if (at < P79_WIN || at + P79_WIN > size) {
++        return NULL;
++    }
++    return g_compute_checksum_for_data(G_CHECKSUM_SHA256, ram + at - P79_WIN,
++                                       2 * P79_WIN);
++}
++
++int p79_ret0_ok(const uint8_t *ram, uint64_t size, uint64_t fo, const P79Row *r)
++{
++    uint64_t at = fo + r->ret0;
++    return (int64_t)fo + r->ret0 >= 0 &&
++           at + 8 <= size && rd32(ram + at) == 0x52800000 &&
++           rd32(ram + at + 4) == 0xd65f03c0;
++}
++
++void p79_build_code(const P79Row *r, uint64_t fo, uint64_t c7, uint32_t code[18])
++{
++    uint32_t cbz = (uint32_t)(((int64_t)(fo + r->ret0 - (fo + 4)) >> 2) &
++                              0x7ffff);
++    uint32_t bl = (uint32_t)(((int64_t)(c7 - (fo + 60)) >> 2) & 0x3ffffff);
++
++    code[0] = 0xd503245f;                                   /* bti c */
++    code[1] = 0xb4000000 | (cbz << 5) | 1;                  /* cbz x1, ret0 */
++    code[2] = 0xd503237f;                                   /* pacibsp */
++    code[3] = 0xa9bf7bff;                         /* stp xzr, x30, [sp,#-16]! */
++    code[4] = 0xf9400069 | ((r->queue_off / 8) << 10);      /* ldr x9,[x3,#q] */
++    code[5] = 0x52800003;                         /* mov w3, #0 */
++    code[6] = 0xb4000069;                         /* cbz x9, +12 */
++    code[7] = 0xb9400123 | ((r->serial_off / 4) << 10);     /* ldr w3,[x9,#s] */
++    code[8] = 0x32010063;                         /* orr w3, w3, #0x80000000 */
++    code[9] = 0xaa0103e0;                         /* mov x0, x1 */
++    code[10] = 0x910003e1;                        /* mov x1, sp */
++    code[11] = 0xaa1f03e4;                        /* mov x4, xzr */
++    code[12] = 0xaa1f03e5;                        /* mov x5, xzr */
++    code[13] = 0xaa1f03e6;                        /* mov x6, xzr */
++    code[14] = 0x52800087;                        /* mov w7, #4 */
++    code[15] = 0x94000000 | bl;                             /* bl createFence */
++    code[16] = 0xa8c17be0;                        /* ldp x0, x30, [sp], #16 */
++    code[17] = 0xd65f0fff;                        /* retab */
++}
++
++void p79_match(const uint8_t *ram, uint64_t size, P79Match *m)
++{
++    uint64_t nf = 0, nc = 0, f1 = 0, f2 = 0, c1 = 0, c2 = 0, off;
++    uint32_t imm = 0, imm2 = 0;
++    static const uint8_t head[8] = {            /* bti c ; cbz x1, +0x18 */
++        0x5f, 0x24, 0x03, 0xd5, 0xc1, 0x00, 0x00, 0xb4 };
++    uint8_t c7b[sizeof(p79_c7)];
++    g_autofree char *sf = NULL, *sc = NULL;
++    uint64_t near = 0;
++
++    memset(m, 0, sizeof(*m));
++    for (int i = 0; i < 12; i++) {
++        c7b[4 * i] = p79_c7[i];
++        c7b[4 * i + 1] = p79_c7[i] >> 8;
++        c7b[4 * i + 2] = p79_c7[i] >> 16;
++        c7b[4 * i + 3] = p79_c7[i] >> 24;
++    }
++
++    /* createIOFence sites: the masked 9-word shape */
++    for (off = 0; off + 36 <= size; ) {
++        const uint8_t *h = memmem(ram + off, size - off, head, sizeof(head));
++        uint64_t at;
++        if (!h) {
++            break;
++        }
++        at = h - ram;
++        off = at + 4;
++        if ((at & 3) == 0 && at + 36 <= size && p79_shape_ok(ram + at, &imm2)) {
++            if (nf == 0) {
++                f1 = at;
++                imm = imm2;
++            } else if (nf == 1) {
++                f2 = at;
++            }
++            nf++;
++        }
++    }
++    /* createFence(7) prologues, fixed */
++    for (off = 0; off + sizeof(c7b) <= size; ) {
++        const uint8_t *h = memmem(ram + off, size - off, c7b, sizeof(c7b));
++        uint64_t at;
++        if (!h) {
++            break;
++        }
++        at = h - ram;
++        off = at + 4;
++        if ((at & 3) == 0) {
++            if (nc == 0) {
++                c1 = at;
++            } else if (nc == 1) {
++                c2 = at;
++            }
++            nc++;
++        }
++    }
++    if (nf == 0 || nc == 0) {
++        m->status = P79_M_NONE;
++        snprintf(m->msg, sizeof(m->msg), "no createIOFence shape (%" PRIu64
++                 ") or createFence prologue (%" PRIu64 ") yet", nf, nc);
++        return;
++    }
++    if (nf != 2 || f2 != f1 + P79_TWIN) {
++        /* a second copy of the kext's text in RAM: which one runs is unknown */
++        m->status = P79_M_AMBIG;
++        snprintf(m->msg, sizeof(m->msg), "%" PRIu64 " createIOFence hits (%#"
++                 PRIx64 ", %#" PRIx64 "): ambiguous, scanning again later",
++                 nf, f1, f2);
++        return;
++    }
++
++    /* validate the shape: both bodies agree, and the b lands on the stub */
++    {
++        uint32_t i2 = 0;
++        uint64_t t1 = b_target(rd32(ram + f1 + 24), f1);
++        uint64_t t2 = b_target(rd32(ram + f2 + 24), f2);
++        if (!p79_shape_ok(ram + f2, &i2) || i2 != imm || t1 != t2 ||
++            !stub_ok(ram, size, t1)) {
++            m->status = P79_M_REFUSE;
++            snprintf(m->msg, sizeof(m->msg), "refused: createIOFence pair at "
++                     "%#" PRIx64 " has an unexpected shape (ldr imm %#x/%#x, "
++                     "b targets %#" PRIx64 "/%#" PRIx64 ", stub %s)", f1, imm,
++                     i2, t1, t2, stub_ok(ram, size, t1) ? "ok" : "bad");
++            return;
++        }
++    }
++
++    /* BL distance candidates: createFence prologues a BL from slot 15 reaches */
++    {
++        uint64_t slot = f1 + 60, c = c1;
++        for (int k = 0; k < 2 && k < (int)nc; k++, c = c2) {
++            if (c > slot && c - slot < 0x8000000 && (!near || c < near)) {
++                near = c;
++            }
++        }
++    }
++
++    sf = sha_at(ram, size, f1);
++    if (!sf) {
++        m->status = P79_M_REFUSE;
++        snprintf(m->msg, sizeof(m->msg), "refused: createIOFence at %#" PRIx64
++                 ": 64 KiB window out of RAM", f1);
++        return;
++    }
++    for (size_t i = 0; i < G_N_ELEMENTS(p79_table); i++) {
++        if (!strcmp(sf, p79_table[i].sha_fence)) {
++            m->row = &p79_table[i];
++            break;
++        }
++    }
++    if (!m->row) {
++        if (near) {
++            sc = sha_at(ram, size, near);
++        }
++        m->status = P79_M_REFUSE;
++        snprintf(m->msg, sizeof(m->msg), "refused: unknown macOS build (not in "
++                 "the table): createIOFence at %#" PRIx64 ", ldr w8,[x0,#%#x], "
++                 "nearest createFence at BL distance %#" PRIx64 ", sha256 "
++                 "fence %s, c7 %s; known builds: %s %s", f1, imm,
++                 near ? near - (f1 + 60) : 0, sf, sc ? sc : "-",
++                 p79_table[0].build, p79_table[1].build);
++        return;
++    }
++    if (m->row->ldr_imm != imm) {
++        m->status = P79_M_REFUSE;
++        snprintf(m->msg, sizeof(m->msg), "refused: build %s ldr imm %#x, row "
++                 "says %#x", m->row->build, imm, m->row->ldr_imm);
++        m->row = NULL;
++        return;
++    }
++    {
++        /* the callee is the copy at the row's distance from the live caller */
++        uint64_t c = f1 + 60 + m->row->bl_dist;
++        if (nc > 1) {
++            snprintf(m->note, sizeof(m->note), "%" PRIu64 " createFence "
++                     "prologues in RAM (first %#" PRIx64 ", %#" PRIx64 "), "
++                     "using the one at %#" PRIx64, nc, c1, c2, c);
++        }
++        if (c + sizeof(c7b) > size || memcmp(ram + c, c7b, sizeof(c7b))) {
++            m->status = P79_M_REFUSE;
++            snprintf(m->msg, sizeof(m->msg), "refused: build %s: no createFence "
++                     "at %#" PRIx64, m->row->build, c);
++            m->row = NULL;
++            return;
++        }
++        sc = sha_at(ram, size, c);
++        if (!sc || strcmp(sc, m->row->sha_c7)) {
++            m->status = P79_M_REFUSE;
++            snprintf(m->msg, sizeof(m->msg), "refused: build %s: createFence at "
++                     "%#" PRIx64 " sha256 %s, want %s", m->row->build, c,
++                     sc ? sc : "-", m->row->sha_c7);
++            m->row = NULL;
++            return;
++        }
++        if (!p79_ret0_ok(ram, size, f1, m->row)) {
++            m->status = P79_M_REFUSE;
++            snprintf(m->msg, sizeof(m->msg), "refused: build %s: no mov w0,#0; "
++                     "ret at createIOFence%+" PRId64, m->row->build,
++                     m->row->ret0);
++            m->row = NULL;
++            return;
++        }
++        m->fo = f1;
++        m->c7 = c;
++        m->status = P79_M_FOUND;
++        snprintf(m->msg, sizeof(m->msg), "build %s matched (ldr w8,[x0,#%#x], BL "
++                 "distance %#" PRIx64 ", queue +%#x, serial +%#x)",
++                 m->row->build, imm, m->row->bl_dist, m->row->queue_off,
++                 m->row->serial_off);
++    }
++}
+diff --git a/hw/vmapple/iofence-match.h b/hw/vmapple/iofence-match.h
+new file mode 100644
+index 0000000000..9d19ef52f1
+--- /dev/null
++++ b/hw/vmapple/iofence-match.h
+@@ -0,0 +1,56 @@
++/*
++ * P79 matcher (R6b): finds AppleParavirtGPU createIOFence and IOSurface
++ * createFence in a RAM image of an arm64 macOS 27 boot kernel collection,
++ * on any build, and only accepts builds listed in a table of known-good
++ * constants. No QEMU dependencies (glib only) so it can be unit tested
++ * offline against decompressed kernelcaches.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef HW_VMAPPLE_IOFENCE_MATCH_H
++#define HW_VMAPPLE_IOFENCE_MATCH_H
++
++#include <stdint.h>
++#include <stddef.h>
++
++#define P79_WIN         0x8000          /* hash window: +-32 KiB */
++#define P79_LEN         72              /* 18 instructions */
++#define P79_TWIN        0x24            /* createIOFenceWithTransaction */
++
++/* One known-good build, generated from its kernelcache by tools/r6b/p79rows.py */
++typedef struct P79Row {
++    const char *build;
++    uint32_t ldr_imm;       /* word 2: ldr w8, [x0, #ldr_imm] (device id) */
++    uint64_t bl_dist;       /* slot 15 (createIOFence + 60) to createFence */
++    int64_t  ret0;          /* createIOFence + ret0: mov w0,#0; ret */
++    uint32_t queue_off;     /* IOGPUCommandDescriptor -> IOGPUCommandQueue */
++    uint32_t serial_off;    /* IOGPUCommandQueue serial */
++    const char *sha_fence;  /* sha256 of 64 KiB around createIOFence */
++    const char *sha_c7;     /* sha256 of 64 KiB around createFence(7) */
++} P79Row;
++
++typedef enum {
++    P79_M_NONE = 0,         /* nothing (complete) found: scan again later */
++    P79_M_AMBIG,            /* more than one copy: scan again later */
++    P79_M_FOUND,            /* known build, safe to patch */
++    P79_M_REFUSE,           /* unknown or inconsistent shape: never patch */
++} P79Status;
++
++typedef struct P79Match {
++    P79Status status;
++    uint64_t fo, c7;        /* RAM offsets of createIOFence and createFence */
++    const P79Row *row;      /* the table row that matched */
++    char msg[512];          /* what to log (always set) */
++    char note[256];         /* optional extra line (duplicate callee), or "" */
++} P79Match;
++
++const P79Row *p79_rows(size_t *n);
++void p79_match(const uint8_t *ram, uint64_t size, P79Match *m);
++
++/* the 18 instructions for row `r`, at RAM offset `fo` with callee `c7` */
++void p79_build_code(const P79Row *r, uint64_t fo, uint64_t c7, uint32_t code[18]);
++/* does the 9-word body at `w` have the createIOFence shape (any ldr imm) */
++int p79_shape_ok(const uint8_t *w, uint32_t *ldr_imm);
++int p79_ret0_ok(const uint8_t *ram, uint64_t size, uint64_t fo, const P79Row *r);
++
++#endif
+diff --git a/hw/vmapple/iofence-patch.c b/hw/vmapple/iofence-patch.c
+new file mode 100644
+index 0000000000..f23c00201f
+--- /dev/null
++++ b/hw/vmapple/iofence-patch.c
+@@ -0,0 +1,183 @@
++/*
++ * P79 lab switch: per command queue IOSurface fences for the guest's
++ * AppleParavirtGPU (macOS 27 boot kernel collections listed in the table in
++ * iofence-match.c: 26A428, 26B131; any other build is refused).
++ *
++ * Off unless SNAP_IOFENCE_PATCH=1. Then, from SNAP_IOFENCE_DELAY seconds of
++ * guest time (default 30), every 5 s until it is done or refused: a worker
++ * thread scans guest RAM for AppleParavirtGPU::createIOFence (and its unused
++ * twin createIOFenceWithTransaction right behind it) and for IOSurface's
++ * createFence(IOFence **, mode, id, cb, p, p, flags), with the build
++ * dependent immediates masked (iofence-match.c decodes and validates them).
++ * Exactly one createIOFence pair, whose 64 KiB SHA-256 selects a table row,
++ * and a createFence at that row's distance with the row's hash, or nothing
++ * is written. The log says which build row matched.
++ * With all vCPUs stopped the 18 instructions are replaced by:
++ *
++ *     bti c
++ *     cbz x1, ret0                    ; no surface: return NULL (as before)
++ *     pacibsp
++ *     stp xzr, x30, [sp, #-16]!       ; [sp] = the fence out pointer
++ *     ldr x9, [x3, #0x60]             ; descriptor -> IOGPUCommandQueue
++ *     mov w3, #0                      ; no queue: id 0 never coalesces
++ *     cbz x9, 1f
++ *     ldr w3, [x9, #0x550]            ; the queue's unique serial
++ *     orr w3, w3, #0x80000000         ; clear of the small accelerator ids
++ * 1:  mov x0, x1 ; mov x1, sp ; mov x4, xzr ; mov x5, xzr ; mov x6, xzr
++ *     mov w7, #4                      ; same-id fences are ordered
++ *     bl IOSurface::createFence(IOFence **, ...)
++ *     ldp x0, x30, [sp], #16
++ *     retab
++ *
++ * The original used one id for the whole device and flags 0, so a GPU
++ * read of a surface the same device wrote waited on the CPU for the
++ * writer's completion. With flag 4 and a per queue id, fences of the same
++ * guest command queue coalesce (the host runs one task's execs in commit
++ * order); fences of other queues, the CPU and the display still wait.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/error-report.h"
++#include "qemu/thread.h"
++#include "qemu/timer.h"
++#include "qemu/atomic.h"
++#include "hw/core/cpu.h"
++#include "system/memory.h"
++#include "system/address-spaces.h"
++#include "hw/vmapple/iofence-patch.h"
++#include "hw/vmapple/iofence-match.h"
++
++#define P79_PERIOD_NS   (5 * NANOSECONDS_PER_SECOND)
++#define P79_MAX_TRIES   120
++
++typedef struct P79State {
++    uint8_t *ram;
++    uint64_t size;
++    hwaddr base;
++    QEMUTimer *timer;
++    QemuThread thread;
++    int tries;
++    bool running;       /* a scan thread is out */
++    bool finished;      /* patched or refused: stop */
++    /* the scan's result, read once `scanned` is set */
++    int scanned;        /* 0 none yet, 1 found, 2 nothing found, 3 refuse */
++    P79Match match;
++} P79State;
++
++static P79State p79;
++
++static void *p79_scan(void *opaque)
++{
++    int r;
++
++    p79_match(p79.ram, p79.size, &p79.match);
++    switch (p79.match.status) {
++    case P79_M_FOUND:
++        r = 1;
++        break;
++    case P79_M_REFUSE:
++        r = 3;
++        break;
++    default:
++        r = 2;          /* nothing yet, or a second copy: scan again later */
++        break;
++    }
++    qatomic_store_release(&p79.scanned, r);
++    return NULL;
++}
++
++static void p79_apply(CPUState *cs, run_on_cpu_data d)
++{
++    const P79Row *row = p79.match.row;
++    uint64_t fo = p79.match.fo;
++    uint32_t code[18];
++    uint32_t ldr_imm;
++
++    /* recheck under exclusion: both original bodies and the ret0 pair */
++    if (!p79_shape_ok(p79.ram + fo, &ldr_imm) || ldr_imm != row->ldr_imm ||
++        !p79_shape_ok(p79.ram + fo + P79_TWIN, &ldr_imm) ||
++        ldr_imm != row->ldr_imm ||
++        !p79_ret0_ok(p79.ram, p79.size, fo, row)) {
++        warn_report("P79: refused: bytes changed before the write");
++        return;
++    }
++    p79_build_code(row, fo, p79.match.c7, code);
++    for (int i = 0; i < 18; i++) {
++        code[i] = cpu_to_le32(code[i]);
++    }
++    /* through the memory API: dirty tracking and translated code dropped */
++    if (address_space_write(&address_space_memory, p79.base + fo,
++                            MEMTXATTRS_UNSPECIFIED, code, sizeof(code))
++        != MEMTX_OK || memcmp(p79.ram + fo, code, sizeof(code))) {
++        warn_report("P79: the write did not land");
++        return;
++    }
++    warn_report("P79: patched createIOFence at ram+%#" PRIx64 " (gpa %#"
++                PRIx64 "), createFence at ram+%#" PRIx64 ", build %s, vcpu %d",
++                fo, (uint64_t)(p79.base + fo), p79.match.c7, row->build,
++                cs->cpu_index);
++}
++
++static void p79_tick(void *opaque)
++{
++    if (p79.finished) {
++        return;
++    }
++    if (p79.running) {
++        int r = qatomic_load_acquire(&p79.scanned);
++        if (r == 0) {
++            goto again;
++        }
++        qemu_thread_join(&p79.thread);
++        p79.running = false;
++        if (p79.match.note[0]) {
++            warn_report("P79: %s", p79.match.note);
++        }
++        if (r != 2 || p79.match.status == P79_M_AMBIG) {
++            warn_report("P79: %s", p79.match.msg);
++        }
++        if (r == 1) {
++            async_safe_run_on_cpu(first_cpu, p79_apply, RUN_ON_CPU_NULL);
++            p79.finished = true;
++            return;
++        }
++        if (r == 3) {
++            p79.finished = true;
++            return;
++        }
++    }
++    if (++p79.tries > P79_MAX_TRIES) {
++        warn_report("P79: createIOFence not found after %d scans, giving up",
++                    P79_MAX_TRIES);
++        p79.finished = true;
++        return;
++    }
++    p79.scanned = 0;
++    p79.running = true;
++    qemu_thread_create(&p79.thread, "p79-scan", p79_scan, NULL,
++                       QEMU_THREAD_JOINABLE);
++again:
++    timer_mod(p79.timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + P79_PERIOD_NS);
++}
++
++void vmapple_iofence_patch_init(MemoryRegion *ram, hwaddr base)
++{
++    const char *on = getenv("SNAP_IOFENCE_PATCH");
++    const char *delay = getenv("SNAP_IOFENCE_DELAY");
++    int64_t d = 30;
++
++    if (!on || strcmp(on, "1")) {
++        return;
++    }
++    if (delay) {
++        d = g_ascii_strtoll(delay, NULL, 10);
++    }
++    p79.ram = memory_region_get_ram_ptr(ram);
++    p79.size = memory_region_size(ram);
++    p79.base = base;
++    p79.timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, p79_tick, NULL);
++    timer_mod(p79.timer, d * NANOSECONDS_PER_SECOND);
++    warn_report("P79: SNAP_IOFENCE_PATCH=1: per queue IOSurface fences, "
++                "scan from %" PRId64 " s of guest time", d);
++}
+diff --git a/hw/vmapple/meson.build b/hw/vmapple/meson.build
+index eba03490b4..518d304798 100644
+--- a/hw/vmapple/meson.build
++++ b/hw/vmapple/meson.build
+@@ -5,4 +5,4 @@ system_ss.add(when: 'CONFIG_VMAPPLE_BDIF', if_true: files('bdif.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_CFG',  if_true: files('cfg.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_MSI_FRAME', if_true: files('msi-frame.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_VIRTIO_BLK',  if_true: files('virtio-blk.c'))
+-specific_ss.add(when: 'CONFIG_VMAPPLE',     if_true: files('vmapple.c'))
++specific_ss.add(when: 'CONFIG_VMAPPLE',     if_true: files('vmapple.c', 'iofence-patch.c', 'iofence-match.c'))
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 2b573acdac..8bd509a6c8 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -51,6 +51,7 @@
+ #include "hw/virtio/virtio-net.h"
+ #include "hw/virtio/virtio-pci.h"
+ #include "hw/vmapple/vmapple.h"
++#include "hw/vmapple/iofence-patch.h"
+ #include "net/net.h"
+ #include "qapi/error.h"
+ #include "qapi/visitor.h"
+@@ -1106,6 +1107,7 @@ static void mach_vmapple_init(MachineState *machine)
+ 
+     memory_region_add_subregion(sysmem, vms->memmap[VMAPPLE_MEM].base,
+                                 machine->ram);
++    vmapple_iofence_patch_init(machine->ram, vms->memmap[VMAPPLE_MEM].base);
+ 
+     create_gic(vms, sysmem);
+     create_bdif(vms, sysmem);
+diff --git a/include/hw/vmapple/iofence-patch.h b/include/hw/vmapple/iofence-patch.h
+new file mode 100644
+index 0000000000..9c747ae051
+--- /dev/null
++++ b/include/hw/vmapple/iofence-patch.h
+@@ -0,0 +1,14 @@
++/*
++ * P79 lab switch: per command queue IOSurface fences (iofence-patch.c).
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef HW_VMAPPLE_IOFENCE_PATCH_H
++#define HW_VMAPPLE_IOFENCE_PATCH_H
++
++#include "system/memory.h"
++
++/* Arms the patch when SNAP_IOFENCE_PATCH=1; RAM is mapped at gpa `base`. */
++void vmapple_iofence_patch_init(MemoryRegion *ram, hwaddr base);
++
++#endif

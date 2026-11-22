@@ -1,0 +1,2992 @@
+From 2cca7d69ea3c06d45854e45209be2261d40fd4ec Mon Sep 17 00:00:00 2001
+From: Anees Iqbal <hello@aneesiqbal.ai>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] docs(27on86): add experiment notes, run scripts and harness
+ tests
+
+Bring-up harness for macOS on TCG: scripts/27on86 (build, run, serial
+command channel, XNU boot argument injection at the handoff, aux NVRAM
+layout checks, headless bootstrap and workload validation, reboot and
+inter-CPU synchronization checks), tests/27on86 (device tree, aux boot
+args and serial helpers, smoke test) and the experiment log under
+docs/experiments with README, AGENTS.md, design and roadmap notes.
+
+Authored by Anees Iqbal; the commits of the original series are
+squashed here.
+---
+ .gitignore                                    |  22 +
+ AGENTS.md                                     |  46 +++
+ README.md                                     |  46 +++
+ docs/design.md                                |  92 +++++
+ docs/experiments/E0001-build-baseline.md      |  48 +++
+ docs/experiments/E0002-tcg-control-boot.md    |  48 +++
+ docs/experiments/E0003-vmapple-tcg-smoke.md   |  71 ++++
+ .../experiments/E0004-macos-userspace-boot.md |  69 ++++
+ .../E0005-eight-vcpu-userspace-boot.md        |  68 ++++
+ .../E0006-headless-workload-validation.md     |  97 +++++
+ docs/experiments/README.md                    |  49 +++
+ docs/roadmap.md                               |  69 ++++
+ scripts/27on86/apple_device_tree.py           |  95 +++++
+ scripts/27on86/bootstrap-headless.py          | 151 +++++++
+ scripts/27on86/build-aarch64.sh               |  20 +
+ scripts/27on86/check-tcg-control.sh           |  59 +++
+ scripts/27on86/check-vmapple-tcg.sh           | 114 ++++++
+ scripts/27on86/guest-headless-bootstrap.sh    | 116 ++++++
+ scripts/27on86/guest-headless-workload.sh     | 115 ++++++
+ scripts/27on86/headless-sshd.conf             |  12 +
+ scripts/27on86/headless-sshd.plist            |  24 ++
+ scripts/27on86/inject-xnu-boot-args.gdb       | 109 +++++
+ scripts/27on86/inject-xnu-boot-args.sh        |  19 +
+ scripts/27on86/run-vmapple-tcg.sh             | 181 +++++++++
+ scripts/27on86/serial-command.py              | 142 +++++++
+ scripts/27on86/set-aux-boot-args.py           | 134 +++++++
+ scripts/27on86/validate-headless.py           | 378 ++++++++++++++++++
+ scripts/27on86/verify-launchd-ram.py          |  52 +++
+ tests/27on86/test_apple_device_tree.py        |  63 +++
+ tests/27on86/test_aux_boot_args.py            |  76 ++++
+ tests/27on86/test_serial_command.py           |  89 +++++
+ tests/27on86/vmapple-smoke.S                  |  43 ++
+ 32 files changed, 2717 insertions(+)
+ create mode 100644 AGENTS.md
+ create mode 100644 README.md
+ create mode 100644 docs/design.md
+ create mode 100644 docs/experiments/E0001-build-baseline.md
+ create mode 100644 docs/experiments/E0002-tcg-control-boot.md
+ create mode 100644 docs/experiments/E0003-vmapple-tcg-smoke.md
+ create mode 100644 docs/experiments/E0004-macos-userspace-boot.md
+ create mode 100644 docs/experiments/E0005-eight-vcpu-userspace-boot.md
+ create mode 100644 docs/experiments/E0006-headless-workload-validation.md
+ create mode 100644 docs/experiments/README.md
+ create mode 100644 docs/roadmap.md
+ create mode 100644 scripts/27on86/apple_device_tree.py
+ create mode 100755 scripts/27on86/bootstrap-headless.py
+ create mode 100755 scripts/27on86/build-aarch64.sh
+ create mode 100755 scripts/27on86/check-tcg-control.sh
+ create mode 100755 scripts/27on86/check-vmapple-tcg.sh
+ create mode 100755 scripts/27on86/guest-headless-bootstrap.sh
+ create mode 100755 scripts/27on86/guest-headless-workload.sh
+ create mode 100644 scripts/27on86/headless-sshd.conf
+ create mode 100644 scripts/27on86/headless-sshd.plist
+ create mode 100644 scripts/27on86/inject-xnu-boot-args.gdb
+ create mode 100755 scripts/27on86/inject-xnu-boot-args.sh
+ create mode 100755 scripts/27on86/run-vmapple-tcg.sh
+ create mode 100755 scripts/27on86/serial-command.py
+ create mode 100755 scripts/27on86/set-aux-boot-args.py
+ create mode 100755 scripts/27on86/validate-headless.py
+ create mode 100755 scripts/27on86/verify-launchd-ram.py
+ create mode 100644 tests/27on86/test_apple_device_tree.py
+ create mode 100755 tests/27on86/test_aux_boot_args.py
+ create mode 100644 tests/27on86/test_serial_command.py
+ create mode 100644 tests/27on86/vmapple-smoke.S
+
+diff --git a/.gitignore b/.gitignore
+index 61fa39967b..b877b55ba8 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -20,3 +20,25 @@ GTAGS
+ *.swp
+ *.patch
+ *.gcov
++
++# Build trees and generated state
++/out/
++/tmp/
++*.log
++*.core
++
++# Local guest and firmware inputs
++/artifacts/
++/local-inputs/
++*.img
++*.dmg
++*.ipsw
++*.raw
++*.qcow2
++*.bin
++*.fd
++*.rom
++
++# Editor and host metadata
++.DS_Store
++.idea/
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000000..9214ab2e91
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,46 @@
++# AGENTS.md
++
++## Checkpoint commits
++
++Commit the repository at every logical checkpoint. A checkpoint is a coherent,
++reviewable unit of completed work that has been verified in proportion to its
++risk - for example, documentation scaffolding, a reproducible baseline, one
++isolated compatibility fix, or a passing experiment.
++
++- Keep each checkpoint commit focused on one purpose.
++- Run the relevant checks before committing.
++- Do not combine unrelated user changes with project work.
++- Do not commit secrets, local inputs, generated artifacts, or third-party
++  binary material.
++- If a checkpoint cannot be committed safely, report why instead of silently
++  leaving completed work uncommitted.
++
++## Configure and build output
++
++Keep verbose configure and Ninja output out of the conversation context.
++
++- Redirect full configure and Ninja output to ignored log files.
++- While a command is running, report only a short live tail when useful.
++- On completion, report the exit status and only the diagnostic tail needed to
++  explain a failure or confirm success.
++- Do not paste complete configure or Ninja transcripts into tool output.
++
++## Static reverse engineering
++
++Static reverse engineering is a legitimate way to determine an unclear API
++contract. Local headers, symbols, disassembly, string tables, and structure
++layouts may be inspected to infer expected shapes, opcodes, field offsets, and
++calling conventions.
++
++Local third-party binaries and material derived from their bytes must remain
++local:
++
++- Never commit binaries, copied excerpts, disassembly listings, extracted
++  shaders or firmware, or other material derived from third-party bytes.
++- Never identify those binaries in persistent repository content, including
++  code comments, commit messages, documentation, tests, and logs.
++- Record conclusions as API contracts - for example, describe a field as a
++  page-shift without recording where that conclusion was learned.
++- Original analysis, metadata, hashes, and reproduction procedures may be
++  recorded when they do not include third-party bytes or identify local binary
++  inputs.
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000..a08b4b11e0
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,46 @@
++# 27on86
++
++27on86 is an experimental QEMU effort to run an arm64 macOS VMApple guest on
++an x86-64 Mac using software CPU translation.
++
++The project targets the VMApple virtual machine contract. It does **not** aim
++to reproduce a physical Apple SoC, provide GPU acceleration, or bypass guest
++security policy.
++
++## Boot milestone
++
++Reach a reproducible arm64 macOS boot checkpoint with QEMU's `vmapple` machine
++and TCG on an x86-64 host. A serial console, useful boot log, or reachable
++network service counts; a graphical desktop does not.
++
++The first completed guest milestone is macOS 13. Later guest versions, ending
++in macOS 27, are separate compatibility milestones.
++
++## Project status
++
++Milestones M0 through M2 are complete on the x86-64 Linux development host.
++The macOS 13 VMApple guest now boots repeatably with eight vCPUs, exposes a
++headless SSH service, passes CPU, memory, storage, networking, and timer
++workloads, reboots into a second usable boot, and shuts down cleanly. The
++one-vCPU configuration remains a passing regression target. See:
++
++- [Design](docs/design.md)
++- [Roadmap](docs/roadmap.md)
++- [Experiment records](docs/experiments/README.md)
++
++The complete fresh-clone validation is:
++
++```sh
++scripts/27on86/validate-headless.py --runs 2 --cpus 8
++```
++
++It requires the local input environment documented by the experiment records.
++The runner validates auxiliary NVRAM geometry before starting QEMU and leaves
++all writable clones, generated keys, and logs under the ignored output tree.
++
++## Repository rules
++
++Guest images, firmware, boot artifacts, crash dumps, and other third-party
++binary material are local inputs only. They must remain untracked. Persistent
++project material records observed interfaces and original conclusions, never
++third-party bytes or their provenance.
+diff --git a/docs/design.md b/docs/design.md
+new file mode 100644
+index 0000000000..43b3d1049b
+--- /dev/null
++++ b/docs/design.md
+@@ -0,0 +1,92 @@
++# Design
++
++## Objective
++
++Execute an arm64 VMApple macOS guest on an x86-64 host by combining QEMU's
++VMApple device model with QEMU's Tiny Code Generator (TCG).
++
++The core path is:
++
++```text
++arm64 macOS guest
++        |
++VMApple virtual platform
++        |
++QEMU AArch64 system emulation
++        |
++TCG translation to x86-64
++```
++
++## Scope
++
++The initial system provides:
++
++- AArch64 CPU execution through TCG.
++- The virtual CPU feature set expected by a VMApple guest.
++- VMApple interrupt, timer, configuration, storage, and networking contracts.
++- Headless diagnostics and operation.
++- Reproducible builds and experiments.
++
++The initial system does not provide:
++
++- Physical Apple SoC emulation.
++- GPU or display acceleration.
++- Same-architecture hardware virtualization.
++- Guest modification as a substitute for a correct virtual platform.
++
++## Working hypotheses
++
++1. The VMApple guest kernel targets a virtual platform rather than a physical
++   M-series SoC, keeping the required device surface tractable.
++2. QEMU TCG implements enough of the required AArch64 architecture to enter
++   the guest boot environment on x86-64.
++3. Remaining failures can be separated into CPU-contract, platform-contract,
++   boot-contract, and performance problems.
++4. A known-good older guest is necessary to distinguish cross-architecture
++   failures from changes in later VMApple generations.
++
++Each hypothesis remains provisional until an experiment supplies evidence.
++
++## Host and accelerator model
++
++Cross-architecture execution uses TCG. Host virtualization facilities cannot
++execute arm64 guest instructions on an x86-64 processor. Consequently, the
++first goal is correctness and observability; performance work begins only
++after a repeatable boot path exists.
++
++## Graphics boundary
++
++The core VMApple machine must not depend on Apple host graphics frameworks.
++When the native paravirtualized graphics device is unavailable, VMApple is
++built and started without that optional device. CPU and platform bring-up is
++therefore headless and software-only.
++
++Guest graphics are a replaceable device boundary. A future `reims-vgpu`
++integration can provide the guest GPU API contract and a portable rendering
++path without coupling the VMApple CPU, interrupt, storage, or boot contracts
++to HVF or other Apple host frameworks.
++
++## Source strategy
++
++Development should preserve QEMU's upstream history and keep the change set
++reviewable as ordinary commits. The preferred layout is a QEMU fork with:
++
++- a documented upstream revision;
++- a development branch for VMApple-on-TCG changes;
++- small commits divided by discovered contract or subsystem;
++- experiment records outside generated build directories.
++
++The current repository should be attached to upstream QEMU history rather
++than embedding an independently cloned source tree or copying QEMU sources
++into an unrelated history.
++
++## Evidence and artifact policy
++
++Static inspection may be used to infer an interface when its contract is
++unclear. Repository content may contain original analysis, abstract layouts,
++field meanings, state transitions, and reproduction procedures.
++
++The repository must not contain third-party binary inputs, extracted bytes,
++disassembly listings, generated disk state, or persistent references that
++identify local binary inputs. Experiment records should refer to inputs by an
++opaque local identifier chosen by the operator.
+diff --git a/docs/experiments/E0001-build-baseline.md b/docs/experiments/E0001-build-baseline.md
+new file mode 100644
+index 0000000000..c79c7c0e82
+--- /dev/null
++++ b/docs/experiments/E0001-build-baseline.md
+@@ -0,0 +1,48 @@
++# E0001: x86-64 AArch64 build baseline
++
++## Question
++
++Can the pinned QEMU baseline build an AArch64 system emulator with native
++x86-64 TCG on the development host?
++
++## Environment
++
++- Host OS and architecture: Linux 7.1.3, x86-64
++- Host CPU: x86-64
++- C compiler: GCC 16.1.1
++- Meson: 1.11.1
++- Ninja: 1.13.2
++- Upstream QEMU tag: `v11.1.0`
++- Upstream QEMU commit: `84f07211cc5b4fc6a371559bf8a5de4fb068e648`
++- Build configuration: debug AArch64 softmmu, documentation disabled
++- Local input identifiers: none
++
++## Procedure
++
++Run:
++
++```sh
++scripts/27on86/build-aarch64.sh
++build/qemu-system-aarch64 --version
++build/qemu-system-aarch64 -accel help
++```
++
++## Observation
++
++The build completed successfully. The resulting executable reports QEMU
++11.1.0 and exposes TCG as its only accelerator. Meson selected the native
++x86-64 TCG backend and generated the `aarch64-softmmu` target.
++
++The upstream default AArch64 configuration does not include the VMApple
++machine on this host. That is an M1 platform-configuration question rather
++than a failure of the AArch64 TCG baseline.
++
++## Conclusion
++
++The pinned source and host toolchain can produce an AArch64 full-system
++emulator whose guest instructions are translated to x86-64 by TCG.
++
++## Next experiment
++
++Boot a minimal AArch64 Linux control guest twice with an identical explicit
++`virt` machine and CPU contract.
+diff --git a/docs/experiments/E0002-tcg-control-boot.md b/docs/experiments/E0002-tcg-control-boot.md
+new file mode 100644
+index 0000000000..d6429290cd
+--- /dev/null
++++ b/docs/experiments/E0002-tcg-control-boot.md
+@@ -0,0 +1,48 @@
++# E0002: Repeated AArch64 TCG control boot
++
++## Question
++
++Can the x86-64 build execute an AArch64 Linux system through TCG to a stable,
++repeatable userspace checkpoint?
++
++## Environment
++
++- Host OS and architecture: Linux 7.1.3, x86-64
++- Host CPU: x86-64
++- QEMU revision: `22cd91aa7e`
++- Machine contract: `virt-11.1`, TCG, `max` CPU, one vCPU, 512 MiB RAM
++- Control input A SHA-256:
++  `1a2fa67cb25a2fa9065818712d50d0d543526818b3c6b43695e54deaca33d66d`
++- Control input B SHA-256:
++  `df5281b4c36f812d0507e219e31a8a7482e0b4175097e292b75c7872c441295c`
++
++## Procedure
++
++Place the two opaque control inputs at `artifacts/control/a` and
++`artifacts/control/b`, then run:
++
++```sh
++scripts/27on86/check-tcg-control.sh
++```
++
++The check launches two clean QEMU processes with an identical command line.
++Each process must report CPU entry, the expected virtual machine model, and
++entry into the initramfs shell before the harness terminates it.
++
++## Observation
++
++Both independent runs passed. The first reached the userspace checkpoint at
++5.45 guest seconds and the second at 5.81 guest seconds. Both reported the
++same AArch64 CPU identifier and virtual machine model.
++
++## Conclusion
++
++The host, QEMU build, AArch64 TCG backend, architectural timer, interrupt
++controller, memory map, serial device, kernel loader, and initramfs path work
++together reproducibly. M0's control-boot exit condition is satisfied.
++
++## Next experiment
++
++Enable the VMApple machine with TCG, select a realizable emulated CPU model,
++and classify the first machine-instantiation failure without using guest boot
++artifacts.
+diff --git a/docs/experiments/E0003-vmapple-tcg-smoke.md b/docs/experiments/E0003-vmapple-tcg-smoke.md
+new file mode 100644
+index 0000000000..80e2b81b49
+--- /dev/null
++++ b/docs/experiments/E0003-vmapple-tcg-smoke.md
+@@ -0,0 +1,71 @@
++# E0003: VMApple firmware execution under TCG
++
++## Question
++
++Can VMApple instantiate on an x86-64 host with TCG, realize an emulated
++AArch64 CPU, enter its firmware region, and operate a platform device without
++an accelerator rejection, assertion, or reset loop?
++
++## Environment
++
++- Host OS and architecture: Linux 7.1.3, x86-64
++- Host CPU: x86-64
++- QEMU revision: `7107b001c8`
++- Machine contract: VMApple, TCG, `max` CPU, one vCPU, 1 GiB RAM
++- Graphics contract: headless; no Apple host graphics framework
++- Local input identifiers: none
++
++## Procedure
++
++Run:
++
++```sh
++scripts/27on86/build-aarch64.sh
++scripts/27on86/check-vmapple-tcg.sh
++```
++
++The check assembles repository-owned AArch64 firmware in a temporary
++directory, creates empty temporary storage fixtures, and starts VMApple with
++TCG. The firmware writes a marker through the VMApple UART and then waits for
++interrupts. The harness requires that marker and removes all fixtures.
++
++## Observation
++
++The VMApple machine is present in `-machine help`. It realizes the `max`
++AArch64 CPU and userspace GICv3 under TCG, enters the firmware region at the
++VMApple reset address, writes `VMAPPLE_TCG_SMOKE_OK` through the PL011 device,
++and remains running until the harness terminates it.
++
++The baseline required four source corrections:
++
++- VMApple must be selectable when AArch64 TCG is enabled, without requiring
++  HVF.
++- VMApple must implement QEMU's AArch64 machine interface to appear in the
++  target's machine list.
++- TCG must use an emulated CPU model instead of the accelerator-only `host`
++  CPU model.
++- VMApple must preserve its graphics and surface-controller MMIO windows when
++  its host graphics framework is unavailable. In headless mode, inert
++  software devices accept probes and advertise no capabilities.
++
++A separate C portability correction makes the AES device build with a
++compiler that treats a block-scope `const` array bound as a variable-length
++array.
++
++## Conclusion
++
++The VMApple machine contract can instantiate and execute firmware through
++AArch64 TCG on an x86-64 host without an accelerator rejection, assertion, or
++reset loop. CPU execution, reset-vector placement, userspace GIC realization,
++memory mapping - including the headless graphics windows - configuration devices,
++storage backends, and serial output all pass the controlled smoke checkpoint.
++
++This result does not claim that a macOS boot environment or guest kernel has
++run. That requires locally provisioned guest inputs and is the next
++compatibility layer.
++
++## Next experiment
++
++Run a locally provisioned known-good VMApple boot environment with the same
++explicit TCG CPU contract and classify its first divergence from the upstream
++HVF path.
+diff --git a/docs/experiments/E0004-macos-userspace-boot.md b/docs/experiments/E0004-macos-userspace-boot.md
+new file mode 100644
+index 0000000000..22de38e259
+--- /dev/null
++++ b/docs/experiments/E0004-macos-userspace-boot.md
+@@ -0,0 +1,69 @@
++# E0004: macOS userspace boot under TCG
++
++## Question
++
++Can a locally provisioned arm64 VMApple guest reach XNU userspace on an
++x86-64 Linux host using TCG and no host graphics framework?
++
++## Environment
++
++- Host OS and architecture: Linux, x86-64
++- QEMU revision: `1b2b73b7fc`
++- Guest generation: macOS 13
++- Machine contract: VMApple, TCG, `max` CPU, one vCPU, 8 GiB RAM
++- Graphics contract: headless, inert software MMIO devices
++- Storage contract: private writable clones presented through both boot and
++  runtime interfaces
++
++## Procedure
++
++Build QEMU, set the four local-input environment variables required by the
++runner, and start it:
++
++```sh
++scripts/27on86/build-aarch64.sh
++QEMU_27ON86_FIRMWARE=/local/input \
++QEMU_27ON86_AUX=/local/input \
++QEMU_27ON86_ROOT=/local/input \
++QEMU_27ON86_ECID=decimal-value \
++scripts/27on86/run-vmapple-tcg.sh
++```
++
++The runner makes private reflink-capable working copies. It does not use
++QEMU's snapshot mode because the boot and runtime views must share writes to
++the same backing files. The AUX input is the raw 32 MiB pflash payload; any
++outer metadata wrapper is not part of the pflash contract.
++
++For each run, confirm XNU's version and platform logs, resolve the live kernel
++slide, and inspect the process-list contract. Success requires a process with
++PID 1 and the short name `launchd`. Repeat from new working copies and a new
++QEMU process.
++
++## Observation
++
++Two independent clean starts completed both bootloader stages, entered XNU
++22.6.0, initialized security policy and root storage, and produced a live PID
++1 named `launchd`. The two runs used different kernel address slides. Neither
++run panicked before or after the userspace transition.
++
++The following compatibility limits remain:
++
++- multi-vCPU operation requires the precise guest-time policy tested in
++  E0005;
++- pointer authentication instructions preserve pointer stripping, but the
++  unavailable implementation-defined authentication cipher is not validated;
++- the headless graphics windows accept probes but expose no rendering
++  capability;
++- some AES requests and storage barriers still take compatibility paths;
++- the tested guest installation did not expose an SSH service.
++
++## Conclusion
++
++VMApple can boot an arm64 macOS 13 guest through AArch64 TCG on an x86-64
++Linux host through XNU and into launchd. This result is repeatable from clean
++starts without HVF or a host graphics framework.
++
++## Next experiment
++
++See E0005 for reliable eight-vCPU startup, then add a guest-side reachable
++service or console path for interactive use.
+diff --git a/docs/experiments/E0005-eight-vcpu-userspace-boot.md b/docs/experiments/E0005-eight-vcpu-userspace-boot.md
+new file mode 100644
+index 0000000000..42d8e7c859
+--- /dev/null
++++ b/docs/experiments/E0005-eight-vcpu-userspace-boot.md
+@@ -0,0 +1,68 @@
++# E0005: reliable eight-vCPU userspace boot under TCG
++
++## Question
++
++Can an arm64 VMApple guest reach and remain in XNU userspace with eight vCPUs
++on an x86-64 Linux host using TCG?
++
++## Environment
++
++- Host OS and architecture: Linux, x86-64
++- QEMU revision: `48e08c5e9e`
++- Guest generation: macOS 13
++- Machine contract: VMApple, TCG, `max` CPU, eight vCPUs, 8 GiB RAM
++- Graphics contract: headless, inert software MMIO devices
++- Storage contract: new private writable clones for every start
++
++## Procedure
++
++Build QEMU and run with the local inputs described in E0004, adding:
++
++```sh
++QEMU_27ON86_CPUS=8 scripts/27on86/run-vmapple-tcg.sh
++```
++
++For each run, query `info registers -a` through QMP and require a nonzero PC
++for all eight CPUs. Save a raw physical-memory range containing kernel process
++objects and verify the userspace transition with:
++
++```sh
++scripts/27on86/verify-launchd-ram.py local-ram-range.bin
++```
++
++Keep the VM running beyond the previous four-minute cross-call failure window.
++Repeat from a new QEMU process and new writable storage clones. Finally repeat
++with `QEMU_27ON86_CPUS=1` as a regression check.
++
++## Observation
++
++Two independent eight-vCPU starts powered all eight CPUs, reached a runnable
++PID 1 named `launchd`, and remained running at 4:35 and 4:53 respectively.
++The one-vCPU regression independently reached the same live PID 1 contract.
++
++Secondary startup exposed two coupled TCG requirements:
++
++- An implementation-defined pointer-authentication compatibility mode must
++  generate signatures deterministically across vCPUs while accepting and
++  stripping signatures that TCG cannot validate. Otherwise identical kernel
++  function pointers compare unequal during per-CPU interrupt registration.
++- Guest time must advance quickly through serialized CPU startup, then use a
++  slower instruction-to-time conversion after all PSCI CPUs are powered. This
++  keeps fixed guest cross-call deadlines meaningful under translated SMP
++  execution without changing the architectural 24 MHz counter frequency.
++
++The runner starts precise icount at shift 0 and the VMApple machine changes it
++continuously to shift -4 after all CPUs are powered and the final secondary has
++had 100 ms of guest time to initialize.
++
++## Conclusion
++
++VMApple can boot this arm64 guest reliably through AArch64 TCG on an x86-64
++host with eight vCPUs. All eight CPUs become active and XNU reaches a live,
++runnable PID 1 in repeated fresh starts without HVF or a host graphics
++framework.
++
++## Next experiment
++
++Add a reachable guest console or service, then measure translated execution
++and timer behavior before reducing the conservative post-startup time scale.
+diff --git a/docs/experiments/E0006-headless-workload-validation.md b/docs/experiments/E0006-headless-workload-validation.md
+new file mode 100644
+index 0000000000..0003021b45
+--- /dev/null
++++ b/docs/experiments/E0006-headless-workload-validation.md
+@@ -0,0 +1,97 @@
++# E0006: repeatable headless guest workloads
++
++## Question
++
++Can fresh VMApple storage clones provide remote command execution, networking,
++representative workloads, and clean lifecycle behavior under eight-vCPU TCG?
++
++## Environment
++
++- Host OS and architecture: Linux, x86-64
++- QEMU revision: `30db52796a`
++- Guest generation: macOS 13
++- Machine contract: VMApple, TCG, `max` CPU, 8 GiB RAM
++- Primary configuration: eight vCPUs with the E0005 TCG time-scale contract
++- Regression configuration: one vCPU
++- Graphics contract: headless, inert software MMIO devices
++- Storage contract: new private writable clones for every validation run
++- Auxiliary-storage contract: valid mirrored NVRAM banks at bank-aligned offsets
++
++## Procedure
++
++Build QEMU, set the four local input variables described in E0004, and run:
++
++```sh
++scripts/27on86/validate-headless.py --runs 2 --cpus 8
++```
++
++The validator performs the following operations for each run:
++
++1. Create new writable auxiliary and root-storage clones.
++2. Start VMApple paused with a private serial socket, GDB port, QMP socket, and
++   forwarded SSH port.
++3. Configure the XNU command line and guest security policy at kernel handoff.
++4. Mount the Data volume, establish firmlinks, start the minimum network and
++   directory services, and expose a generated SSH identity.
++5. Run architecture, CPU-count, memory, parallel CPU, storage, network, and
++   monotonic-timer checks over SSH.
++6. Request a guest halt and require a guest-originated QMP shutdown event.
++
++After the two eight-vCPU runs, the validator repeats the complete procedure
++with one vCPU unless `--skip-one-cpu-regression` is supplied.
++
++To validate a real reset and second boot in the same QEMU process, run one
++eight-vCPU validation with:
++
++```sh
++scripts/27on86/validate-headless.py --runs 1 --cpus 8 \
++    --skip-one-cpu-regression --reboot-cycle
++```
++
++This enables QEMU reset, requests a guest reboot, requires a guest-originated
++QMP RESET event, configures the second kernel handoff, restores SSH, verifies
++the vCPU count, and then requires a clean guest halt.
++
++Long serial uploads are divided into short, acknowledged base64 chunks. This
++is required because a single-core translated guest may not drain an emulated
++UART quickly enough to accept a large unacknowledged command.
++
++## Observation
++
++Two independent eight-vCPU runs passed the full workload and reported eight
++online, active, and logical CPUs. Both touched and verified 256 MiB of memory,
++ran eight concurrent digest workers, wrote and read back 32 MiB of storage,
++fetched distinct payloads from a host HTTP service through user networking,
++and measured a two-second monotonic interval within tolerance. Two subsequent
++fresh runs each completed 512 ordered lock and condition-variable handoffs
++across eight guest threads, explicitly exercising inter-CPU synchronization.
++
++The runs emitted guest-originated clean shutdown events after 492.3 and 523.5
++seconds. A fresh one-vCPU regression passed the same checks with one worker and
++shut down cleanly after 238.6 seconds.
++
++The reboot-cycle run emitted a guest-originated RESET event with reason
++`guest-reset`, reached a second XNU handoff, restored SSH with eight online
++vCPUs, and then emitted a guest-originated clean shutdown. The complete
++boot-workload-reboot-boot-halt cycle took 1201.7 seconds.
++
++The installed network service binds only when the emulated NIC presents the
++stable VMApple address used by the guest's interface record. The runner now
++uses that address by default while retaining an environment override.
++
++An auxiliary image whose valid NVRAM banks are displaced from bank boundaries
++causes a firmware shutdown before kernel handoff. The runner now rejects this
++layout before creating a VM, while accepting boot-normalized auxiliary state.
++
++## Conclusion
++
++The macOS 13 VMApple guest is usable headlessly under AArch64 TCG on an x86-64
++host with eight vCPUs. Fresh writable clones repeatedly support authenticated
++host-to-guest commands, storage and network I/O, timer progress, concurrent CPU
++work, clean guest reboot, a second boot, and clean guest shutdown. The one-vCPU
++path remains functional.
++
++## Next experiment
++
++Use the lifecycle harness for the next guest version in the compatibility
++ladder and record the first contract that diverges from this baseline.
+diff --git a/docs/experiments/README.md b/docs/experiments/README.md
+new file mode 100644
+index 0000000000..0fddd4db18
+--- /dev/null
++++ b/docs/experiments/README.md
+@@ -0,0 +1,49 @@
++# Experiment records
++
++Experiments turn observations into reproducible evidence. Create one Markdown
++file per experiment using a monotonically increasing number.
++
++Current records:
++
++- E0001: build baseline
++- E0002: TCG control boot
++- E0003: VMApple TCG smoke test
++- E0004: macOS userspace boot
++- E0005: reliable eight-vCPU userspace boot
++- E0006: repeatable headless guest workloads
++
++## Template
++
++```markdown
++# E0001: Short title
++
++## Question
++
++What single uncertainty does this experiment resolve?
++
++## Environment
++
++- Host OS and architecture:
++- Host CPU:
++- QEMU revision:
++- Build configuration:
++- Local input identifiers:
++
++## Procedure
++
++Commands and configuration needed to reproduce the experiment, excluding
++paths or names that identify local third-party binary inputs.
++
++## Observation
++
++Original observations, addresses, field semantics, and error categories. Do
++not include third-party bytes, extracted content, or disassembly listings.
++
++## Conclusion
++
++State the inferred API or architectural contract directly.
++
++## Next experiment
++
++The smallest follow-up that could disprove or refine the conclusion.
++```
+diff --git a/docs/roadmap.md b/docs/roadmap.md
+new file mode 100644
+index 0000000000..9664f481f5
+--- /dev/null
++++ b/docs/roadmap.md
+@@ -0,0 +1,69 @@
++# Roadmap
++
++## M0: Reproducible baseline
++
++Status: complete. See E0001 and E0002 in `docs/experiments/`.
++
++- Select and pin an upstream QEMU revision.
++- Build `qemu-system-aarch64` on the x86-64 target host.
++- Boot an arm64 Linux guest on QEMU's `virt` machine with TCG.
++- Record CPU model, accelerator settings, host information, and timings.
++
++Exit condition: the control guest boots twice from a clean process with the
++same command-line contract.
++
++## M1: VMApple under TCG
++
++Status: complete. See E0003 in `docs/experiments/`.
++
++- Identify VMApple assumptions tied to HVF or an arm64 host.
++- Allow the machine to instantiate with TCG.
++- Select an explicit emulated CPU model and feature contract.
++- Make early failures observable through QEMU logging and serial output.
++
++Exit condition: VMApple reaches its boot environment under x86-64 TCG without
++a QEMU assertion, unsupported-accelerator rejection, or immediate reset loop.
++
++## M2: Known-good guest boot
++
++Status: complete for macOS 13 with one and eight vCPUs. See E0004 and E0005
++in `docs/experiments/`.
++
++- Use a locally provisioned VMApple guest.
++- Classify failures as CPU, timer/interrupt, memory, boot, or device contract.
++- Implement the smallest contract-correct fixes.
++- Establish storage and networking.
++
++Exit condition: two clean starts reach XNU userspace with a live PID 1.
++
++## M3: Guest-version ladder
++
++Advance one major macOS release at a time. For every version:
++
++- preserve the last known-good configuration;
++- capture the first divergent checkpoint;
++- document contract changes independently of local artifact identity;
++- add a regression test where practical.
++
++Exit condition: macOS 27 reaches the M2 boot criterion.
++
++## M4: Usability
++
++Status: in progress. Headless access, storage, networking, workload coverage,
++clean reboot into a second boot, and clean shutdown are established in E0006.
++An installation or update workflow remains.
++
++- Reliable reboot, clean shutdown, storage, and networking are complete.
++- Remote interactive access without an emulated accelerated GPU is complete.
++- Stable multi-vCPU operation and representative workload coverage are
++  complete for eight vCPUs.
++- Installation or update workflow where legally and technically possible.
++
++## M5: Performance
++
++- Profile before changing translation behavior.
++- Measure boot time, translated-code cache behavior, exits, atomics, barriers,
++  timers, and device overhead.
++- Optimize upstreamable hot paths first.
++- Evaluate specialized cross-ISA translation only after TCG bottlenecks are
++  demonstrated quantitatively.
+diff --git a/scripts/27on86/apple_device_tree.py b/scripts/27on86/apple_device_tree.py
+new file mode 100644
+index 0000000000..fd3b16f1cb
+--- /dev/null
++++ b/scripts/27on86/apple_device_tree.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python3
++
++"""Small helpers for editing the flattened Apple Device Tree format."""
++
++import struct
++
++
++PROPERTY_NAME_SIZE = 32
++PROPERTY_HEADER_SIZE = PROPERTY_NAME_SIZE + 4
++PROPERTY_LENGTH_MASK = 0x00FFFFFF
++
++
++class DeviceTreeError(ValueError):
++    """The flattened tree does not satisfy the expected wire format."""
++
++
++def _aligned_size(size: int) -> int:
++    return (size + 3) & ~3
++
++
++def _node_at(tree: bytearray, offset: int, end: int):
++    if offset + 8 > end:
++        raise DeviceTreeError("truncated node header")
++
++    property_count, child_count = struct.unpack_from("<II", tree, offset)
++    cursor = offset + 8
++    properties = {}
++    for _ in range(property_count):
++        if cursor + PROPERTY_HEADER_SIZE > end:
++            raise DeviceTreeError("truncated property header")
++        name_field = bytes(tree[cursor : cursor + PROPERTY_NAME_SIZE])
++        name = name_field.split(b"\0", 1)[0].decode("ascii", errors="strict")
++        raw_length = struct.unpack_from("<I", tree, cursor + PROPERTY_NAME_SIZE)[0]
++        length = raw_length & PROPERTY_LENGTH_MASK
++        value_offset = cursor + PROPERTY_HEADER_SIZE
++        next_offset = value_offset + _aligned_size(length)
++        if next_offset > end:
++            raise DeviceTreeError(f"truncated property {name!r}")
++        properties[name] = (cursor, value_offset, length)
++        cursor = next_offset
++
++    children = []
++    for _ in range(child_count):
++        child, cursor = _node_at(tree, cursor, end)
++        children.append(child)
++
++    return {"properties": properties, "children": children}, cursor
++
++
++def parse(tree: bytearray):
++    """Parse a complete flattened tree and return its root node."""
++    root, consumed = _node_at(tree, 0, len(tree))
++    if consumed > len(tree):
++        raise DeviceTreeError("tree extends beyond its declared length")
++    return root
++
++
++def property_value(tree: bytearray, node, name: str) -> bytes:
++    """Return one node property's unpadded value."""
++    try:
++        _, value_offset, length = node["properties"][name]
++    except KeyError as error:
++        raise DeviceTreeError(f"missing property {name!r}") from error
++    return bytes(tree[value_offset : value_offset + length])
++
++
++def child_named(tree: bytearray, node, name: str):
++    """Find a direct child by its NUL-terminated ``name`` property."""
++    expected = name.encode() + b"\0"
++    for child in node["children"]:
++        if "name" in child["properties"] and property_value(tree, child, "name") == expected:
++            return child
++    raise DeviceTreeError(f"missing child node {name!r}")
++
++
++def replace_property(tree: bytearray, node, old_name: str, new_name: str, value: bytes):
++    """Rename and replace an equal-sized property without moving the tree."""
++    if len(new_name.encode()) >= PROPERTY_NAME_SIZE:
++        raise DeviceTreeError("property name is too long")
++    try:
++        header_offset, value_offset, length = node["properties"][old_name]
++    except KeyError as error:
++        raise DeviceTreeError(f"missing property {old_name!r}") from error
++    if len(value) != length:
++        raise DeviceTreeError(
++            f"property {old_name!r} is {length} bytes, replacement is {len(value)}"
++        )
++
++    encoded_name = new_name.encode() + b"\0"
++    tree[header_offset : header_offset + PROPERTY_NAME_SIZE] = encoded_name.ljust(
++        PROPERTY_NAME_SIZE, b"\0"
++    )
++    tree[value_offset : value_offset + length] = value
++    node["properties"][new_name] = node["properties"].pop(old_name)
++
+diff --git a/scripts/27on86/bootstrap-headless.py b/scripts/27on86/bootstrap-headless.py
+new file mode 100755
+index 0000000000..3fcd2e4b91
+--- /dev/null
++++ b/scripts/27on86/bootstrap-headless.py
+@@ -0,0 +1,151 @@
++#!/usr/bin/env python3
++
++"""Turn a VMApple single-user serial shell into a headless SSH guest."""
++
++import argparse
++import base64
++import importlib.util
++import os
++from pathlib import Path
++import re
++import shlex
++import subprocess
++import sys
++
++
++SCRIPT_DIR = Path(__file__).resolve().parent
++SERIAL_HELPER = SCRIPT_DIR / "serial-command.py"
++SPEC = importlib.util.spec_from_file_location("serial_command", SERIAL_HELPER)
++serial_command = importlib.util.module_from_spec(SPEC)
++assert SPEC.loader is not None
++SPEC.loader.exec_module(serial_command)
++
++ASSETS = (
++    "guest-headless-bootstrap.sh",
++    "headless-sshd.conf",
++    "headless-sshd.plist",
++)
++
++
++def run_serial(socket_path: Path, command: str, timeout: float = 600):
++    status, output = serial_command.run_command(
++        os.fspath(socket_path), command, timeout
++    )
++    if status:
++        sys.stdout.buffer.write(output)
++        raise RuntimeError(f"guest command exited with status {status}")
++    return output.decode(errors="replace")
++
++
++def ensure_key(path: Path):
++    if path.exists() and path.with_name(path.name + ".pub").exists():
++        return
++    path.parent.mkdir(parents=True, exist_ok=True)
++    subprocess.run(
++        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", os.fspath(path)],
++        check=True,
++    )
++
++
++def discover_stage(socket_path: Path):
++    output = run_serial(
++        socket_path,
++        """
++stage=
++for candidate in /System/Volumes/Preboot/*; do
++    leaf=${candidate##*/}
++    case "$leaf" in
++        ????????-????-????-????-????????????)
++            stage="$candidate/var/27on86"
++            break
++            ;;
++    esac
++done
++test -n "$stage"
++mkdir -p "$stage"
++printf '%s\n' "$stage"
++""",
++    )
++    matches = re.findall(
++        r"/System/Volumes/Preboot/[0-9A-Fa-f-]{36}/var/27on86", output
++    )
++    if not matches:
++        raise RuntimeError("guest did not report its staging directory")
++    return matches[-1]
++
++
++def upload(socket_path: Path, stage: str, name: str, content: bytes, mode: int):
++    print(f"staging {name}", flush=True)
++    encoded = base64.b64encode(content).decode()
++    destination = f"{stage}/{name}"
++    encoded_path = destination + ".b64"
++    run_serial(socket_path, f": > {shlex.quote(encoded_path)}")
++    for offset in range(0, len(encoded), 128):
++        chunk = encoded[offset : offset + 128]
++        run_serial(
++            socket_path,
++            "printf '%%s' %s >> %s"
++            % (shlex.quote(chunk), shlex.quote(encoded_path)),
++        )
++    run_serial(
++        socket_path,
++        "/usr/bin/base64 -D < %s > %s"
++        % (shlex.quote(encoded_path), shlex.quote(destination)),
++    )
++    run_serial(socket_path, "rm -f %s" % shlex.quote(encoded_path))
++    run_serial(socket_path, "chmod %o %s" % (mode, shlex.quote(destination)))
++
++
++def stage_command(stage: str):
++    return shlex.quote(f"{stage}/guest-headless-bootstrap.sh")
++
++
++def parse_args():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("serial_socket", type=Path)
++    parser.add_argument("state_directory", type=Path)
++    return parser.parse_args()
++
++
++def main():
++    args = parse_args()
++    client_key = args.state_directory / "id_ed25519"
++    host_key = args.state_directory / "ssh_host_ed25519_key"
++    ensure_key(client_key)
++    ensure_key(host_key)
++
++    stage = discover_stage(args.serial_socket)
++    upload(args.serial_socket, stage, "authorized_keys", client_key.with_name(
++        client_key.name + ".pub"
++    ).read_bytes(), 0o600)
++    upload(
++        args.serial_socket,
++        stage,
++        "ssh_host_ed25519_key",
++        host_key.read_bytes(),
++        0o600,
++    )
++    upload(
++        args.serial_socket,
++        stage,
++        "ssh_host_ed25519_key.pub",
++        host_key.with_name(host_key.name + ".pub").read_bytes(),
++        0o644,
++    )
++    for name in ASSETS:
++        mode = 0o700 if name.endswith(".sh") else 0o600
++        upload(args.serial_socket, stage, name, (SCRIPT_DIR / name).read_bytes(), mode)
++
++    print("running guest headless bootstrap", flush=True)
++    output = run_serial(args.serial_socket, stage_command(stage), timeout=900)
++    print(output, end="")
++    print(f"SSH identity: {client_key}")
++    return 0
++
++
++if __name__ == "__main__":
++    try:
++        sys.exit(main())
++    except (RuntimeError, serial_command.SerialCommandError, subprocess.CalledProcessError) as error:
++        print(f"headless bootstrap failed: {error}", file=sys.stderr)
++        sys.exit(1)
+diff --git a/scripts/27on86/build-aarch64.sh b/scripts/27on86/build-aarch64.sh
+new file mode 100755
+index 0000000000..1c1b92937c
+--- /dev/null
++++ b/scripts/27on86/build-aarch64.sh
+@@ -0,0 +1,20 @@
++#!/bin/sh
++
++set -eu
++
++script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++source_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
++build_dir=${QEMU_27ON86_BUILD_DIR:-"$source_root/build"}
++
++mkdir -p "$build_dir"
++
++(
++    cd "$build_dir"
++    "$source_root/configure" \
++        --target-list=aarch64-softmmu \
++        --enable-debug \
++        --disable-docs \
++        --disable-werror
++)
++
++ninja -C "$build_dir" qemu-system-aarch64
+diff --git a/scripts/27on86/check-tcg-control.sh b/scripts/27on86/check-tcg-control.sh
+new file mode 100755
+index 0000000000..8bb71c17ad
+--- /dev/null
++++ b/scripts/27on86/check-tcg-control.sh
+@@ -0,0 +1,59 @@
++#!/bin/sh
++
++set -eu
++
++script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++source_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
++build_dir=${QEMU_27ON86_BUILD_DIR:-"$source_root/build"}
++input_dir=${QEMU_27ON86_CONTROL_DIR:-"$source_root/artifacts/control"}
++output_dir=${QEMU_27ON86_OUTPUT_DIR:-"$source_root/out"}
++qemu="$build_dir/qemu-system-aarch64"
++
++if ! test -x "$qemu"; then
++    echo "missing emulator; run scripts/27on86/build-aarch64.sh" >&2
++    exit 1
++fi
++
++for input in "$input_dir/a" "$input_dir/b"; do
++    if ! test -f "$input"; then
++        echo "missing opaque control input: $input" >&2
++        exit 1
++    fi
++done
++
++mkdir -p "$output_dir"
++
++run_control()
++{
++    run_number=$1
++    log="$output_dir/tcg-control-$run_number.log"
++    status=0
++
++    timeout --signal=TERM 12s "$qemu" \
++        -machine virt-11.1,accel=tcg \
++        -cpu max \
++        -smp 1 \
++        -m 512M \
++        -nodefaults \
++        -display none \
++        -monitor none \
++        -serial stdio \
++        -no-reboot \
++        -kernel "$input_dir/a" \
++        -initrd "$input_dir/b" \
++        -append 'console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/bin/sh' \
++        >"$log" 2>&1 || status=$?
++
++    if test "$status" -ne 0 && test "$status" -ne 124; then
++        echo "control run $run_number exited unexpectedly: $status" >&2
++        return 1
++    fi
++
++    grep -Fq 'Booting Linux on physical CPU' "$log"
++    grep -Fq 'Machine model: linux,dummy-virt' "$log"
++    grep -Fq 'Run /bin/sh as init process' "$log"
++    echo "control run $run_number: PASS"
++}
++
++run_control 1
++run_control 2
+diff --git a/scripts/27on86/check-vmapple-tcg.sh b/scripts/27on86/check-vmapple-tcg.sh
+new file mode 100755
+index 0000000000..5bcbaa634e
+--- /dev/null
++++ b/scripts/27on86/check-vmapple-tcg.sh
+@@ -0,0 +1,114 @@
++#!/bin/sh
++
++set -eu
++
++script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++source_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
++build_dir=${QEMU_27ON86_BUILD_DIR:-"$source_root/build"}
++output_dir=${QEMU_27ON86_OUTPUT_DIR:-"$source_root/out"}
++qemu="$build_dir/qemu-system-aarch64"
++fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/27on86-vmapple.XXXXXX")
++firmware="$fixture_dir/firmware"
++firmware_object="$fixture_dir/firmware.o"
++aux="$fixture_dir/aux"
++root="$fixture_dir/root"
++log="$output_dir/vmapple-tcg-smoke.log"
++mtree_log="$output_dir/vmapple-tcg-mtree.log"
++cfg_log="$output_dir/vmapple-tcg-cfg.log"
++
++cleanup()
++{
++    rm -f "$firmware" "$firmware_object" "$aux" "$root"
++    rmdir "$fixture_dir"
++}
++trap cleanup EXIT HUP INT TERM
++
++if ! test -x "$qemu"; then
++    echo "missing emulator; run scripts/27on86/build-aarch64.sh" >&2
++    exit 1
++fi
++
++clang --target=aarch64-none-elf \
++    -c "$source_root/tests/27on86/vmapple-smoke.S" \
++    -o "$firmware_object"
++llvm-objcopy -O binary -j .text.boot "$firmware_object" "$firmware"
++truncate -s 16384 "$aux"
++truncate -s 16384 "$root"
++mkdir -p "$output_dir"
++
++status=0
++timeout --signal=TERM 5s "$qemu" \
++    -machine vmapple,uuid=1,accel=tcg \
++    -cpu max \
++    -smp 1 \
++    -m 1G \
++    -nodefaults \
++    -display none \
++    -monitor none \
++    -serial stdio \
++    -no-reboot \
++    -bios "$firmware" \
++    -drive file="$aux",if=pflash,format=raw \
++    -drive file="$root",if=pflash,format=raw \
++    >"$log" 2>&1 || status=$?
++
++if test "$status" -ne 0 && test "$status" -ne 124; then
++    cat "$log" >&2
++    echo "VMApple TCG smoke test exited unexpectedly: $status" >&2
++    exit 1
++fi
++
++grep -Fq 'VMAPPLE_TCG_SMOKE_OK' "$log"
++
++if ! "$qemu" -device help 2>&1 | grep -Fq 'apple-gfx-mmio'; then
++    status=0
++    printf 'info mtree -f\nquit\n' | timeout --signal=TERM 5s "$qemu" \
++        -machine vmapple,uuid=1,accel=tcg \
++        -cpu max \
++        -smp 1 \
++        -m 1G \
++        -nodefaults \
++        -display none \
++        -serial none \
++        -monitor stdio \
++        -S \
++        -bios "$firmware" \
++        -drive file="$aux",if=pflash,format=raw \
++        -drive file="$root",if=pflash,format=raw \
++        >"$mtree_log" 2>&1 || status=$?
++
++    if test "$status" -ne 0; then
++        tail -n 40 "$mtree_log" >&2
++        echo "VMApple memory-map check exited unexpectedly: $status" >&2
++        exit 1
++    fi
++
++    grep -Fq 'vmapple.gfx-stub' "$mtree_log"
++    grep -Fq 'vmapple.iosfc-stub' "$mtree_log"
++fi
++
++status=0
++printf 'xp /1wx 0x400034\nquit\n' | "$qemu" \
++    -machine vmapple,uuid=1,accel=tcg,run-installer=on \
++    -cpu max \
++    -smp 1 \
++    -m 1G \
++    -nodefaults \
++    -display none \
++    -serial none \
++    -monitor stdio \
++    -S \
++    -bios "$firmware" \
++    -drive file="$aux",if=pflash,format=raw \
++    -drive file="$root",if=pflash,format=raw \
++    >"$cfg_log" 2>&1 || status=$?
++
++if test "$status" -ne 0; then
++    tail -n 40 "$cfg_log" >&2
++    echo "VMApple configuration check exited unexpectedly: $status" >&2
++    exit 1
++fi
++
++grep -Eq '00400034: 0x00000001' "$cfg_log"
++
++echo "VMApple TCG smoke test: PASS"
+diff --git a/scripts/27on86/guest-headless-bootstrap.sh b/scripts/27on86/guest-headless-bootstrap.sh
+new file mode 100755
+index 0000000000..cd2f400392
+--- /dev/null
++++ b/scripts/27on86/guest-headless-bootstrap.sh
+@@ -0,0 +1,116 @@
++#!/bin/sh
++
++set -eu
++
++stage=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++boot_util=/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs_boot_util
++
++echo "starting APFS data-volume setup"
++"$boot_util" 2 >"$stage/apfs-boot.log" 2>&1 &
++boot_pid=$!
++trap 'kill -INT "$boot_pid" 2>/dev/null || true' EXIT HUP INT TERM
++
++stitched=0
++count=0
++while test "$count" -lt 180; do
++    if test -d /System/Volumes/Data/private/var && test -d /private/var; then
++        data_dev=$(/usr/bin/stat -f %d /System/Volumes/Data/private)
++        private_dev=$(/usr/bin/stat -f %d /private)
++        if test "$data_dev" = "$private_dev"; then
++            stitched=1
++            break
++        fi
++    fi
++    count=$((count + 1))
++    sleep 1
++done
++
++if test "$stitched" != 1; then
++    echo "APFS firmlink setup did not complete" >&2
++    tail -n 40 "$stage/apfs-boot.log" >&2
++    exit 1
++fi
++
++# Firmlink visibility precedes the remaining volume-group notifications. Keep
++# phase 2 alive long enough for those notifications to settle before configd
++# opens the network stack.
++echo "APFS firmlinks visible; settling volume-group setup"
++sleep 60
++kill -INT "$boot_pid" 2>/dev/null || true
++wait "$boot_pid" 2>/dev/null || true
++trap - EXIT HUP INT TERM
++echo "APFS firmlinks ready after ${count}s"
++
++mkdir -p /private/var/db/27on86 /private/var/root/.ssh /etc/ssh
++cp "$stage/authorized_keys" /private/var/root/.ssh/authorized_keys
++cp "$stage/ssh_host_ed25519_key" /etc/ssh/ssh_host_ed25519_key
++cp "$stage/ssh_host_ed25519_key.pub" /etc/ssh/ssh_host_ed25519_key.pub
++cp "$stage/headless-sshd.conf" /private/var/db/27on86/sshd_config
++chmod 700 /private/var/root/.ssh /private/var/db/27on86
++chmod 600 /private/var/root/.ssh/authorized_keys \
++    /etc/ssh/ssh_host_ed25519_key /private/var/db/27on86/sshd_config
++chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
++
++start_service()
++{
++    label=$1
++    plist=$2
++    if ! /bin/launchctl print "system/$label" >/dev/null 2>&1; then
++        /bin/launchctl bootstrap system "$plist" >"$stage/$label.log" 2>&1
++    fi
++}
++
++start_service com.apple.configd \
++    /System/Library/LaunchDaemons/com.apple.configd.plist
++
++count=0
++address=
++while test "$count" -lt 120; do
++    address=$(/usr/sbin/ipconfig getifaddr en0 2>/dev/null || true)
++    if test -n "$address"; then
++        break
++    fi
++    count=$((count + 1))
++    sleep 1
++done
++if test -z "$address"; then
++    echo "network did not acquire an IPv4 address" >&2
++    exit 1
++fi
++echo "network ready: $address"
++
++start_service com.apple.opendirectoryd \
++    /System/Library/LaunchDaemons/com.apple.opendirectoryd.plist
++
++count=0
++while test "$count" -lt 60; do
++    if /usr/bin/dscl . -read /Users/sshd >/dev/null 2>&1; then
++        break
++    fi
++    count=$((count + 1))
++    sleep 1
++done
++if test "$count" -ge 60; then
++    echo "directory service did not expose the sshd account" >&2
++    exit 1
++fi
++
++/usr/sbin/sshd -t -f /private/var/db/27on86/sshd_config
++/bin/launchctl bootout system/org.qemu.27on86.sshd >/dev/null 2>&1 || true
++/bin/launchctl bootstrap system "$stage/headless-sshd.plist" \
++    >"$stage/org.qemu.27on86.sshd.log" 2>&1
++
++count=0
++while test "$count" -lt 30; do
++    if /bin/launchctl print system/org.qemu.27on86.sshd 2>/dev/null |
++        grep -q 'state = running'; then
++        echo "headless SSH ready"
++        exit 0
++    fi
++    count=$((count + 1))
++    sleep 1
++done
++
++echo "sshd did not remain running" >&2
++tail -n 40 /private/var/db/27on86/sshd.log >&2 || true
++exit 1
+diff --git a/scripts/27on86/guest-headless-workload.sh b/scripts/27on86/guest-headless-workload.sh
+new file mode 100755
+index 0000000000..4fe4739743
+--- /dev/null
++++ b/scripts/27on86/guest-headless-workload.sh
+@@ -0,0 +1,115 @@
++#!/bin/sh
++
++set -eu
++
++expected_cpus=$1
++network_url=$2
++network_token=$3
++work=/private/tmp/27on86-workload.$$
++mkdir -p "$work"
++
++cleanup()
++{
++    find "$work" -type f -delete 2>/dev/null || true
++    rmdir "$work" 2>/dev/null || true
++}
++trap cleanup EXIT HUP INT TERM
++
++architecture=$(/usr/bin/uname -m)
++online_cpus=$(/usr/sbin/sysctl -n hw.ncpu)
++active_cpus=$(/usr/sbin/sysctl -n hw.activecpu)
++logical_cpus=$(/usr/sbin/sysctl -n hw.logicalcpu)
++test "$architecture" = arm64
++test "$online_cpus" = "$expected_cpus"
++test "$active_cpus" = "$expected_cpus"
++test "$logical_cpus" = "$expected_cpus"
++echo "architecture=$architecture"
++echo "online_cpus=$online_cpus"
++
++/usr/bin/perl - <<'PL'
++use strict;
++use warnings;
++
++my $size = 256 * 1024 * 1024;
++my $page = 4096;
++my $memory = "\0" x $size;
++my $checksum = 0;
++for (my $offset = 0; $offset < $size; $offset += $page) {
++    my $value = ($offset / $page) & 0xff;
++    substr($memory, $offset, 1) = chr($value);
++    $checksum += ord(substr($memory, $offset, 1));
++}
++my $expected = ($size / $page / 256) * 32640;
++die "memory checksum mismatch: $checksum != $expected\n"
++    if $checksum != $expected;
++print "memory_bytes=$size\n";
++print "memory_checksum=$checksum\n";
++PL
++
++pids=
++worker=0
++while test "$worker" -lt "$expected_cpus"; do
++    (
++        /bin/dd if=/dev/zero bs=1048576 count=1 2>/dev/null |
++            /usr/bin/openssl dgst -sha256 >"$work/cpu.$worker"
++    ) &
++    pids="$pids $!"
++    worker=$((worker + 1))
++done
++for pid in $pids; do
++    wait "$pid"
++done
++worker_count=$(find "$work" -name 'cpu.*' -type f | /usr/bin/wc -l | tr -d ' ')
++unique_hashes=$(awk '{print $NF}' "$work"/cpu.* | sort -u | /usr/bin/wc -l | tr -d ' ')
++test "$worker_count" = "$expected_cpus"
++test "$unique_hashes" = 1
++echo "parallel_workers=$worker_count"
++echo "parallel_hash=$(awk 'NR == 1 {print $NF}' "$work"/cpu.0)"
++
++intercpu_counter=$(/usr/bin/perl -Mthreads -Mthreads::shared -e '
++    my $workers = shift;
++    my $rounds = 64;
++    my $turn :shared = 0;
++    my $counter :shared = 0;
++    my @threads;
++    for my $worker (0 .. $workers - 1) {
++        push @threads, threads->create(sub {
++            for (1 .. $rounds) {
++                lock($turn);
++                cond_wait($turn) while $turn != $worker;
++                ++$counter;
++                $turn = ($turn + 1) % $workers;
++                cond_broadcast($turn);
++            }
++        });
++    }
++    $_->join for @threads;
++    die "inter-CPU counter mismatch: $counter\n"
++        if $counter != $workers * $rounds;
++    print $counter;
++' "$expected_cpus")
++test "$intercpu_counter" = "$((expected_cpus * 64))"
++echo "intercpu_counter=$intercpu_counter"
++
++/bin/dd if=/dev/zero of="$work/storage.bin" bs=1048576 count=32 2>/dev/null
++/bin/sync
++storage_hash=$(/usr/bin/cksum "$work/storage.bin" | awk '{print $1 ":" $2}')
++readback_hash=$(/bin/cat "$work/storage.bin" | /usr/bin/cksum | awk '{print $1 ":" $2}')
++test "$storage_hash" = "$readback_hash"
++echo "storage_bytes=33554432"
++echo "storage_hash=$storage_hash"
++
++received=$(/usr/bin/curl -fsS "$network_url")
++test "$received" = "$network_token"
++echo "network_payload=$received"
++
++/usr/bin/perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC,sleep -e '
++    my $start = clock_gettime(CLOCK_MONOTONIC);
++    sleep(2);
++    my $elapsed = int((clock_gettime(CLOCK_MONOTONIC) - $start) * 1_000_000_000);
++    die "timer interval outside tolerance: $elapsed\n"
++        if $elapsed < 1_900_000_000 || $elapsed > 10_000_000_000;
++    print "timer_elapsed_ns=$elapsed\n";
++'
++
++echo "workload_status=pass"
+diff --git a/scripts/27on86/headless-sshd.conf b/scripts/27on86/headless-sshd.conf
+new file mode 100644
+index 0000000000..daff6d6087
+--- /dev/null
++++ b/scripts/27on86/headless-sshd.conf
+@@ -0,0 +1,12 @@
++Port 22
++ListenAddress 0.0.0.0
++HostKey /etc/ssh/ssh_host_ed25519_key
++PidFile /private/var/db/27on86/sshd.pid
++AuthorizedKeysFile /private/var/root/.ssh/authorized_keys
++PermitRootLogin yes
++StrictModes no
++PasswordAuthentication no
++KbdInteractiveAuthentication no
++UsePAM no
++PrintMotd no
++Subsystem sftp internal-sftp
+diff --git a/scripts/27on86/headless-sshd.plist b/scripts/27on86/headless-sshd.plist
+new file mode 100644
+index 0000000000..a429ac0f01
+--- /dev/null
++++ b/scripts/27on86/headless-sshd.plist
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++  <key>Label</key>
++  <string>org.qemu.27on86.sshd</string>
++  <key>ProgramArguments</key>
++  <array>
++    <string>/usr/sbin/sshd</string>
++    <string>-D</string>
++    <string>-e</string>
++    <string>-f</string>
++    <string>/private/var/db/27on86/sshd_config</string>
++  </array>
++  <key>RunAtLoad</key>
++  <true/>
++  <key>KeepAlive</key>
++  <true/>
++  <key>StandardOutPath</key>
++  <string>/private/var/db/27on86/sshd.log</string>
++  <key>StandardErrorPath</key>
++  <string>/private/var/db/27on86/sshd.log</string>
++</dict>
++</plist>
+diff --git a/scripts/27on86/inject-xnu-boot-args.gdb b/scripts/27on86/inject-xnu-boot-args.gdb
+new file mode 100644
+index 0000000000..0091df5ee9
+--- /dev/null
++++ b/scripts/27on86/inject-xnu-boot-args.gdb
+@@ -0,0 +1,109 @@
++python
++import gdb
++import os
++import struct
++import sys
++
++
++HANDOFF_PC = 0xACA00000
++BOOT_ARGS_REVISION = 2
++BOOT_ARGS_VERSION = 2
++COMMAND_LINE_OFFSET = 108
++COMMAND_LINE_SIZE = 608
++DEVICE_TREE_POINTER_OFFSET = 96
++DEVICE_TREE_LENGTH_OFFSET = 104
++VIRTUAL_BASE_OFFSET = 8
++PHYSICAL_BASE_OFFSET = 16
++
++
++def required_environment(name):
++    value = os.environ.get(name)
++    if not value:
++        raise gdb.GdbError(f"set {name}")
++    return value
++
++
++port = required_environment("QEMU_27ON86_GDB_PORT")
++command_line = required_environment("QEMU_27ON86_XNU_BOOT_ARGS").encode()
++if b"\0" in command_line:
++    raise gdb.GdbError("XNU boot arguments must not contain a NUL byte")
++if len(command_line) >= COMMAND_LINE_SIZE:
++    raise gdb.GdbError(
++        f"XNU boot arguments must be shorter than {COMMAND_LINE_SIZE} bytes"
++    )
++
++csr_config_text = os.environ.get("QEMU_27ON86_CSR_CONFIG")
++csr_config = None
++if csr_config_text:
++    try:
++        csr_config = int(csr_config_text, 0)
++    except ValueError as error:
++        raise gdb.GdbError("QEMU_27ON86_CSR_CONFIG must be an integer") from error
++    if not 0 <= csr_config <= 0xFFFFFFFF:
++        raise gdb.GdbError("QEMU_27ON86_CSR_CONFIG must fit in 32 bits")
++
++gdb.execute("set architecture aarch64", to_string=True)
++gdb.execute(f"target remote :{port}", to_string=True)
++
++# The reset path uses the handoff trampoline once for the second-stage loader
++# and a second time for XNU. At the second entry, x1 is the public boot_args
++# structure that the trampoline passes to the kernel in x0.
++breakpoint = gdb.Breakpoint(
++    f"*{HANDOFF_PC:#x}", type=gdb.BP_HARDWARE_BREAKPOINT, internal=True
++)
++breakpoint.ignore_count = 1
++gdb.execute("continue", to_string=True)
++
++pc = int(gdb.parse_and_eval("$pc"))
++if pc != HANDOFF_PC:
++    raise gdb.GdbError(f"unexpected stop at {pc:#x}")
++
++boot_args = int(gdb.parse_and_eval("$x1"))
++inferior = gdb.selected_inferior()
++header = bytes(inferior.read_memory(boot_args, 4))
++revision, version = struct.unpack("<HH", header)
++if (revision, version) != (BOOT_ARGS_REVISION, BOOT_ARGS_VERSION):
++    raise gdb.GdbError(
++        f"unexpected boot_args revision/version {revision}/{version}"
++    )
++
++payload = (command_line + b"\0").ljust(COMMAND_LINE_SIZE, b"\0")
++inferior.write_memory(boot_args + COMMAND_LINE_OFFSET, payload)
++readback = bytes(
++    inferior.read_memory(boot_args + COMMAND_LINE_OFFSET, len(command_line) + 1)
++)
++if readback != command_line + b"\0":
++    raise gdb.GdbError("XNU boot-argument write did not verify")
++
++print(f"injected XNU boot arguments: {command_line.decode(errors='replace')}")
++
++if csr_config is not None:
++    # GDB does not expose the command-file path. The wrapper runs from any
++    # directory, so use the repository script path supplied by the wrapper.
++    script_dir = required_environment("QEMU_27ON86_SCRIPT_DIR")
++    sys.path.insert(0, script_dir)
++    import apple_device_tree
++
++    virtual_base, physical_base = struct.unpack(
++        "<QQ", bytes(inferior.read_memory(boot_args + VIRTUAL_BASE_OFFSET, 16))
++    )
++    device_tree_virtual, device_tree_length = struct.unpack(
++        "<QI",
++        bytes(inferior.read_memory(boot_args + DEVICE_TREE_POINTER_OFFSET, 12)),
++    )
++    if device_tree_virtual < virtual_base:
++        raise gdb.GdbError("device tree pointer is below the kernel virtual base")
++    device_tree = device_tree_virtual - virtual_base + physical_base
++    flattened = bytearray(inferior.read_memory(device_tree, device_tree_length))
++    root = apple_device_tree.parse(flattened)
++    chosen = apple_device_tree.child_named(flattened, root, "chosen")
++    asmb = apple_device_tree.child_named(flattened, chosen, "asmb")
++    old_name = "lp-sip0" if "lp-sip0" in asmb["properties"] else "lp-stng"
++    apple_device_tree.replace_property(
++        flattened, asmb, old_name, "lp-sip0", struct.pack("<Q", csr_config)
++    )
++    inferior.write_memory(device_tree, flattened)
++    print(f"injected XNU CSR configuration: {csr_config:#x}")
++breakpoint.delete()
++gdb.execute("detach", to_string=True)
++end
+diff --git a/scripts/27on86/inject-xnu-boot-args.sh b/scripts/27on86/inject-xnu-boot-args.sh
+new file mode 100755
+index 0000000000..9138280aac
+--- /dev/null
++++ b/scripts/27on86/inject-xnu-boot-args.sh
+@@ -0,0 +1,19 @@
++#!/bin/sh
++
++set -eu
++
++script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++gdb=${QEMU_27ON86_GDB_BIN:-gdb}
++export QEMU_27ON86_SCRIPT_DIR=$script_dir
++
++: "${QEMU_27ON86_GDB_PORT:?set QEMU_27ON86_GDB_PORT}"
++: "${QEMU_27ON86_XNU_BOOT_ARGS:?set QEMU_27ON86_XNU_BOOT_ARGS}"
++
++case "$QEMU_27ON86_GDB_PORT" in
++    *[!0-9]* | '')
++        echo "GDB port must be an unsigned decimal value" >&2
++        exit 1
++        ;;
++esac
++
++exec "$gdb" -nx -q -batch -x "$script_dir/inject-xnu-boot-args.gdb"
+diff --git a/scripts/27on86/run-vmapple-tcg.sh b/scripts/27on86/run-vmapple-tcg.sh
+new file mode 100755
+index 0000000000..9e1a83a6ed
+--- /dev/null
++++ b/scripts/27on86/run-vmapple-tcg.sh
+@@ -0,0 +1,181 @@
++#!/bin/sh
++
++set -eu
++
++script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++source_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
++build_dir=${QEMU_27ON86_BUILD_DIR:-"$source_root/build"}
++output_dir=${QEMU_27ON86_OUTPUT_DIR:-"$source_root/out"}
++qemu=${QEMU_27ON86_QEMU:-"$build_dir/qemu-system-aarch64"}
++cpus=${QEMU_27ON86_CPUS:-1}
++memory=${QEMU_27ON86_MEMORY:-8G}
++ssh_port=${QEMU_27ON86_SSH_PORT:-10022}
++mac=${QEMU_27ON86_MAC:-52:54:00:76:61:70}
++pcap=${QEMU_27ON86_PCAP:-}
++tcg_smp_final_shift=${QEMU_27ON86_TCG_SMP_FINAL_SHIFT:--4}
++run_installer=${QEMU_27ON86_RUN_INSTALLER:-off}
++serial=${QEMU_27ON86_SERIAL:-}
++boot_args=${QEMU_27ON86_BOOT_ARGS:-}
++trace_event=${QEMU_27ON86_TRACE_EVENT:-}
++virtio_console_chardev=${QEMU_27ON86_VIRTIO_CONSOLE_CHARDEV:-}
++virtio_console_max_ports=${QEMU_27ON86_VIRTIO_CONSOLE_MAX_PORTS:-31}
++gdb_port=${QEMU_27ON86_GDB_PORT:-}
++pause_at_start=${QEMU_27ON86_PAUSE_AT_START:-off}
++no_reboot=${QEMU_27ON86_NO_REBOOT:-on}
++
++: "${QEMU_27ON86_FIRMWARE:?set QEMU_27ON86_FIRMWARE}"
++: "${QEMU_27ON86_AUX:?set QEMU_27ON86_AUX}"
++: "${QEMU_27ON86_ROOT:?set QEMU_27ON86_ROOT}"
++: "${QEMU_27ON86_ECID:?set QEMU_27ON86_ECID}"
++
++for input in "$QEMU_27ON86_FIRMWARE" "$QEMU_27ON86_AUX" \
++             "$QEMU_27ON86_ROOT"; do
++    if ! test -f "$input"; then
++        echo "missing local input: $input" >&2
++        exit 1
++    fi
++done
++
++if ! test -x "$qemu"; then
++    echo "missing emulator; run scripts/27on86/build-aarch64.sh" >&2
++    exit 1
++fi
++
++"$script_dir/set-aux-boot-args.py" --check-only "$QEMU_27ON86_AUX"
++
++case "$cpus:$ssh_port:$virtio_console_max_ports:$QEMU_27ON86_ECID" in
++    *[!0-9:]* | :* | *::*)
++        echo "CPU count, SSH port, console port count, and ECID must be unsigned decimal values" >&2
++        exit 1
++        ;;
++esac
++
++case "$gdb_port" in
++    '' | *[!0-9]*)
++        if test -n "$gdb_port"; then
++            echo "GDB port must be an unsigned decimal value" >&2
++            exit 1
++        fi
++        ;;
++esac
++
++case "$mac" in
++    [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:\
++[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:\
++[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f])
++        ;;
++    *)
++        echo "MAC address must contain six hexadecimal octets" >&2
++        exit 1
++        ;;
++esac
++
++case "$tcg_smp_final_shift" in
++    -10 | -[0-9] | [0-9] | 10)
++        ;;
++    *)
++        echo "TCG SMP final shift must be between -10 and 10" >&2
++        exit 1
++        ;;
++esac
++
++case "$run_installer" in
++    on | off)
++        ;;
++    *)
++        echo "installer selector must be 'on' or 'off'" >&2
++        exit 1
++        ;;
++esac
++
++case "$pause_at_start" in
++    on | off)
++        ;;
++    *)
++        echo "pause-at-start selector must be 'on' or 'off'" >&2
++        exit 1
++        ;;
++esac
++
++case "$no_reboot" in
++    on | off)
++        ;;
++    *)
++        echo "no-reboot selector must be 'on' or 'off'" >&2
++        exit 1
++        ;;
++esac
++
++mkdir -p "$output_dir"
++run_dir=$(mktemp -d "$output_dir/vmapple-run.XXXXXX")
++aux_work="$run_dir/aux.work"
++root_work="$run_dir/root.work"
++
++cp --reflink=auto -- "$QEMU_27ON86_AUX" "$aux_work"
++cp --reflink=auto -- "$QEMU_27ON86_ROOT" "$root_work"
++
++if test -n "$boot_args"; then
++    "$script_dir/set-aux-boot-args.py" "$aux_work" "$boot_args"
++fi
++
++echo "VMApple run directory: $run_dir"
++
++if test -z "$serial"; then
++    serial="file:$run_dir/serial.log"
++fi
++
++set --
++if test "$cpus" -gt 1; then
++    set -- "$@" -icount shift=0,align=off,sleep=off
++    machine="vmapple,uuid=$QEMU_27ON86_ECID,accel=tcg,run-installer=$run_installer,tcg-smp-final-shift=$tcg_smp_final_shift"
++else
++    machine="vmapple,uuid=$QEMU_27ON86_ECID,accel=tcg,run-installer=$run_installer"
++fi
++
++if test -n "$pcap"; then
++    set -- "$@" -object "filter-dump,id=netcap,netdev=net0,file=$pcap"
++fi
++
++if test -n "$trace_event"; then
++    set -- "$@" -trace "enable=$trace_event,file=$run_dir/trace.log"
++fi
++
++if test -n "$virtio_console_chardev"; then
++    set -- "$@" \
++        -chardev "$virtio_console_chardev,id=vconsole0" \
++        -device "virtio-serial-pci,id=vserial0,max_ports=$virtio_console_max_ports" \
++        -device virtconsole,id=vconsoleport0,chardev=vconsole0
++fi
++
++if test -n "$gdb_port"; then
++    set -- "$@" -gdb "tcp::$gdb_port"
++fi
++
++if test "$pause_at_start" = on; then
++    set -- "$@" -S
++fi
++
++if test "$no_reboot" = on; then
++    set -- "$@" -no-reboot
++fi
++
++exec "$qemu" \
++    -machine "$machine" \
++    -cpu max \
++    -smp "$cpus" \
++    "$@" \
++    -m "$memory" \
++    -display none \
++    -monitor none \
++    -serial "$serial" \
++    -qmp "unix:$run_dir/qmp.sock,server=on,wait=off" \
++    -action panic=pause,shutdown=pause \
++    -bios "$QEMU_27ON86_FIRMWARE" \
++    -drive "if=pflash,format=raw,file.filename=$aux_work,file.locking=off" \
++    -drive "if=pflash,format=raw,file.filename=$root_work,file.locking=off" \
++    -drive "if=none,format=raw,file.filename=$aux_work,file.locking=off,id=aux" \
++    -device vmapple-virtio-blk-pci,variant=aux,drive=aux,share-rw=on \
++    -drive "if=none,format=raw,file.filename=$root_work,file.locking=off,id=root" \
++    -device vmapple-virtio-blk-pci,variant=root,drive=root,share-rw=on \
++    -netdev "user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:$ssh_port-:22" \
++    -device "virtio-net-pci,netdev=net0,mac=$mac"
+diff --git a/scripts/27on86/serial-command.py b/scripts/27on86/serial-command.py
+new file mode 100755
+index 0000000000..f19f3ff508
+--- /dev/null
++++ b/scripts/27on86/serial-command.py
+@@ -0,0 +1,142 @@
++#!/usr/bin/env python3
++
++import argparse
++import os
++from pathlib import Path
++import re
++import secrets
++import socket
++import sys
++import time
++
++
++BOOT_PROMPT = b"-sh-3.2# "
++READY_PROMPT = b"__27ON86_PROMPT__ "
++MAX_BUFFER = 4 * 1024 * 1024
++WRITE_CHUNK_SIZE = 64
++WRITE_CHUNK_DELAY = 0.01
++
++
++class SerialCommandError(Exception):
++    pass
++
++
++def receive_until(sock, buffer, pattern, deadline):
++    while True:
++        match = pattern.search(buffer)
++        if match:
++            return match
++        remaining = deadline - time.monotonic()
++        if remaining <= 0:
++            raise SerialCommandError(f"timed out waiting for {pattern.pattern!r}")
++        sock.settimeout(min(1.0, remaining))
++        try:
++            chunk = sock.recv(65536)
++        except TimeoutError:
++            continue
++        if not chunk:
++            raise SerialCommandError("serial connection closed")
++        buffer.extend(chunk)
++        if len(buffer) > MAX_BUFFER:
++            del buffer[:-MAX_BUFFER]
++
++
++def connect(path, deadline):
++    last_error = None
++    while time.monotonic() < deadline:
++        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++        try:
++            sock.connect(path)
++            return sock
++        except (FileNotFoundError, ConnectionRefusedError) as error:
++            last_error = error
++            sock.close()
++            time.sleep(0.1)
++    raise SerialCommandError(f"could not connect to {path}: {last_error}")
++
++
++def send_paced(sock, payload):
++    for offset in range(0, len(payload), WRITE_CHUNK_SIZE):
++        sock.sendall(payload[offset : offset + WRITE_CHUNK_SIZE])
++        if offset + WRITE_CHUNK_SIZE < len(payload):
++            time.sleep(WRITE_CHUNK_DELAY)
++
++
++def run_command(path, command, timeout):
++    deadline = time.monotonic() + timeout
++    token = secrets.token_hex(12).encode()
++    begin = b"__27ON86_BEGIN_" + token + b"__"
++    end = b"__27ON86_END_" + token + b"__"
++    end_pattern = re.compile(re.escape(end) + rb":([0-9]+)\r*\n")
++    buffer = bytearray()
++
++    with connect(path, deadline) as sock:
++        sock.sendall(b"\n")
++        prompt_pattern = re.compile(
++            b"(?:" + re.escape(BOOT_PROMPT) + b"|" + re.escape(READY_PROMPT) + b")"
++        )
++        receive_until(sock, buffer, prompt_pattern, deadline)
++        del buffer[:]
++        sock.sendall(b"set +H; stty -echo; export PS1='" + READY_PROMPT + b"'\n")
++        receive_until(sock, buffer, re.compile(re.escape(READY_PROMPT)), deadline)
++        del buffer[:]
++
++        # Prompt discovery can consume most of the allowance during a slow TCG
++        # boot. Once synchronized, give the command itself a fresh allowance.
++        deadline = time.monotonic() + timeout
++
++        payload = (
++            b"export PS1=''\nprintf '\\n"
++            + begin
++            + b"\\n'\n"
++            + command.encode()
++            + b"\n__27on86_status=$?\nexport PS1='"
++            + READY_PROMPT
++            + b"'; printf '\\n"
++            + end
++            + b":%d\\n' \"$__27on86_status\"\n"
++        )
++        # A single large write can overrun the emulated UART while one TCG vCPU
++        # is busy draining console input. Pace commands so long uploads survive.
++        send_paced(sock, payload)
++        match = receive_until(sock, buffer, end_pattern, deadline)
++
++    start = buffer.rfind(begin, 0, match.start())
++    if start < 0:
++        raise SerialCommandError("command output start marker was lost")
++    start += len(begin)
++    while buffer[start:start + 1] == b"\r":
++        start += 1
++    if buffer[start:start + 1] == b"\n":
++        start += 1
++    output = bytes(buffer[start:match.start()]).replace(b"\r", b"")
++    status = int(match.group(1))
++    return status, output
++
++
++def parse_args():
++    parser = argparse.ArgumentParser(
++        description="run a command in a VMApple single-user serial shell"
++    )
++    parser.add_argument("socket", type=Path, help="QEMU Unix serial socket")
++    parser.add_argument("command", help="shell command to execute")
++    parser.add_argument("--timeout", type=float, default=180.0)
++    return parser.parse_args()
++
++
++def main():
++    args = parse_args()
++    if args.timeout <= 0:
++        print("timeout must be positive", file=sys.stderr)
++        return 2
++    try:
++        status, output = run_command(os.fspath(args.socket), args.command, args.timeout)
++    except SerialCommandError as error:
++        print(f"serial command failed: {error}", file=sys.stderr)
++        return 124
++    sys.stdout.buffer.write(output)
++    return status if status <= 125 else 125
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/scripts/27on86/set-aux-boot-args.py b/scripts/27on86/set-aux-boot-args.py
+new file mode 100755
+index 0000000000..cbddbdaab8
+--- /dev/null
++++ b/scripts/27on86/set-aux-boot-args.py
+@@ -0,0 +1,134 @@
++#!/usr/bin/env python3
++
++"""Set boot-args in every valid CHRP system partition in an image."""
++
++import argparse
++from pathlib import Path
++import zlib
++
++
++HEADER_SIZE = 16
++SYSTEM_SIGNATURE = 0x70
++NVRAM_SIGNATURE = 0x5A
++NVRAM_BANK_SIZE = 0x80000
++
++
++def header_checksum(header: bytes) -> int:
++    total = header[0]
++    for value in header[2:16]:
++        total += value
++        total = (total + (total >> 8)) & 0xFF
++    return total
++
++
++def system_partitions(image: bytearray, start: int = 0, end: int | None = None):
++    if end is None:
++        end = len(image)
++    for offset in range(start, end - HEADER_SIZE + 1, 16):
++        header = image[offset : offset + HEADER_SIZE]
++        if header[0] != SYSTEM_SIGNATURE or header[4:16].rstrip(b"\0") != b"system":
++            continue
++        if header_checksum(header) != header[1]:
++            continue
++
++        size = int.from_bytes(header[2:4], "little") * 16
++        if size < HEADER_SIZE or offset + size > end:
++            continue
++        yield offset, size
++
++
++def nvram_banks(image: bytearray):
++    for offset in range(0, len(image) - NVRAM_BANK_SIZE + 1, 16):
++        header = image[offset : offset + HEADER_SIZE]
++        if header[0] != NVRAM_SIGNATURE or header[4:16].rstrip(b"\0") != b"nvram":
++            continue
++        if header_checksum(header) != header[1]:
++            continue
++
++        stored = int.from_bytes(image[offset + 16 : offset + 20], "little")
++        actual = zlib.adler32(image[offset + 20 : offset + NVRAM_BANK_SIZE])
++        if stored == actual:
++            yield offset
++
++
++def replace_boot_args(partition: bytearray, boot_args: bytes) -> None:
++    payload = partition[HEADER_SIZE:]
++    end = payload.find(b"\0\0")
++    if end < 0:
++        raise ValueError("system partition has no variable-list terminator")
++
++    entries = payload[:end].split(b"\0") if end else []
++    replacement = b"boot-args=" + boot_args
++    for index, entry in enumerate(entries):
++        if entry.startswith(b"boot-args="):
++            entries[index] = replacement
++            break
++    else:
++        entries.append(replacement)
++
++    encoded = b"\0".join(entries) + b"\0\0"
++    if len(encoded) > len(payload):
++        raise ValueError("boot arguments do not fit in the system partition")
++
++    partition[HEADER_SIZE:] = encoded.ljust(len(payload), b"\0")
++
++
++def validate_nvram_layout(image: bytearray) -> list[int]:
++    banks = list(nvram_banks(image))
++    if not banks:
++        raise ValueError("no valid NVRAM banks found")
++    if any(offset % NVRAM_BANK_SIZE for offset in banks):
++        raise ValueError("NVRAM banks must start at bank-aligned offsets")
++    for bank_offset in banks:
++        bank_end = bank_offset + NVRAM_BANK_SIZE
++        if not list(system_partitions(image, bank_offset, bank_end)):
++            raise ValueError("NVRAM bank has no valid CHRP system partition")
++    return banks
++
++
++def set_boot_args(image: bytearray, boot_args: bytes) -> int:
++    banks = validate_nvram_layout(image)
++
++    count = 0
++    for bank_offset in banks:
++        bank_end = bank_offset + NVRAM_BANK_SIZE
++        matches = list(system_partitions(image, bank_offset, bank_end))
++        for offset, size in matches:
++            partition = image[offset : offset + size]
++            replace_boot_args(partition, boot_args)
++            image[offset : offset + size] = partition
++            count += 1
++
++        checksum = zlib.adler32(image[bank_offset + 20 : bank_end])
++        image[bank_offset + 16 : bank_offset + 20] = checksum.to_bytes(4, "little")
++    return count
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--check-only", action="store_true")
++    parser.add_argument("image", type=Path)
++    parser.add_argument("boot_args", nargs="?")
++    args = parser.parse_args()
++
++    if args.check_only and args.boot_args is not None:
++        parser.error("boot_args cannot be used with --check-only")
++    if not args.check_only and args.boot_args is None:
++        parser.error("boot_args is required unless --check-only is used")
++    if args.boot_args is not None and "\0" in args.boot_args:
++        parser.error("boot arguments must not contain NUL bytes")
++
++    image = bytearray(args.image.read_bytes())
++    try:
++        if args.check_only:
++            validate_nvram_layout(image)
++            return
++        count = set_boot_args(image, args.boot_args.encode())
++    except ValueError as error:
++        parser.error(str(error))
++    args.image.write_bytes(image)
++    print(f"updated {count} CHRP system partition(s)")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/27on86/validate-headless.py b/scripts/27on86/validate-headless.py
+new file mode 100755
+index 0000000000..fde470ef2a
+--- /dev/null
++++ b/scripts/27on86/validate-headless.py
+@@ -0,0 +1,378 @@
++#!/usr/bin/env python3
++
++"""Run repeatable VMApple headless validation from fresh disk clones."""
++
++import argparse
++import json
++import os
++from pathlib import Path
++import shlex
++import socket
++import subprocess
++import sys
++import time
++
++
++SCRIPT_DIR = Path(__file__).resolve().parent
++SOURCE_ROOT = SCRIPT_DIR.parents[1]
++RUNNER = SCRIPT_DIR / "run-vmapple-tcg.sh"
++INJECTOR = SCRIPT_DIR / "inject-xnu-boot-args.sh"
++BOOTSTRAP = SCRIPT_DIR / "bootstrap-headless.py"
++WORKLOAD = SCRIPT_DIR / "guest-headless-workload.sh"
++
++
++def reserve_tcp_port():
++    with socket.socket() as listener:
++        listener.bind(("127.0.0.1", 0))
++        return listener.getsockname()[1]
++
++
++def wait_for_path(path: Path, process: subprocess.Popen, timeout: float):
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        if path.exists():
++            return
++        if process.poll() is not None:
++            raise RuntimeError(f"QEMU exited with status {process.returncode}")
++        time.sleep(0.1)
++    raise RuntimeError(f"timed out waiting for {path}")
++
++
++class QMP:
++    def __init__(self, path: Path, timeout: float = 30):
++        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++        self.socket.settimeout(timeout)
++        self.socket.connect(os.fspath(path))
++        self.stream = self.socket.makefile("rwb", buffering=0)
++        greeting = self.receive()
++        if "QMP" not in greeting:
++            raise RuntimeError("QMP greeting is missing")
++        self.execute("qmp_capabilities")
++
++    def close(self):
++        self.stream.close()
++        self.socket.close()
++
++    def send(self, message):
++        self.stream.write(json.dumps(message).encode() + b"\n")
++
++    def receive(self):
++        line = self.stream.readline()
++        if not line:
++            raise RuntimeError("QMP connection closed")
++        return json.loads(line)
++
++    def execute(self, command, arguments=None):
++        message = {"execute": command}
++        if arguments is not None:
++            message["arguments"] = arguments
++        self.send(message)
++        while True:
++            response = self.receive()
++            if "error" in response:
++                raise RuntimeError(f"QMP {command} failed: {response['error']}")
++            if "return" in response:
++                return response["return"]
++
++    def wait_for_event(self, event: str, timeout: float):
++        self.socket.settimeout(timeout)
++        while True:
++            message = self.receive()
++            if message.get("event") == event:
++                return message.get("data", {})
++
++
++def required_environment():
++    names = (
++        "QEMU_27ON86_FIRMWARE",
++        "QEMU_27ON86_AUX",
++        "QEMU_27ON86_ROOT",
++        "QEMU_27ON86_ECID",
++    )
++    missing = [name for name in names if not os.environ.get(name)]
++    if missing:
++        raise RuntimeError("set " + ", ".join(missing))
++    return {name: os.environ[name] for name in names}
++
++
++def ssh_command(port: int, identity: Path, remote_command: str):
++    return [
++        "ssh",
++        "-i",
++        os.fspath(identity),
++        "-p",
++        str(port),
++        "-o",
++        "BatchMode=yes",
++        "-o",
++        "StrictHostKeyChecking=no",
++        "-o",
++        "UserKnownHostsFile=/dev/null",
++        "-o",
++        "LogLevel=ERROR",
++        "-o",
++        "ConnectTimeout=10",
++        "root@127.0.0.1",
++        remote_command,
++    ]
++
++
++def wait_for_ssh(port: int, identity: Path, timeout: float):
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        result = subprocess.run(
++            ssh_command(port, identity, "true"),
++            stdout=subprocess.DEVNULL,
++            stderr=subprocess.DEVNULL,
++        )
++        if result.returncode == 0:
++            return
++        time.sleep(2)
++    raise RuntimeError("timed out waiting for SSH")
++
++
++def start_qemu(
++    index: int, cpus: int, output: Path, base_environment, reboot_cycle: bool
++):
++    ssh_port = reserve_tcp_port()
++    gdb_port = reserve_tcp_port()
++    serial_socket = Path(f"/tmp/27on86-{os.getpid()}-{index}.serial")
++    run_output = output / f"run-{index}-{cpus}cpu"
++    run_output.mkdir(parents=True, exist_ok=True)
++    environment = os.environ.copy()
++    environment.update(base_environment)
++    environment.update(
++        {
++            "QEMU_27ON86_OUTPUT_DIR": os.fspath(run_output),
++            "QEMU_27ON86_SERIAL": f"unix:{serial_socket},server=on,wait=off",
++            "QEMU_27ON86_SSH_PORT": str(ssh_port),
++            "QEMU_27ON86_GDB_PORT": str(gdb_port),
++            "QEMU_27ON86_PAUSE_AT_START": "on",
++            "QEMU_27ON86_CPUS": str(cpus),
++            "QEMU_27ON86_NO_REBOOT": "off" if reboot_cycle else "on",
++        }
++    )
++    process = subprocess.Popen(
++        [os.fspath(RUNNER)],
++        cwd=SOURCE_ROOT,
++        env=environment,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        text=True,
++    )
++    first_line = process.stdout.readline().strip()
++    prefix = "VMApple run directory: "
++    if not first_line.startswith(prefix):
++        raise RuntimeError(f"runner did not report its directory: {first_line}")
++    run_directory = Path(first_line.removeprefix(prefix))
++    wait_for_path(serial_socket, process, 30)
++    wait_for_path(run_directory / "qmp.sock", process, 30)
++    return process, run_directory, serial_socket, ssh_port, gdb_port
++
++
++def inject_handoff(gdb_port: int):
++    injector_environment = os.environ.copy()
++    injector_environment.update(
++        {
++            "QEMU_27ON86_GDB_PORT": str(gdb_port),
++            "QEMU_27ON86_XNU_BOOT_ARGS": "-s -v serial=11 debug=0x14c",
++            "QEMU_27ON86_CSR_CONFIG": "0x2",
++        }
++    )
++    subprocess.run([os.fspath(INJECTOR)], env=injector_environment, check=True)
++
++
++def run_validation(
++    index: int, cpus: int, output: Path, base_environment, reboot_cycle: bool = False
++):
++    started = time.monotonic()
++    process = None
++    qmp = None
++    http_process = None
++    serial_socket = None
++    run_directory = None
++    try:
++        process, run_directory, serial_socket, ssh_port, gdb_port = start_qemu(
++            index, cpus, output, base_environment, reboot_cycle
++        )
++        print(f"run {index}: QEMU started in {run_directory}", flush=True)
++
++        inject_handoff(gdb_port)
++        print(f"run {index}: XNU handoff configured", flush=True)
++
++        state_directory = run_directory / "headless-state"
++        subprocess.run(
++            [os.fspath(BOOTSTRAP), os.fspath(serial_socket), os.fspath(state_directory)],
++            check=True,
++        )
++        identity = state_directory / "id_ed25519"
++        wait_for_ssh(ssh_port, identity, 60)
++        print(f"run {index}: SSH ready", flush=True)
++
++        http_port = reserve_tcp_port()
++        network_token = f"27on86-network-run-{index}"
++        network_file = run_directory / "network-token"
++        network_file.write_text(network_token)
++        http_process = subprocess.Popen(
++            [
++                sys.executable,
++                "-m",
++                "http.server",
++                str(http_port),
++                "--bind",
++                "127.0.0.1",
++                "--directory",
++                os.fspath(run_directory),
++            ],
++            stdout=subprocess.DEVNULL,
++            stderr=subprocess.DEVNULL,
++        )
++        network_url = f"http://10.0.2.2:{http_port}/{network_file.name}"
++        with WORKLOAD.open("rb") as workload:
++            result = subprocess.run(
++                ssh_command(
++                    ssh_port,
++                    identity,
++                    "sh -s -- "
++                    + " ".join(
++                        shlex.quote(value)
++                        for value in (str(cpus), network_url, network_token)
++                    ),
++                ),
++                stdin=workload,
++                stdout=subprocess.PIPE,
++                stderr=subprocess.STDOUT,
++                check=True,
++            )
++        workload_output = result.stdout.decode(errors="replace")
++        (run_directory / "workload.log").write_text(workload_output)
++        print(workload_output, end="", flush=True)
++
++        qmp = QMP(run_directory / "qmp.sock")
++        if reboot_cycle:
++            subprocess.run(
++                ssh_command(ssh_port, identity, "/bin/launchctl reboot"),
++                stdout=subprocess.DEVNULL,
++                stderr=subprocess.DEVNULL,
++                check=False,
++            )
++            reset = qmp.wait_for_event("RESET", 120)
++            print(f"run {index}: guest reset observed ({reset})", flush=True)
++            inject_handoff(gdb_port)
++            print(f"run {index}: reboot handoff configured", flush=True)
++            subprocess.run(
++                [
++                    os.fspath(BOOTSTRAP),
++                    os.fspath(serial_socket),
++                    os.fspath(state_directory),
++                ],
++                check=True,
++            )
++            wait_for_ssh(ssh_port, identity, 60)
++            subprocess.run(
++                ssh_command(
++                    ssh_port,
++                    identity,
++                    f"test $(/usr/sbin/sysctl -n hw.ncpu) = {cpus}",
++                ),
++                check=True,
++            )
++            print(f"run {index}: SSH ready after reboot", flush=True)
++
++        subprocess.run(
++            ssh_command(
++                ssh_port,
++                identity,
++                "/bin/launchctl reboot halt",
++            ),
++            stdout=subprocess.DEVNULL,
++            stderr=subprocess.DEVNULL,
++            check=False,
++        )
++        shutdown = qmp.wait_for_event("SHUTDOWN", 120)
++        status = qmp.execute("query-status")
++        if not shutdown.get("guest") or status.get("running"):
++            raise RuntimeError(
++                f"unclean shutdown evidence: event={shutdown}, status={status}"
++            )
++        print(
++            f"run {index}: clean shutdown ({shutdown.get('reason')}) after "
++            f"{time.monotonic() - started:.1f}s",
++            flush=True,
++        )
++        qmp.execute("quit")
++        qmp.close()
++        qmp = None
++        process.wait(timeout=30)
++        return run_directory
++    finally:
++        if http_process is not None and http_process.poll() is None:
++            http_process.terminate()
++            http_process.wait(timeout=10)
++        if qmp is not None:
++            try:
++                qmp.execute("quit")
++            except (OSError, RuntimeError):
++                pass
++            qmp.close()
++        if process is not None and process.poll() is None:
++            process.terminate()
++            process.wait(timeout=30)
++        if process is not None and process.stdout is not None:
++            remaining = process.stdout.read()
++            if run_directory is not None and remaining:
++                (run_directory / "qemu.log").write_text(remaining)
++        if serial_socket is not None:
++            try:
++                serial_socket.unlink()
++            except FileNotFoundError:
++                pass
++
++
++def parse_args():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--runs", type=int, default=2)
++    parser.add_argument("--cpus", type=int, default=8)
++    parser.add_argument(
++        "--output", type=Path, default=SOURCE_ROOT / "out/headless-validation"
++    )
++    parser.add_argument("--skip-one-cpu-regression", action="store_true")
++    parser.add_argument("--reboot-cycle", action="store_true")
++    return parser.parse_args()
++
++
++def main():
++    args = parse_args()
++    if args.runs < 1 or args.cpus < 1:
++        raise RuntimeError("runs and CPUs must be positive")
++    base_environment = required_environment()
++    args.output.mkdir(parents=True, exist_ok=True)
++
++    completed = []
++    for index in range(1, args.runs + 1):
++        completed.append(
++            run_validation(
++                index,
++                args.cpus,
++                args.output,
++                base_environment,
++                reboot_cycle=args.reboot_cycle,
++            )
++        )
++    if not args.skip_one_cpu_regression:
++        completed.append(
++            run_validation(args.runs + 1, 1, args.output, base_environment)
++        )
++
++    print("validated fresh VMApple runs:")
++    for directory in completed:
++        print(f"  {directory}")
++    return 0
++
++
++if __name__ == "__main__":
++    try:
++        sys.exit(main())
++    except (RuntimeError, subprocess.CalledProcessError, socket.timeout) as error:
++        print(f"headless validation failed: {error}", file=sys.stderr)
++        sys.exit(1)
+diff --git a/scripts/27on86/verify-launchd-ram.py b/scripts/27on86/verify-launchd-ram.py
+new file mode 100755
+index 0000000000..940d8b60d1
+--- /dev/null
++++ b/scripts/27on86/verify-launchd-ram.py
+@@ -0,0 +1,52 @@
++#!/usr/bin/env python3
++
++import argparse
++import mmap
++import struct
++import sys
++
++
++PROC_COMM_OFFSET = 1464
++PROC_NAME_OFFSET = PROC_COMM_OFFSET + 17
++PROC_PID_OFFSET = 0x60
++PROC_STAT_OFFSET = 0x64
++PROC_STATE_RUNNABLE = 2
++PROCESS_NAME = b"launchd\0"
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(
++        description="verify a live PID 1 launchd process in a raw RAM range"
++    )
++    parser.add_argument("dump", help="raw physical-memory range from QEMU")
++    args = parser.parse_args()
++
++    with open(args.dump, "rb") as stream:
++        with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as memory:
++            offset = 0
++            while True:
++                offset = memory.find(PROCESS_NAME, offset)
++                if offset < 0:
++                    break
++
++                proc_offset = offset - PROC_COMM_OFFSET
++                if (proc_offset >= 0 and
++                        memory[offset:offset + len(PROCESS_NAME)] ==
++                        PROCESS_NAME and
++                        memory[proc_offset + PROC_NAME_OFFSET:
++                               proc_offset + PROC_NAME_OFFSET +
++                               len(PROCESS_NAME)] == PROCESS_NAME):
++                    pid = struct.unpack_from(
++                        "<i", memory, proc_offset + PROC_PID_OFFSET)[0]
++                    state = memory[proc_offset + PROC_STAT_OFFSET]
++                    if pid == 1 and state == PROC_STATE_RUNNABLE:
++                        print("live launchd PID 1: PASS")
++                        return 0
++                offset += 1
++
++    print("live launchd PID 1: NOT FOUND", file=sys.stderr)
++    return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/27on86/test_apple_device_tree.py b/tests/27on86/test_apple_device_tree.py
+new file mode 100644
+index 0000000000..be3dd97001
+--- /dev/null
++++ b/tests/27on86/test_apple_device_tree.py
+@@ -0,0 +1,63 @@
++import importlib.util
++from pathlib import Path
++import struct
++import unittest
++
++
++ROOT = Path(__file__).resolve().parents[2]
++HELPER = ROOT / "scripts/27on86/apple_device_tree.py"
++SPEC = importlib.util.spec_from_file_location("apple_device_tree", HELPER)
++apple_device_tree = importlib.util.module_from_spec(SPEC)
++assert SPEC.loader is not None
++SPEC.loader.exec_module(apple_device_tree)
++
++
++def prop(name, value):
++    header = name.encode().ljust(32, b"\0") + struct.pack("<I", len(value))
++    return header + value.ljust((len(value) + 3) & ~3, b"\0")
++
++
++def node(properties, children=()):
++    return bytearray(
++        struct.pack("<II", len(properties), len(children))
++        + b"".join(prop(name, value) for name, value in properties)
++        + b"".join(children)
++    )
++
++
++class AppleDeviceTreeTests(unittest.TestCase):
++    def test_replaces_equal_sized_property_in_named_child(self):
++        asmb = node((("name", b"asmb\0"), ("lp-stng", struct.pack("<Q", 1))))
++        chosen = node((("name", b"chosen\0"),), (asmb,))
++        tree = node((("name", b"device-tree\0"),), (chosen,))
++
++        root = apple_device_tree.parse(tree)
++        chosen_node = apple_device_tree.child_named(tree, root, "chosen")
++        asmb_node = apple_device_tree.child_named(tree, chosen_node, "asmb")
++        apple_device_tree.replace_property(
++            tree, asmb_node, "lp-stng", "lp-sip0", struct.pack("<Q", 2)
++        )
++
++        reparsed = apple_device_tree.parse(tree)
++        chosen_node = apple_device_tree.child_named(tree, reparsed, "chosen")
++        asmb_node = apple_device_tree.child_named(tree, chosen_node, "asmb")
++        self.assertEqual(
++            apple_device_tree.property_value(tree, asmb_node, "lp-sip0"),
++            struct.pack("<Q", 2),
++        )
++        self.assertNotIn("lp-stng", asmb_node["properties"])
++
++    def test_rejects_a_different_sized_replacement(self):
++        tree = node((("name", b"root\0"), ("old", b"1234")))
++        root = apple_device_tree.parse(tree)
++        with self.assertRaisesRegex(apple_device_tree.DeviceTreeError, "4 bytes"):
++            apple_device_tree.replace_property(tree, root, "old", "new", b"12345678")
++
++    def test_rejects_truncated_property(self):
++        tree = bytearray(struct.pack("<II", 1, 0) + b"short")
++        with self.assertRaisesRegex(apple_device_tree.DeviceTreeError, "truncated"):
++            apple_device_tree.parse(tree)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/27on86/test_aux_boot_args.py b/tests/27on86/test_aux_boot_args.py
+new file mode 100755
+index 0000000000..43b4aa91a5
+--- /dev/null
++++ b/tests/27on86/test_aux_boot_args.py
+@@ -0,0 +1,76 @@
++#!/usr/bin/env python3
++
++import importlib.util
++from pathlib import Path
++import unittest
++
++
++ROOT = Path(__file__).resolve().parents[2]
++HELPER = ROOT / "scripts/27on86/set-aux-boot-args.py"
++SPEC = importlib.util.spec_from_file_location("set_aux_boot_args", HELPER)
++MODULE = importlib.util.module_from_spec(SPEC)
++assert SPEC.loader is not None
++SPEC.loader.exec_module(MODULE)
++
++
++def partition(*entries: bytes) -> bytes:
++    size = 512
++    header = bytearray(size)
++    header[0] = MODULE.SYSTEM_SIGNATURE
++    header[2:4] = (size // 16).to_bytes(2, "little")
++    header[4:10] = b"system"
++    header[1] = MODULE.header_checksum(header[: MODULE.HEADER_SIZE])
++    payload = b"\0".join(entries) + b"\0\0"
++    header[MODULE.HEADER_SIZE : MODULE.HEADER_SIZE + len(payload)] = payload
++    return bytes(header)
++
++
++def bank(*entries: bytes) -> bytes:
++    image = bytearray(MODULE.NVRAM_BANK_SIZE)
++    image[0] = MODULE.NVRAM_SIGNATURE
++    image[2:4] = (2).to_bytes(2, "little")
++    image[4:9] = b"nvram"
++    image[1] = MODULE.header_checksum(image[: MODULE.HEADER_SIZE])
++    part = partition(*entries)
++    image[0x60000 : 0x60000 + len(part)] = part
++    checksum = MODULE.zlib.adler32(image[20:])
++    image[16:20] = checksum.to_bytes(4, "little")
++    return bytes(image)
++
++
++class AuxBootArgsTest(unittest.TestCase):
++    def test_accepts_bank_aligned_layout(self):
++        image = bytearray(bank(b"boot-args="))
++
++        self.assertEqual(MODULE.validate_nvram_layout(image), [0])
++
++    def test_rejects_displaced_bank_layout(self):
++        image = bytearray(b"\0" * 0x4000 + bank(b"boot-args="))
++
++        with self.assertRaisesRegex(ValueError, "bank-aligned"):
++            MODULE.validate_nvram_layout(image)
++
++    def test_updates_every_valid_mirror(self):
++        original = bank(b"binary=\xff\x01", b"boot-args=", b"auto-boot=true")
++        image = bytearray(original + original)
++
++        self.assertEqual(MODULE.set_boot_args(image, b"-s serial=3"), 2)
++        for bank_offset in MODULE.nvram_banks(image):
++            matches = MODULE.system_partitions(
++                image, bank_offset, bank_offset + MODULE.NVRAM_BANK_SIZE
++            )
++            for offset, size in matches:
++                self.assertIn(b"boot-args=-s serial=3\0", image[offset : offset + size])
++
++    def test_rejects_missing_partition(self):
++        with self.assertRaisesRegex(ValueError, "no valid"):
++            MODULE.set_boot_args(bytearray(512), b"-s")
++
++    def test_rejects_oversized_value(self):
++        image = bytearray(bank(b"boot-args="))
++        with self.assertRaisesRegex(ValueError, "do not fit"):
++            MODULE.set_boot_args(image, b"x" * 512)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/27on86/test_serial_command.py b/tests/27on86/test_serial_command.py
+new file mode 100644
+index 0000000000..a853d98e6c
+--- /dev/null
++++ b/tests/27on86/test_serial_command.py
+@@ -0,0 +1,89 @@
++import importlib.util
++from pathlib import Path
++import re
++import socket
++import tempfile
++import threading
++import unittest
++
++
++SOURCE_ROOT = Path(__file__).resolve().parents[2]
++SCRIPT = SOURCE_ROOT / "scripts" / "27on86" / "serial-command.py"
++SPEC = importlib.util.spec_from_file_location("serial_command", SCRIPT)
++SERIAL_COMMAND = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(SERIAL_COMMAND)
++
++
++class FakeSerialShell(threading.Thread):
++    def __init__(self, path, output, status):
++        super().__init__(daemon=True)
++        self.path = path
++        self.output = output
++        self.status = status
++        self.error = None
++
++    def run(self):
++        try:
++            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
++                server.bind(self.path)
++                server.listen(1)
++                with server.accept()[0] as client:
++                    client.sendall(SERIAL_COMMAND.BOOT_PROMPT)
++                    self.receive_until(client, b"\n")
++                    setup = self.receive_until(client, b"\n")
++                    self.assert_contains(setup, b"stty -echo")
++                    client.sendall(SERIAL_COMMAND.READY_PROMPT)
++                    request = self.receive_until(client, b"$__27on86_status\"\n")
++                    match = re.search(rb"__27ON86_BEGIN_([0-9a-f]+)__", request)
++                    if not match:
++                        raise AssertionError("missing begin marker")
++                    token = match.group(1)
++                    response = (
++                        request
++                        + b"__27ON86_BEGIN_"
++                        + token
++                        + b"__\r\r\n"
++                        + self.output
++                        + b"\r\n__27ON86_END_"
++                        + token
++                        + b"__:%d\r\r\n" % self.status
++                    )
++                    client.sendall(response)
++        except Exception as error:
++            self.error = error
++
++    @staticmethod
++    def receive_until(client, marker):
++        data = bytearray()
++        while marker not in data:
++            chunk = client.recv(65536)
++            if not chunk:
++                raise AssertionError("client disconnected")
++            data.extend(chunk)
++        return bytes(data)
++
++    @staticmethod
++    def assert_contains(value, expected):
++        if expected not in value:
++            raise AssertionError(f"{expected!r} not in {value!r}")
++
++
++class SerialCommandTests(unittest.TestCase):
++    def test_returns_framed_output_and_guest_status(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = str(Path(directory) / "serial.sock")
++            server = FakeSerialShell(path, b"guest output", 7)
++            server.start()
++            while not Path(path).exists():
++                server.join(0.01)
++
++            status, output = SERIAL_COMMAND.run_command(path, "false", 2)
++            server.join(2)
++
++            self.assertIsNone(server.error)
++            self.assertEqual(status, 7)
++            self.assertEqual(output, b"guest output\n")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/27on86/vmapple-smoke.S b/tests/27on86/vmapple-smoke.S
+new file mode 100644
+index 0000000000..450ee556a9
+--- /dev/null
++++ b/tests/27on86/vmapple-smoke.S
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++
++    .section .text.boot, "ax"
++    .global _start
++
++_start:
++    movz    x0, #0x2001, lsl #16
++    mov     w3, #0x301
++    str     w3, [x0, #0x30]
++
++    mrs     x4, cntfrq_el0
++    movz    w5, #0x3600
++    movk    w5, #0x016e, lsl #16
++    cmp     w4, w5
++    b.ne    bad_cntfrq
++
++    adr     x1, message
++
++write_message:
++
++1:
++    ldrb    w2, [x1], #1
++    cbz     w2, 3f
++
++2:
++    ldr     w3, [x0, #0x18]
++    tbnz    w3, #5, 2b
++    str     w2, [x0]
++    b       1b
++
++3:
++    wfi
++    b       3b
++
++bad_cntfrq:
++    adr     x1, bad_cntfrq_message
++    b       write_message
++
++message:
++    .asciz  "VMAPPLE_TCG_SMOKE_OK\n"
++
++bad_cntfrq_message:
++    .asciz  "VMAPPLE_TCG_BAD_CNTFRQ\n"

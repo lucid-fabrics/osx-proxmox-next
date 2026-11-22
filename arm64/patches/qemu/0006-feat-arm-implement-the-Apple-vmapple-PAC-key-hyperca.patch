@@ -1,0 +1,805 @@
+From 1d259f87537ecd6b627d0394fb50ea39a635d704 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(arm): implement the Apple vmapple PAC key hypercalls
+
+Adds the PAC key service the vmapple guest calls through hypercalls
+and the Apple compatible PAC computed with three multiplies.
+System tests sign, strip and fail for every pauth key, also in the
+vmapple compat mode (pauth-fail, pauth-regime, pauth-compat).
+---
+ target/arm/cpu.h                          |   5 +
+ target/arm/cpu64.c                        |   8 +
+ target/arm/tcg/pauth_helper.c             |  20 +-
+ target/arm/tcg/psci.c                     |  48 ++-
+ tests/tcg/aarch64/Makefile.softmmu-target |  22 ++
+ tests/tcg/aarch64/system/pauth-compat.c   |  10 +
+ tests/tcg/aarch64/system/pauth-fail.c     | 216 ++++++++++++++
+ tests/tcg/aarch64/system/pauth-regime.c   | 343 ++++++++++++++++++++++
+ 8 files changed, 668 insertions(+), 4 deletions(-)
+ create mode 100644 tests/tcg/aarch64/system/pauth-compat.c
+ create mode 100644 tests/tcg/aarch64/system/pauth-fail.c
+ create mode 100644 tests/tcg/aarch64/system/pauth-regime.c
+
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index 33e3a8aa7f..8ebb9692af 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -772,6 +772,11 @@ typedef struct CPUArchState {
+     /* Fields up to this point are cleared by a CPU reset */
+     struct {} end_reset_fields;
+ 
++    /* vmapple Apple PAC key service state (see target/arm/tcg/psci.c) */
++    uint64_t vmapple_rop_pid;
++    uint64_t vmapple_jop_pid;
++    bool vmapple_user_jop_key;
++
+     /* Fields after this point are preserved across CPU reset. */
+ 
+     /* Internal CPU feature flags.  */
+diff --git a/target/arm/cpu64.c b/target/arm/cpu64.c
+index 2816735577..db1e31ee6a 100644
+--- a/target/arm/cpu64.c
++++ b/target/arm/cpu64.c
+@@ -642,6 +642,13 @@ static const Property arm_cpu_pauth_qarma3_property =
+     DEFINE_PROP_BOOL("pauth-qarma3", ARMCPU, prop_pauth_qarma3, false);
+ static Property arm_cpu_pauth_qarma5_property =
+     DEFINE_PROP_BOOL("pauth-qarma5", ARMCPU, prop_pauth_qarma5, false);
++/*
++ * The vmapple machine sets pauth_impdef_compat itself; the property lets
++ * tests drive the same mode on any machine.
++ */
++static const Property arm_cpu_pauth_compat_property =
++    DEFINE_PROP_BOOL("x-pauth-impdef-compat", ARMCPU, pauth_impdef_compat,
++                     false);
+ 
+ void aarch64_add_pauth_properties(Object *obj)
+ {
+@@ -663,6 +670,7 @@ void aarch64_add_pauth_properties(Object *obj)
+         qdev_property_add_static(DEVICE(obj), &arm_cpu_pauth_impdef_property);
+         qdev_property_add_static(DEVICE(obj), &arm_cpu_pauth_qarma3_property);
+         qdev_property_add_static(DEVICE(obj), &arm_cpu_pauth_qarma5_property);
++        qdev_property_add_static(DEVICE(obj), &arm_cpu_pauth_compat_property);
+     }
+ }
+ 
+diff --git a/target/arm/tcg/pauth_helper.c b/target/arm/tcg/pauth_helper.c
+index a7b24ae124..e215e58834 100644
+--- a/target/arm/tcg/pauth_helper.c
++++ b/target/arm/tcg/pauth_helper.c
+@@ -312,6 +312,21 @@ static uint64_t pauth_computepac_impdef(uint64_t data, uint64_t modifier,
+     return qemu_xxhash64_4(data, modifier, key.lo, key.hi);
+ }
+ 
++/*
++ * The cipher of the compat mode (see pauth_computepac()).  Nothing ever
++ * checks the code it produces, because pauth_auth() only strips it, so it
++ * has to be deterministic and spread over the pointer and the modifier
++ * and nothing more.  Three multiplies instead of the eighteen of xxhash64.
++ */
++static inline uint64_t pauth_computepac_compat(uint64_t data, uint64_t modifier)
++{
++    uint64_t h = data * 0x9E3779B97F4A7C15ull + modifier * 0xC2B2AE3D27D4EB4Full;
++
++    h ^= h >> 32;
++    h *= 0x165667B19E3779F9ull;
++    return h ^ (h >> 29);
++}
++
+ static uint64_t pauth_computepac(CPUARMState *env, uint64_t data,
+                                  uint64_t modifier, ARMPACKey key)
+ {
+@@ -324,7 +339,7 @@ static uint64_t pauth_computepac(CPUARMState *env, uint64_t data,
+      * authentication below still strips the guest's original signatures.
+      */
+     if (cpu->pauth_impdef_compat) {
+-        return pauth_computepac_impdef(data, modifier, (ARMPACKey) { 0 });
++        return pauth_computepac_compat(data, modifier);
+     }
+ 
+     if (cpu_isar_feature(aa64_pauth_qarma5, cpu)) {
+@@ -436,7 +451,7 @@ static uint64_t pauth_auth(CPUARMState *env, uint64_t ptr, uint64_t modifier,
+     ARMCPU *cpu = env_archcpu(env);
+     ARMMMUIdx mmu_idx = arm_stage1_mmu_idx(env);
+     ARMVAParameters param = aa64_va_parameters(env, ptr, mmu_idx, data, false);
+-    ARMPauthFeature pauth_feature = cpu_isar_feature(pauth_feature, cpu);
++    ARMPauthFeature pauth_feature;
+     int bot_bit, top_bit;
+     uint64_t pac, orig_ptr, cmp_mask;
+ 
+@@ -450,6 +465,7 @@ static uint64_t pauth_auth(CPUARMState *env, uint64_t ptr, uint64_t modifier,
+     if (cpu->pauth_impdef_compat) {
+         return orig_ptr;
+     }
++    pauth_feature = cpu_isar_feature(pauth_feature, cpu);
+ 
+     pac = pauth_computepac(env, orig_ptr, modifier, *key);
+     bot_bit = 64 - param.tsz;
+diff --git a/target/arm/tcg/psci.c b/target/arm/tcg/psci.c
+index 931095ca18..c5c71ec6bb 100644
+--- a/target/arm/tcg/psci.c
++++ b/target/arm/tcg/psci.c
+@@ -28,6 +28,22 @@
+ #include "target/arm/multiprocessing.h"
+ #include "target/arm/trace.h"
+ 
++/*
++ * Apple vendor hypercalls issued by the macOS 27 vmapple XNU kernel.
++ * 0xC1000000..5 are a PAC key service: XNU cannot program the AP*KEY
++ * registers itself on vmapple. Only the per-vCPU values are tracked, the
++ * keys themselves stay fixed (consistent sign/auth, no cross-process
++ * isolation).
++ */
++#define APPLE_HVC_VMAPPLE_PAC_INIT              0xC1000000
++#define APPLE_HVC_VMAPPLE_PAC_GET_DEFAULT_KEYS  0xC1000001
++#define APPLE_HVC_VMAPPLE_PAC_SET_ROP_PID       0xC1000003
++#define APPLE_HVC_VMAPPLE_PAC_SET_JOP_PID       0xC1000004
++#define APPLE_HVC_VMAPPLE_PAC_USER_JOP_KEY      0xC1000005
++#define APPLE_HVC_HVG_PROBE                     0xC10000F0
++#define APPLE_VMAPPLE_DEFAULT_ROP_PID           0x5250505250505250ULL
++#define APPLE_VMAPPLE_DEFAULT_JOP_PID           0x4a4f504a4f504a4fULL
++
+ bool arm_is_psci_call(ARMCPU *cpu, int excp_type)
+ {
+     /*
+@@ -93,10 +109,38 @@ void arm_handle_psci_call(ARMCPU *cpu)
+         CPUState *target_cpu_state;
+         ARMCPU *target_cpu;
+ 
+-    case 0xC1000000 ... 0xC10000FF: /* Apple vendor hypercall from macOS 27 XNU early boot */
+-        qemu_log_mask(LOG_UNIMP, "vmapple: HVC 0x%" PRIx64 " x1=%" PRIx64 " x2=%" PRIx64 " x3=%" PRIx64 "\n", param[0], param[1], param[2], param[3]);
++    case APPLE_HVC_VMAPPLE_PAC_INIT:
++        /* Per-CPU start/wake handshake: success is x0 == 0, else XNU spins */
++        ret = 0;
++        break;
++    case APPLE_HVC_VMAPPLE_PAC_GET_DEFAULT_KEYS:
++        env->xregs[2] = APPLE_VMAPPLE_DEFAULT_ROP_PID;
++        env->xregs[3] = APPLE_VMAPPLE_DEFAULT_JOP_PID;
++        ret = 0;
++        break;
++    case APPLE_HVC_VMAPPLE_PAC_SET_ROP_PID:
++        env->vmapple_rop_pid = param[1];
+         ret = 0;
+         break;
++    case APPLE_HVC_VMAPPLE_PAC_SET_JOP_PID:
++        env->vmapple_jop_pid = param[1];
++        ret = 0;
++        break;
++    case APPLE_HVC_VMAPPLE_PAC_USER_JOP_KEY:
++        env->vmapple_user_jop_key = param[1] != 0;
++        ret = 0;
++        break;
++    case APPLE_HVC_HVG_PROBE:
++    case 0x8300FF00 ... 0x8300FFFF: /* SMCCC vendor hypervisor UID/revision */
++    case 0xC3000000 ... 0xC3FFFFFF: /* Apple hvg services: not offered */
++    case 0xC1000002:
++    case 0xC1000006 ... 0xC10000EF:
++    case 0xC10000F1 ... 0xC10000FF:
++        ret = QEMU_PSCI_RET_NOT_SUPPORTED;
++        break;
++    case 0xC6000000 ... 0xC6FFFFFF: /* nested Hypervisor.framework calls */
++        ret = QEMU_PSCI_RET_NOT_SUPPORTED;
++        break;
+     case QEMU_PSCI_0_2_FN_PSCI_VERSION:
+         ret = QEMU_PSCI_VERSION_1_1;
+         break;
+diff --git a/tests/tcg/aarch64/Makefile.softmmu-target b/tests/tcg/aarch64/Makefile.softmmu-target
+index 3f30be6c5d..55fa0102e4 100644
+--- a/tests/tcg/aarch64/Makefile.softmmu-target
++++ b/tests/tcg/aarch64/Makefile.softmmu-target
+@@ -114,6 +114,28 @@ run-pauth-3:
+ 	$(call skip-test, "RUN of pauth-3", "not built")
+ endif
+ 
++# Sign, strip and fail, with the default cipher, and in the vmapple compat mode
++ifneq ($(CROSS_CC_HAS_ARMV8_3),)
++pauth-fail pauth-compat: CFLAGS += $(CROSS_CC_HAS_ARMV8_3)
++pauth-compat: pauth-fail.c
++run-pauth-compat: QEMU_BASE_MACHINE=-M virt -cpu max,x-pauth-impdef-compat=on -display none
++else
++pauth-fail pauth-compat:
++	$(call skip-test, "BUILD of $@", "missing compiler support")
++run-pauth-fail run-pauth-compat:
++	$(call skip-test, "RUN of $@", "not built")
++endif
++
++# TCR_EL1 and exception level changes under the compat mode strip
++ifneq ($(CROSS_CC_HAS_ARMV8_3),)
++pauth-regime: CFLAGS += $(CROSS_CC_HAS_ARMV8_3)
++run-pauth-regime: QEMU_BASE_MACHINE=-M virt -cpu max,x-pauth-impdef-compat=on -display none
++else
++pauth-regime:
++	$(call skip-test, "BUILD of $@", "missing compiler support")
++run-pauth-regime:
++	$(call skip-test, "RUN of $@", "not built")
++endif
+ ifneq ($(CROSS_CC_HAS_ARMV8_MTE),)
+ QEMU_MTE_ENABLED_MACHINE=-M virt,mte=on -cpu max -display none
+ QEMU_OPTS_WITH_MTE_ON = $(QEMU_MTE_ENABLED_MACHINE) $(QEMU_BASE_ARGS) -kernel
+diff --git a/tests/tcg/aarch64/system/pauth-compat.c b/tests/tcg/aarch64/system/pauth-compat.c
+new file mode 100644
+index 0000000000..8365caa7f5
+--- /dev/null
++++ b/tests/tcg/aarch64/system/pauth-compat.c
+@@ -0,0 +1,10 @@
++/*
++ * The pointer authentication test in the vmapple compat mode: sign and strip
++ * work, authentication only strips.  Run with -cpu max,x-pauth-impdef-compat=on.
++ *
++ * Copyright (c) 2026 Snapintosh contributors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#define PAUTH_COMPAT 1
++#include "pauth-fail.c"
+diff --git a/tests/tcg/aarch64/system/pauth-fail.c b/tests/tcg/aarch64/system/pauth-fail.c
+new file mode 100644
+index 0000000000..ad5f659726
+--- /dev/null
++++ b/tests/tcg/aarch64/system/pauth-fail.c
+@@ -0,0 +1,216 @@
++/*
++ * Pointer authentication signs, strips, and fails.
++ *
++ * For each of the four keys: a signed pointer differs from the plain one, is
++ * deterministic, depends on the modifier, authenticates back to the plain
++ * pointer, and XPAC strips it.  Authenticating a pointer whose code was
++ * corrupted, signed with another modifier, or signed under another key must
++ * NOT give the plain pointer back: it either raises the PAC failure
++ * exception (FPAC, EC 0x1c; the handler skips the instruction) or returns a
++ * poisoned pointer.  Built with PAUTH_COMPAT the CPU runs in the vmapple
++ * compat mode (x-pauth-impdef-compat), where authentication only strips and
++ * never fails.  PACGA is deterministic, depends on the modifier and fills
++ * only the upper 32 bits.
++ *
++ * Copyright (c) 2026 Snapintosh contributors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include <stdint.h>
++#include <minilib.h>
++
++#ifdef PAUTH_COMPAT
++#define COMPAT 1
++#else
++#define COMPAT 0
++#endif
++
++#define SCTLR_ENIA (1ull << 31)
++#define SCTLR_ENIB (1ull << 30)
++#define SCTLR_ENDA (1ull << 27)
++#define SCTLR_ENDB (1ull << 13)
++#define EC_PACFAIL 0x1c
++#define NMOD 8
++
++volatile uint64_t pf_esr;
++volatile uint64_t pf_count;
++
++/* Synchronous exceptions from EL1h skip the faulting instruction. */
++asm(".text\n"
++    ".balign 2048\n"
++    "pf_vectors:\n"
++    ".skip 0x200\n"
++    "    mrs x16, esr_el1\n"
++    "    adrp x17, pf_esr\n"
++    "    str x16, [x17, :lo12:pf_esr]\n"
++    "    ldr x16, [x17, :lo12:pf_count]\n"
++    "    add x16, x16, #1\n"
++    "    str x16, [x17, :lo12:pf_count]\n"
++    "    mrs x16, elr_el1\n"
++    "    add x16, x16, #4\n"
++    "    msr elr_el1, x16\n"
++    "    eret\n"
++    ".balign 0x800\n");
++extern char pf_vectors[];
++
++static int fails;
++
++#define CHECK(c) do {                                               \
++    if (!(c)) {                                                     \
++        ml_printf("FAIL line %d: " #c "\n", __LINE__);              \
++        fails++;                                                    \
++    } } while (0)
++
++#define DEF_KEY(k, XPAC, DATA)                                      \
++static uint64_t sign_##k(uint64_t p, uint64_t m)                    \
++{                                                                   \
++    asm volatile("pac" #k " %0, %1" : "+r" (p) : "r" (m));          \
++    return p;                                                       \
++}                                                                   \
++static uint64_t auth_##k(uint64_t p, uint64_t m)                    \
++{                                                                   \
++    asm volatile("aut" #k " %0, %1" : "+r" (p) : "r" (m)            \
++                 : "x16", "x17");                                   \
++    return p;                                                       \
++}                                                                   \
++static uint64_t strip_##k(uint64_t p)                               \
++{                                                                   \
++    asm volatile(XPAC " %0" : "+r" (p));                            \
++    return p;                                                       \
++}
++
++DEF_KEY(ia, "xpaci", 0)
++DEF_KEY(ib, "xpaci", 0)
++DEF_KEY(da, "xpacd", 0)
++DEF_KEY(db, "xpacd", 0)
++
++#define WSR(r, v) asm volatile("msr " #r ", %0" :: "r" ((uint64_t)(v)))
++
++static void set_key(int k, uint64_t lo, uint64_t hi)
++{
++    switch (k) {
++    case 0: WSR(apiakeylo_el1, lo); WSR(apiakeyhi_el1, hi); break;
++    case 1: WSR(apibkeylo_el1, lo); WSR(apibkeyhi_el1, hi); break;
++    case 2: WSR(apdakeylo_el1, lo); WSR(apdakeyhi_el1, hi); break;
++    default: WSR(apdbkeylo_el1, lo); WSR(apdbkeyhi_el1, hi); break;
++    }
++    asm volatile("isb");
++}
++
++typedef uint64_t (*sign_fn)(uint64_t, uint64_t);
++typedef uint64_t (*strip_fn)(uint64_t);
++
++static const char * const names[4] = { "ia", "ib", "da", "db" };
++static const sign_fn signs[4] = { sign_ia, sign_ib, sign_da, sign_db };
++static const sign_fn auths[4] = { auth_ia, auth_ib, auth_da, auth_db };
++static const strip_fn strips[4] = { strip_ia, strip_ib, strip_da, strip_db };
++
++static uint64_t buf[64] __attribute__((aligned(4096)));
++
++static uint64_t modifier(int i)
++{
++    return 0x1111222233334444ull * (uint64_t)(i + 1) + 0x77;
++}
++
++static void test_key(int k)
++{
++    uint64_t p = (uint64_t)&buf[3];
++    uint64_t m1 = modifier(0), sp, other_m = 0, r, bit;
++    uint64_t cnt0;
++    int i, found = 0;
++
++    set_key(k, 0x0123456789abcdefull, 0xfedcba9876543210ull);
++    sp = signs[k](p, m1);
++    CHECK(sp != p);
++    CHECK(signs[k](p, m1) == sp);
++    CHECK(strips[k](sp) == p);
++
++    cnt0 = pf_count;
++    CHECK(auths[k](sp, m1) == p);
++    CHECK(pf_count == cnt0);
++
++    for (i = 1; i < NMOD; i++) {
++        if (signs[k](p, modifier(i)) != sp) {
++            other_m = modifier(i);
++            found++;
++        }
++    }
++    CHECK(found > 0);
++
++    /* a flipped bit of the code */
++    bit = (sp ^ p) & -(sp ^ p);
++    CHECK(bit != 0);
++    cnt0 = pf_count;
++    r = auths[k](sp ^ bit, m1);
++    if (COMPAT) {
++        CHECK(r == p && pf_count == cnt0);
++    } else {
++        CHECK(r != p);
++        if (pf_count != cnt0) {
++            CHECK(pf_count == cnt0 + 1);
++            CHECK((pf_esr >> 26) == EC_PACFAIL);
++        }
++    }
++
++    /* the right pointer under another modifier */
++    cnt0 = pf_count;
++    r = auths[k](sp, other_m);
++    CHECK(COMPAT ? (r == p) : (r != p));
++
++    /* the right pointer and modifier under another key */
++    set_key(k, 0x0123456789abcdefull ^ 0xff00ff00ull, 0xfedcba9876543210ull);
++    r = auths[k](sp, m1);
++    CHECK(COMPAT ? (r == p) : (r != p));
++    set_key(k, 0x0123456789abcdefull, 0xfedcba9876543210ull);
++    CHECK(auths[k](sp, m1) == p);
++
++    ml_printf("key %s checked\n", names[k]);
++}
++
++static void test_pacga(void)
++{
++    uint64_t p = (uint64_t)&buf[5], g, g2;
++    int i, differs = 0;
++
++    WSR(apgakeylo_el1, 0x0123456789abcdefull);
++    WSR(apgakeyhi_el1, 0xfedcba9876543210ull);
++    asm volatile("isb");
++    asm volatile("pacga %0, %1, %2" : "=r" (g) : "r" (p), "r" (modifier(0)));
++    asm volatile("pacga %0, %1, %2" : "=r" (g2) : "r" (p), "r" (modifier(0)));
++    CHECK(g == g2);
++    CHECK((g & 0xffffffffull) == 0);
++    CHECK(g != 0);
++    for (i = 1; i < NMOD; i++) {
++        asm volatile("pacga %0, %1, %2" : "=r" (g2)
++                     : "r" (p), "r" (modifier(i)));
++        differs += g2 != g;
++    }
++    CHECK(differs > 0);
++    ml_printf("pacga checked\n");
++}
++
++int main(void)
++{
++    uint64_t sctlr, old_vbar;
++    int k;
++
++    ml_printf("Pointer authentication test%s\n", COMPAT ? " (compat)" : "");
++    asm volatile("mrs %0, vbar_el1\n\tmsr vbar_el1, %1\n\tisb"
++                 : "=&r" (old_vbar) : "r" (pf_vectors));
++    asm volatile("mrs %0, sctlr_el1" : "=r" (sctlr));
++    sctlr |= SCTLR_ENIA | SCTLR_ENIB | SCTLR_ENDA | SCTLR_ENDB;
++    asm volatile("msr sctlr_el1, %0\n\tisb" :: "r" (sctlr));
++
++    for (k = 0; k < 4; k++) {
++        test_key(k);
++    }
++    test_pacga();
++
++    asm volatile("msr vbar_el1, %0\n\tisb" :: "r" (old_vbar));
++    if (fails) {
++        ml_printf("FAIL: %d checks\n", fails);
++        return 1;
++    }
++    ml_printf("OK\n");
++    return 0;
++}
+diff --git a/tests/tcg/aarch64/system/pauth-regime.c b/tests/tcg/aarch64/system/pauth-regime.c
+new file mode 100644
+index 0000000000..aa252a0721
+--- /dev/null
++++ b/tests/tcg/aarch64/system/pauth-regime.c
+@@ -0,0 +1,343 @@
++/*
++ * Pointer authentication follows TCR_EL1 and the exception level.
++ *
++ * In the vmapple compat mode authentication and XPAC only strip, and what is
++ * stripped depends on the VA size and the top byte settings of the half of the
++ * address space that bit 55 selects (TBI0/1, TBID0/1, T0SZ/T1SZ).  The helpers
++ * memoize those parameters per MMU index and TCR_EL1, so this test changes
++ * TCR_EL1 many times, in both orders, and after each change strips and
++ * authenticates tagged and junk-extended pointers for the instruction and the
++ * data keys at EL1 and at EL0 (different MMU indexes) and compares with a
++ * model written from the architecture.  A memo entry that survives a TCR
++ * write, or that is shared between instruction and data, or between the two
++ * halves, fails here.  Run with -cpu max,x-pauth-impdef-compat=on (no EL2, which would trap
++ * the keys without HCR_EL2.API).
++ *
++ * Copyright (c) 2026 Snapintosh contributors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include <stdint.h>
++#include <minilib.h>
++
++#define SCTLR_ENIA (1ull << 31)
++#define SCTLR_ENIB (1ull << 30)
++#define SCTLR_ENDA (1ull << 27)
++#define SCTLR_ENDB (1ull << 13)
++
++#define TCR_TBI0   (1ull << 37)
++#define TCR_TBI1   (1ull << 38)
++#define TCR_TBID0  (1ull << 51)
++#define TCR_TBID1  (1ull << 52)
++
++#define NP 4
++
++/* Lower EL synchronous exception (an SVC from EL0) returns to el0_back. */
++asm(".text\n"
++    ".balign 2048\n"
++    "pr_vectors:\n"
++    ".skip 0x400\n"
++    "    adr x16, el0_back\n"
++    "    msr elr_el1, x16\n"
++    "    mov x16, #0x3c5\n"
++    "    msr spsr_el1, x16\n"
++    "    eret\n"
++    ".balign 0x800\n"
++    /* x0 = function to run at EL0, x1 = its stack */
++    ".global run_el0\n"
++    "run_el0:\n"
++    "    stp x29, x30, [sp, #-96]!\n"
++    "    stp x19, x20, [sp, #16]\n"
++    "    stp x21, x22, [sp, #32]\n"
++    "    stp x23, x24, [sp, #48]\n"
++    "    stp x25, x26, [sp, #64]\n"
++    "    stp x27, x28, [sp, #80]\n"
++    "    msr sp_el0, x1\n"
++    "    msr elr_el1, x0\n"
++    "    msr spsr_el1, xzr\n"
++    "    adr x30, el0_exit\n"
++    "    eret\n"
++    "el0_exit:\n"
++    "    svc #0\n"
++    "el0_back:\n"
++    "    ldp x19, x20, [sp, #16]\n"
++    "    ldp x21, x22, [sp, #32]\n"
++    "    ldp x23, x24, [sp, #48]\n"
++    "    ldp x25, x26, [sp, #64]\n"
++    "    ldp x27, x28, [sp, #80]\n"
++    "    ldp x29, x30, [sp], #96\n"
++    "    ret\n");
++extern char pr_vectors[];
++extern void run_el0(void (*fn)(void), void *stack);
++
++#define WSR(r, v) asm volatile("msr " #r ", %0" :: "r" ((uint64_t)(v)))
++
++static volatile uint64_t cur_tcr;
++static volatile uint64_t bad;
++static volatile uint64_t checks;
++static volatile uint64_t first_got, first_exp, first_ptr, first_tcr;
++static volatile int first_op;
++static uint64_t el0_stack[512] __attribute__((aligned(16)));
++
++static uint64_t ptrs[NP];
++
++/* What stripping gives under tcr for a pointer, insn or data access. */
++static uint64_t model(uint64_t p, uint64_t tcr, int data)
++{
++    int hi = (p >> 55) & 1;
++    unsigned tsz = hi ? (tcr >> 16) & 63 : tcr & 63;
++    int tbi = !!(tcr & (hi ? TCR_TBI1 : TCR_TBI0));
++    uint64_t mask, bot;
++
++    if (tsz < 16) {
++        tsz = 16;    /* the smallest size without FEAT_LVA and DS */
++    }
++    bot = 64 - tsz;
++    if (!data && (tcr & (hi ? TCR_TBID1 : TCR_TBID0))) {
++        tbi = 0;
++    }
++    mask = tbi ? ((1ull << 56) - 1) : ~0ull;
++    mask &= ~((1ull << bot) - 1);
++    return hi ? (p | mask) : (p & ~mask);
++}
++
++static void note(int op, uint64_t p, uint64_t got, uint64_t exp)
++{
++    if (!bad++) {
++        first_op = op;
++        first_ptr = p;
++        first_got = got;
++        first_exp = exp;
++        first_tcr = cur_tcr;
++    }
++}
++
++#define CHK(op, p, got, exp) do {                                   \
++    uint64_t g_ = (got), e_ = (exp);                                \
++    checks++;                                                       \
++    if (g_ != e_) {                                                 \
++        note(op, (p), g_, e_);                                      \
++    } } while (0)
++
++static uint64_t auth_ia(uint64_t p, uint64_t m)
++{
++    asm volatile("autia %0, %1" : "+r" (p) : "r" (m));
++    return p;
++}
++static uint64_t auth_ib(uint64_t p, uint64_t m)
++{
++    asm volatile("autib %0, %1" : "+r" (p) : "r" (m));
++    return p;
++}
++static uint64_t auth_da(uint64_t p, uint64_t m)
++{
++    asm volatile("autda %0, %1" : "+r" (p) : "r" (m));
++    return p;
++}
++static uint64_t auth_db(uint64_t p, uint64_t m)
++{
++    asm volatile("autdb %0, %1" : "+r" (p) : "r" (m));
++    return p;
++}
++static uint64_t sign_ib(uint64_t p, uint64_t m)
++{
++    asm volatile("pacib %0, %1" : "+r" (p) : "r" (m));
++    return p;
++}
++static uint64_t sign_da(uint64_t p, uint64_t m)
++{
++    asm volatile("pacda %0, %1" : "+r" (p) : "r" (m));
++    return p;
++}
++static uint64_t strip_i(uint64_t p)
++{
++    asm volatile("xpaci %0" : "+r" (p));
++    return p;
++}
++static uint64_t strip_d(uint64_t p)
++{
++    asm volatile("xpacd %0" : "+r" (p));
++    return p;
++}
++
++static volatile uint64_t calls;
++static uint64_t datum[2] = { 0x1122334455667788ull, 0x99aabbccddeeff00ull };
++
++void callee(void)
++{
++    calls++;
++}
++
++/* BLRAA with a junk-extended pointer must call, LDRAA must load. */
++static void check_use(void)
++{
++    uint64_t junk = 0x5aull << 48;
++    register uint64_t r0 asm("x0") = (uint64_t)callee | junk;
++    register uint64_t r1 asm("x1") = 0x4242;
++    uint64_t before = calls, v;
++
++    asm volatile("blraa x0, x1"
++                 : "+r" (r0), "+r" (r1)
++                 :
++                 : "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
++                   "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x30",
++                   "memory", "cc");
++    CHK(11, 0, calls, before + 1);
++    asm volatile("ldraa %0, [%1]" : "=r" (v) : "r" ((uint64_t)datum | junk)
++                 : "memory");
++    CHK(12, 0, v, datum[0]);
++    asm volatile("ldrab %0, [%1]" : "=r" (v) : "r" ((uint64_t)&datum[1] | junk)
++                 : "memory");
++    CHK(13, 0, v, datum[1]);
++}
++
++/* Runs at EL1 and at EL0, so it must not print. */
++static void check_one(void)
++{
++    check_use();
++    uint64_t tcr = cur_tcr;
++    int i;
++
++    for (i = 0; i < NP; i++) {
++        uint64_t p = ptrs[i], m = 0x1234567800000000ull + i;
++        uint64_t ei = model(p, tcr, 0), ed = model(p, tcr, 1);
++
++        CHK(1, p, strip_i(p), ei);
++        CHK(2, p, strip_d(p), ed);
++        CHK(3, p, auth_ia(p, m), ei);
++        CHK(4, p, auth_da(p, m), ed);
++        CHK(5, p, auth_db(p, m), ed);
++        CHK(6, p, auth_ib(p, m), ei);
++    }
++}
++
++/* Canonical pointers survive sign then authenticate under any setting. */
++static void check_sign(void)
++{
++    uint64_t tcr = cur_tcr;
++    int i;
++
++    for (i = 0; i < NP; i += 2) {
++        /* the even entries are canonical for every VA size tried */
++        uint64_t p = ptrs[i], m = 0x9e3779b97f4a7c15ull * (i + 1);
++
++        CHK(7, p, auth_ib(sign_ib(p, m), m), model(p, tcr, 0));
++        CHK(8, p, auth_da(sign_da(p, m), m), model(p, tcr, 1));
++        CHK(9, p, strip_i(sign_ib(p, m)), model(p, tcr, 0));
++        CHK(10, p, strip_d(sign_da(p, m)), model(p, tcr, 1));
++    }
++}
++
++static void check_el0(void)
++{
++    check_one();
++    check_sign();
++}
++
++static const uint8_t tszs[] = { 16, 20, 25, 30 };
++
++static void try_tcr(uint64_t base, unsigned t0, unsigned t1, unsigned bits)
++{
++    uint64_t tcr = base & ~(63ull | (63ull << 16) | TCR_TBI0 | TCR_TBI1 |
++                            TCR_TBID0 | TCR_TBID1);
++
++    tcr |= tszs[t0] | ((uint64_t)tszs[t1] << 16);
++    tcr |= (bits & 1 ? TCR_TBI0 : 0) | (bits & 2 ? TCR_TBI1 : 0) |
++           (bits & 4 ? TCR_TBID0 : 0) | (bits & 8 ? TCR_TBID1 : 0);
++    cur_tcr = tcr;
++    WSR(tcr_el1, tcr);
++    asm volatile("isb");
++    check_one();
++    check_sign();
++    run_el0(check_el0, el0_stack + 500);
++    check_one();
++}
++
++int main(void)
++{
++    uint64_t sctlr, old_vbar, base, junk = 0x5a5aull << 48;
++    unsigned a, b, c, n = 0;
++
++    ml_printf("Pointer authentication regime test\n");
++    asm volatile("mrs %0, vbar_el1\n\tmsr vbar_el1, %1\n\tisb"
++                 : "=&r" (old_vbar) : "r" (pr_vectors));
++    asm volatile("mrs %0, sctlr_el1" : "=r" (sctlr));
++    /* The walks are not used, and T0SZ changes below would break the boot tables. */
++    sctlr &= ~1ull;
++    sctlr |= SCTLR_ENIA | SCTLR_ENIB | SCTLR_ENDA | SCTLR_ENDB;
++    asm volatile("msr sctlr_el1, %0\n\tisb" :: "r" (sctlr));
++    WSR(apiakeylo_el1, 0x0123456789abcdefull);
++    WSR(apiakeyhi_el1, 0xfedcba9876543210ull);
++    WSR(apibkeylo_el1, 0x1111111111111111ull);
++    WSR(apibkeyhi_el1, 0x2222222222222222ull);
++    WSR(apdakeylo_el1, 0x3333333333333333ull);
++    WSR(apdakeyhi_el1, 0x4444444444444444ull);
++    WSR(apdbkeylo_el1, 0x5555555555555555ull);
++    WSR(apdbkeyhi_el1, 0x6666666666666666ull);
++    asm volatile("isb\n\tmrs %0, tcr_el1" : "=r" (base));
++
++    /*
++     * The first strip of the run, with the reset value of TCR_EL1 (all zero,
++     * which is also what the inline masks start with): the masks must not be
++     * taken from an empty table.
++     */
++    ptrs[0] = 0x0000000012345670ull;
++    ptrs[1] = ptrs[0] | junk;
++    ptrs[2] = 0xffffffffffe00010ull;
++    ptrs[3] = ptrs[2] & ~junk;
++    WSR(tcr_el1, 0);
++    asm volatile("isb");
++    cur_tcr = 0;
++    check_one();
++
++    /* even: canonical low and high pointers, odd: junk in the PAC field */
++    ptrs[0] = 0x0000000012345670ull;
++    ptrs[1] = ptrs[0] | junk;
++    ptrs[2] = 0xffffffffffe00010ull;
++    ptrs[3] = ptrs[2] & ~junk;
++
++    for (a = 0; a < 4; a++) {
++        for (b = 0; b < 4; b++) {
++            for (c = 0; c < 16; c++) {
++                try_tcr(base, a, b, c);
++                n++;
++            }
++        }
++    }
++    /* the same settings backwards, so no entry is only fresh */
++    for (a = 4; a-- > 0;) {
++        for (b = 4; b-- > 0;) {
++            for (c = 16; c-- > 0;) {
++                try_tcr(base, a, b, c);
++                n++;
++            }
++        }
++    }
++    /* A keys off: authentication with them leaves the pointer alone, B keys and XPAC still strip (with all keys off PAC is inactive and nothing happens) */
++    base = (base & ~(63ull | (63ull << 16))) | 16 | (16ull << 16);
++    WSR(tcr_el1, base);
++    asm volatile("isb");
++    cur_tcr = base;
++    asm volatile("msr sctlr_el1, %0\n\tisb"
++                 :: "r" (sctlr & ~(SCTLR_ENIA | SCTLR_ENDA)));
++    for (a = 0; a < NP; a++) {
++        CHK(14, ptrs[a], auth_ia(ptrs[a], 5), ptrs[a]);
++        CHK(15, ptrs[a], auth_ib(ptrs[a], 5), model(ptrs[a], base, 0));
++        CHK(16, ptrs[a], auth_da(ptrs[a], 5), ptrs[a]);
++        CHK(17, ptrs[a], auth_db(ptrs[a], 5), model(ptrs[a], base, 1));
++        CHK(18, ptrs[a], strip_i(ptrs[a]), model(ptrs[a], base, 0));
++    }
++    asm volatile("msr sctlr_el1, %0\n\tisb" :: "r" (sctlr));
++    check_one();
++    WSR(tcr_el1, base);
++    asm volatile("msr vbar_el1, %0\n\tisb" :: "r" (old_vbar));
++    ml_printf("%d TCR settings, %d checks\n", (int)n, (int)checks);
++    if (bad) {
++        ml_printf("FAIL: %d mismatches, first op %d ptr %lx got %lx want %lx"
++                  " tcr %lx\n", (int)bad, first_op, first_ptr, first_got,
++                  first_exp, first_tcr);
++        return 1;
++    }
++    ml_printf("OK\n");
++    return 0;
++}

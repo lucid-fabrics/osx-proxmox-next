@@ -1,0 +1,355 @@
+From 735dbb960ed7fe2b209dac9b34a8ac0bc00544be Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(usb-hid): add identity overrides and the Apple virtual
+ keyboard IDs
+
+usb-kbd, usb-tablet and usb-mouse get properties to override the USB
+vendor, product and string identities. The vmapple machine uses them to
+present the Apple virtual keyboard IDs that macOS matches its HID
+drivers against. Adds a qtest for the overrides.
+---
+ hw/usb/dev-hid.c                    | 111 +++++++++++++++++++++++++++-
+ hw/vmapple/vmapple.c                |  15 +++-
+ include/hw/vmapple/vmapple.h        |   4 +
+ tests/qtest/meson.build             |   3 +
+ tests/qtest/usb-hid-identity-test.c | 107 +++++++++++++++++++++++++++
+ 5 files changed, 237 insertions(+), 3 deletions(-)
+ create mode 100644 tests/qtest/usb-hid-identity-test.c
+
+diff --git a/hw/usb/dev-hid.c b/hw/usb/dev-hid.c
+index ae19d60203..45933c4ed0 100644
+--- a/hw/usb/dev-hid.c
++++ b/hw/usb/dev-hid.c
+@@ -43,6 +43,14 @@ struct USBHIDState {
+     uint32_t usb_version;
+     char *display;
+     uint32_t head;
++    /* Identity overrides, 0 or NULL keeps the QEMU defaults */
++    uint16_t vendorid;
++    uint16_t productid;
++    uint8_t country_code;
++    char *manufacturer;
++    char *product;
++    /* Private copy of the descriptors when an override is in use */
++    USBDesc *own_desc;
+ };
+ 
+ #define TYPE_USB_HID "usb-hid"
+@@ -688,10 +696,86 @@ static void usb_hid_handle_data(USBDevice *dev, USBPacket *p)
+     }
+ }
+ 
++/*
++ * Guests identify a HID device by its vendor and product ID, its strings and
++ * the country code of its HID descriptor. macOS asks the user to run the
++ * Keyboard Setup Assistant for a keyboard it cannot classify, so a machine
++ * model needs to be able to present the identity the guest knows.  The
++ * descriptors are const and shared, so an override works on a private copy.
++ */
++static USBDescDevice *usb_hid_copy_speed(const USBDescDevice *src,
++                                         uint8_t country_code)
++{
++    USBDescDevice *dev;
++    USBDescConfig *conf;
++    USBDescIface *iface;
++    USBDescOther *other;
++    uint8_t *hid;
++
++    assert(src->bNumConfigurations == 1 && src->confs->nif == 1 &&
++           src->confs->ifs->ndesc == 1 &&
++           src->confs->ifs->descs->data[1] == USB_DT_HID);
++    dev = g_memdup2(src, sizeof(*src));
++    conf = g_memdup2(src->confs, sizeof(*conf));
++    iface = g_memdup2(conf->ifs, sizeof(*iface));
++    other = g_memdup2(iface->descs, sizeof(*other));
++    hid = g_memdup2(other->data, other->data[0]);
++    hid[4] = country_code;
++    other->data = hid;
++    iface->descs = other;
++    conf->ifs = iface;
++    dev->confs = conf;
++    return dev;
++}
++
++static void usb_hid_free_speed(const USBDescDevice *dev)
++{
++    if (!dev) {
++        return;
++    }
++    g_free((void *)dev->confs->ifs->descs->data);
++    g_free((void *)dev->confs->ifs->descs);
++    g_free((void *)dev->confs->ifs);
++    g_free((void *)dev->confs);
++    g_free((void *)dev);
++}
++
++static const USBDesc *usb_hid_override_desc(USBHIDState *us,
++                                            const USBDesc *desc)
++{
++    USBDesc *own;
++
++    if (!us->vendorid && !us->productid && !us->country_code) {
++        return desc;
++    }
++    own = g_memdup2(desc, sizeof(*desc));
++    if (us->vendorid) {
++        own->id.idVendor = us->vendorid;
++    }
++    if (us->productid) {
++        own->id.idProduct = us->productid;
++    }
++    if (desc->full) {
++        own->full = usb_hid_copy_speed(desc->full, us->country_code);
++    }
++    if (desc->high) {
++        own->high = usb_hid_copy_speed(desc->high, us->country_code);
++    }
++    us->own_desc = own;
++    return own;
++}
++
+ static void usb_hid_unrealize(USBDevice *dev)
+ {
+     USBHIDState *us = USB_HID(dev);
+ 
++    if (us->own_desc) {
++        usb_hid_free_speed(us->own_desc->full);
++        usb_hid_free_speed(us->own_desc->high);
++        g_free(us->own_desc);
++        us->own_desc = NULL;
++        dev->usb_desc = NULL;
++    }
+     hid_free(&us->hid);
+ }
+ 
+@@ -702,10 +786,10 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
+     USBHIDState *us = USB_HID(dev);
+     switch (us->usb_version) {
+     case 1:
+-        dev->usb_desc = usb1;
++        dev->usb_desc = usb_hid_override_desc(us, usb1);
+         break;
+     case 2:
+-        dev->usb_desc = usb2;
++        dev->usb_desc = usb_hid_override_desc(us, usb2);
+         break;
+     default:
+         dev->usb_desc = NULL;
+@@ -718,6 +802,14 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
+ 
+     usb_desc_create_serial(dev);
+     usb_desc_init(dev);
++    if (us->manufacturer) {
++        usb_desc_set_string(dev, STR_MANUFACTURER, us->manufacturer);
++    }
++    if (us->product) {
++        usb_desc_set_string(dev, kind == HID_TABLET ? STR_PRODUCT_TABLET :
++                                 kind == HID_MOUSE ? STR_PRODUCT_MOUSE :
++                                 STR_PRODUCT_KEYBOARD, us->product);
++    }
+     us->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
+     hid_init(&us->hid, kind, usb_hid_changed);
+     if (us->display && us->hid.s) {
+@@ -795,6 +887,11 @@ static const TypeInfo usb_hid_type_info = {
+ 
+ static const Property usb_tablet_properties[] = {
+         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
++        DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
++        DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
++        DEFINE_PROP_UINT8("country-code", USBHIDState, country_code, 0),
++        DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
++        DEFINE_PROP_STRING("product", USBHIDState, product),
+         DEFINE_PROP_STRING("display", USBHIDState, display),
+         DEFINE_PROP_UINT32("head", USBHIDState, head, 0),
+ };
+@@ -819,6 +916,11 @@ static const TypeInfo usb_tablet_info = {
+ 
+ static const Property usb_mouse_properties[] = {
+         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
++        DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
++        DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
++        DEFINE_PROP_UINT8("country-code", USBHIDState, country_code, 0),
++        DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
++        DEFINE_PROP_STRING("product", USBHIDState, product),
+ };
+ 
+ static void usb_mouse_class_initfn(ObjectClass *klass, const void *data)
+@@ -841,6 +943,11 @@ static const TypeInfo usb_mouse_info = {
+ 
+ static const Property usb_keyboard_properties[] = {
+         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
++        DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
++        DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
++        DEFINE_PROP_UINT8("country-code", USBHIDState, country_code, 0),
++        DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
++        DEFINE_PROP_STRING("product", USBHIDState, product),
+         DEFINE_PROP_STRING("display", USBHIDState, display),
+ };
+ 
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index e0e9f0ba06..747a022e83 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -485,7 +485,20 @@ static void create_pcie(VMAppleMachineState *vms)
+ 
+         usb_bus = USB_BUS(object_resolve_type_unambiguous(TYPE_USB_BUS,
+                                                           &error_fatal));
+-        usb_create_simple(usb_bus, "usb-kbd");
++        /*
++         * macOS runs the Keyboard Setup Assistant for a keyboard it cannot
++         * classify, which blocks the desktop behind a modal window. Present
++         * the identity of Apple's own virtual USB keyboard instead.
++         */
++        USBDevice *kbd = USB_DEVICE(qdev_new("usb-kbd"));
++        qdev_prop_set_uint16(DEVICE(kbd), "vendorid",
++                             VMAPPLE_USB_KBD_VENDOR_ID);
++        qdev_prop_set_uint16(DEVICE(kbd), "productid",
++                             VMAPPLE_USB_KBD_PRODUCT_ID);
++        qdev_prop_set_string(DEVICE(kbd), "manufacturer", "Apple Inc.");
++        qdev_prop_set_string(DEVICE(kbd), "product",
++                             "Apple Virtual USB Keyboard");
++        usb_realize_and_unref(kbd, usb_bus, &error_abort);
+         usb_create_simple(usb_bus, "usb-tablet");
+     }
+ }
+diff --git a/include/hw/vmapple/vmapple.h b/include/hw/vmapple/vmapple.h
+index 9c1ad1bd8c..01a59af698 100644
+--- a/include/hw/vmapple/vmapple.h
++++ b/include/hw/vmapple/vmapple.h
+@@ -20,4 +20,8 @@
+ 
+ #define TYPE_VMAPPLE_VIRTIO_BLK_PCI "vmapple-virtio-blk-pci"
+ 
++/* USB identity of Apple's virtual keyboard, which macOS classifies by ID */
++#define VMAPPLE_USB_KBD_VENDOR_ID  0x05ac
++#define VMAPPLE_USB_KBD_PRODUCT_ID 0x0250
++
+ #endif /* HW_VMAPPLE_VMAPPLE_H */
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index 56ff860e21..3aec8d2174 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -267,6 +267,9 @@ qtests_aarch64 = \
+   (config_all_devices.has_key('CONFIG_XLNX_ZYNQMP_ARM') ? ['xlnx-can-test', 'fuzz-xlnx-dp-test'] : []) + \
+   (config_all_devices.has_key('CONFIG_XLNX_VERSAL') ? ['xlnx-canfd-test', 'xlnx-versal-trng-test'] : []) + \
+   (config_all_devices.has_key('CONFIG_RASPI') ? ['bcm2835-dma-test', 'bcm2835-i2c-test'] : []) +  \
++  (config_all_devices.has_key('CONFIG_USB_XHCI_PCI') and
++   config_all_devices.has_key('CONFIG_USB_HID') and
++   config_all_devices.has_key('CONFIG_ARM_VIRT') ? ['usb-hid-identity-test'] : []) + \
+   (config_all_accel.has_key('CONFIG_TCG') and                                            \
+    config_all_devices.has_key('CONFIG_TPM_TIS_I2C') ? ['tpm-tis-i2c-test', 'tpm-tis-i2c-swtpm-test'] : []) + \
+   (config_all_devices.has_key('CONFIG_ASPEED_SOC') ? qtests_aspeed64 : []) + \
+diff --git a/tests/qtest/usb-hid-identity-test.c b/tests/qtest/usb-hid-identity-test.c
+new file mode 100644
+index 0000000000..bd29b78944
+--- /dev/null
++++ b/tests/qtest/usb-hid-identity-test.c
+@@ -0,0 +1,107 @@
++/*
++ * QTest testcase for the identity overrides of the USB HID devices
++ *
++ * The vmapple machine presents Apple's virtual keyboard IDs so that macOS
++ * does not start the Keyboard Setup Assistant. This checks the properties
++ * that carry the identity on the generic device, and that a device with a
++ * private copy of its descriptors can be unplugged again.
++ *
++ * This work is licensed under the terms of the GNU GPL, version 2 or later.
++ * See the COPYING file in the top-level directory.
++ */
++#include "qemu/osdep.h"
++#include "libqtest.h"
++#include "qobject/qdict.h"
++
++static int64_t get_int(QTestState *qts, const char *path, const char *prop)
++{
++    QDict *resp = qtest_qmp(qts,
++        "{ 'execute': 'qom-get', 'arguments': "
++        "{ 'path': %s, 'property': %s } }", path, prop);
++    int64_t val;
++
++    g_assert(qdict_haskey(resp, "return"));
++    val = qdict_get_int(resp, "return");
++
++    qobject_unref(resp);
++    return val;
++}
++
++static char *get_str(QTestState *qts, const char *path, const char *prop)
++{
++    QDict *resp = qtest_qmp(qts,
++        "{ 'execute': 'qom-get', 'arguments': "
++        "{ 'path': %s, 'property': %s } }", path, prop);
++    char *val;
++
++    g_assert(qdict_haskey(resp, "return"));
++    val = g_strdup(qdict_get_str(resp, "return"));
++
++    qobject_unref(resp);
++    return val;
++}
++
++static void test_identity(void)
++{
++    QTestState *qts = qtest_init("-machine virt -cpu max -device qemu-xhci "
++        "-device usb-kbd,id=apple,vendorid=0x05ac,productid=0x0250,"
++        "country-code=33,manufacturer=Apple\\ Inc.,"
++        "product=Apple\\ Virtual\\ USB\\ Keyboard "
++        "-device usb-kbd,id=plain "
++        "-device usb-tablet,id=tablet,vendorid=0x05ac,productid=0x0251 "
++        "-device usb-mouse,id=mouse,country-code=33");
++    char *str;
++
++    g_assert_cmpint(get_int(qts, "/machine/peripheral/apple", "vendorid"),
++                    ==, 0x05ac);
++    g_assert_cmpint(get_int(qts, "/machine/peripheral/apple", "productid"),
++                    ==, 0x0250);
++    g_assert_cmpint(get_int(qts, "/machine/peripheral/apple", "country-code"),
++                    ==, 33);
++    str = get_str(qts, "/machine/peripheral/apple", "manufacturer");
++    g_assert_cmpstr(str, ==, "Apple Inc.");
++    g_free(str);
++    str = get_str(qts, "/machine/peripheral/apple", "product");
++    g_assert_cmpstr(str, ==, "Apple Virtual USB Keyboard");
++    g_free(str);
++
++    /* Without overrides the QEMU identity stays */
++    g_assert_cmpint(get_int(qts, "/machine/peripheral/plain", "vendorid"),
++                    ==, 0);
++    g_assert_cmpint(get_int(qts, "/machine/peripheral/plain", "productid"),
++                    ==, 0);
++    g_assert_cmpint(get_int(qts, "/machine/peripheral/plain", "country-code"),
++                    ==, 0);
++
++    g_assert_cmpint(get_int(qts, "/machine/peripheral/tablet", "productid"),
++                    ==, 0x0251);
++    g_assert_cmpint(get_int(qts, "/machine/peripheral/mouse", "country-code"),
++                    ==, 33);
++    qtest_quit(qts);
++}
++
++static void test_hotplug(void)
++{
++    QTestState *qts = qtest_init("-machine virt -cpu max -device qemu-xhci");
++    int i;
++
++    /* Each cycle copies the descriptors and has to free them again */
++    for (i = 0; i < 3; i++) {
++        qtest_qmp_device_add(qts, "usb-kbd", "hot",
++                             "{ 'vendorid': 1452, 'productid': 592,"
++                             "  'country-code': 33, 'usb_version': %d }",
++                             1 + (i & 1));
++        g_assert_cmpint(get_int(qts, "/machine/peripheral/hot", "vendorid"),
++                        ==, 1452);
++        qtest_qmp_device_del(qts, "hot");
++    }
++    qtest_quit(qts);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    qtest_add_func("/usb-hid/identity", test_identity);
++    qtest_add_func("/usb-hid/hotplug", test_hotplug);
++    return g_test_run();
++}

@@ -1,0 +1,57 @@
+From b8b80ad5439ac06c1e4a0704e3e5dc7cd32e1664 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 21:28:12 -0500
+Subject: [PATCH] perf(tcg): do not read every record header at exit unless
+ compacting there (P97)
+
+---
+ accel/tcg/pcache.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/accel/tcg/pcache.c b/accel/tcg/pcache.c
+index 1ea24a6bd2..0b2f040e10 100644
+--- a/accel/tcg/pcache.c
++++ b/accel/tcg/pcache.c
+@@ -1273,6 +1273,7 @@ static void pc_p89_exit(PCache *c, uint32_t nhit)
+     uint64_t unhit = p89_env("P89_UNHIT", 3);
+     uint64_t target = p89_env("P89_TARGET_KB", c->cap * 5 / 8 >> 10) << 10;
+     uint64_t trig = p89_env("P89_TRIGGER_MB", c->cap * 3 / 4 >> 20) << 20;
++    bool at_exit = p89_at_exit();
+ 
+     if (!pc_close_use2(c, nhit) || c->fh->boot_no != c->boot_no) {
+         /* a short run: nothing aged, nothing to rewrite */
+@@ -1283,7 +1284,14 @@ static void pc_p89_exit(PCache *c, uint32_t nhit)
+         if (qatomic_read(&c->uses[rid])) {
+             c->lastboot[rid] = c->boot_no & 0xffff;
+         }
+-        if (pc_p89_dead(c, rid, keep, unhit)) {
++        /*
++         * P97: the dead count reads every record header of the pack. Only the
++         * P89 exit compaction needs it; with qemu-pcache-compact it is just
++         * the advice below, and on a pack whose pages are not in memory
++         * (after a copy, under memory pressure) the scan faulted the whole
++         * pack in and held the exit for tens of seconds.
++         */
++        if (at_exit && pc_p89_dead(c, rid, keep, unhit)) {
+             dead += pc_rec(c, rid)->total;
+         }
+     }
+@@ -1298,14 +1306,14 @@ static void pc_p89_exit(PCache *c, uint32_t nhit)
+     if (p89_mode() == P89_ON &&
+         (dead >= MAX(256ull << 20, end / 8) || end >= trig ||
+          c->use_v1_bytes >= (64ull << 20))) {
+-        if (p89_at_exit()) {
++        if (at_exit) {
+             /* the P89 behaviour: hold the exit for the rewrite */
+             pc_compact2(c, keep, unhit, target, NULL);
+         } else {
+             /* P89b: the rewrite is qemu-pcache-compact's, not the exit's */
+-            info_report("pcache: %" PRIu64 " MiB of %" PRIu64 " MiB are dead, "
+-                        "qemu-pcache-compact reclaims them while the VM is "
+-                        "off", dead >> 20, end >> 20);
++            info_report("pcache: pack is %" PRIu64 " MiB, "
++                        "qemu-pcache-compact reclaims the dead records while "
++                        "the VM is off", end >> 20);
+         }
+     }
+ }

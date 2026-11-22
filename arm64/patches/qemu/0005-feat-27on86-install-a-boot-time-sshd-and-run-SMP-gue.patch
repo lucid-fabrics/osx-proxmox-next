@@ -1,0 +1,521 @@
+From d32a0779ebf5361fce581cac9f87fbf98e8ee361 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(27on86): install a boot-time sshd and run SMP guests on
+ MTTCG
+
+persist-sshd.py installs an sshd LaunchDaemon from the single-user
+shell so a guest can be reached over ssh without Setup Assistant. The
+run script uses MTTCG for SMP guests by default and a check script
+boots it with a small two-vCPU test image.
+---
+ scripts/27on86/check-vmapple-mttcg.sh |  52 +++++++++
+ scripts/27on86/guest-persist-sshd.sh  |  52 +++++++++
+ scripts/27on86/persist-sshd.conf      |  12 ++
+ scripts/27on86/persist-sshd.plist     |  24 ++++
+ scripts/27on86/persist-sshd.py        | 151 ++++++++++++++++++++++++++
+ scripts/27on86/run-vmapple-tcg.sh     |  32 +++++-
+ tests/27on86/vmapple-mttcg.S          | 102 +++++++++++++++++
+ 7 files changed, 422 insertions(+), 3 deletions(-)
+ create mode 100755 scripts/27on86/check-vmapple-mttcg.sh
+ create mode 100755 scripts/27on86/guest-persist-sshd.sh
+ create mode 100644 scripts/27on86/persist-sshd.conf
+ create mode 100644 scripts/27on86/persist-sshd.plist
+ create mode 100755 scripts/27on86/persist-sshd.py
+ create mode 100644 tests/27on86/vmapple-mttcg.S
+
+diff --git a/scripts/27on86/check-vmapple-mttcg.sh b/scripts/27on86/check-vmapple-mttcg.sh
+new file mode 100755
+index 0000000000..ccb321c2bf
+--- /dev/null
++++ b/scripts/27on86/check-vmapple-mttcg.sh
+@@ -0,0 +1,52 @@
++#!/bin/sh
++# Boot test for multi-threaded TCG on vmapple (no icount time contract).
++set -eu
++script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++source_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
++build_dir=${QEMU_27ON86_BUILD_DIR:-"$source_root/build"}
++qemu=${QEMU_27ON86_QEMU:-"$build_dir/qemu-system-aarch64"}
++fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/27on86-mttcg.XXXXXX")
++cleanup()
++{
++    rm -f "$fixture_dir"/*
++    rmdir "$fixture_dir"
++}
++trap cleanup EXIT HUP INT TERM
++if ! test -x "$qemu"; then
++    echo "missing emulator; run scripts/27on86/build-aarch64.sh" >&2
++    exit 1
++fi
++clang --target=aarch64-none-elf \
++    -c "$source_root/tests/27on86/vmapple-mttcg.S" \
++    -o "$fixture_dir/firmware.o"
++llvm-objcopy -O binary -j .text.boot "$fixture_dir/firmware.o" \
++    "$fixture_dir/firmware"
++truncate -s 16384 "$fixture_dir/aux"
++truncate -s 16384 "$fixture_dir/root"
++status=0
++timeout --signal=TERM 20s "$qemu" \
++    -machine vmapple,uuid=1 \
++    -cpu max \
++    -smp 4 \
++    -accel tcg,thread=multi \
++    -m 1G \
++    -nodefaults \
++    -display none \
++    -monitor none \
++    -serial stdio \
++    -no-reboot \
++    -bios "$fixture_dir/firmware" \
++    -drive file="$fixture_dir/aux",if=pflash,format=raw \
++    -drive file="$fixture_dir/root",if=pflash,format=raw \
++    >"$fixture_dir/log" 2>&1 || status=$?
++if test "$status" -ne 0 && test "$status" -ne 124; then
++    cat "$fixture_dir/log" >&2
++    echo "VMApple MTTCG test exited unexpectedly: $status" >&2
++    exit 1
++fi
++if ! grep -Fq 'VMAPPLE_MTTCG_OK' "$fixture_dir/log"; then
++    cat "$fixture_dir/log" >&2
++    echo "VMApple MTTCG test failed" >&2
++    exit 1
++fi
++echo "VMApple MTTCG test passed"
+diff --git a/scripts/27on86/guest-persist-sshd.sh b/scripts/27on86/guest-persist-sshd.sh
+new file mode 100755
+index 0000000000..4f895279c9
+--- /dev/null
++++ b/scripts/27on86/guest-persist-sshd.sh
+@@ -0,0 +1,52 @@
++#!/bin/sh
++# Runs in the VMApple single-user serial shell. Mounts the Data volume, then
++# installs a LaunchDaemon that starts sshd on every normal boot.
++set -eu
++stage=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++boot_util=/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs_boot_util
++echo "starting APFS data-volume setup"
++"$boot_util" 2 >"$stage/apfs-boot.log" 2>&1 &
++boot_pid=$!
++trap 'kill -INT "$boot_pid" 2>/dev/null || true' EXIT HUP INT TERM
++stitched=0
++count=0
++while test "$count" -lt 180; do
++    if test -d /System/Volumes/Data/private/var && test -d /private/var; then
++        data_dev=$(/usr/bin/stat -f %d /System/Volumes/Data/private)
++        private_dev=$(/usr/bin/stat -f %d /private)
++        if test "$data_dev" = "$private_dev"; then
++            stitched=1
++            break
++        fi
++    fi
++    count=$((count + 1))
++    sleep 1
++done
++if test "$stitched" != 1; then
++    echo "APFS firmlink setup did not complete" >&2
++    tail -n 40 "$stage/apfs-boot.log" >&2
++    exit 1
++fi
++echo "APFS firmlinks visible; settling volume-group setup"
++sleep 30
++kill -INT "$boot_pid" 2>/dev/null || true
++wait "$boot_pid" 2>/dev/null || true
++trap - EXIT HUP INT TERM
++echo "APFS firmlinks ready after ${count}s"
++state=/private/var/db/27on86
++mkdir -p "$state" /private/var/root/.ssh /Library/LaunchDaemons
++cp "$stage/authorized_keys" /private/var/root/.ssh/authorized_keys
++cp "$stage/ssh_host_ed25519_key" "$state/ssh_host_ed25519_key"
++cp "$stage/ssh_host_ed25519_key.pub" "$state/ssh_host_ed25519_key.pub"
++cp "$stage/persist-sshd.conf" "$state/sshd_config"
++cp "$stage/persist-sshd.plist" /Library/LaunchDaemons/org.qemu.27on86.sshd.plist
++chown root:wheel /private/var/root/.ssh /private/var/root/.ssh/authorized_keys \
++    "$state" "$state"/* /Library/LaunchDaemons/org.qemu.27on86.sshd.plist
++chmod 700 /private/var/root/.ssh "$state"
++chmod 600 /private/var/root/.ssh/authorized_keys \
++    "$state/ssh_host_ed25519_key" "$state/sshd_config"
++chmod 644 "$state/ssh_host_ed25519_key.pub" \
++    /Library/LaunchDaemons/org.qemu.27on86.sshd.plist
++/usr/bin/plutil -lint /Library/LaunchDaemons/org.qemu.27on86.sshd.plist
++sync
++echo "sshd LaunchDaemon installed"
+diff --git a/scripts/27on86/persist-sshd.conf b/scripts/27on86/persist-sshd.conf
+new file mode 100644
+index 0000000000..a6536b8968
+--- /dev/null
++++ b/scripts/27on86/persist-sshd.conf
+@@ -0,0 +1,12 @@
++Port 22
++ListenAddress 0.0.0.0
++HostKey /private/var/db/27on86/ssh_host_ed25519_key
++PidFile /private/var/run/27on86-sshd.pid
++AuthorizedKeysFile /private/var/root/.ssh/authorized_keys
++PermitRootLogin yes
++StrictModes no
++PasswordAuthentication no
++KbdInteractiveAuthentication no
++UsePAM no
++PrintMotd no
++Subsystem sftp internal-sftp
+diff --git a/scripts/27on86/persist-sshd.plist b/scripts/27on86/persist-sshd.plist
+new file mode 100644
+index 0000000000..a429ac0f01
+--- /dev/null
++++ b/scripts/27on86/persist-sshd.plist
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++  <key>Label</key>
++  <string>org.qemu.27on86.sshd</string>
++  <key>ProgramArguments</key>
++  <array>
++    <string>/usr/sbin/sshd</string>
++    <string>-D</string>
++    <string>-e</string>
++    <string>-f</string>
++    <string>/private/var/db/27on86/sshd_config</string>
++  </array>
++  <key>RunAtLoad</key>
++  <true/>
++  <key>KeepAlive</key>
++  <true/>
++  <key>StandardOutPath</key>
++  <string>/private/var/db/27on86/sshd.log</string>
++  <key>StandardErrorPath</key>
++  <string>/private/var/db/27on86/sshd.log</string>
++</dict>
++</plist>
+diff --git a/scripts/27on86/persist-sshd.py b/scripts/27on86/persist-sshd.py
+new file mode 100755
+index 0000000000..4f96355749
+--- /dev/null
++++ b/scripts/27on86/persist-sshd.py
+@@ -0,0 +1,151 @@
++#!/usr/bin/env python3
++
++"""Install a boot-time sshd LaunchDaemon from a VMApple single-user shell."""
++
++import argparse
++import base64
++import importlib.util
++import os
++from pathlib import Path
++import re
++import shlex
++import subprocess
++import sys
++
++
++SCRIPT_DIR = Path(__file__).resolve().parent
++SERIAL_HELPER = SCRIPT_DIR / "serial-command.py"
++SPEC = importlib.util.spec_from_file_location("serial_command", SERIAL_HELPER)
++serial_command = importlib.util.module_from_spec(SPEC)
++assert SPEC.loader is not None
++SPEC.loader.exec_module(serial_command)
++
++ASSETS = (
++    "guest-persist-sshd.sh",
++    "persist-sshd.conf",
++    "persist-sshd.plist",
++)
++
++
++def run_serial(socket_path: Path, command: str, timeout: float = 600):
++    status, output = serial_command.run_command(
++        os.fspath(socket_path), command, timeout
++    )
++    if status:
++        sys.stdout.buffer.write(output)
++        raise RuntimeError(f"guest command exited with status {status}")
++    return output.decode(errors="replace")
++
++
++def ensure_key(path: Path):
++    if path.exists() and path.with_name(path.name + ".pub").exists():
++        return
++    path.parent.mkdir(parents=True, exist_ok=True)
++    subprocess.run(
++        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", os.fspath(path)],
++        check=True,
++    )
++
++
++def discover_stage(socket_path: Path):
++    output = run_serial(
++        socket_path,
++        """
++stage=
++for candidate in /System/Volumes/Preboot/*; do
++    leaf=${candidate##*/}
++    case "$leaf" in
++        ????????-????-????-????-????????????)
++            stage="$candidate/var/27on86"
++            break
++            ;;
++    esac
++done
++test -n "$stage"
++mkdir -p "$stage"
++printf '%s\n' "$stage"
++""",
++    )
++    matches = re.findall(
++        r"/System/Volumes/Preboot/[0-9A-Fa-f-]{36}/var/27on86", output
++    )
++    if not matches:
++        raise RuntimeError("guest did not report its staging directory")
++    return matches[-1]
++
++
++def upload(socket_path: Path, stage: str, name: str, content: bytes, mode: int):
++    print(f"staging {name}", flush=True)
++    encoded = base64.b64encode(content).decode()
++    destination = f"{stage}/{name}"
++    encoded_path = destination + ".b64"
++    run_serial(socket_path, f": > {shlex.quote(encoded_path)}")
++    for offset in range(0, len(encoded), 128):
++        chunk = encoded[offset : offset + 128]
++        run_serial(
++            socket_path,
++            "printf '%%s' %s >> %s"
++            % (shlex.quote(chunk), shlex.quote(encoded_path)),
++        )
++    run_serial(
++        socket_path,
++        "/usr/bin/base64 -D < %s > %s"
++        % (shlex.quote(encoded_path), shlex.quote(destination)),
++    )
++    run_serial(socket_path, "rm -f %s" % shlex.quote(encoded_path))
++    run_serial(socket_path, "chmod %o %s" % (mode, shlex.quote(destination)))
++
++
++def stage_command(stage: str):
++    return shlex.quote(f"{stage}/guest-persist-sshd.sh")
++
++
++def parse_args():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("serial_socket", type=Path)
++    parser.add_argument("state_directory", type=Path)
++    return parser.parse_args()
++
++
++def main():
++    args = parse_args()
++    client_key = args.state_directory / "id_ed25519"
++    host_key = args.state_directory / "ssh_host_ed25519_key"
++    ensure_key(client_key)
++    ensure_key(host_key)
++
++    stage = discover_stage(args.serial_socket)
++    upload(args.serial_socket, stage, "authorized_keys", client_key.with_name(
++        client_key.name + ".pub"
++    ).read_bytes(), 0o600)
++    upload(
++        args.serial_socket,
++        stage,
++        "ssh_host_ed25519_key",
++        host_key.read_bytes(),
++        0o600,
++    )
++    upload(
++        args.serial_socket,
++        stage,
++        "ssh_host_ed25519_key.pub",
++        host_key.with_name(host_key.name + ".pub").read_bytes(),
++        0o644,
++    )
++    for name in ASSETS:
++        mode = 0o700 if name.endswith(".sh") else 0o600
++        upload(args.serial_socket, stage, name, (SCRIPT_DIR / name).read_bytes(), mode)
++
++    print("running guest sshd installer", flush=True)
++    output = run_serial(args.serial_socket, stage_command(stage), timeout=900)
++    print(output, end="")
++    print(f"SSH identity: {client_key}")
++    return 0
++
++
++if __name__ == "__main__":
++    try:
++        sys.exit(main())
++    except (RuntimeError, serial_command.SerialCommandError, subprocess.CalledProcessError) as error:
++        print(f"sshd installation failed: {error}", file=sys.stderr)
++        sys.exit(1)
+diff --git a/scripts/27on86/run-vmapple-tcg.sh b/scripts/27on86/run-vmapple-tcg.sh
+index 52815b0338..e5093f65d5 100755
+--- a/scripts/27on86/run-vmapple-tcg.sh
++++ b/scripts/27on86/run-vmapple-tcg.sh
+@@ -23,6 +23,9 @@ gdb_port=${QEMU_27ON86_GDB_PORT:-}
+ pause_at_start=${QEMU_27ON86_PAUSE_AT_START:-off}
+ no_reboot=${QEMU_27ON86_NO_REBOOT:-on}
+ internal_use=${QEMU_27ON86_INTERNAL_USE_ONLY_UNIT:-off}
++smp_time=${QEMU_27ON86_SMP_TIME:-mttcg}
++csr_config=${QEMU_27ON86_CSR_CONFIG:-}
++xnu_boot_args=${QEMU_27ON86_XNU_BOOT_ARGS:-}
+ 
+ : "${QEMU_27ON86_FIRMWARE:?set QEMU_27ON86_FIRMWARE}"
+ : "${QEMU_27ON86_AUX:?set QEMU_27ON86_AUX}"
+@@ -125,14 +128,22 @@ if test -z "$serial"; then
+     serial="file:$run_dir/serial.log"
+ fi
+ 
++case "$smp_time" in
++    mttcg | icount)
++        ;;
++    *)
++        echo "SMP time selector must be 'mttcg' or 'icount'" >&2
++        exit 1
++        ;;
++esac
+ set --
+-if test "$cpus" -gt 1; then
++if test "$cpus" -gt 1 && test "$smp_time" = icount; then
++    # The serialized time-scale contract: one host thread runs every vCPU.
+     set -- "$@" -icount shift=0,align=off,sleep=off
+     machine="vmapple,uuid=$QEMU_27ON86_ECID,accel=tcg,run-installer=$run_installer,tcg-smp-final-shift=$tcg_smp_final_shift"
+ else
+     machine="vmapple,uuid=$QEMU_27ON86_ECID,accel=tcg,run-installer=$run_installer"
+ fi
+-
+ case "$internal_use" in
+     on)
+         machine="$machine,internal-use-only-unit=on"
+@@ -140,10 +151,25 @@ case "$internal_use" in
+     off)
+         ;;
+     *)
+-        echo "internal-use-only-unit selector must be on or off" >&2
++        echo "internal-use-only-unit selector must be 'on' or 'off'" >&2
+         exit 1
+         ;;
+ esac
++case "$csr_config" in
++    '')
++        ;;
++    *[!0-9xXa-fA-F]*)
++        echo "CSR configuration must be an integer" >&2
++        exit 1
++        ;;
++    *)
++        machine="$machine,csr-config=$csr_config"
++        ;;
++esac
++if test -n "$xnu_boot_args"; then
++    # Commas are escaped for the -machine option parser.
++    machine="$machine,xnu-boot-args=$(printf '%s' "$xnu_boot_args" | sed 's/,/,,/g')"
++fi
+ if test -n "$pcap"; then
+     set -- "$@" -object "filter-dump,id=netcap,netdev=net0,file=$pcap"
+ fi
+diff --git a/tests/27on86/vmapple-mttcg.S b/tests/27on86/vmapple-mttcg.S
+new file mode 100644
+index 0000000000..a2c548b834
+--- /dev/null
++++ b/tests/27on86/vmapple-mttcg.S
+@@ -0,0 +1,102 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Boot test for multi-threaded TCG on vmapple without the icount time
++ * contract.  CPU 0 starts three secondaries with PSCI CPU_ON, each one
++ * bumps a shared counter, and CPU 0 checks that the architectural counter
++ * runs at 24 MHz and moves in real time.  Prints VMAPPLE_MTTCG_OK, or
++ * VMAPPLE_MTTCG_FAIL <n>.
++ */
++    .section .text.boot, "ax"
++    .global _start
++    .set    COUNTER, 0x70000000
++_start:
++    movz    x20, #0x2001, lsl #16        /* PL011 */
++    mov     w3, #0x301
++    str     w3, [x20, #0x30]
++    ldr     x21, =COUNTER
++    str     wzr, [x21]
++    mov     x22, #1                      /* cpu index (== MPIDR) */
++1:  movz    x0, #0xc400, lsl #16         /* PSCI CPU_ON (64-bit) */
++    movk    x0, #0x0003
++    mov     x1, x22
++    adr     x2, secondary
++    mov     x3, #0
++    hvc     #0
++    cbnz    x0, fail1
++    add     x22, x22, #1
++    cmp     x22, #4
++    b.lo    1b
++    /* the counter frequency is the platform timebase */
++    mrs     x0, cntfrq_el0
++    movz    x9, #0x016e, lsl #16
++    movk    x9, #0x3600
++    cmp     x0, x9
++    b.ne    fail2
++    /* wait up to 5 s of counter time for all secondaries */
++    mrs     x23, cntvct_el0
++    movz    x24, #0x0725, lsl #16        /* 120,000,000 ticks = 5 s */
++    movk    x24, #0x5600
++2:  ldr     w0, [x21]
++    cmp     w0, #3
++    b.eq    3f
++    mrs     x0, cntvct_el0
++    sub     x0, x0, x23
++    cmp     x0, x24
++    b.lo    2b
++    b       fail3
++3:  /* the counter must have moved, and not faster than real time allows */
++    mrs     x0, cntvct_el0
++    cmp     x0, x23
++    b.ls    fail4
++    adr     x1, ok_msg
++    b       print
++fail1:
++    mov     w19, #1
++    b       fail
++fail2:
++    mov     w19, #2
++    b       fail
++fail3:
++    mov     w19, #3
++    b       fail
++fail4:
++    mov     w19, #4
++fail:
++    adr     x1, fail_msg
++    bl      puts
++    add     w19, w19, #'0'
++    mov     w2, w19
++    bl      putc
++    mov     w2, #10
++    bl      putc
++    b       halt
++print:
++    bl      puts
++halt:
++    wfi
++    b       halt
++secondary:
++    ldr     x1, =COUNTER
++4:  ldxr    w2, [x1]
++    add     w2, w2, #1
++    stxr    w3, w2, [x1]
++    cbnz    w3, 4b
++5:  wfe
++    b       5b
++puts:
++    mov     x25, x30
++1:  ldrb    w2, [x1], #1
++    cbz     w2, 2f
++    bl      putc
++    b       1b
++2:  ret     x25
++putc:
++    ldr     w3, [x20, #0x18]
++    tbnz    w3, #5, putc
++    str     w2, [x20]
++    ret
++    .ltorg
++ok_msg:
++    .asciz  "VMAPPLE_MTTCG_OK\n"
++fail_msg:
++    .asciz  "VMAPPLE_MTTCG_FAIL "

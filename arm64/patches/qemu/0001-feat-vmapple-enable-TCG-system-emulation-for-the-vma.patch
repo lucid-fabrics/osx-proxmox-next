@@ -1,0 +1,604 @@
+From 84141d3136a5269131cf188c9ba2a79057479785 Mon Sep 17 00:00:00 2001
+From: Anees Iqbal <hello@aneesiqbal.ai>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(vmapple): enable TCG system emulation for the vmapple
+ machine
+
+Lets qemu-system-aarch64 run the vmapple machine without HVF so an
+x86 host can boot a macOS guest under TCG.
+
+- hw/vmapple: build for TCG, map the graphics windows headless, expose
+  the installer boot selection, set the architectural timebase and keep
+  SMP guest time stable.
+- target/arm: pointer authentication compatible with the Apple
+  algorithm used by vmapple guests.
+- icount: allow a configurable SMP time scale (-icount, qemu-options).
+- Kconfig and default.mak enable vmapple in aarch64-softmmu.
+- hw/vmapple/aes: small fixes needed for the first userspace boot.
+
+Authored by Anees Iqbal; the commits of the original series are
+squashed here (code paths only, the harness and notes are the next
+commit).
+---
+ accel/tcg/icount-common.c                   |  61 ++++++-
+ configs/devices/aarch64-softmmu/default.mak |   1 -
+ hw/vmapple/Kconfig                          |   8 +-
+ hw/vmapple/aes.c                            |   6 +-
+ hw/vmapple/vmapple.c                        | 176 +++++++++++++++++++-
+ include/exec/icount.h                       |  12 ++
+ qemu-options.hx                             |   7 +-
+ target/arm/cpu.h                            |   1 +
+ target/arm/tcg/pauth_helper.c               |  26 ++-
+ 9 files changed, 276 insertions(+), 22 deletions(-)
+
+diff --git a/accel/tcg/icount-common.c b/accel/tcg/icount-common.c
+index b1b6c005fe..0563cda90f 100644
+--- a/accel/tcg/icount-common.c
++++ b/accel/tcg/icount-common.c
+@@ -47,6 +47,8 @@
+ static bool icount_sleep = true;
+ /* Arbitrarily pick 1MIPS as the minimum allowable speed.  */
+ #define MAX_ICOUNT_SHIFT 10
++/* Fractional nanoseconds per instruction, down to roughly one picosecond. */
++#define MIN_ICOUNT_SHIFT -10
+ 
+ bool icount_align_option;
+ 
+@@ -153,9 +155,40 @@ int64_t icount_get(void)
+     return icount;
+ }
+ 
++static int64_t icount_to_ns_shift(int64_t icount, int shift)
++{
++    return shift >= 0 ? icount << shift : icount / (1LL << -shift);
++}
++
+ int64_t icount_to_ns(int64_t icount)
+ {
+-    return icount << qatomic_read(&timers_state.icount_time_shift);
++    return icount_to_ns_shift(
++        icount, qatomic_read(&timers_state.icount_time_shift));
++}
++
++bool icount_set_time_shift(int shift)
++{
++    int64_t icount;
++    int64_t clock;
++
++    if (use_icount != ICOUNT_PRECISE || shift < MIN_ICOUNT_SHIFT ||
++        shift > MAX_ICOUNT_SHIFT) {
++        return false;
++    }
++
++    seqlock_write_lock(&timers_state.vm_clock_seqlock,
++                       &timers_state.vm_clock_lock);
++    icount = icount_get_raw_locked();
++    clock = qatomic_read(&timers_state.qemu_icount_bias) +
++            icount_to_ns_shift(
++                icount, qatomic_read(&timers_state.icount_time_shift));
++    qatomic_set(&timers_state.icount_time_shift, shift);
++    qatomic_set(&timers_state.qemu_icount_bias,
++                clock - icount_to_ns_shift(icount, shift));
++    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
++                         &timers_state.vm_clock_lock);
++
++    return true;
+ }
+ 
+ /*
+@@ -225,7 +258,20 @@ static void icount_adjust_vm(void *opaque)
+ int64_t icount_round(int64_t count)
+ {
+     int shift = qatomic_read(&timers_state.icount_time_shift);
+-    return (count + (1 << shift) - 1) >> shift;
++
++    if (shift >= 0) {
++        return (count + (1 << shift) - 1) >> shift;
++    }
++
++    int64_t scale = 1LL << -shift;
++
++    if (count > INT64_MAX / scale) {
++        return INT64_MAX;
++    }
++    if (count < INT64_MIN / scale) {
++        return INT64_MIN;
++    }
++    return count * scale;
+ }
+ 
+ static void icount_warp_rt(void)
+@@ -420,7 +466,8 @@ bool icount_configure(QemuOpts *opts, Error **errp)
+     const char *option = qemu_opt_get(opts, "shift");
+     bool sleep = qemu_opt_get_bool(opts, "sleep", true);
+     bool align = qemu_opt_get_bool(opts, "align", false);
+-    long time_shift = -1;
++    bool adaptive = false;
++    long time_shift = 0;
+ 
+     if (!option) {
+         if (qemu_opt_get(opts, "align") != NULL) {
+@@ -435,9 +482,11 @@ bool icount_configure(QemuOpts *opts, Error **errp)
+         return false;
+     }
+ 
+-    if (strcmp(option, "auto") != 0) {
++    adaptive = strcmp(option, "auto") == 0;
++    if (!adaptive) {
+         if (qemu_strtol(option, NULL, 0, &time_shift) < 0
+-            || time_shift < 0 || time_shift > MAX_ICOUNT_SHIFT) {
++            || time_shift < MIN_ICOUNT_SHIFT
++            || time_shift > MAX_ICOUNT_SHIFT) {
+             error_setg(errp, "icount: Invalid shift value");
+             return false;
+         }
+@@ -457,7 +506,7 @@ bool icount_configure(QemuOpts *opts, Error **errp)
+ 
+     icount_align_option = align;
+ 
+-    if (time_shift >= 0) {
++    if (!adaptive) {
+         timers_state.icount_time_shift = time_shift;
+         icount_enable_precise();
+         return true;
+diff --git a/configs/devices/aarch64-softmmu/default.mak b/configs/devices/aarch64-softmmu/default.mak
+index ad8028cfd4..93f4022ad6 100644
+--- a/configs/devices/aarch64-softmmu/default.mak
++++ b/configs/devices/aarch64-softmmu/default.mak
+@@ -9,4 +9,3 @@ include ../arm-softmmu/default.mak
+ # CONFIG_XLNX_VERSAL=n
+ # CONFIG_SBSA_REF=n
+ # CONFIG_NPCM8XX=n
+-CONFIG_VMAPPLE=n
+diff --git a/hw/vmapple/Kconfig b/hw/vmapple/Kconfig
+index 2382b29767..af66355a88 100644
+--- a/hw/vmapple/Kconfig
++++ b/hw/vmapple/Kconfig
+@@ -14,9 +14,9 @@ config VMAPPLE_VIRTIO_BLK
+ 
+ config VMAPPLE
+     bool
+-    depends on ARM
+-    depends on HVF
+-    default y if ARM
++    depends on AARCH64
++    depends on TCG || HVF
++    default y
+     imply PCI_DEVICES
+     select ARM_GICV3
+     select PLATFORM_BUS
+@@ -30,5 +30,5 @@ config VMAPPLE
+     select VMAPPLE_AES
+     select VMAPPLE_BDIF
+     select VMAPPLE_CFG
+-    select MAC_PVG_MMIO
++    imply MAC_PVG_MMIO
+     select VMAPPLE_VIRTIO_BLK
+diff --git a/hw/vmapple/aes.c b/hw/vmapple/aes.c
+index 553e688adb..2f88866f33 100644
+--- a/hw/vmapple/aes.c
++++ b/hw/vmapple/aes.c
+@@ -26,6 +26,7 @@
+ OBJECT_DECLARE_SIMPLE_TYPE(AESState, APPLE_AES)
+ 
+ #define MAX_FIFO_SIZE     9
++#define MAX_DUMP_LEN      0x1000
+ 
+ #define CMD_KEY           0x1
+ #define CMD_KEY_CONTEXT_SHIFT    27
+@@ -253,10 +254,9 @@ static bool cmd_iv(AESState *s)
+ 
+ static void dump_data(const char *desc, const void *p, size_t len)
+ {
+-    static const size_t MAX_LEN = 0x1000;
+-    char hex[MAX_LEN * 2 + 1] = "";
++    char hex[MAX_DUMP_LEN * 2 + 1] = "";
+ 
+-    if (len > MAX_LEN) {
++    if (len > MAX_DUMP_LEN) {
+         return;
+     }
+ 
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 607181f517..e0e9f0ba06 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -23,7 +23,9 @@
+ #include "qemu/log.h"
+ #include "qemu/module.h"
+ #include "qemu/option.h"
++#include "qemu/timer.h"
+ #include "qemu/units.h"
++#include "exec/icount.h"
+ #include "monitor/qdev.h"
+ #include "hw/core/boards.h"
+ #include "hw/core/irq.h"
+@@ -32,6 +34,7 @@
+ #include "hw/core/sysbus.h"
+ #include "hw/usb/usb.h"
+ #include "hw/arm/boot.h"
++#include "hw/arm/machines-qom.h"
+ #include "hw/char/pl011.h"
+ #include "hw/intc/arm_gic.h"
+ #include "hw/intc/arm_gicv3_common.h"
+@@ -46,12 +49,13 @@
+ #include "qapi/qapi-visit-common.h"
+ #include "qobject/qlist.h"
+ #include "standard-headers/linux/input.h"
+-#include "system/hvf.h"
+ #include "system/reset.h"
+ #include "system/runstate.h"
+ #include "system/system.h"
++#include "system/tcg.h"
+ #include "target/arm/gtimer.h"
+ #include "target/arm/cpu.h"
++#include "target/arm/cpu-features.h"
+ 
+ struct VMAppleMachineState {
+     MachineState parent;
+@@ -67,7 +71,15 @@ struct VMAppleMachineState {
+     PCIBus *bus;
+     MemoryRegion fw_mr;
+     MemoryRegion ecam_alias;
++#ifndef CONFIG_MAC_PVG_MMIO
++    MemoryRegion gfx_stub_mr;
++    MemoryRegion iosfc_stub_mr;
++#endif
+     uint64_t uuid;
++    bool run_installer;
++    int64_t tcg_smp_final_shift;
++    QEMUTimer *tcg_smp_shift_timer;
++    bool tcg_smp_all_powered;
+ };
+ 
+ #define TYPE_VMAPPLE_MACHINE   MACHINE_TYPE_NAME("vmapple")
+@@ -76,6 +88,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(VMAppleMachineState, VMAPPLE_MACHINE)
+ /* Number of external interrupt lines to configure the GIC with */
+ #define NUM_IRQS 256
+ 
++/* The virtual platform timebase runs at 24 MHz. */
++#define VMAPPLE_TIMEBASE_HZ 24000000
++
+ enum {
+     VMAPPLE_FIRMWARE,
+     VMAPPLE_CONFIG,
+@@ -193,6 +208,7 @@ static bool create_cfg(VMAppleMachineState *vms, MemoryRegion *mem,
+     qdev_prop_set_uint32(vms->cfg, "nr-cpus", machine->smp.cpus);
+     qdev_prop_set_uint64(vms->cfg, "ecid", vms->uuid);
+     qdev_prop_set_uint64(vms->cfg, "ram-size", machine->ram_size);
++    qdev_prop_set_uint32(vms->cfg, "run_installer2", vms->run_installer);
+     qdev_prop_set_uint32(vms->cfg, "rnd", rnd);
+ 
+     if (!sysbus_realize_and_unref(cfg, errp)) {
+@@ -203,8 +219,35 @@ static bool create_cfg(VMAppleMachineState *vms, MemoryRegion *mem,
+     return true;
+ }
+ 
++#ifndef CONFIG_MAC_PVG_MMIO
++static uint64_t gfx_stub_read(void *opaque, hwaddr offset, unsigned size)
++{
++    return 0;
++}
++
++static void gfx_stub_write(void *opaque, hwaddr offset, uint64_t value,
++                           unsigned size)
++{
++}
++
++static const MemoryRegionOps gfx_stub_ops = {
++    .read = gfx_stub_read,
++    .write = gfx_stub_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++    .impl = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++};
++#endif
++
+ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+ {
++#ifdef CONFIG_MAC_PVG_MMIO
+     int irq_gfx = vms->irqmap[VMAPPLE_APV_GFX];
+     int irq_iosfc = vms->irqmap[VMAPPLE_APV_IOSFC];
+     SysBusDevice *gfx;
+@@ -215,6 +258,23 @@ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+     sysbus_connect_irq(gfx, 0, qdev_get_gpio_in(vms->gic, irq_gfx));
+     sysbus_connect_irq(gfx, 1, qdev_get_gpio_in(vms->gic, irq_iosfc));
+     sysbus_realize_and_unref(gfx, &error_fatal);
++#else
++    /*
++     * The guest platform always exposes these windows, even when QEMU was
++     * built without a host graphics backend.  Keep them mapped as inert
++     * devices so probing a headless VM cannot raise an external abort.
++     */
++    memory_region_init_io(&vms->gfx_stub_mr, OBJECT(vms), &gfx_stub_ops, vms,
++                          "vmapple.gfx-stub",
++                          vms->memmap[VMAPPLE_APV_GFX].size);
++    memory_region_init_io(&vms->iosfc_stub_mr, OBJECT(vms), &gfx_stub_ops, vms,
++                          "vmapple.iosfc-stub",
++                          vms->memmap[VMAPPLE_APV_IOSFC].size);
++    memory_region_add_subregion(mem, vms->memmap[VMAPPLE_APV_GFX].base,
++                                &vms->gfx_stub_mr);
++    memory_region_add_subregion(mem, vms->memmap[VMAPPLE_APV_IOSFC].base,
++                                &vms->iosfc_stub_mr);
++#endif
+ }
+ 
+ static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)
+@@ -438,6 +498,61 @@ static void vmapple_reset(void *opaque)
+     cpu_set_pc(first_cpu, base);
+ }
+ 
++static void vmapple_tcg_smp_shift(void *opaque)
++{
++    VMAppleMachineState *vms = opaque;
++    MachineState *ms = MACHINE(vms);
++    int n;
++
++    for (n = 0; n < ms->smp.cpus; n++) {
++        if (ARM_CPU(qemu_get_cpu(n))->power_state != PSCI_ON) {
++            timer_mod(vms->tcg_smp_shift_timer,
++                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                      NANOSECONDS_PER_SECOND / 1000);
++            return;
++        }
++    }
++
++    if (!vms->tcg_smp_all_powered) {
++        /* Let the final secondary finish its early initialization. */
++        vms->tcg_smp_all_powered = true;
++        timer_mod(vms->tcg_smp_shift_timer,
++                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                  NANOSECONDS_PER_SECOND / 10);
++        return;
++    }
++
++    if (!icount_set_time_shift(vms->tcg_smp_final_shift)) {
++        error_report("could not apply VMApple TCG SMP icount shift");
++    }
++}
++
++static void vmapple_get_tcg_smp_final_shift(Object *obj, Visitor *v,
++                                            const char *name, void *opaque,
++                                            Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++
++    visit_type_int(v, name, &vms->tcg_smp_final_shift, errp);
++}
++
++static void vmapple_set_tcg_smp_final_shift(Object *obj, Visitor *v,
++                                            const char *name, void *opaque,
++                                            Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++    int64_t value;
++
++    if (!visit_type_int(v, name, &value, errp)) {
++        return;
++    }
++    if (value < -10 || value > 10) {
++        error_setg(errp, "%s must be between -10 and 10", name);
++        return;
++    }
++    vms->tcg_smp_final_shift = value;
++}
++
+ static void mach_vmapple_init(MachineState *machine)
+ {
+     VMAppleMachineState *vms = VMAPPLE_MACHINE(machine);
+@@ -465,6 +580,23 @@ static void mach_vmapple_init(MachineState *machine)
+         object_property_set_int(cpu, "mp-affinity",
+                                 possible_cpus->cpus[n].arch_id, &error_fatal);
+ 
++        if (tcg_enabled()) {
++            ARMCPU *arm_cpu = ARM_CPU(cpu);
++            uint64_t isar1 = GET_IDREG(&arm_cpu->isar, ID_AA64ISAR1);
++
++            /*
++             * The virtual platform exposes the original pointer
++             * authentication architecture, without the later faulting
++             * authentication extensions advertised by the TCG max CPU.
++             */
++            isar1 = FIELD_DP64(isar1, ID_AA64ISAR1, APA, 1);
++            isar1 = FIELD_DP64(isar1, ID_AA64ISAR1, API, 1);
++            SET_IDREG(&arm_cpu->isar, ID_AA64ISAR1, isar1);
++            arm_cpu->pauth_impdef_compat = true;
++            object_property_set_int(cpu, "cntfrq", VMAPPLE_TIMEBASE_HZ,
++                                    &error_fatal);
++        }
++
+         cs = CPU(cpu);
+         cs->cpu_index = n;
+ 
+@@ -505,6 +637,15 @@ static void mach_vmapple_init(MachineState *machine)
+ 
+     create_gpio_devices(vms, VMAPPLE_GPIO, sysmem);
+ 
++    if (tcg_enabled() && icount_enabled() == ICOUNT_PRECISE &&
++        smp_cpus > 1 && vms->tcg_smp_final_shift != 0) {
++        vms->tcg_smp_shift_timer =
++            timer_new_ns(QEMU_CLOCK_VIRTUAL, vmapple_tcg_smp_shift, vms);
++        timer_mod(vms->tcg_smp_shift_timer,
++                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                  NANOSECONDS_PER_SECOND / 1000);
++    }
++
+     vmapple_firmware_init(vms, sysmem);
+     create_cfg(vms, sysmem, &error_fatal);
+ 
+@@ -571,6 +712,12 @@ static GlobalProperty vmapple_compat_defaults[] = {
+     { TYPE_XHCI_PCI, "conditional-intr-mapping", "on" },
+ };
+ 
++static const char *vmapple_get_default_cpu_type(const MachineState *ms)
++{
++    return tcg_enabled() ? ARM_CPU_TYPE_NAME("max")
++                         : ARM_CPU_TYPE_NAME("host");
++}
++
+ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
+ {
+     MachineClass *mc = MACHINE_CLASS(oc);
+@@ -583,7 +730,7 @@ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
+     mc->minimum_page_bits = 12;
+     mc->possible_cpu_arch_ids = vmapple_possible_cpu_arch_ids;
+     mc->cpu_index_to_instance_props = vmapple_cpu_index_to_props;
+-    mc->default_cpu_type = ARM_CPU_TYPE_NAME("host");
++    mc->get_default_cpu_type = vmapple_get_default_cpu_type;
+     mc->get_default_cpu_node_id = vmapple_get_default_cpu_node_id;
+     mc->default_ram_id = "mach-vmapple.ram";
+     mc->desc = "Apple aarch64 Virtual Machine";
+@@ -592,6 +739,16 @@ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
+                      G_N_ELEMENTS(vmapple_compat_defaults));
+ }
+ 
++static bool vmapple_get_run_installer(Object *obj, Error **errp)
++{
++    return VMAPPLE_MACHINE(obj)->run_installer;
++}
++
++static void vmapple_set_run_installer(Object *obj, bool value, Error **errp)
++{
++    VMAPPLE_MACHINE(obj)->run_installer = value;
++}
++
+ static void vmapple_instance_init(Object *obj)
+ {
+     VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
+@@ -601,6 +758,19 @@ static void vmapple_instance_init(Object *obj)
+     object_property_add_uint64_ptr(obj, "uuid", &vms->uuid,
+                                    OBJ_PROP_FLAG_READWRITE);
+     object_property_set_description(obj, "uuid", "Machine UUID (SDOM)");
++
++    object_property_add_bool(obj, "run-installer",
++                             vmapple_get_run_installer,
++                             vmapple_set_run_installer);
++    object_property_set_description(obj, "run-installer",
++                                    "Boot the installer environment");
++
++    object_property_add(obj, "tcg-smp-final-shift", "int",
++                        vmapple_get_tcg_smp_final_shift,
++                        vmapple_set_tcg_smp_final_shift, NULL, NULL);
++    object_property_set_description(
++        obj, "tcg-smp-final-shift",
++        "Final precise icount shift after SMP startup under TCG");
+ }
+ 
+ static const TypeInfo vmapple_machine_info = {
+@@ -609,6 +779,7 @@ static const TypeInfo vmapple_machine_info = {
+     .instance_size = sizeof(VMAppleMachineState),
+     .class_init    = vmapple_machine_class_init,
+     .instance_init = vmapple_instance_init,
++    .interfaces    = aarch64_machine_interfaces,
+ };
+ 
+ static void machvmapple_machine_init(void)
+@@ -616,4 +787,3 @@ static void machvmapple_machine_init(void)
+     type_register_static(&vmapple_machine_info);
+ }
+ type_init(machvmapple_machine_init);
+-
+diff --git a/include/exec/icount.h b/include/exec/icount.h
+index 7a26b40084..e162d4258f 100644
+--- a/include/exec/icount.h
++++ b/include/exec/icount.h
+@@ -56,6 +56,18 @@ int64_t icount_get(void);
+  */
+ int64_t icount_to_ns(int64_t icount);
+ 
++/**
++ * icount_set_time_shift: change the fixed icount conversion at runtime
++ * @shift: base-two nanoseconds per instruction exponent
++ *
++ * The virtual clock remains continuous across the change.  This is only
++ * available when icount is operating in precise mode.
++ *
++ * Return: true if the shift was changed, false if it was invalid or icount
++ * was not configured in precise mode.
++ */
++bool icount_set_time_shift(int shift);
++
+ /**
+  * icount_configure: configure the icount options, including "shift"
+  * @opts: Options to parse
+diff --git a/qemu-options.hx b/qemu-options.hx
+index 34970fffc9..6d467741bc 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -5322,9 +5322,10 @@ DEF("icount", HAS_ARG, QEMU_OPTION_icount, \
+ SRST
+ ``-icount [shift=N|auto][,align=on|off][,sleep=on|off][,rr=record|replay,rrfile=filename[,rrsnapshot=snapshot]]``
+     Enable virtual instruction counter. The virtual cpu will execute one
+-    instruction every 2^N ns of virtual time. If ``auto`` is specified
+-    then the virtual cpu speed will be automatically adjusted to keep
+-    virtual time within a few seconds of real time.
++    instruction every 2^N ns of virtual time. Negative values of N allow
++    multiple instructions per nanosecond. If ``auto`` is specified then the
++    virtual cpu speed will be automatically adjusted to keep virtual time
++    within a few seconds of real time.
+ 
+     Note that while this option can give deterministic behavior, it does
+     not provide cycle accurate emulation. Modern CPUs contain
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index c0492c8dfb..69633ba226 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -1126,6 +1126,7 @@ struct ArchCPU {
+     bool prop_pauth_impdef;
+     bool prop_pauth_qarma3;
+     bool prop_pauth_qarma5;
++    bool pauth_impdef_compat;
+     bool prop_lpa2;
+ 
+     /* GM blocksize, in log_2(words), ie low 4 bits of GMID_EL0 */
+diff --git a/target/arm/tcg/pauth_helper.c b/target/arm/tcg/pauth_helper.c
+index 3d83ca4c3c..a7b24ae124 100644
+--- a/target/arm/tcg/pauth_helper.c
++++ b/target/arm/tcg/pauth_helper.c
+@@ -315,9 +315,21 @@ static uint64_t pauth_computepac_impdef(uint64_t data, uint64_t modifier,
+ static uint64_t pauth_computepac(CPUARMState *env, uint64_t data,
+                                  uint64_t modifier, ARMPACKey key)
+ {
+-    if (cpu_isar_feature(aa64_pauth_qarma5, env_archcpu(env))) {
++    ARMCPU *cpu = env_archcpu(env);
++
++    /*
++     * Keep signatures stable across vCPUs when the guest's implementation-
++     * defined cipher and key registers are not available to TCG.  A fixed
++     * emulation key preserves pointer identity and integrity round trips;
++     * authentication below still strips the guest's original signatures.
++     */
++    if (cpu->pauth_impdef_compat) {
++        return pauth_computepac_impdef(data, modifier, (ARMPACKey) { 0 });
++    }
++
++    if (cpu_isar_feature(aa64_pauth_qarma5, cpu)) {
+         return pauth_computepac_architected(data, modifier, key, false);
+-    } else if (cpu_isar_feature(aa64_pauth_qarma3, env_archcpu(env))) {
++    } else if (cpu_isar_feature(aa64_pauth_qarma3, cpu)) {
+         return pauth_computepac_architected(data, modifier, key, true);
+     } else {
+         return pauth_computepac_impdef(data, modifier, key);
+@@ -429,6 +441,16 @@ static uint64_t pauth_auth(CPUARMState *env, uint64_t ptr, uint64_t modifier,
+     uint64_t pac, orig_ptr, cmp_mask;
+ 
+     orig_ptr = pauth_original_ptr(ptr, param);
++
++    /*
++     * Some virtual platforms use an implementation-defined PAC cipher which
++     * is not available to TCG.  They may opt into authentication bypass while
++     * retaining architectural pointer stripping behavior.
++     */
++    if (cpu->pauth_impdef_compat) {
++        return orig_ptr;
++    }
++
+     pac = pauth_computepac(env, orig_ptr, modifier, *key);
+     bot_bit = 64 - param.tsz;
+     top_bit = 64 - 8 * param.tbi;

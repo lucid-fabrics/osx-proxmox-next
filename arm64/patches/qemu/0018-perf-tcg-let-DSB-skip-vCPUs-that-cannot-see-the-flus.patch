@@ -1,0 +1,923 @@
+From 97397e48c9edce5786da54d65b50184c0cae65c1 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] perf(tcg): let DSB skip vCPUs that cannot see the flushed
+ entries
+
+A DSB after a broadcast TLBI waited for every running vCPU. A vCPU
+between TBs (P80_BC=quiet) or running in another ASID (P85_BC=asid)
+cannot touch the entries and is skipped. Both are on by default,
+P80_BC=off and P85_BC=off turn them off. Includes the P80/P85 guest
+sampler and statistics, off unless P80_DIR is set, and a
+broken-on-purpose negative control (P80_BC=nowait) for the TLB tests.
+---
+ accel/tcg/cpu-exec.c       |  25 ++-
+ accel/tcg/cputlb.c         |  94 +++++++++++-
+ accel/tcg/meson.build      |   1 +
+ accel/tcg/p80.c            | 306 +++++++++++++++++++++++++++++++++++++
+ accel/tcg/translate-all.c  |   5 +
+ include/hw/core/cpu.h      |  18 +++
+ include/qemu/p80.h         |  74 +++++++++
+ system/cpus.c              |  15 +-
+ target/arm/cpu.c           |  37 +++++
+ target/arm/tcg/tlb-insns.c |  28 +++-
+ 10 files changed, 588 insertions(+), 15 deletions(-)
+ create mode 100644 accel/tcg/p80.c
+ create mode 100644 include/qemu/p80.h
+
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index b877552062..e44fad21fa 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/p80.h"
+ #include "qemu/p35-stats.h"
+ #include "qemu/qemu-print.h"
+ #include "qapi/error.h"
+@@ -399,7 +400,7 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+     if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
+         cpu_loop_exit(cpu);
+     }
+-
++    qatomic_set(&cpu->p80_pc, s.pc);
+     tb = tb_lookup(cpu, s);
+     if (tb == NULL) {
+         return tcg_code_gen_epilogue;
+@@ -436,7 +437,7 @@ const void *HELPER(ras_fill)(CPUArchState *env, void *call)
+     if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
+         cpu_loop_exit(cpu);
+     }
+-
++    qatomic_set(&cpu->p80_pc, s.pc);
+     tb = tb_lookup(cpu, s);
+     if (tb == NULL) {
+         return tcg_code_gen_epilogue;
+@@ -483,7 +484,7 @@ const void *HELPER(ibc_miss)(CPUArchState *env, void *slot)
+     if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
+         cpu_loop_exit(cpu);
+     }
+-
++    qatomic_set(&cpu->p80_pc, s.pc);
+     tb = tb_lookup(cpu, s);
+     if (tb == NULL) {
+         return tcg_code_gen_epilogue;
+@@ -953,8 +954,13 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
+     }
+     if (unlikely(cpu_test_interrupt(cpu, ~0)) &&
+         !cpu_interrupt_is_inert(cpu)) {
++        bool quiet;
+         p35_inc(P35_BQL_INT_TAKE);
++        quiet = p80_quiet_enter(&cpu->tlb_bc_quiet);
+         bql_lock();
++        if (quiet) {
++            p80_quiet_leave(&cpu->tlb_bc_quiet);
++        }
+         if (cpu_test_interrupt(cpu, CPU_INTERRUPT_DEBUG)) {
+             cpu_reset_interrupt(cpu, CPU_INTERRUPT_DEBUG);
+             cpu->exception_index = EXCP_DEBUG;
+@@ -1119,14 +1125,21 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                 break;
+             }
+ 
++            qatomic_set(&cpu->p80_pc, s.pc);
+             tb = tb_lookup(cpu, s);
+             if (tb == NULL) {
+                 CPUJumpCache *jc;
+                 uint32_t h;
+-
++                bool quiet = !(s.cflags & CF_NOIRQ) &&
++                             p80_quiet_enter(&cpu->tlb_bc_quiet);
++                P80_SET(cpu, P80_ST_GEN);
+                 mmap_lock();
+                 tb = tb_gen_code(cpu, s);
+                 mmap_unlock();
++                P80_RESTORE(cpu);
++                if (quiet) {
++                    p80_quiet_leave(&cpu->tlb_bc_quiet);
++                }
+ 
+                 /*
+                  * We add the TB in the virtual pc hash table
+@@ -1168,6 +1181,10 @@ static int cpu_exec_setjmp(CPUState *cpu, SyncClocks *sc)
+ {
+     /* Prepare setjmp context for exception handling. */
+     if (unlikely(sigsetjmp(cpu->jmp_env, 0) != 0)) {
++        qatomic_set(&cpu->p80_state, P80_ST_EXEC);
++        if (qatomic_read(&cpu->tlb_bc_quiet)) {
++            p80_quiet_leave(&cpu->tlb_bc_quiet);
++        }
+         cpu_exec_longjmp_cleanup(cpu);
+     }
+ 
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index 3629b23185..0d07c9fdd4 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/p80.h"
+ #include "qemu/p35-stats.h"
+ #include "qemu/main-loop.h"
+ #include "qemu/target-info.h"
+@@ -1216,6 +1217,13 @@ void tlb_bc_enable(void)
+ {
+     tlb_bc_on = true;
+     tlb_bc_process_fn = tlb_bc_process;
++    p80_init();
++    if (p80_bc_quiet) {
++        info_report("P80: DSB does not wait for vCPUs between TBs");
++    }
++    if (p85_bc_asid) {
++        info_report("P85: DSB does not wait for vCPUs in another ASID");
++    }
+ }
+ 
+ static bool tlb_bc_usable(CPUState *src)
+@@ -1291,6 +1299,13 @@ static void tlb_bc_broadcast(CPUState *src, TLBBcRec *r)
+         src->tlb_bc_wait[dst->cpu_index] = r->ticket;
+     }
+     src->tlb_bc_nwait = 1;
++    if (!src->p85_tlbi_asid) {
++        src->p85_dsb_asid = P85_ASID_MIX;
++    } else if (src->p85_dsb_asid == 0) {
++        src->p85_dsb_asid = src->p85_tlbi_asid;
++    } else if (src->p85_tlbi_asid != src->p85_dsb_asid) {
++        src->p85_dsb_asid = P85_ASID_MIX;
++    }
+     /* Store the records before reading cpu->running. */
+     smp_mb();
+     CPU_FOREACH(dst) {
+@@ -1310,6 +1325,7 @@ bool tlb_bc_process(CPUState *cpu)
+     uint64_t last;
+ 
+     assert_cpu_is_self(cpu);
++    P80_SET(cpu, P80_ST_FLUSH);
+     qemu_spin_lock(&m->lock);
+     n = m->n;
+     memcpy(local, m->rec, n * sizeof(local[0]));
+@@ -1318,9 +1334,9 @@ bool tlb_bc_process(CPUState *cpu)
+     last = m->issued;
+     qemu_spin_unlock(&m->lock);
+     if (!n) {
++        P80_RESTORE(cpu);
+         return false;
+     }
+-
+     /* Whole-index flushes first, then what they did not already cover. */
+     for (i = 0; i < n; i++) {
+         if (local[i].kind == TLB_BC_IDX) {
+@@ -1340,6 +1356,7 @@ bool tlb_bc_process(CPUState *cpu)
+         }
+     }
+     qatomic_store_release(&m->done, last);
++    P80_RESTORE(cpu);
+     return true;
+ }
+ 
+@@ -1347,14 +1364,23 @@ void tlb_bc_sync(CPUState *src, uintptr_t ra)
+ {
+     CPUState *dst;
+     unsigned spins = 0;
+-
++    uint64_t p80_t0 = 0;
++    bool p80_waited = false;
++    uint32_t fa;
++    uint64_t p85_skip = 0;
+     if (!src->tlb_bc_nwait) {
+         return;
+     }
++    fa = p85_bc_asid && p85_asid_fn && src->p85_dsb_asid != P85_ASID_MIX ?
++         src->p85_dsb_asid : 0;
++    if (p80_on) {
++        p80_t0 = p80_ns();
++        qatomic_set(&src->p80_state, P80_ST_SYNC);
++    }
+     smp_mb();
+     CPU_FOREACH(dst) {
+-        uint64_t t;
+-
++        uint64_t t, ts = 0;
++        int st = -1;
+         if (dst == src) {
+             continue;
+         }
+@@ -1362,8 +1388,43 @@ void tlb_bc_sync(CPUState *src, uintptr_t ra)
+         if (!t) {
+             continue;
+         }
++        if (fa && qatomic_load_acquire(&dst->tlb_bc.done) < t &&
++            qatomic_read(&dst->running)) {
++            /*
++             * After the barrier above: a vCPU that switches to this ASID
++             * now flushes its non-global entries first (vmsa_ttbr_write),
++             * and walks the page tables the poster already updated.
++             */
++            int da = p85_asid_fn(dst);
++            if (da >= 0 && (da != (int)(fa & 0xffff) || p85_bc_bad)) {
++                p85_skip++;
++                src->tlb_bc_wait[dst->cpu_index] = 0;
++                continue;
++            }
++        }
+         while (qatomic_load_acquire(&dst->tlb_bc.done) < t &&
+                qatomic_read(&dst->running)) {
++            if (unlikely(p80_bc_nowait) ||
++                (p80_bc_quiet && qatomic_read(&dst->tlb_bc_quiet))) {
++                /*
++                 * Between TBs, it reaches a TB start (icount_decr is set)
++                 * and applies the records before any data access.
++                 */
++                if (unlikely(p80_on) && ts) {
++                    p80_sync_seg(src->cpu_index, P80_ST_QUIET, 1,
++                                 p80_ns() - ts);
++                }
++                break;
++            }
++            if (unlikely(p80_on)) {
++                p80_waited = true;
++                if (!ts) {
++                    ts = p80_ns();
++                } else if (st < 0 && (spins & 15) == 0 &&
++                           p80_ns() - ts > 4000) {
++                    st = qatomic_read(&dst->p80_state);
++                }
++            }
+             if (qatomic_read(&src->tlb_bc.pending) && tlb_bc_process(src)) {
+                 /* leave the chain of TBs at the next TB boundary */
+                 qatomic_set(&src->neg.icount_decr.u16.high, -1);
+@@ -1371,13 +1432,29 @@ void tlb_bc_sync(CPUState *src, uintptr_t ra)
+             if (++spins % 1024 == 0 &&
+                 (qatomic_read(&src->exit_request) || src->stop)) {
+                 /* Let the stop happen, the DSB runs again afterwards. */
++                if (p80_on) {
++                    qatomic_set(&src->p80_state, P80_ST_EXEC);
++                }
+                 cpu_loop_exit_restore(src, ra);
+             }
+             cpu_relax();
+         }
++        if (unlikely(p80_on) && st >= 0) {
++            p80_sync_seg(src->cpu_index, st,
++                         qatomic_load_acquire(&dst->tlb_bc.done) >= t,
++                         p80_ns() - ts);
++        }
+         src->tlb_bc_wait[dst->cpu_index] = 0;
+     }
+     src->tlb_bc_nwait = 0;
++    src->p85_dsb_asid = 0;
++    if (fa && p80_on) {
++        p85_asid_count(src->cpu_index, 1, p85_skip);
++    }
++    if (p80_on) {
++        p80_sync_call(src->cpu_index, p80_waited, p80_ns() - p80_t0);
++        qatomic_set(&src->p80_state, P80_ST_EXEC);
++    }
+ }
+ 
+ /* update the TLBs so that writes to code in the virtual page 'addr'
+@@ -1809,12 +1886,14 @@ static bool tlb_fill_align(CPUState *cpu, vaddr addr, MMUAccessType type,
+ {
+     const TCGCPUOps *ops = cpu->cc->tcg_ops;
+     CPUTLBEntryFull full = { };
+-
++    P80_SET(cpu, P80_ST_FILL);
+     if (ops->tlb_fill_align) {
+         uint64_t ts_t0 G_GNUC_UNUSED = tlbs_now();
+         uint64_t p35_t0 = unlikely(p35_on) ? cpu_get_host_ticks() : 0;
+-        if (ops->tlb_fill_align(cpu, &full, addr, type, mmu_idx,
+-                                memop, size, probe, ra)) {
++        bool p80_ok = ops->tlb_fill_align(cpu, &full, addr, type, mmu_idx,
++                                          memop, size, probe, ra);
++        P80_RESTORE(cpu);
++        if (p80_ok) {
+             if (unlikely(p35_on)) {
+                 uint64_t p35_t1 = cpu_get_host_ticks();
+                 p35_add(P35_FILL_N, 1);
+@@ -1838,6 +1917,7 @@ static bool tlb_fill_align(CPUState *cpu, vaddr addr, MMUAccessType type,
+         if (addr & ((1u << memop_alignment_bits(memop)) - 1)) {
+             ops->do_unaligned_access(cpu, addr, type, mmu_idx, ra);
+         }
++        P80_RESTORE(cpu);
+         if (ops->tlb_fill(cpu, addr, size, type, mmu_idx, probe, ra)) {
+             return true;
+         }
+diff --git a/accel/tcg/meson.build b/accel/tcg/meson.build
+index fc18a486fb..3b27a542e1 100644
+--- a/accel/tcg/meson.build
++++ b/accel/tcg/meson.build
+@@ -38,4 +38,5 @@ system_ss.add(files(
+   'watchpoint.c',
+   'pcache.c',
+   'pcache-tcg.c',
++  'p80.c',
+ ))
+diff --git a/accel/tcg/p80.c b/accel/tcg/p80.c
+new file mode 100644
+index 0000000000..0dcb63b184
+--- /dev/null
++++ b/accel/tcg/p80.c
+@@ -0,0 +1,306 @@
++/*
++ * P80 instrumentation (lab only, branch p80). P80_DIR=dir turns it on:
++ *  - dir/pc.bin: every P80_US microseconds (default 1000) one 24 byte record
++ *    per vCPU: realtime ns, last guest PC looked up, cpu index, halted,
++ *    running, state (see p80.h).
++ *  - dir/bc.txt: once a second, cumulative tlb_bc_sync statistics and the
++ *    host /proc/stat steal and total ticks.
++ */
++#include "qemu/osdep.h"
++#include "qemu/thread.h"
++#include "qemu/atomic.h"
++#include "qemu/rcu.h"
++#include "hw/core/cpu.h"
++#include "qemu/p80.h"
++#include <time.h>
++
++int p80_on;
++bool p80_bc_quiet;
++bool p80_bc_nowait;
++static char *p80_dir;
++static pthread_once_t p80_once = PTHREAD_ONCE_INIT;
++static int p80_us = 1000;
++
++#define P80_MAXCPU 64
++#define P80_NH 24
++typedef struct P80Stat {
++    uint64_t calls, waited, wait_ns;
++    uint64_t hist[P80_NH];          /* waited calls by log2(ns) */
++    uint64_t seg_n[P80_ST_N], seg_ns[P80_ST_N];   /* segments >= 4 us by target state */
++    uint64_t seg_stop_n, seg_stop_ns;             /* segment ended by target leaving the exec loop */
++    char pad[64];
++} P80Stat;
++static P80Stat p80_st[P80_MAXCPU];
++
++typedef struct P80Pc {
++    uint64_t t, pc;
++    uint16_t cpu;
++    uint8_t halted, running;
++    uint32_t state;
++} P80Pc;
++
++int p85_ctx_on;
++bool p85_bc_asid;
++bool p85_bc_bad;
++int (*p85_asid_fn)(CPUState *cpu);
++static uint64_t p85_af[P80_MAXCPU][8], p85_as[P80_MAXCPU][8];
++void p85_asid_count(int src, uint64_t filtered, uint64_t skipped)
++{
++    p85_af[src & (P80_MAXCPU - 1)][0] += filtered;
++    p85_as[src & (P80_MAXCPU - 1)][0] += skipped;
++}
++int p85_gen_on;
++void (*p85_ctx_fn)(CPUState *cpu, uint64_t *ttbr0, uint64_t *tpidr);
++typedef struct P85Pc {
++    uint64_t t, pc, ttbr0, tpidr;
++    uint16_t cpu;
++    uint8_t halted, running;
++    uint32_t state;
++} P85Pc;
++typedef struct P85Gen {
++    uint64_t t, ns, pc, ttbr0, tpidr;
++    uint16_t cpu, kind;
++    uint32_t pad;
++} P85Gen;
++#define P85_RING 65536
++typedef struct P85Ring {
++    P85Gen r[P85_RING];
++    uint64_t head, tail, drop;
++} P85Ring;
++static P85Ring *p85_ring[P80_MAXCPU];
++uint64_t p80_ns(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_REALTIME, &ts);
++    return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
++}
++
++void p80_sync_call(int src, bool waited, uint64_t ns)
++{
++    P80Stat *s = &p80_st[src & (P80_MAXCPU - 1)];
++    s->calls++;
++    if (waited) {
++        int b = 63 - __builtin_clzll(ns | 1);
++        s->waited++;
++        s->wait_ns += ns;
++        s->hist[b < P80_NH ? b : P80_NH - 1]++;
++    }
++}
++
++void p80_sync_seg(int src, int st, int ran, uint64_t ns)
++{
++    P80Stat *s = &p80_st[src & (P80_MAXCPU - 1)];
++    if (!ran) {
++        s->seg_stop_n++;
++        s->seg_stop_ns += ns;
++    }
++    s->seg_n[st & (P80_ST_N - 1)]++;
++    s->seg_ns[st & (P80_ST_N - 1)] += ns;
++}
++
++void p85_gen_event(CPUState *cpu, uint64_t t0, uint64_t pc, int kind)
++{
++    P85Ring *g = p85_ring[cpu->cpu_index & (P80_MAXCPU - 1)];
++    uint64_t h;
++    P85Gen *e;
++    if (!g) {
++        return;
++    }
++    h = g->head;
++    if (h - qatomic_load_acquire(&g->tail) >= P85_RING) {
++        g->drop++;
++        return;
++    }
++    e = &g->r[h % P85_RING];
++    e->t = t0;
++    e->ns = p80_ns() - t0;
++    e->pc = pc;
++    e->ttbr0 = e->tpidr = 0;
++    if (p85_ctx_fn) {
++        p85_ctx_fn(cpu, &e->ttbr0, &e->tpidr);
++    }
++    e->cpu = cpu->cpu_index;
++    e->kind = kind;
++    e->pad = 0;
++    qatomic_store_release(&g->head, h + 1);
++}
++static void p85_drain(FILE *f)
++{
++    for (int c = 0; c < P80_MAXCPU; c++) {
++        P85Ring *g = p85_ring[c];
++        uint64_t h, t;
++        if (!g) {
++            continue;
++        }
++        h = qatomic_load_acquire(&g->head);
++        for (t = g->tail; t < h; t++) {
++            fwrite(&g->r[t % P85_RING], sizeof(P85Gen), 1, f);
++        }
++        qatomic_store_release(&g->tail, h);
++    }
++    fflush(f);
++}
++static void p80_dump(FILE *f, uint64_t now)
++{
++    unsigned long long u, n, sy, id, io, irq, sirq, steal = 0;
++    FILE *ps = fopen("/proc/stat", "r");
++    u = n = sy = id = io = irq = sirq = 0;
++    if (ps) {
++        if (fscanf(ps, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
++                   &u, &n, &sy, &id, &io, &irq, &sirq, &steal) != 8) {
++            steal = 0;
++        }
++        fclose(ps);
++    }
++    fprintf(f, "T %" PRIu64 " steal %llu total %llu\n", now, steal,
++            u + n + sy + id + io + irq + sirq + steal);
++    for (int c = 0; c < P80_MAXCPU; c++) {
++        P80Stat *s = &p80_st[c];
++        if (!s->calls) {
++            continue;
++        }
++        fprintf(f, "S %d %" PRIu64 " %" PRIu64 " %" PRIu64 " stop %" PRIu64 " %" PRIu64,
++                c, s->calls, s->waited, s->wait_ns, s->seg_stop_n, s->seg_stop_ns);
++        fprintf(f, " H");
++        for (int i = 0; i < P80_NH; i++) {
++            fprintf(f, " %" PRIu64, s->hist[i]);
++        }
++        fprintf(f, " G");
++        for (int i = 0; i < P80_ST_N; i++) {
++            fprintf(f, " %" PRIu64 ":%" PRIu64, s->seg_n[i], s->seg_ns[i]);
++        }
++        fprintf(f, "\n");
++    }
++    for (int c = 0; c < P80_MAXCPU; c++) {
++        if (p85_af[c][0]) {
++            fprintf(f, "A %d %" PRIu64 " %" PRIu64 "\n", c, p85_af[c][0], p85_as[c][0]);
++        }
++    }
++    fflush(f);
++}
++
++static void *p80_thread(void *arg)
++{
++    char *p = g_strdup_printf("%s/pc.bin", p80_dir);
++    char *b = g_strdup_printf("%s/bc.txt", p80_dir);
++    char *p2 = g_strdup_printf("%s/pc2.bin", p80_dir);
++    char *g2 = g_strdup_printf("%s/gen.bin", p80_dir);
++    char *on = g_strdup_printf("%s/gen.on", p80_dir);
++    FILE *fp = fopen(p85_ctx_on ? p2 : p, "w"), *fb = fopen(b, "w");
++    FILE *fg = p85_ctx_on ? fopen(g2, "w") : NULL;
++    uint64_t next = p80_ns(), nextd = next, nextg = next;
++    static P80Pc buf[4096];
++    static P85Pc buf2[4096];
++    int nb = 0;
++    g_free(p);
++    g_free(b);
++    g_free(p2);
++    g_free(g2);
++    if (!fp || !fb) {
++        return NULL;
++    }
++    for (;;) {
++        CPUState *cpu;
++        uint64_t now = p80_ns();
++        while (now < next) {
++            struct timespec ts = { 0, next - now };
++            nanosleep(&ts, NULL);
++            now = p80_ns();
++        }
++        next += p80_us * 1000ull;
++        if (now > next + 100000000ull) {
++            next = now;
++        }
++        WITH_RCU_READ_LOCK_GUARD() {
++            CPU_FOREACH(cpu) {
++                if (p85_ctx_on) {
++                    P85Pc *r2 = &buf2[nb++];
++                    r2->t = now;
++                    r2->pc = qatomic_read(&cpu->p80_pc);
++                    r2->ttbr0 = r2->tpidr = 0;
++                    if (p85_ctx_fn) {
++                        p85_ctx_fn(cpu, &r2->ttbr0, &r2->tpidr);
++                    }
++                    r2->cpu = cpu->cpu_index;
++                    r2->halted = qatomic_read(&cpu->halted);
++                    r2->running = qatomic_read(&cpu->running);
++                    r2->state = qatomic_read(&cpu->p80_state);
++                    if (nb == ARRAY_SIZE(buf2)) {
++                        fwrite(buf2, sizeof(buf2[0]), nb, fp);
++                        nb = 0;
++                    }
++                    continue;
++                }
++                P80Pc *r = &buf[nb++];
++                r->t = now;
++                r->pc = qatomic_read(&cpu->p80_pc);
++                r->cpu = cpu->cpu_index;
++                r->halted = qatomic_read(&cpu->halted);
++                r->running = qatomic_read(&cpu->running);
++                r->state = qatomic_read(&cpu->p80_state);
++                if (nb == ARRAY_SIZE(buf)) {
++                    fwrite(buf, sizeof(buf[0]), nb, fp);
++                    nb = 0;
++                }
++            }
++        }
++        if (fg && now >= nextg) {
++            nextg = now + 100000000ull;
++            if (!p85_ring[0]) {
++                for (int c = 0; c < P80_MAXCPU; c++) {
++                    p85_ring[c] = g_new0(P85Ring, 1);
++                }
++                smp_mb();
++            }
++            qatomic_set(&p85_gen_on, access(on, F_OK) == 0);
++            p85_drain(fg);
++        }
++        if (now >= nextd) {
++            nextd = now + 1000000000ull;
++            if (p85_ctx_on) {
++                fwrite(buf2, sizeof(buf2[0]), nb, fp);
++            } else {
++                fwrite(buf, sizeof(buf[0]), nb, fp);
++            }
++            nb = 0;
++            fflush(fp);
++            p80_dump(fb, now);
++        }
++    }
++    return NULL;
++}
++
++static void p80_init_once(void)
++{
++    const char *d = getenv("P80_DIR");
++    const char *u = getenv("P80_US");
++    const char *bc = getenv("P80_BC");
++    QemuThread t;
++    if (bc && strstr(bc, "quiet")) {
++        p80_bc_quiet = true;
++    }
++    if (bc && strstr(bc, "nowait")) {
++        p80_bc_nowait = true;
++    }
++    if (getenv("P85_BC") && strstr(getenv("P85_BC"), "asid")) {
++        p85_bc_asid = true;
++    }
++    if (getenv("P85_BC") && strstr(getenv("P85_BC"), "asidbad")) {
++        p85_bc_bad = true;     /* broken on purpose: a negative control for the tests */
++    }
++    if (!d || !*d) {
++        return;
++    }
++    if (u && atoi(u) > 0) {
++        p80_us = atoi(u);
++    }
++    p80_dir = g_strdup(d);
++    p85_ctx_on = getenv("P85_CTX") && atoi(getenv("P85_CTX")) > 0;
++    p80_on = 1;
++    qemu_thread_create(&t, "p80", p80_thread, NULL, QEMU_THREAD_DETACHED);
++}
++
++void p80_init(void)
++{
++    pthread_once(&p80_once, p80_init_once);
++}
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index 2da75154a1..f399ecce50 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -39,6 +39,7 @@
+ #include "tcg/perf.h"
+ #include "tcg/insn-start-words.h"
+ #include "pcache-tcg.h"
++#include "qemu/p80.h"
+ 
+ TBContext tb_ctx;
+ 
+@@ -400,6 +401,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+ #ifndef CONFIG_USER_ONLY
+     bool pc_eligible;
+     uint64_t pc_t0 = 0;
++    uint64_t p85_t0 = unlikely(qatomic_read(&p85_gen_on)) ? p80_ns() : 0;
+ #endif
+ #ifdef CONFIG_SOFTMMU
+     /* Before the code is read, see tb_link_page() */
+@@ -565,6 +567,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+         tb_pcache_record(cpu, env, tb, &s, phys_pc, host_pc, gen_code_buf,
+                          gen_code_size, search_size, 0, true);
+     }
++    if (unlikely(p85_t0)) {
++        p85_gen_event(cpu, p85_t0, s.pc, pc_hit ? 1 : pc_eligible ? 2 : 3);
++    }
+ #endif
+     tb->tc.size = gen_code_size;
+ 
+diff --git a/include/hw/core/cpu.h b/include/hw/core/cpu.h
+index 2726089123..9e2da369a6 100644
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -552,6 +552,24 @@ struct CPUState {
+     TLBBcMailbox tlb_bc;
+     uint32_t tlb_bc_nwait;
+     uint64_t tlb_bc_wait[TLB_BC_MAXCPUS];
++    /* P80 instrumentation: last guest PC looked up, what the vCPU does. */
++    uint64_t p80_pc;
++    uint32_t p80_state;
++    /*
++     * Set while the vCPU is between TBs (translating, or waiting for the BQL
++     * to take an interrupt) and will reach a TB start, which checks
++     * icount_decr, before it makes any guest data access: a DSB on another
++     * vCPU need not wait for it (P80_BC=quiet).
++     */
++    uint32_t tlb_bc_quiet;
++    /*
++     * P85_BC=asid: ASID of the TLBI being broadcast (0x10000 | asid, 0 when the
++     * operation is not limited to one ASID's non-global entries), and the ASID
++     * of every record posted since the last DSB (0 none, 0x10000 | asid when
++     * they all name the same one, P85_ASID_MIX otherwise).
++     */
++    uint32_t p85_tlbi_asid;
++    uint32_t p85_dsb_asid;
+     uint32_t cflags_next_tb;
+     uint32_t interrupt_request;
+     unsigned singlestep_flags;
+diff --git a/include/qemu/p80.h b/include/qemu/p80.h
+new file mode 100644
+index 0000000000..4911793e20
+--- /dev/null
++++ b/include/qemu/p80.h
+@@ -0,0 +1,74 @@
++/*
++ * P80 instrumentation (lab only, branch p80, off unless P80_DIR is set):
++ * a guest PC sampler (last TB looked up per vCPU) and statistics of the
++ * broadcast TLB maintenance wait (tlb_bc_sync).
++ */
++#ifndef QEMU_P80_H
++#define QEMU_P80_H
++
++#include "qemu/atomic.h"
++
++enum {
++    P80_ST_EXEC = 0,    /* executing or in the exec loop */
++    P80_ST_BQL = 1,     /* waiting for the BQL */
++    P80_ST_GEN = 2,     /* translating or loading a TB */
++    P80_ST_SYNC = 3,    /* in tlb_bc_sync (its own DSB wait) */
++    P80_ST_FLUSH = 4,   /* applying its mailbox */
++    P80_ST_FILL = 5,    /* page table walk */
++    P80_ST_N = 8,
++};
++
++extern int p80_on;
++extern bool p80_bc_quiet;
++/* P80_BC=nowait: DSB never waits (broken on purpose, a negative control for the tests) */
++extern bool p80_bc_nowait;
++#define P80_ST_QUIET 6  /* p80_sync_seg: wait ended because the target was quiet */
++
++/* Enter and leave a quiet region (see CPUState.tlb_bc_quiet). */
++static inline bool p80_quiet_enter(uint32_t *q)
++{
++    if (p80_bc_quiet) {
++        qatomic_set(q, 1);
++        return true;
++    }
++    return false;
++}
++static inline void p80_quiet_leave(uint32_t *q)
++{
++    /* Order the clear before the icount_decr read at the next TB start. */
++    qatomic_set(q, 0);
++    smp_mb();
++}
++void p80_init(void);
++/*
++ * P85_BC=asid: a DSB does not wait for a vCPU whose current ASID differs from
++ * the one ASID that every TLBI posted since the last DSB was limited to (VAE1IS
++ * and VALE1IS on a TTBR0 address, ASIDE1IS).  Such a vCPU holds no non-global
++ * entry of that ASID: an ASID switch flushes the non-global EL1&0 entries.
++ */
++#define P85_ASID_MIX 0xffffffffu
++extern bool p85_bc_asid;
++/* P85_BC=asidbad: skip the vCPU even in the same ASID (negative control) */
++extern bool p85_bc_bad;
++extern int (*p85_asid_fn)(CPUState *cpu);
++void p85_asid_count(int src, uint64_t filtered, uint64_t skipped);
++/*
++ * P85 (lab only, with P80_DIR): P85_CTX=1 writes pc2.bin (40 byte records with the guest TTBR0_EL1 and
++ * TPIDR_EL1, i.e. process and thread), and gen.bin: one record per tb_gen_code while the file
++ * P80_DIR/gen.on exists (start ns, ns spent, guest pc, ttbr0, tpidr, cpu, kind 1 pack hit,
++ * 2 translated after a pack miss, 3 translated, not eligible for the pack).
++ */
++extern int p85_ctx_on;
++extern int p85_gen_on;
++extern void (*p85_ctx_fn)(CPUState *cpu, uint64_t *ttbr0, uint64_t *tpidr);
++void p85_gen_event(CPUState *cpu, uint64_t t0, uint64_t pc, int kind);
++uint64_t p80_ns(void);
++void p80_sync_seg(int src, int st, int ran, uint64_t ns);
++void p80_sync_call(int src, bool waited, uint64_t ns);
++
++#define P80_SET(cpu, st) \
++    uint32_t p80_old_ = qatomic_read(&(cpu)->p80_state); \
++    qatomic_set(&(cpu)->p80_state, (st))
++#define P80_RESTORE(cpu) qatomic_set(&(cpu)->p80_state, p80_old_)
++
++#endif
+diff --git a/system/cpus.c b/system/cpus.c
+index 13497b2f15..18b04b5a2a 100644
+--- a/system/cpus.c
++++ b/system/cpus.c
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/p80.h"
+ #include "qemu/p35-stats.h"
+ #include "monitor/monitor.h"
+ #include "qemu/coroutine-tls.h"
+@@ -581,7 +582,14 @@ void bql_lock_impl(const char *file, int line)
+ {
+     QemuMutexLockFunc bql_lock_fn = qatomic_read(&bql_mutex_lock_func);
+ 
++    CPUState *p80c = current_cpu;
++    uint32_t p80o = 0;
++
+     g_assert(!bql_locked());
++    if (p80c) {
++        p80o = qatomic_read(&p80c->p80_state);
++        qatomic_set(&p80c->p80_state, P80_ST_BQL);
++    }
+     if (unlikely(p35_on)) {
+         p35_add(P35_BQL_LOCK, 1);
+         if (qemu_mutex_trylock(&bql)) {
+@@ -591,9 +599,12 @@ void bql_lock_impl(const char *file, int line)
+             bql_lock_fn(&bql, file, line);
+             p35_add(P35_BQL_WAIT_NS, get_clock() - t0);
+         }
+-        return;
++    } else {
++        bql_lock_fn(&bql, file, line);
++    }
++    if (p80c) {
++        qatomic_set(&p80c->p80_state, p80o);
+     }
+-    bql_lock_fn(&bql, file, line);
+ }
+ 
+ void bql_unlock(void)
+diff --git a/target/arm/cpu.c b/target/arm/cpu.c
+index 114d56566e..6b6c2cc722 100644
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -58,6 +58,7 @@
+ #include "target/arm/gtimer.h"
+ 
+ #include "trace.h"
++#include "qemu/p80.h"
+ 
+ static void arm_cpu_set_pc(CPUState *cs, vaddr value)
+ {
+@@ -2834,3 +2835,39 @@ static void arm_cpu_register_types(void)
+ }
+ 
+ type_init(arm_cpu_register_types)
++
++/* P85 (lab only): process (TTBR0_EL1) and thread (TPIDR_EL1) of a vCPU for the P80 sampler. */
++static void arm_p85_ctx(CPUState *cs, uint64_t *ttbr0, uint64_t *tpidr)
++{
++    CPUARMState *env = cpu_env(cs);
++    *ttbr0 = qatomic_read(&env->cp15.ttbr0_el[1]);
++    *tpidr = qatomic_read(&env->cp15.tpidr_el[1]);
++}
++/*
++ * P85_BC=asid: the ASID a vCPU runs EL1&0 with, -1 when it is not plainly in
++ * EL1&0 (EL2/EL3, E2H).  Read from another thread: the result is only trusted
++ * after tlb_bc_sync's barrier (see there).
++ */
++static int arm_p85_asid(CPUState *cs)
++{
++    CPUARMState *env = cpu_env(cs);
++    uint64_t tcr, ttbr;
++    int asid;
++    if (!qatomic_read(&env->aarch64) || arm_current_el(env) > 1 ||
++        (arm_hcr_el2_eff(env) & HCR_E2H)) {
++        return -1;
++    }
++    tcr = qatomic_read(&env->cp15.tcr_el[1]);
++    ttbr = extract64(tcr, 22, 1) ? qatomic_read(&env->cp15.ttbr1_el[1])
++                                 : qatomic_read(&env->cp15.ttbr0_el[1]);
++    asid = extract64(ttbr, 48, 16);
++    if (!extract64(tcr, 36, 1)) {
++        asid &= 0xff;
++    }
++    return asid;
++}
++static void __attribute__((constructor)) arm_p85_register(void)
++{
++    p85_ctx_fn = arm_p85_ctx;
++    p85_asid_fn = arm_p85_asid;
++}
+diff --git a/target/arm/tcg/tlb-insns.c b/target/arm/tcg/tlb-insns.c
+index b24eb57788..de86e86f05 100644
+--- a/target/arm/tcg/tlb-insns.c
++++ b/target/arm/tcg/tlb-insns.c
+@@ -6,6 +6,7 @@
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+ #include "qemu/osdep.h"
++#include "qemu/p80.h"
+ #include "qemu/log.h"
+ #include "exec/cputlb.h"
+ #include "exec/target_page.h"
+@@ -314,13 +315,27 @@ static int vae2_tlbbits(CPUARMState *env, uint64_t addr)
+     return tlbbits_for_regime(env, mmu_idx, addr);
+ }
+ 
++/* P85: 0x10000 | ASID of a TLBI operand (8 bit unless TCR_EL1.AS) */
++static uint32_t p85_tlbi_asid_of(CPUARMState *env, uint64_t value)
++{
++    uint32_t asid = extract64(value, 48, 16);
++    if (!extract64(env->cp15.tcr_el[1], 36, 1)) {
++        asid &= 0xff;
++    }
++    return 0x10000 | asid;
++}
+ static void tlbi_aa64_vmalle1is_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                       uint64_t value)
+ {
+     CPUState *cs = env_cpu(env);
+     int mask = vae1_tlbmask(env);
+-
++    /* ASIDE1IS (opc2 2): only the non-global entries of one ASID */
++    if (p85_bc_asid && ri->opc2 == 2 && arm_current_el(env) == 1 &&
++        !(arm_hcr_el2_eff(env) & HCR_E2H)) {
++        cs->p85_tlbi_asid = p85_tlbi_asid_of(env, value);
++    }
+     tlb_flush_by_mmuidx_all_cpus_synced(cs, mask);
++    cs->p85_tlbi_asid = 0;
+ }
+ 
+ static void tlbi_aa64_vmalle1_write(CPUARMState *env, const ARMCPRegInfo *ri,
+@@ -438,8 +453,17 @@ static void tlbi_aa64_vae1is_write(CPUARMState *env, const ARMCPRegInfo *ri,
+     int mask = vae1_tlbmask(env);
+     uint64_t pageaddr = sextract64(value << 12, 0, 56);
+     int bits = vae1_tlbbits(env, pageaddr);
+-
++    /*
++     * VAE1IS (opc2 1) and VALE1IS (opc2 5) name one ASID; on a TTBR0 address
++     * (bit 55 clear) the entries they hit are that ASID's non-global ones.
++     */
++    if (p85_bc_asid && (ri->opc2 == 1 || ri->opc2 == 5) &&
++        !extract64(pageaddr, 55, 1) && arm_current_el(env) == 1 &&
++        !(arm_hcr_el2_eff(env) & HCR_E2H)) {
++        cs->p85_tlbi_asid = p85_tlbi_asid_of(env, value);
++    }
+     tlb_flush_page_bits_by_mmuidx_all_cpus_synced(cs, pageaddr, mask, bits);
++    cs->p85_tlbi_asid = 0;
+ }
+ 
+ static void tlbi_aa64_vae1_write(CPUARMState *env, const ARMCPRegInfo *ri,

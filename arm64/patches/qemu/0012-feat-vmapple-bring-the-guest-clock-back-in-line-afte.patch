@@ -1,0 +1,552 @@
+From cc3ae0f2f3e23ec904cf41e7d9bdc630c303411c Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(vmapple): bring the guest clock back in line after a
+ restore
+
+- Count the generic timer at exactly CNTFRQ (x-exact-cntfrq=off keeps
+  the old way, an older stream keeps counting the old way). The old
+  divisor made a 24 MHz guest run 1.6 percent fast.
+- sync-clock-on-load (opt in): the wall time of the save goes into the
+  stream and the first run after a load moves the VM clock forward by
+  the host time since then. The advance is counted from the stop, not
+  from the device state write, which runs after the RAM of a
+  mapped-ram save is written.
+- cntfrq-exact system test.
+---
+ hw/vmapple/vmapple.c                    |  96 ++++++++++++++++++++
+ include/system/cpu-timers.h             |   5 +
+ system/cpu-timers.c                     |  17 ++++
+ target/arm/cpu.c                        |  55 ++++++++++-
+ target/arm/cpu.h                        |  14 +++
+ target/arm/helper.c                     |  13 +--
+ target/arm/machine.c                    |  41 +++++++++
+ tests/tcg/aarch64/system/cntfrq-exact.c | 116 ++++++++++++++++++++++++
+ 8 files changed, 348 insertions(+), 9 deletions(-)
+ create mode 100644 tests/tcg/aarch64/system/cntfrq-exact.c
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 54b8ab805f..2b573acdac 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -62,6 +62,8 @@
+ #include "system/runstate.h"
+ #include "system/system.h"
+ #include "system/tcg.h"
++#include "system/cpu-timers.h"
++#include "migration/vmstate.h"
+ #include "target/arm/gtimer.h"
+ #include "target/arm/cpu.h"
+ #include "target/arm/cpu-features.h"
+@@ -97,6 +99,13 @@ struct VMAppleMachineState {
+     CPUBreakpoint *handoff_bp;
+     bool handoff_stepping;
+     VMChangeStateEntry *handoff_vmsh;
++    /* guest clock catch-up after a load, see vmapple_clock_state() */
++    bool sync_clock;
++    bool clock_loaded;
++    int64_t saved_wall_ns;
++    /* host time of the last stop, 0 while running (not migrated) */
++    int64_t stop_wall_ns;
++    VMChangeStateEntry *clock_vmsh;
+ };
+ 
+ #define TYPE_VMAPPLE_MACHINE   MACHINE_TYPE_NAME("vmapple")
+@@ -624,6 +633,80 @@ static void vmapple_tcg_smp_shift(void *opaque)
+     }
+ }
+ 
++/*
++ * The guest keeps its wall time as a base plus the counter, and the counter
++ * stops while the machine is saved. The host wall time at the save goes into
++ * the stream, and the first time the machine runs after a load the VM clock
++ * is moved forward by the time elapsed since, so `date` is right at once.
++ */
++static int vmapple_clock_pre_save(void *opaque)
++{
++    VMAppleMachineState *vms = opaque;
++
++    /*
++     * The guest's clock stopped when the VM did, not when the device state is
++     * written: with a mapped-ram save the RAM goes out first (about 7 s for
++     * 8 GiB), and counting from here left the guest that much behind.
++     */
++    if (!runstate_is_running() && vms->stop_wall_ns > 0) {
++        vms->saved_wall_ns = vms->stop_wall_ns;
++    } else {
++        vms->saved_wall_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
++    }
++    return 0;
++}
++
++static int vmapple_clock_post_load(void *opaque, int version_id)
++{
++    VMAppleMachineState *vms = opaque;
++
++    vms->clock_loaded = true;
++    return 0;
++}
++
++static bool vmapple_clock_needed(void *opaque)
++{
++    return true;
++}
++
++static const VMStateDescription vmstate_vmapple_clock = {
++    .name = "vmapple/wallclock",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = vmapple_clock_needed,
++    .pre_save = vmapple_clock_pre_save,
++    .post_load = vmapple_clock_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_INT64(saved_wall_ns, VMAppleMachineState),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static void vmapple_clock_state(void *opaque, bool running, RunState state)
++{
++    VMAppleMachineState *vms = opaque;
++
++    vms->stop_wall_ns = running ? 0 : qemu_clock_get_ns(QEMU_CLOCK_HOST);
++    if (!running || !vms->clock_loaded) {
++        return;
++    }
++    vms->clock_loaded = false;
++    if (vms->sync_clock && vms->saved_wall_ns > 0 && !icount_enabled()) {
++        cpu_clock_advance(qemu_clock_get_ns(QEMU_CLOCK_HOST) -
++                          vms->saved_wall_ns);
++    }
++}
++
++static bool vmapple_get_sync_clock(Object *obj, Error **errp)
++{
++    return VMAPPLE_MACHINE(obj)->sync_clock;
++}
++
++static void vmapple_set_sync_clock(Object *obj, bool value, Error **errp)
++{
++    VMAPPLE_MACHINE(obj)->sync_clock = value;
++}
++
+ static void vmapple_get_tcg_smp_final_shift(Object *obj, Visitor *v,
+                                             const char *name, void *opaque,
+                                             Error **errp)
+@@ -1070,6 +1153,9 @@ static void mach_vmapple_init(MachineState *machine)
+         vms->handoff_vmsh = qemu_add_vm_change_state_handler(
+             vmapple_handoff_state, vms);
+     }
++    vmstate_register_any(NULL, &vmstate_vmapple_clock, vms);
++    vms->clock_vmsh = qemu_add_vm_change_state_handler(vmapple_clock_state,
++                                                       vms);
+     arm_load_kernel(ARM_CPU(first_cpu), machine, &vms->bootinfo);
+ 
+     qemu_register_reset(vmapple_reset, vms);
+@@ -1198,6 +1284,16 @@ static void vmapple_instance_init(Object *obj)
+     object_property_set_description(obj, "run-installer",
+                                     "Boot the installer environment");
+ 
++    vms->sync_clock = false;
++    object_property_add_bool(obj, "sync-clock-on-load",
++                             vmapple_get_sync_clock, vmapple_set_sync_clock);
++    object_property_set_description(obj, "sync-clock-on-load",
++                                    "After a snapshot load, move the guest "
++                                    "clock forward by the host time elapsed "
++                                    "since the save (default off: a jump of "
++                                    "an hour or more makes the guest run its "
++                                    "overdue work and delays ssh by minutes; "
++                                    "not for icount)");
+     vms->xnu_handoff_pc = 0xe0a00000;
+     object_property_add_bool(obj, "internal-use-only-unit",
+                              vmapple_get_internal_use_only_unit,
+diff --git a/include/system/cpu-timers.h b/include/system/cpu-timers.h
+index a1abed0d7a..0605ad859d 100644
+--- a/include/system/cpu-timers.h
++++ b/include/system/cpu-timers.h
+@@ -24,6 +24,11 @@ void cpu_enable_ticks(void);
+ /* Caller must hold BQL */
+ void cpu_disable_ticks(void);
+ 
++/*
++ * Move the VM clock forward by @ns (ignored when not positive).
++ * Caller must hold BQL. Not for icount.
++ */
++void cpu_clock_advance(int64_t ns);
+ /*
+  * return the time elapsed in VM between vm_start and vm_stop.
+  * cpu_get_ticks() uses units of the host CPU cycle counter.
+diff --git a/system/cpu-timers.c b/system/cpu-timers.c
+index 9919b46230..a0de483be5 100644
+--- a/system/cpu-timers.c
++++ b/system/cpu-timers.c
+@@ -100,6 +100,23 @@ int64_t cpu_get_clock(void)
+     return ti;
+ }
+ 
++/*
++ * Move the VM clock forward: the guest counter and every timer on
++ * QEMU_CLOCK_VIRTUAL see the jump. Caller must hold BQL.
++ */
++void cpu_clock_advance(int64_t ns)
++{
++    if (ns <= 0) {
++        return;
++    }
++    seqlock_write_lock(&timers_state.vm_clock_seqlock,
++                       &timers_state.vm_clock_lock);
++    timers_state.cpu_clock_offset += ns;
++    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
++                         &timers_state.vm_clock_lock);
++    qemu_clock_notify(QEMU_CLOCK_VIRTUAL);
++}
++
+ /*
+  * enable cpu_get_ticks()
+  * Caller must hold BQL which serves as mutex for vm_clock_seqlock.
+diff --git a/target/arm/cpu.c b/target/arm/cpu.c
+index e2605a3cc9..b56e3359cd 100644
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -1317,6 +1317,9 @@ static void arm_cpu_initfn(Object *obj)
+ static const Property arm_cpu_gt_cntfrq_property =
+             DEFINE_PROP_UINT64("cntfrq", ARMCPU, gt_cntfrq_hz, 0);
+ 
++static const Property arm_cpu_gt_exact_property =
++            DEFINE_PROP_BOOL("x-exact-cntfrq", ARMCPU, gt_exact_cntfrq, true);
++
+ static const Property arm_cpu_reset_cbar_property =
+             DEFINE_PROP_UINT64("reset-cbar", ARMCPU, reset_cbar, 0);
+ 
+@@ -1463,6 +1466,51 @@ unsigned int gt_cntfrq_period_ns(ARMCPU *cpu)
+       NANOSECONDS_PER_SECOND / cpu->gt_cntfrq_hz : 1;
+ }
+ 
++/*
++ * True if counting at exactly gt_cntfrq_hz differs from counting with the
++ * truncated gt_cntfrq_period_ns(), i.e. the frequency does not divide 1 GHz.
++ */
++bool gt_exact_matters(ARMCPU *cpu)
++{
++    return cpu->gt_cntfrq_hz &&
++           NANOSECONDS_PER_SECOND % cpu->gt_cntfrq_hz != 0;
++}
++
++/*
++ * Counter value at QEMU_CLOCK_VIRTUAL time @ns. In exact mode this is
++ * floor(ns * CNTFRQ / 1e9), so the guest sees the frequency it is told
++ * (CNTFRQ_EL0), instead of 1e9 / floor(1e9 / CNTFRQ).
++ */
++uint64_t gt_ns_to_ticks(ARMCPU *cpu, int64_t ns)
++{
++    if (cpu->gt_exact) {
++        return muldiv64(ns, cpu->gt_cntfrq_hz, NANOSECONDS_PER_SECOND);
++    }
++    return ns / gt_cntfrq_period_ns(cpu);
++}
++
++/*
++ * Earliest QEMU_CLOCK_VIRTUAL time at which gt_ns_to_ticks() reaches
++ * @ticks, or INT64_MAX if that is out of range. This is the exact inverse
++ * of gt_ns_to_ticks() (a timer set for it never fires before the counter
++ * reaches its compare value, and never later than one ns after), which is
++ * what the integer QEMUTimer scale gave the truncated period.
++ */
++int64_t gt_ticks_to_ns(ARMCPU *cpu, uint64_t ticks)
++{
++    if (!cpu->gt_exact) {
++        uint64_t period = gt_cntfrq_period_ns(cpu);
++
++        return ticks > INT64_MAX / period ? INT64_MAX : ticks * period;
++    }
++    if (ticks > muldiv64(INT64_MAX, cpu->gt_cntfrq_hz,
++                         NANOSECONDS_PER_SECOND)) {
++        return INT64_MAX;
++    }
++    return muldiv64_round_up(ticks, NANOSECONDS_PER_SECOND,
++                             cpu->gt_cntfrq_hz);
++}
++
+ static void arm_cpu_propagate_feature_implications(ARMCPU *cpu)
+ {
+     CPUARMState *env = &cpu->env;
+@@ -1704,6 +1752,7 @@ static void arm_cpu_post_init(Object *obj)
+ 
+     if (arm_feature(&cpu->env, ARM_FEATURE_GENERIC_TIMER)) {
+         qdev_property_add_static(DEVICE(cpu), &arm_cpu_gt_cntfrq_property);
++        qdev_property_add_static(DEVICE(cpu), &arm_cpu_gt_exact_property);
+     }
+ 
+     if (kvm_enabled()) {
+@@ -1941,7 +1990,11 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
+     }
+ #ifndef CONFIG_USER_ONLY
+     {
+-        uint64_t scale = gt_cntfrq_period_ns(cpu);
++        /* The timers count ns: gt_ticks_to_ns() converts a compare value */
++        uint64_t scale = SCALE_NS;
++
++        cpu->gt_exact = cpu->gt_exact_cntfrq &&
++                        cpu->gt_cntfrq_hz <= UINT32_MAX;
+ 
+         cpu->gt_timer[GTIMER_PHYS] = timer_new(QEMU_CLOCK_VIRTUAL, scale,
+                                                arm_gt_ptimer_cb, cpu);
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index 3e48283ccb..ed0a952a93 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -1230,6 +1230,17 @@ struct ArchCPU {
+ 
+     /* Generic timer counter frequency, in Hz */
+     uint64_t gt_cntfrq_hz;
++    /*
++     * gt_exact: count at exactly gt_cntfrq_hz. When false, the counter is
++     * QEMU_CLOCK_VIRTUAL divided by the truncated gt_cntfrq_period_ns(),
++     * which runs fast for a frequency that does not divide 1 GHz (24 MHz:
++     * a 41 ns period, 1.6 % fast). Property x-exact-cntfrq (default on);
++     * an incoming stream without the cpu/gt-exact subsection was counted
++     * the old way and keeps it, see cpu_post_load().
++     */
++    bool gt_exact_cntfrq;
++    bool gt_exact;
++    bool gt_exact_in_stream;
+ };
+ 
+ typedef struct ARMCPUInfo {
+@@ -1276,6 +1287,9 @@ void arm_gt_sel2timer_cb(void *opaque);
+ void arm_gt_sel2vtimer_cb(void *opaque);
+ 
+ unsigned int gt_cntfrq_period_ns(ARMCPU *cpu);
++bool gt_exact_matters(ARMCPU *cpu);
++uint64_t gt_ns_to_ticks(ARMCPU *cpu, int64_t ns);
++int64_t gt_ticks_to_ns(ARMCPU *cpu, uint64_t ticks);
+ void gt_rme_post_el_change(ARMCPU *cpu, void *opaque);
+ 
+ #define ARM_AFF0_SHIFT 0
+diff --git a/target/arm/helper.c b/target/arm/helper.c
+index bd23343ca7..edacd37308 100644
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -1389,7 +1389,7 @@ uint64_t gt_get_countervalue(CPUARMState *env)
+ {
+     ARMCPU *cpu = env_archcpu(env);
+ 
+-    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / gt_cntfrq_period_ns(cpu);
++    return gt_ns_to_ticks(cpu, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+ }
+ 
+ static void gt_update_gicv5_ppi(CPUARMState *env, int timeridx, bool level)
+@@ -1576,14 +1576,11 @@ static void gt_recalc_timer(ARMCPU *cpu, int timeridx)
+         /*
+          * Note that the desired next expiry time might be beyond the
+          * signed-64-bit range of a QEMUTimer -- in this case we just
+-         * set the timer for as far in the future as possible. When the
+-         * timer expires we will reset the timer for any remaining period.
++         * set the timer for as far in the future as possible (INT64_MAX
++         * from gt_ticks_to_ns()). When the timer expires we will reset
++         * the timer for any remaining period.
+          */
+-        if (nexttick > INT64_MAX / gt_cntfrq_period_ns(cpu)) {
+-            timer_mod_ns(cpu->gt_timer[timeridx], INT64_MAX);
+-        } else {
+-            timer_mod(cpu->gt_timer[timeridx], nexttick);
+-        }
++        timer_mod_ns(cpu->gt_timer[timeridx], gt_ticks_to_ns(cpu, nexttick));
+         trace_arm_gt_recalc(timeridx, nexttick);
+     } else {
+         /* Timer disabled: ISTATUS and timer output always clear */
+diff --git a/target/arm/machine.c b/target/arm/machine.c
+index c46e3d90de..840ca3a647 100644
+--- a/target/arm/machine.c
++++ b/target/arm/machine.c
+@@ -1034,6 +1034,8 @@ static int cpu_pre_load(void *opaque)
+     ARMCPU *cpu = opaque;
+     CPUARMState *env = &cpu->env;
+ 
++    cpu->gt_exact_in_stream = false;
++
+     /*
+      * In an inbound migration where on the source FPSCR/FPSR/FPCR are 0,
+      * there will be no fpcr_fpsr subsection so we won't call vfp_set_fpcr()
+@@ -1122,6 +1124,16 @@ static int cpu_post_load(void *opaque, int version_id)
+     bool fail = false;
+     int i, v;
+ 
++    /*
++     * Count the way the source did: a stream without cpu/gt-exact comes
++     * from a QEMU (or a CPU with x-exact-cntfrq=off) that used the
++     * truncated period, and switching mode would move the counter (back,
++     * for 24 MHz) under a running guest.
++     */
++    if (gt_exact_matters(cpu)) {
++        cpu->gt_exact = cpu->gt_exact_in_stream;
++    }
++
+     trace_cpu_post_load(cpu->cpreg_vmstate_array_len,
+                         cpu->cpreg_array_len);
+ 
+@@ -1245,6 +1257,34 @@ static int cpu_post_load(void *opaque, int version_id)
+     return 0;
+ }
+ 
++static bool gt_exact_needed(void *opaque)
++{
++    ARMCPU *cpu = opaque;
++
++    return cpu->gt_exact && gt_exact_matters(cpu);
++}
++
++static int gt_exact_post_load(void *opaque, int version_id)
++{
++    ARMCPU *cpu = opaque;
++
++    cpu->gt_exact_in_stream = cpu->gt_exact;
++    return 0;
++}
++
++/* The generic timer counts at exactly CNTFRQ (see gt_ns_to_ticks()) */
++static const VMStateDescription vmstate_gt_exact = {
++    .name = "cpu/gt-exact",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = gt_exact_needed,
++    .post_load = gt_exact_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_BOOL(gt_exact, ARMCPU),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ static bool vmapple_pac_needed(void *opaque)
+ {
+     ARMCPU *cpu = opaque;
+@@ -1367,6 +1407,7 @@ const VMStateDescription vmstate_arm_cpu = {
+         &vmstate_event,
+         &vmstate_fpmr,
+         &vmstate_vmapple_pac,
++        &vmstate_gt_exact,
+         NULL
+     }
+ };
+diff --git a/tests/tcg/aarch64/system/cntfrq-exact.c b/tests/tcg/aarch64/system/cntfrq-exact.c
+new file mode 100644
+index 0000000000..a3b09d3cf1
+--- /dev/null
++++ b/tests/tcg/aarch64/system/cntfrq-exact.c
+@@ -0,0 +1,116 @@
++/*
++ * Generic timer at a frequency that does not divide 1 GHz.
++ *
++ * Run with -cpu max,cntfrq=24000000 and -icount shift=0 so that one
++ * instruction is one ns of QEMU_CLOCK_VIRTUAL. The counter used to be
++ * ns / floor(1e9 / CNTFRQ), a 41 ns period for 24 MHz, so it ran 1.6 %
++ * fast against the CNTFRQ_EL0 the guest reads (macOS guests drifted by
++ * a minute per hour). Checks that:
++ *  - the counter advances at CNTFRQ: a loop of a known number of
++ *    instructions (ns) moves it by ns * CNTFRQ / 1e9, within 0.1 %;
++ *  - the virtual timer never asserts before CNTVCT reaches CVAL and
++ *    fires within a few ticks after, for short and long compare values
++ *    (a timer set for a rounded-down ns would fire early or re-arm
++ *    at the same time forever).
++ *
++ * Copyright (c) 2026 Snapintosh contributors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include <stdint.h>
++#include <minilib.h>
++
++#define FREQ        24000000ull
++#define ITERS       25000000ull     /* 2 instructions each: 50 ms */
++
++#define SYSREG_R(name) ({ uint64_t v_; \
++    asm volatile("isb; mrs %0, " #name : "=r" (v_) :: "memory"); v_; })
++#define SYSREG_W(name, val) \
++    asm volatile("msr " #name ", %0; isb" :: "r" ((uint64_t)(val)) : "memory")
++
++uint64_t mmu_cfg[8] __attribute__((aligned(64)));
++
++static uint64_t spin(uint64_t n)
++{
++    asm volatile("1: subs %0, %0, #1\n\tb.ne 1b" : "+r" (n) :: "cc");
++    return n;
++}
++
++static int check_rate(void)
++{
++    uint64_t c0, c1, got, want, err;
++
++    /* warm up the translation so the measured loop is just the loop */
++    spin(1000);
++    c0 = SYSREG_R(cntvct_el0);
++    spin(ITERS);
++    c1 = SYSREG_R(cntvct_el0);
++    got = c1 - c0;
++    want = 2 * ITERS * FREQ / 1000000000ull;
++    err = got > want ? got - want : want - got;
++    ml_printf("counter moved %ld ticks for %ld ns, expected %ld\n",
++              (long)got, (long)(2 * ITERS), (long)want);
++    if (err * 1000 > want) {
++        ml_printf("FAIL: counter rate off by more than 0.1%%\n");
++        return 1;
++    }
++    return 0;
++}
++
++static int check_timer(uint64_t delta)
++{
++    uint64_t cval, now, late;
++    int polls = 0;
++
++    SYSREG_W(cntv_ctl_el0, 0);
++    cval = SYSREG_R(cntvct_el0) + delta;
++    SYSREG_W(cntv_cval_el0, cval);
++    SYSREG_W(cntv_ctl_el0, 1);              /* enabled, IMASK clear */
++    while (!(SYSREG_R(cntv_ctl_el0) & 4)) {
++        if (++polls > 200000000) {
++            ml_printf("FAIL: timer +%ld never fired\n", (long)delta);
++            return 1;
++        }
++    }
++    now = SYSREG_R(cntvct_el0);
++    SYSREG_W(cntv_ctl_el0, 0);
++    if (now < cval) {
++        ml_printf("FAIL: timer +%ld fired early: cnt %ld cval %ld\n",
++                  (long)delta, (long)now, (long)cval);
++        return 1;
++    }
++    late = now - cval;
++    if (late > 64) {
++        ml_printf("FAIL: timer +%ld fired %ld ticks late\n",
++                  (long)delta, (long)late);
++        return 1;
++    }
++    return 0;
++}
++
++int main(void)
++{
++    static const uint64_t deltas[] = { 1, 2, 3, 7, 24, 25, 41, 1000, 23999,
++                                       24000, 240001 };
++    uint64_t frq = SYSREG_R(cntfrq_el0);
++    int fails = 0;
++
++    asm volatile("msr daifset, #2");        /* poll ISTATUS, no IRQs */
++    ml_printf("CNTFRQ_EL0 %ld\n", (long)frq);
++    if (frq != FREQ) {
++        ml_printf("FAIL: run with -cpu max,cntfrq=%ld\n", (long)FREQ);
++        return 1;
++    }
++    fails += check_rate();
++    for (int r = 0; r < 20; r++) {
++        for (unsigned i = 0; i < sizeof(deltas) / sizeof(deltas[0]); i++) {
++            fails += check_timer(deltas[i] + r);
++        }
++    }
++    if (fails) {
++        ml_printf("FAIL: %d checks\n", fails);
++        return 1;
++    }
++    ml_printf("OK\n");
++    return 0;
++}

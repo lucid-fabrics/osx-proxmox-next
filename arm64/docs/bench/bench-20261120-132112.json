@@ -1,0 +1,174 @@
+{
+ "schema": 1,
+ "date_utc": "2026-11-20T14:35:29Z",
+ "release_commit": "c9939ff",
+ "runs_requested": 3,
+ "host": {
+  "cpu_model": "12th Gen Intel(R) Core(TM) i5-1240P",
+  "host_threads": 6,
+  "cores_given": 6,
+  "ram_given": "4G",
+  "gpu_path": "ANV",
+  "qemu_md5": "455899b7d68dbf7ff41b8cec5a603956",
+  "pcache": "ro",
+  "ipsw_build": "26A428"
+ },
+ "options": {
+  "runs": 3,
+  "cpus": 6,
+  "ram": "4G",
+  "gpu": "auto",
+  "ssh_port": 10022,
+  "http_port": 18080,
+  "pcache": "ro",
+  "settle": 60,
+  "save_settle": 120,
+  "drag_settle": 40,
+  "drag_secs": 20,
+  "resume_pause": 3,
+  "no_drag": false,
+  "no_resume": false,
+  "commit": "c9939ff",
+  "keep": false,
+  "dry_run": false,
+  "ssh_limit": 900,
+  "dock_limit": 600,
+  "draw_limit": 300,
+  "secs_cold": 1800,
+  "secs_snap": 1800,
+  "secs_resume": 1200
+ },
+ "runs": [
+  {
+   "run": 1,
+   "boot_to_ssh_s": 94.4,
+   "boot_to_dock_s": 188.5,
+   "safari_cold_draw_s": 146.2,
+   "safari_cold_get_s": 128.39,
+   "drag_grab_offset_px": 40,
+   "drag_events": 470,
+   "drag_frames": 122,
+   "drag_s": 20.04,
+   "drag_fps": 6.09,
+   "drag_window_moved_px": 96,
+   "cold_fatals": 0,
+   "snapshot_save_s": 371.6,
+   "snapshot_gib": 4.01,
+   "errors": [
+    "resume: no SETTIME line"
+   ]
+  },
+  {
+   "run": 2,
+   "boot_to_ssh_s": 107.2,
+   "boot_to_dock_s": 157.9,
+   "safari_cold_draw_s": 187.2,
+   "safari_cold_get_s": 164.6,
+   "drag_grab_offset_px": 40,
+   "drag_events": 470,
+   "drag_frames": 119,
+   "drag_s": 20.04,
+   "drag_fps": 5.94,
+   "drag_window_moved_px": 104,
+   "cold_fatals": 0,
+   "snapshot_save_s": 406.4,
+   "snapshot_gib": 4.01,
+   "errors": [
+    "resume: no SETTIME line"
+   ]
+  },
+  {
+   "run": 3,
+   "boot_to_ssh_s": 103.9,
+   "boot_to_dock_s": 142.9,
+   "safari_cold_draw_s": 228.3,
+   "safari_cold_get_s": 196.41,
+   "drag_grab_offset_px": 40,
+   "drag_events": 471,
+   "drag_frames": 134,
+   "drag_s": 20.02,
+   "drag_fps": 6.69,
+   "drag_window_moved_px": 96,
+   "cold_fatals": 0,
+   "snapshot_save_s": 350.9,
+   "snapshot_gib": 4.01,
+   "errors": [
+    "resume: no SETTIME line"
+   ]
+  }
+ ],
+ "summary": {
+  "boot_to_ssh_s": {
+   "n": 3,
+   "median": 103.9,
+   "min": 94.4,
+   "max": 107.2,
+   "mean": 101.83,
+   "sd": 6.65
+  },
+  "boot_to_dock_s": {
+   "n": 3,
+   "median": 157.9,
+   "min": 142.9,
+   "max": 188.5,
+   "mean": 163.1,
+   "sd": 23.24
+  },
+  "safari_cold_draw_s": {
+   "n": 3,
+   "median": 187.2,
+   "min": 146.2,
+   "max": 228.3,
+   "mean": 187.23,
+   "sd": 41.05
+  },
+  "safari_cold_get_s": {
+   "n": 3,
+   "median": 164.6,
+   "min": 128.39,
+   "max": 196.41,
+   "mean": 163.13,
+   "sd": 34.03
+  },
+  "safari_resume_draw_s": {
+   "n": 0,
+   "median": null,
+   "min": null,
+   "max": null,
+   "mean": null,
+   "sd": null
+  },
+  "safari_resume_get_s": {
+   "n": 0,
+   "median": null,
+   "min": null,
+   "max": null,
+   "mean": null,
+   "sd": null
+  },
+  "drag_fps": {
+   "n": 3,
+   "median": 6.09,
+   "min": 5.94,
+   "max": 6.69,
+   "mean": 6.24,
+   "sd": 0.4
+  },
+  "resume_load_s": {
+   "n": 0,
+   "median": null,
+   "min": null,
+   "max": null,
+   "mean": null,
+   "sd": null
+  },
+  "resume_ssh_s": {
+   "n": 0,
+   "median": null,
+   "min": null,
+   "max": null,
+   "mean": null,
+   "sd": null
+  }
+ }
+}

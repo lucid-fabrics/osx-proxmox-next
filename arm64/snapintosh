@@ -1,0 +1,1761 @@
+#!/usr/bin/env bash
+# snapintosh: run arm64 macOS 27 on x86 Linux (QEMU TCG vmapple fork + Ambrosia boot firmware + reims-vgpu + metal2vulkan).
+# One entry point. See README.md and docs/BLOCKERS.md.
+set -euo pipefail
+# Everything this tool writes (guest RAM in vm.state, overlays with the autologin password file, logs, the ssh key) is for the
+# user alone: no group or other bits on anything it creates, and $HOME_DIR itself is 0700 (ensure_home).
+umask 077
+# bash 5.2+ treats `&` in the replacement of ${v//pat/rep} as "the matched text": a path with an `&` in it would be garbled. Off, so
+# every replacement is literal (tests/test_launch.py runs a home with `&` in it).
+shopt -u patsub_replacement 2>/dev/null || true
+# a guest password exported in the caller's shell goes to goldenctl only (see make_disk_golden), never into the environment of QEMU, ssh or qemu-nbd
+GUEST_PW=${SNAPINTOSH_GUEST_PASSWORD-}; unset SNAPINTOSH_GUEST_PASSWORD
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+ROOT=$(dirname "$SELF")
+LIB=$ROOT/lib
+
+# ---------------------------------------------------------------- config
+# shellcheck source=pins.env
+. "$ROOT/pins.env"
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/snapintosh/pins.env
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
+
+ipsw_pick() { # BUILD: set IPSW_BUILD/VERSION/URL/SHA256/SIZE from the table in pins.env
+  local b=$1 k
+  case " $IPSW_BUILDS " in *" $b "*) ;; *) printf 'snapintosh: unknown build %s (tested: %s)\n' "$b" "$IPSW_BUILDS" >&2; exit 1 ;; esac
+  IPSW_BUILD=$b
+  for k in VERSION URL SHA256 SIZE; do eval "IPSW_$k=\${IPSW_${b}_$k}"; done
+}
+ipsw_pick "$IPSW_DEFAULT"
+
+HOME_DIR=${SNAPINTOSH_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/snapintosh}
+PREFIX=${SNAPINTOSH_PREFIX:-$HOME_DIR/prefix}
+SRC=$HOME_DIR/src
+BUILD=$HOME_DIR/build
+DL=$HOME_DIR/dl
+VM=$HOME_DIR/vm
+PCACHE_DIR=$HOME_DIR/pcache
+SNAPS=${SNAPS:-$HOME_DIR/snaps}
+RUNS=$HOME_DIR/runs
+KNOWN_HOSTS=$HOME_DIR/known_hosts   # the guest's ssh host key, pinned on first use (accept-new); removed when a new golden is made
+export SNAPS
+export SNAPINTOSH_KNOWN_HOSTS=$KNOWN_HOSTS
+
+# rustup puts cargo, rustc and rustup in ~/.cargo/bin and only a login shell's profile adds that to PATH: a non-interactive ssh or cron
+# does not, so check-host and build would report the tools missing. Appended last, so a cargo that is on PATH still wins.
+cargo_bin=${CARGO_HOME:-$HOME/.cargo}/bin
+case ":$PATH:" in *":$cargo_bin:"*) ;; *) [ ! -d "$cargo_bin" ] || PATH=$PATH:$cargo_bin ;; esac
+export PATH
+
+ensure_home() { mkdir -p "$HOME_DIR" && chmod 700 "$HOME_DIR"; }
+
+# A snapshot name becomes a directory under $SNAPS and part of shell strings: letters, digits, dot, underscore, dash (1 to 64),
+# first one a letter or digit, no "..". lib/snapctl.py checks the same rule again before it builds any path.
+valid_snapname() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] && [[ $1 != *..* ]]; }
+
+# the guest's machine id is the one the lab used (ECID inside machineid.bin), read at run time
+SSH_PORT_DEFAULT=10022
+AMB_DIR_REL=share/snapintosh/ambrosia   # under $PREFIX: ambrosia.bin and config.cpio, written by build
+
+c_red=$'\033[31m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_off=$'\033[0m'
+[ -t 1 ] || { c_red=; c_grn=; c_ylw=; c_off=; }
+ok()   { printf '%s[ok]%s   %s\n' "$c_grn" "$c_off" "$*"; }
+warn() { printf '%s[warn]%s %s\n' "$c_ylw" "$c_off" "$*"; NWARN=$((NWARN + 1)); }
+bad()  { printf '%s[FAIL]%s %s\n' "$c_red" "$c_off" "$*"; NFAIL=$((NFAIL + 1)); }
+info() { printf '       %s\n' "$*"; }
+die()  { printf 'snapintosh: %s\n' "$*" >&2; exit 1; }
+NWARN=0; NFAIL=0
+
+DRY=${SNAPINTOSH_DRY:-0}
+
+# One cleanup for every command path that starts a process or makes a resource. Arrays are global because the EXIT trap runs
+# after the function that filled them has returned. A path calls `cl_trap` BEFORE it creates its first resource, registers what it
+# starts (`track PID` for every background process, CL_NBDPID/CL_NBDSOCK for the qemu-nbd daemon, CL_CTLS, CL_RMDIR, CL_ABORT),
+# and `cleanup_reset` clears it all when the path ends normally.
+# R23: Ctrl-C or SIGTERM runs cleanup_all and then EXITS with 128+signal (it used to carry on waiting for a helper that nobody stopped).
+# A pid is never trusted on its own: `track` stores the process start time with it, and the qemu-nbd daemon (only known through the
+# pid file it writes) is killed only when /proc says its command line is qemu-nbd on our socket.
+pstate() { sed 's/^.*) \(.\).*$/\1/' "/proc/$1/stat" 2>/dev/null; }     # R S D T Z ... , empty when the process is gone
+pstart() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }   # start time in clock ticks since boot
+# dec_into VAR VALUE NAME [UNIT]: VAR gets VALUE as a plain base 10 number. Bash reads 08 or 0900 inside $(( )) as octal (an error, or a quietly
+# different number), so every number the CLI does arithmetic on goes through here: digits only, at most 9, and 10# does the rest.
+dec_into() {
+  [[ $2 =~ ^[0-9]{1,9}$ ]] || die "$3=$2: expected a number${4:+ of $4} (digits only, for example 600)"
+  printf -v "$1" %s "$((10#$2))"
+}
+pidns() { readlink "/proc/${1:-$$}/ns/pid" 2>/dev/null | tr -cd '0-9'; }   # inode of the pid namespace, empty when /proc does not say
+PIDNS=$(pidns)
+plive() { local s; s=$(pstate "$1") || true; [ -n "$s" ] && [ "$s" != Z ]; }
+children() { pgrep -P "$1" 2>/dev/null || true; }
+# stop_tree PID: stop the process and everything below it. R24: first FREEZE the tree (SIGSTOP: a stopped process forks nothing), re-listing
+# until a whole pass finds no new member, so a child that is being forked at the moment of the signal (the settime `timeout` and its python
+# helper in S8 bug 2) cannot slip past the list and outlive its parent. Then TERM, CONT (a stopped process acts on TERM only once it runs),
+# and KILL what is still there after 4 s.
+stop_tree() {
+  local all=" $1 " p c i left new=1
+  kill -STOP "$1" 2>/dev/null || true
+  while [ "$new" = 1 ]; do
+    new=0
+    for p in $all; do
+      for c in $(children "$p"); do
+        case $all in *" $c "*) ;; *) all="$all$c "; kill -STOP "$c" 2>/dev/null || true; new=1 ;; esac
+      done
+    done
+  done
+  for p in $all; do kill -TERM "$p" 2>/dev/null || true; kill -CONT "$p" 2>/dev/null || true; done
+  for i in $(seq 40); do
+    left=0; for p in $all; do ! plive "$p" || left=1; done
+    [ "$left" = 0 ] && return 0
+    sleep 0.1
+  done
+  for p in $all; do kill -9 "$p" 2>/dev/null || true; done
+}
+CL_PIDS=(); CL_CTLS=(); CL_RMDIR=""; CL_P1=""; CL_NBDPID=""; CL_NBDSOCK=""; CL_ABORT=(); CL_RMRUN=""; CL_RUN=""; CL_COMPACT=""; CL_PGO=""
+# compact_detached RUNDIR: P89b/R24. Starts the detached pack compactor (CL_COMPACT = qemu-pcache-compact, set by `launch` when it applies) for the pack
+# the QEMU of RUNDIR had open read-write, once. It runs on a normal end AND from cleanup_all: before R24 a Ctrl-C or SIGTERM (how a user ends a VM)
+# left the trap without compacting, so a pack that was only ever ended that way grew to its 8 GiB limit, where every new translation is then dropped
+# for the rest of each boot (found by the R24 size-cap measurement). The compactor waits for the pack lock (lib/compact.sh), so QEMU may still be exiting.
+compact_detached() {
+  local pck
+  [ -n "$CL_COMPACT" ] && [ -n "$1" ] || return 0
+  pck=$(sed -n 's/.*pcache: \(\/[^ ,]*\.pack\), rw,.*/\1/p' "$1/qemu.out" 2>/dev/null | head -1) || true
+  [ -z "$pck" ] || ( setsid nohup sh "$LIB/compact.sh" "$pck" "$CL_COMPACT" >>"$PCACHE_DIR/compact.log" 2>&1 </dev/null & )
+  CL_COMPACT=""
+}
+track() { local st; st=$(pstart "$1") || true; [ -z "$st" ] || CL_PIDS+=("$1:$st"); }
+kill_nbd() { # PIDFILE SOCKET: the qemu-nbd this run started, and nothing else (a stale pid file may name any process)
+  local p c
+  [ -n "$1" ] || return 0
+  p=$(cat "$1" 2>/dev/null || true); [[ $p =~ ^[0-9]+$ ]] || return 0
+  c=$(tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline" || true)   # 2> first: a missing file's error comes from the redirection
+  case $c in *qemu-nbd*"$2"*) kill "$p" 2>/dev/null || true ;; esac
+}
+# run_procs RUNDIR [MINSTART]: the processes of this user that belong to a run directory, found by what they were started with (a helper, the
+# `timeout` wrapper and QEMU, memfdhold, the progress tail, the ssh master), not by who their parent is. R24 (S8 bug 2): a Ctrl-C or SIGTERM sent
+# to the whole process group kills the helper's subshell before our trap runs, and what it had started (the settime `timeout` has its own process
+# group, so the group signal misses it) is then a child of init, which no walk down from a tracked pid finds. The run dir is unique to this run.
+# With MINSTART (reap_stale) only processes of OUR pid namespace that started at or after that clock tick are listed: a process of another
+# namespace (a container that shares the home) can show the same run dir without being ours to kill.
+# The ssh ControlPersist master renames itself ("ssh: RUNDIR/ssh.ctl [mux]"), so for it the whole cmdline is one string.
+# A process that exits during the scan is skipped without a word: every read of /proc/PID is in a group that discards its errors.
+run_procs() {
+  local p a s c
+  local -a av
+  for p in /proc/[0-9]*; do
+    p=${p#/proc/}
+    [ "$p" != "$$" ] && [ -O "/proc/$p" ] 2>/dev/null || continue
+    av=(); { mapfile -d '' -t av < "/proc/$p/cmdline"; } 2>/dev/null || continue
+    [ "${#av[@]}" -ge 1 ] || continue
+    case ${av[0]} in "ssh: "*) c=ssh: ;; *) c=${av[0]##*/} ;; esac   # the title of the ControlPersist master has a "/" in it
+    case $c in
+      timeout|python3|python|qemu-system-aarch64|ssh) [ "${#av[@]}" -gt 1 ] || continue ;;
+      "ssh:") ;;
+      tail) [ "${av[1]-}" = -n ] && [ "${av[3]-}" = -F ] || continue ;;   # only the one we start: tail -n +1 -F RUNDIR/snapctl.log
+      *) continue ;;
+    esac
+    for a in "${av[@]}"; do
+      case $a in "$1"|"$1"/*|*:"$1"/*|*=*"$1"/*|"ssh: $1"/*) ;; *) continue ;; esac
+      if [ -n "${2:-}" ]; then
+        [ -n "$PIDNS" ] && [ "$(pidns "$p")" = "$PIDNS" ] || break
+        s=$(pstart "$p"); [[ $s =~ ^[0-9]+$ ]] && [ "$s" -ge "$2" ] || break
+      fi
+      echo "$p"; break
+    done
+  done
+}
+stop_run_procs() { local p; for p in $(run_procs "$1"); do stop_tree "$p"; done; }
+# reap_stale RUNS: R24 (S8 bug 1). A snapintosh that was SIGKILLed (or lost its `timeout` wrapper before pdeath.py existed) can leave its QEMU
+# and helpers running, holding the ssh port and the pack lock. A run dir is stale when its cli.pid ("PID:START:PIDNS", written by the run) names
+# a snapintosh of THIS pid namespace that is gone (pid plus start time, so a reused pid does not count). Only a process of this namespace that
+# started after that snapintosh did is stopped. Everything else is skipped and said: a run dir of another namespace (a container with the same
+# home), an old cli.pid without a namespace, a run dir without cli.pid, a process that does not provably belong to the dead run.
+# A run of a live snapintosh (a second run on another port) is left alone. The run dir stays for its logs.
+# R27 (A3 finding 8): QEMU and helpers are also started outside $RUNS, by golden phase 1 in $VM/golden/tmp (it writes the same cli.pid). Every
+# directory that holds a cli.pid and a run's processes is passed as an extra argument, so the same rules cover it.
+reap_stale() {
+  local rd cp st ns pids all p
+  for rd in "$1"/*/ "${@:2}"; do
+    rd=${rd%/}; [ -d "$rd" ] || continue
+    all=$(run_procs "$rd" | tr '\n' ' '); case $all in *[0-9]*) ;; *) continue ;; esac
+    if [ ! -f "$rd/cli.pid" ]; then reap_skip "$rd" "$all" "it has no cli.pid, so nothing proves it is from a dead run"; continue; fi
+    cp=$(cat "$rd/cli.pid" 2>/dev/null || true); st=${cp#*:}; cp=${cp%%:*}; ns=""
+    case $st in *:*) ns=${st#*:}; st=${st%%:*} ;; esac
+    if ! [[ $cp =~ ^[0-9]+$ && $st =~ ^[0-9]+$ ]]; then reap_skip "$rd" "$all" "its cli.pid is unreadable"; continue; fi
+    if [ -z "$ns" ] || [ -z "$PIDNS" ]; then reap_skip "$rd" "$all" "its cli.pid does not record a pid namespace"; continue; fi
+    if [ "$ns" != "$PIDNS" ]; then reap_skip "$rd" "$all" "its snapintosh ran in another pid namespace (a container?)"; continue; fi
+    [ "$(pstart "$cp")" != "$st" ] || continue   # its snapintosh still lives
+    pids=$(run_procs "$rd" "$st" | tr '\n' ' ')
+    for p in $all; do case " $pids " in *" $p "*) ;; *) reap_skip "$rd" "$p" "it is not provably from that run (other namespace or started before it)" ;; esac; done
+    case $pids in *[0-9]*) ;; *) continue ;; esac
+    echo "snapintosh: stopping pid(s) ${pids% } of an earlier snapintosh that died (run dir $rd); they could still hold the ssh port and the pack lock" >&2
+    for p in $pids; do stop_tree "$p"; done
+    kill_nbd "$rd/nbd.pid" "$rd/nbd.sock"
+    ssh -o "ControlPath=\"$rd/ssh.ctl\"" -O exit root@127.0.0.1 >/dev/null 2>&1 || true
+  done
+  return 0
+}
+# reap_leftovers RUNS: R29 (S9 bug 1). reap_stale stops what a dead snapintosh left running; this removes what it left on disk. A run dir
+# whose cli.pid names a dead snapintosh of this pid namespace (the proof cli_dead gives) and that no process still names is removed, and with
+# it the `.stage-*` of its save (the guest RAM, 4 GiB) and `.old-*` in the snapshot dir; the same files whose run dir is long gone go too
+# (snapctl.py reap). A run dir with a `keep` marker (golden, KEEP_RUNS=1: its files are wanted) stays. Said on stderr, never fatal.
+reap_leftovers() {
+  local rd b dead=()
+  for rd in "$1"/*/; do
+    rd=${rd%/}; [ -d "$rd" ] || continue
+    { [ -f "$rd/cli.pid" ] && cli_dead "$rd"; } || continue
+    [ -z "$(run_procs "$rd")" ] || continue   # something of it still runs and was not provably ours (reap_stale said so): leave it all
+    dead+=("${rd##*/}")
+  done
+  python3 -I "$LIB/snapctl.py" reap "$1" "$([ "$SNAPS" = "$HOME_DIR/snaps" ] && echo 1 || echo 0)" "${dead[@]}" >&2 || true
+  for b in "${dead[@]}"; do
+    [ -f "$1/$b/keep" ] && continue
+    echo "snapintosh: removed run dir $1/$b of an earlier snapintosh that died" >&2
+    rm -rf "${1:?}/$b"
+  done
+  return 0
+}
+# cli_dead DIR: true when DIR/cli.pid names a snapintosh of this pid namespace that is gone (pid plus start tick), the same proof reap_stale uses
+cli_dead() {
+  local cp st
+  cp=$(cat "$1/cli.pid" 2>/dev/null || true); st=${cp#*:}; cp=${cp%%:*}
+  [ -n "$PIDNS" ] && [ "${st##*:}" = "$PIDNS" ] || return 1
+  st=${st%%:*}; [[ $cp =~ ^[0-9]+$ && $st =~ ^[0-9]+$ ]] || return 1
+  [ "$(pstart "$cp")" != "$st" ]
+}
+reap_skip() { echo "snapintosh: skipped pid(s) ${2% } that name run dir $1: $3; stop them yourself if they are stale" >&2; }
+cleanup_all() {
+  local x p st i
+  [ -z "${CL_RUN:-}" ] || compact_detached "$CL_RUN"   # before anything is removed: it reads the run dir's qemu.out
+  for x in "${CL_CTLS[@]}"; do ssh -o "ControlPath=\"$x\"" -O exit root@127.0.0.1 >/dev/null 2>&1 || true; done
+  # newest first: the progress tail and the helper stop before QEMU does (a helper that loses its QEMU first prints a traceback)
+  for ((i = ${#CL_PIDS[@]} - 1; i >= 0; i--)); do x=${CL_PIDS[i]}; p=${x%%:*}; st=${x#*:}; if [ "$(pstart "$p")" = "$st" ]; then stop_tree "$p"; fi; done
+  [ -z "${CL_PGO:-}" ] || { pgo_stop_ns "$CL_PGO"; pgo_unstage; }      # a --pgo build: what its namespace still holds, even if the tree walk above missed it
+  [ -z "${CL_RUN:-}" ] || stop_run_procs "$CL_RUN"   # what is left of this run even if its parent died first (see run_procs)
+  kill_nbd "$CL_NBDPID" "$CL_NBDSOCK"
+  # a save that did not finish: its staging directory goes (the helper is stopped above, so nothing writes into it any more)
+  if [ "${#CL_ABORT[@]}" = 2 ]; then python3 -I "$LIB/snapctl.py" abort "${CL_ABORT[0]}" "${CL_ABORT[1]}" >/dev/null 2>&1 || true; fi
+  [ -z "$CL_RMRUN" ] || rm -rf "$CL_RMRUN"
+  [ -z "$CL_RMDIR" ] || rmdir "$CL_RMDIR" 2>/dev/null || true
+  # make-disk golden phase 1 that did not finish: keep the overlay under another name, never as a golden
+  if [ -n "$CL_P1" ] && [ -f "$CL_P1" ]; then mv "$CL_P1" "${CL_P1%.qcow2}.failed.qcow2" 2>/dev/null || true; fi
+  return 0
+}
+on_signal() { trap - EXIT INT TERM HUP; cleanup_all; exit "$1"; }
+cl_trap() { trap cleanup_all EXIT; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; }
+# R21: a normal end first forgets CL_P1: cleanup_all renames that overlay to .failed, which made every successful phase 1 of make-disk golden
+# throw its own result away ("no golden image" at phase 2)
+cleanup_reset() { CL_P1=""; CL_RMRUN=""; CL_ABORT=(); cleanup_all; CL_PIDS=(); CL_CTLS=(); CL_RMDIR=""; CL_P1=""; CL_NBDPID=""; CL_NBDSOCK=""; CL_ABORT=(); CL_RUN=""; CL_COMPACT=""; CL_PGO=""; trap - EXIT INT TERM HUP; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "missing tool: $1 ($2)"; }
+
+usage() {
+  cat <<'EOF'
+usage: snapintosh <command> [options]
+
+  check-host                 CPU, RAM, disk, Vulkan device and extensions, udmabuf limits
+  build [--only X] [-j N] [--pgo]
+                             build reims-vgpu + metal2vulkan, the QEMU fork and Ambrosia (X: reims, qemu, ambrosia, mesa).
+                             --pgo (opt-in, off by default): build QEMU with profile-guided optimisation and full LTO. It trains on a boot
+                             of your golden, so it needs a working build and a golden first and takes about 50 minutes on 6 cores, up to 4 h at its bounds (README)
+  build --deps               print the Debian/Ubuntu packages and the cross toolchain the build needs
+  fetch [--build B] [--url U [--sha256 H]] [--out D]
+                             download the macOS 27 IPSW from Apple (resumable). The pinned builds are checked for size and sha256;
+                             a --url file is checked for the size the server announces, and for the hash when you pass --sha256.
+                             B: 26A428 (27.0, default, the lab build) or 26B131 (27.2.1, supported, not booted by us)
+  make-disk <step>           IPSW to a bootable disk:
+      mac-steps [--build B]    print the steps that need a Mac (they cannot be done on Linux)
+      import DIR [--avpbooter F]   import what the Mac produced (disk.img aux.img machineid.bin hardwaremodel.bin);
+                               AVPBooter is only for the legacy --fw avp path
+      adopt-golden FILE [--ssh-state DIR] [--name quiet|sshd]
+                               use an existing golden (a qcow2 overlay chain on the same disk.img, for example a lab
+                               root-quiet3.qcow2) instead of making one: copies the chain, rebases it onto the imported
+                               disk, copies the ssh key. No Mac, no single-user boot
+      golden [BASE] [--no-quiet] [--again] [--warm N] [--user U] [--password-file F] [run options: --cpus --ram --gpu --icd --mesa --ssh-port --secs]
+                               make the tuned golden from the installed disk, no Mac and no manual step: phase 1 is a
+                               single-user boot (root ssh key, sshd job with ProcessType Interactive, timed fix, autologin
+                               fallback), phase 2 one normal boot over ssh (quiet profile). BASE is read only
+                               (default: the imported disk.img). --again redoes phase 2 only. --user is the account for
+                               autologin (default snap, a macOS short name); its password (default snaplab) is read from
+                               --password-file or the environment variable SNAPINTOSH_GUEST_PASSWORD, never from the command line. Both boots fill the
+                               translation cache; --warm N (default 0 = off) then boots the finished golden N times
+                               to the desktop, opens and quits Safari, so the first `run` starts warm (R15)
+      warm [N] [run options]   the warm-up boots alone, for a golden that came from adopt-golden or an old make-disk golden
+      sshd-interactive         optional: sshd job ProcessType Interactive (P83), notes and guest script
+      quiet                    optional: the quiet guest profile over ssh (faster boot), notes
+  run [options]              boot the guest with the D3 defaults (Ambrosia, 12 vCPUs, P79, P86, P84)
+  snapshot NAME [options]    boot, wait for ssh, save a snapshot, quit
+  resume NAME [options]      restore a snapshot
+  bench [options]            measure boot to ssh and Dock, Safari cold launch, drag fps, resume time and Safari from a resume:
+                             N runs (--runs, default 3), JSON plus a table with median and spread, host info (R20, see README).
+                             --save-settle S (default 120) is the snapshot settle; all options: bench --help
+  status                     show what is installed
+
+run/snapshot/resume options:
+  --cpus N        guest vCPUs (default 12)       --ram SIZE   guest RAM (default 8G)
+  --fw ambrosia|avp   boot firmware (default ambrosia; avp = legacy AVPBooter path, needs AVPBooter from your Mac)
+  --gpu auto|0|1  1 = host Vulkan GPU, 0 = lavapipe (default auto: 1 if a non-CPU device exists)
+  --icd FILE      Vulkan ICD json for --gpu 1 (default: the first non-llvmpipe one found)
+  --mesa DIR      Mesa prefix with lavapipe for --gpu 0 (default: the one `build --only mesa` made)
+  --vnc [PORT]    VNC on 127.0.0.1 (default 5900, loopback only) with a random password: the file is <run dir>/vnc.pass (mode 600,
+                  the path is printed). The guest logs in as an admin by itself, so an open VNC port would hand that desktop to every local user
+  --vnc-insecure  with --vnc: no password (any local user can connect)
+  --ssh-port P    host port forwarded to guest sshd (default 10022)
+  --secs N        stop after N seconds (default 3600)
+  --settle N      snapshot only: seconds between the first ssh answer and the save (default 60). Open Safari or anything
+                  else you want in the snapshot inside that window; the page must be drawn before the save
+  --open URL      snapshot only: open URL in Safari for you (after the Dock and Finder are up, through the robust open helper) and
+                  require its window on screen at the save. Implies --app Safari. The URL may not contain & (one query parameter at most)
+  --app NAME      snapshot only: the app that must be on screen at the save: wait for its window (at most APPWAIT s, default 180), and
+                  refuse the save with status 5 when it never shows. Without --app, a running Safari is checked and a miss only warns
+  --no-pcache     do not use the persistent translation cache
+  --pcache-ro     use the cache without appending to it
+  --dry-run       print the QEMU command and exit
+env: SNAPINTOSH_HOME (default ~/.local/share/snapintosh, mode 700), SNAPINTOSH_PREFIX, SNAPINTOSH_GUEST_PASSWORD, SNAPINTOSH_DRY=1, SNAPINTOSH_NO_SETTIME=1,
+     SETTIME_TIMEOUT=SECONDS (resume: budget of the clock step; default 120 on 12 or more threads, 300 on 8 to 11, 600 below),
+     SYNCCLOCK=1|auto and SYNCMAXAGE (resume: guest counter advance, opt-in),
+     SNAP_IOFENCE_PATCH=0 (P79 IOFence patch is on by default), P80_BC=off / P85_BC=off / P82_PCOPEN=off (D3 switches)
+EOF
+}
+
+# The clock step after a resume waits for the guest's ssh and then for the clock, inside one budget. A guest resumed from a snapshot
+# catches up on its overdue work first: on 6 threads its load average stays near 500 for about 5 minutes (H3), and a 120 s budget
+# gave up while the guest was fine. So the default scales with the host the way the golden waits do: 120 s from 12 threads, 300 s from
+# 8, 600 s below. SETTIME_TIMEOUT overrides it (seconds). The CLI's own hard limit is 30 s above the budget.
+settime_budget() {
+  local t
+  if [ -n "${SETTIME_TIMEOUT:-}" ]; then
+    dec_into t "$SETTIME_TIMEOUT" SETTIME_TIMEOUT seconds
+    echo "$t"; return
+  fi
+  dec_into t "${SNAPINTOSH_CHECK_THREADS:-$(nproc)}" SNAPINTOSH_CHECK_THREADS threads
+  if [ "$t" -ge 12 ]; then echo 120; elif [ "$t" -ge 8 ]; then echo 300; else echo 600; fi
+}
+
+# ---------------------------------------------------------------- check-host
+# dmi_ram_gb: installed RAM in GiB from the SMBIOS memory devices (type 17), or nothing when /sys/firmware/dmi is not readable (it is root only
+# on most hosts). SNAPINTOSH_CHECK_DMI_GB overrides it for the tests (an empty value means unreadable).
+dmi_ram_gb() {
+  if [ -n "${SNAPINTOSH_CHECK_DMI_GB+x}" ]; then echo "$SNAPINTOSH_CHECK_DMI_GB"; return; fi
+  python3 -I - <<'PY' 2>/dev/null || true
+import glob, struct
+mb = 0
+for f in glob.glob("/sys/firmware/dmi/entries/17-*/raw"):
+    try:
+        d = open(f, "rb").read()
+    except OSError:
+        raise SystemExit(0)
+    if len(d) < 0x10:
+        continue
+    sz = struct.unpack_from("<H", d, 0x0C)[0]
+    if sz == 0x7FFF and len(d) >= 0x20:
+        mb += struct.unpack_from("<I", d, 0x1C)[0] & 0x7FFFFFFF
+    elif sz not in (0, 0xFFFF):
+        mb += (sz & 0x7FFF) // 1024 if sz & 0x8000 else sz
+if mb:
+    print(mb // 1024)
+PY
+}
+cmd_check_host() {
+  local mem_kb mem_g cores model free_g
+  echo "snapintosh check-host"
+  if [ "$(uname -m)" = x86_64 ]; then ok "arch x86_64"; else bad "arch $(uname -m): only x86_64 hosts are built and tested"; fi
+  model=$(awk -F: '/model name/ {gsub(/^ +/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null || true)
+  dec_into cores "${SNAPINTOSH_CHECK_THREADS:-$(nproc)}" SNAPINTOSH_CHECK_THREADS threads   # the override is for the tests
+  info "cpu: ${model:-unknown}, $cores threads"
+  if [ "$cores" -ge 16 ]; then ok "$cores threads (lab reference: 16 vCPU Ryzen 9 9950X, guest 12 vCPUs)"
+  elif [ "$cores" -ge 8 ]; then
+    warn "$cores threads: works, slower. Cores matter: on 6 slow cores the first Safari launch of a boot loops for 2 to 5 minutes (GPU-process 3 s watchdog; a fix is in progress), and drag was 3.2 fps on ANV (G3). Consider --cpus $cores or fewer"
+  elif [ "$cores" -ge 6 ]; then
+    warn "$cores threads: the smallest tested host (H3: build 557 s, bench about 18 minutes per run). Use --cpus $cores --ram 4G; slow steps (golden, resume clock step) wait longer here"
+  else bad "$cores threads: the TCG guest plus renderer threads need 6 or more (8 or more is comfortable)"; fi
+  ok "KVM not needed: the guest is arm64 under TCG (QEMU software emulation)"
+
+  # MemTotal of a 16 GiB machine is 15.2 to 15.9 GiB (firmware and kernel take their share), so the limits are a GiB lower than the
+  # advertised size: 15 GiB (rounded down) counts as 16, 23 as 24. R27 (A3 finding 9): an iGPU carve-out (1 to 4 GiB of UMA frame buffer on
+  # AMD APUs, 1 GiB on some Intel BIOSes) or a large crashkernel takes more: 13 to 14 GiB of MemTotal on a 16 GiB machine. That passes when the
+  # installed size (DMI, readable only as root on most hosts) says 16 GiB or more, and warns when it cannot be read; below 13 GiB it fails.
+  dec_into mem_kb "${SNAPINTOSH_CHECK_MEM_KB:-$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)}" SNAPINTOSH_CHECK_MEM_KB kB; mem_g=$((mem_kb / 1048576))
+  if [ "$mem_g" -ge 23 ]; then ok "RAM ${mem_g} GiB"
+  elif [ "$mem_g" -ge 15 ]; then warn "RAM ${mem_g} GiB (a 16 GiB machine shows 15 to 16): enough for one guest (use --ram 4G, or the default 8G with nothing else running). 24 GiB is the lab norm"
+  elif [ "$mem_g" -ge 13 ]; then
+    local phys; phys=$(dmi_ram_gb)
+    if [ -z "$phys" ]; then warn "RAM ${mem_g} GiB visible: a 16 GiB machine with an iGPU carve-out or a crashkernel shows this, so it can work with --ram 4G; the installed size could not be read (run check-host as root, or: sudo dmidecode -t memory). Below 16 GiB installed the build and the guest do not fit"
+    elif [ "$phys" -ge 16 ]; then warn "RAM ${mem_g} GiB visible of ${phys} GiB installed (iGPU carve-out or crashkernel): enough for one guest with --ram 4G"
+    else bad "RAM ${mem_g} GiB (${phys} GiB installed): need 16 GiB (guest memfd, translation cache, renderer, build)"; fi
+  else bad "RAM ${mem_g} GiB: need 16 GiB (guest memfd, translation cache, renderer, build)"; fi
+
+  local probe=$HOME_DIR
+  while [ ! -d "$probe" ] && [ "$probe" != / ]; do probe=$(dirname "$probe"); done
+  free_g=$(df -Pk "$probe" 2>/dev/null | awk 'NR==2 {print int($4/1048576)}')
+  free_g=${free_g:-0}
+  # What is still missing decides what is needed (sizes measured in P91 on a clean-room install, GiB):
+  #   toolchains + sources + build tree + prefix   3.5 + 2.3 + 8.5 + 0.8 = 15 (the build tree can be deleted afterwards)
+  #   the Apple IPSW 25 (26.6 GB) and the imported disk plus golden 31 (disk.img 29 on a 64 GiB sparse file, golden 0.7)
+  #   translation cache pack 4.5 per QEMU binary (3.7 to 4.0 GiB written by one cold boot)
+  #   headroom 10: run overlays and one snapshot (8.6)
+  # FAIL: free space is below that sum, the work cannot finish. WARN: less than 20 GiB above it (a second snapshot is 8.6).
+  local need_g=10 parts="10 headroom"
+  if [ ! -x "$PREFIX/bin/qemu-system-aarch64" ]; then need_g=$((need_g + 15)); parts="$parts + 15 build"; fi
+  if [ ! -f "$VM/disk.img" ]; then
+    need_g=$((need_g + 31)); parts="$parts + 31 disk"
+    if ! ls "$DL"/*.ipsw >/dev/null 2>&1; then need_g=$((need_g + 25)); parts="$parts + 25 IPSW"; fi
+  fi
+  if ! ls "$PCACHE_DIR"/*.pack >/dev/null 2>&1; then need_g=$((need_g + 5)); parts="$parts + 5 pack"; fi
+  if [ "$free_g" -ge $((need_g + 20)) ]; then ok "disk ${free_g} GiB free under $HOME_DIR (this host still needs $need_g: $parts)"
+  elif [ "$free_g" -ge "$need_g" ]; then warn "disk ${free_g} GiB free under $HOME_DIR, enough for the $need_g GiB still needed ($parts) but under 20 GiB to spare (each snapshot adds 8.6)"
+  else bad "disk ${free_g} GiB free under $HOME_DIR: the steps still to do need $need_g GiB ($parts)"; fi
+
+  HAVE_GPU=0
+  check_vulkan
+  check_udmabuf
+  check_tools
+  check_repro_mnt
+  echo
+  echo "summary: $NFAIL failed, $NWARN warnings"
+  [ "$NFAIL" -eq 0 ]
+}
+
+check_udmabuf() {
+  local dev=${SNAPINTOSH_UDMABUF_DEV:-/dev/udmabuf} pdir=${SNAPINTOSH_UDMABUF_PARAMS:-/sys/module/udmabuf/parameters}
+  local lim sz fail=bad grp
+  # only the host-GPU path imports guest RAM through udmabuf: with lavapipe alone (no GPU) the lab ran 50 cold boots without it
+  if [ "$HAVE_GPU" = 0 ]; then fail=warn; info "no host GPU found: udmabuf is only needed for --gpu 1, problems below are warnings"; fi
+  if [ ! -e "$dev" ]; then
+    $fail "$dev missing. The GPU path imports guest RAM through it"
+    info "fix: sudo modprobe udmabuf   (at every boot: echo udmabuf | sudo tee /etc/modules-load.d/snapintosh-udmabuf.conf)"
+    return
+  fi
+  if [ -r "$dev" ] && [ -w "$dev" ]; then ok "$dev readable and writable by $(id -un) ($(stat -c '%U:%G %a' "$dev"))"
+  else
+    grp=$(stat -c %G "$dev")
+    $fail "$dev not accessible to $(id -un): it is $(stat -c '%U:%G %a' "$dev")"
+    info "fix: sudo usermod -aG $grp $(id -un)   then log in again (a running ssh session keeps its old groups)"
+    info "     or for every boot: echo 'KERNEL==\"udmabuf\", GROUP=\"$grp\", MODE=\"0660\"' | sudo tee /etc/udev/rules.d/99-snapintosh-udmabuf.rules; sudo udevadm control --reload; sudo udevadm trigger /dev/udmabuf"
+  fi
+  lim=$(cat "$pdir/list_limit" 2>/dev/null || echo "?")
+  sz=$(cat "$pdir/size_limit_mb" 2>/dev/null || echo "?")
+  info "udmabuf list_limit=$lim size_limit_mb=$sz (needed: at least 65536 and 4096; the kernel default is 1024 and 64)"
+  local low=0
+  if [ "$lim" != "?" ] && [ "$lim" -lt 65536 ]; then low=1; fi
+  if [ "$sz" != "?" ] && [ "$sz" -lt 4096 ]; then low=1; fi
+  if [ "$low" = 1 ]; then
+    $fail "udmabuf limits too low (list_limit $lim, size_limit_mb $sz): the first present dies with 'pieces ... do not fit udmabuf's list_limit' (G2)"
+    info "fix now:   echo 65536 | sudo tee $pdir/list_limit; echo 4096 | sudo tee $pdir/size_limit_mb"
+    info "fix for every boot: echo 'options udmabuf list_limit=65536 size_limit_mb=4096' | sudo tee /etc/modprobe.d/snapintosh-udmabuf.conf"
+  fi
+}
+
+# required extensions of the renderer
+REQ_EXT=(VK_EXT_fragment_shader_interlock VK_EXT_external_memory_host)
+
+check_vulkan() {
+  local out dev found=0
+  if ! command -v vulkaninfo >/dev/null 2>&1; then
+    bad "vulkaninfo not installed (apt install vulkan-tools): cannot verify the GPU"
+    return
+  fi
+  out=$(timeout 60 vulkaninfo 2>/dev/null || true)
+  if [ -z "$out" ]; then bad "vulkaninfo printed nothing: no working Vulkan driver"; return; fi
+  # split into per-device blocks: "GPU0:" ... ; extension lists sit under each device's block
+  while IFS=$'\t' read -r idx name type vendor missing; do
+    found=1
+    [ "$vendor" = 0x10005 ] || HAVE_GPU=1
+    local note=""
+    case "$vendor" in
+      0x10de) note="NVIDIA: lab-tested driver 615.71.10 (open kernel module), RTX 3060 Ti drag 1.6x lavapipe" ;;
+      0x1002) note="AMD RADV: lab-tested Mesa 25.0.7 on a 2-CU Granite Ridge iGPU, drag 1.3x lavapipe. Needs /dev/udmabuf" ;;
+      0x8086) note="Intel ANV: lab-tested Mesa 25.0.7 on Alder Lake Iris Xe, drag 2.2x lavapipe (G3). Needs /dev/udmabuf" ;;
+      0x10005) note="CPU renderer (lavapipe): stock Mesa 25.0.x lacks interlock; needs the patched Mesa 26.3 from 'build --only mesa'" ;;
+      *) note="vendor $vendor not tested by the lab" ;;
+    esac
+    if [ -z "$missing" ]; then ok "Vulkan device $idx: $name ($type), required extensions present"
+    else
+      if [ "$vendor" = 0x10005 ]; then warn "Vulkan device $idx: $name: missing $missing (stock lavapipe)"
+      else bad "Vulkan device $idx: $name: missing $missing"; fi
+    fi
+    info "$note"
+  done < <(printf '%s\n' "$out" | python3 -I "$LIB/vkparse.py" "${REQ_EXT[@]}")
+  [ "$found" -eq 1 ] || bad "no Vulkan physical device found in vulkaninfo output"
+}
+
+check_tools() {
+  local t missing=""
+  for t in git python3 curl qemu-img; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done
+  if [ -x "$PREFIX/bin/qemu-img" ]; then missing=${missing// qemu-img/}; fi
+  if [ -z "$missing" ]; then ok "tools: git python3 curl qemu-img"; else warn "missing tools:$missing (see: snapintosh build --deps)"; fi
+  # Ambrosia is cross built: rustup picks rust 1.99.1 and the aarch64-unknown-none target from its rust-toolchain.toml
+  missing=""
+  for t in cargo rustc rustup make cpio; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done
+  if [ -z "$missing" ]; then
+    ok "Ambrosia build tools: cargo rustc rustup make cpio"
+    if rustup target list --installed 2>/dev/null | grep -q '^aarch64-unknown-none$'; then ok "rust target aarch64-unknown-none installed"
+    else info "rust target aarch64-unknown-none not installed for the default toolchain: the build's rust-toolchain.toml (1.99.1) installs it on first make"; fi
+  else warn "missing Ambrosia build tools:$missing (rustup from https://rustup.rs, see: snapintosh build --deps)"; fi
+}
+
+check_repro_mnt() {
+  local hits
+  if repro_ns_ok; then ok "build --pgo can run here: unprivileged user namespaces work (unshare -rm)"
+  else
+    warn "build --pgo cannot run here (the plain build still does, it falls back to building in place and its Rust half then differs from the reference md5):"
+    userns_fix | sed 's/^/        /'
+  fi
+  hits=$(repro_mnt_hits)
+  if [ -n "$hits" ] && repro_ns_ok; then
+    warn "the build binds $HOME_DIR over $REPRO_MNT and these paths are under $REPRO_MNT, so build will refuse: $(printf '%s' "$hits" | tr '
+' ' ')(move them, or SNAPINTOSH_NO_REPRO=1)"
+  fi
+}
+
+# ---------------------------------------------------------------- build
+cmd_build_deps() {
+  cat <<'EOF'
+# Debian 13 / Ubuntu 26.04 package set. Verified in R12 and R13: a minimal
+# debootstrap root with only these packages (plus the Mesa block below for `build --only mesa`) builds everything. cmake and the X11
+# development packages are there because reims-vgpu's `cargo xtask dist` compiles SDL3 from source (sdl3-sys); libfdt-dev because
+# QEMU is configured with the system libfdt, libgnutls28-dev because VNC password authentication needs gnutls' DES. Since R13 the build passes a fixed feature set to QEMU's configure and to SDL3's
+# cmake (see build_qemu and lib/sdl3-features.cmake), so installing more development packages (audio, USB, Wayland, TLS, ...)
+# no longer changes the binary: the same sources and toolchain give the same md5 on any package set.
+sudo apt install build-essential git curl ca-certificates python3 python3-venv pkg-config ninja-build meson cmake \
+  clang lld llvm libglib2.0-dev libpixman-1-dev libslirp-dev libfdt-dev libgnutls28-dev libvulkan-dev \
+  vulkan-tools mesa-vulkan-drivers libzstd-dev zlib1g-dev flex bison xz-utils qemu-utils cpio \
+  libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev
+# Rust: the pinned reims-vgpu tree selects nightly-2026-11-03 through rust-toolchain.toml
+curl -sSf https://sh.rustup.rs | sh
+# Ambrosia is cross compiled (arm64 bare metal firmware built on x86): its rust-toolchain.toml selects rust 1.99.1
+# with the aarch64-unknown-none target and the llvm-tools component (objcopy), and rustup installs them on the first
+# `make`. Nothing else is needed: no aarch64 gcc, no Apple tools. The build takes seconds. To prefetch:
+#   rustup toolchain install 1.99.1 --profile minimal -c llvm-tools -t aarch64-unknown-none
+# Optional, lavapipe only (hosts without a Vulkan GPU): Mesa build deps
+sudo apt install llvm-dev libclang-dev glslang-tools python3-mako python3-yaml libdrm-dev libx11-dev libxcb1-dev \
+  libxext-dev libxfixes-dev libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev libxshmfence-dev libwayland-dev
+EOF
+}
+
+clone_pin() { # name repo ref dest
+  local name=$1 repo=$2 ref=$3 dest=$4
+  [ -n "$repo" ] || die "${name}_REPO is not set. Nothing is public yet: export ${name}_REPO=file:///path/to/clone (or ssh://...) or put it in $CONF"
+  if [ ! -d "$dest/.git" ]; then
+    mkdir -p "$dest"
+    git -C "$dest" init --quiet
+    git -C "$dest" remote add origin "$repo"
+  fi
+  # fetch the pinned commit alone first (small, and tolerates partial clones on the remote), else everything
+  git -C "$dest" cat-file -e "$ref^{commit}" 2>/dev/null \
+    || git -C "$dest" fetch --quiet --depth 1 origin "$ref" 2>/dev/null \
+    || git -C "$dest" fetch --quiet origin 2>/dev/null || true
+  git -C "$dest" cat-file -e "$ref^{commit}" 2>/dev/null || die "$name: commit $ref is not in $repo"
+  git -C "$dest" checkout --quiet --detach "$ref"
+  ok "$name at $(git -C "$dest" rev-parse --short=12 HEAD)"
+}
+
+preflight_build() { # tools...
+  local t missing=""
+  for t in "$@"; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done
+  if [ -n "$missing" ]; then
+    printf '%s[FAIL]%s build tools missing:%s\n' "$c_red" "$c_off" "$missing" >&2
+    echo "run: snapintosh build --deps" >&2
+    return 1
+  fi
+}
+
+# Reproducible builds (P91): the same pins give the same bytes in any directory and under any HOME. Every build path that would be
+# written into the binaries (debug info, __FILE__, panic locations, cargo registry paths) is mapped to a fixed name. The order
+# matters: the last matching map wins, so the broad $HOME comes first. SNAPINTOSH_NO_REPRO=1 turns this off.
+repro_flags() {
+  RP_RUST=""; RP_C=""
+  [ "${SNAPINTOSH_NO_REPRO:-0}" = 1 ] && return 0
+  local ch=${CARGO_HOME:-$HOME/.cargo} rh=${RUSTUP_HOME:-$HOME/.rustup} pair from to
+  local -a pairs=("$HOME=/snapintosh/home" "$HOME_DIR=/snapintosh/data" "$ch=/snapintosh/cargo" "$rh=/snapintosh/rustup"
+                  "$SRC=/snapintosh/src" "$BUILD=/snapintosh/build" "$PREFIX=/snapintosh/prefix")
+  for pair in "${pairs[@]}"; do
+    from=${pair%%=*}; to=${pair#*=}
+    RP_RUST="$RP_RUST --remap-path-prefix=$from=$to"
+    RP_C="$RP_C -ffile-prefix-map=$from=$to"
+  done
+}
+
+# The Rust half of the build runs in a private mount namespace with $HOME_DIR bound at /mnt (see build_reims). SNAPINTOSH_REPRO_MNT
+# changes the mount point (for the tests).
+REPRO_MNT=${SNAPINTOSH_REPRO_MNT:-/mnt}
+repro_ns_ok() { [ "${SNAPINTOSH_NO_REPRO:-0}" != 1 ] && [ -d "$REPRO_MNT" ] && unshare -rm true 2>/dev/null; }
+
+# userns_fix: why `unshare -rm` fails on this host and the exact way out, on stdout (nothing is changed here). Ubuntu 23.10 and later (26.04
+# included) set kernel.apparmor_restrict_unprivileged_userns=1, which makes the kernel refuse a user namespace to an ordinary program: the plain
+# build then falls back to building in place, but build --pgo needs the namespace. SNAPINTOSH_APPARMOR_USERNS is the sysctl file (for the tests).
+userns_fix() {
+  local f=${SNAPINTOSH_APPARMOR_USERNS:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}
+  if [ "${SNAPINTOSH_NO_REPRO:-0}" = 1 ]; then echo "SNAPINTOSH_NO_REPRO=1 is set: unset it (it turns the private mount namespace off)"
+  elif [ ! -d "$REPRO_MNT" ]; then echo "the directory $REPRO_MNT does not exist (the namespace binds the data directory there): create it, or point SNAPINTOSH_REPRO_MNT at an empty directory"
+  elif [ "$(cat "$f" 2>/dev/null || true)" = 1 ]; then
+    cat <<EOT
+AppArmor refuses unprivileged user namespaces here (kernel.apparmor_restrict_unprivileged_userns=1, the Ubuntu default). Either allow them for
+this boot (or every boot, with the second line):
+  sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+  echo kernel.apparmor_restrict_unprivileged_userns=0 | sudo tee /etc/sysctl.d/60-snapintosh-userns.conf
+or a profile for unshare (the way Ubuntu ships one for bwrap; note unshare runs any program, so this lifts the restriction for everything started through it), then load it:
+  printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile snapintosh-unshare /usr/bin/unshare flags=(unconfined) {\n  userns,\n}\n' | sudo tee /etc/apparmor.d/snapintosh-unshare
+  sudo apparmor_parser -r /etc/apparmor.d/snapintosh-unshare
+snapintosh changes nothing on the host by itself.
+EOT
+  else
+    echo "unprivileged user namespaces are off or refused here (check: unshare -rm true; sysctl user.max_user_namespaces kernel.unprivileged_userns_clone)"
+  fi
+}
+
+# Everything the build reads that sits under the mount point disappears inside the namespace. Prints one line per path that does (the
+# path and what it is); the release tree and $HOME_DIR are not listed: the tree's one file is copied, $HOME_DIR is what gets bound.
+repro_mnt_hits() {
+  local what p r t
+  for what in "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" "TMPDIR=${TMPDIR:-/tmp}"; do
+    p=${what#*=}; r=$(realpath -m "$p" 2>/dev/null || echo "$p")
+    case "$p $r" in "$REPRO_MNT "*|"$REPRO_MNT/"*|*" $REPRO_MNT"|*" $REPRO_MNT/"*) printf '%s\n' "$what" ;; esac
+  done
+  for t in cargo rustc rustup clang ld.lld cmake make; do
+    p=$(command -v "$t" 2>/dev/null) || continue
+    r=$(realpath "$p" 2>/dev/null || echo "$p")
+    case "$p $r" in "$REPRO_MNT/"*|*" $REPRO_MNT/"*) printf '%s\n' "$t=$p" ;; esac
+  done
+}
+
+repro_mnt_check() {
+  local hits; hits=$(repro_mnt_hits)
+  [ -z "$hits" ] || die "the reproducible build binds $HOME_DIR over $REPRO_MNT, which hides these paths from cargo:
+$(printf '%s\n' "$hits" | sed 's/^/  /')
+move them out of $REPRO_MNT (a home, CARGO_HOME or RUSTUP_HOME under $REPRO_MNT cannot work), or build in place with
+SNAPINTOSH_NO_REPRO=1 (the Rust half then depends on the directory, so the binary md5 differs from the reference)"
+}
+
+build_reims() {
+  if repro_ns_ok; then repro_mnt_check; fi   # first: a hidden path used to fail the build after 53 s
+  mkdir -p "$SRC" "$BUILD"
+  clone_pin M2V "$M2V_REPO" "$M2V_REF" "$SRC/metal2vulkan"
+  clone_pin REIMS "$REIMS_REPO" "$REIMS_REF" "$SRC/reims-vgpu"
+  preflight_build cargo rustc clang ld.lld lld-link make cmake || return 1
+  info "building reims-vgpu dist (vulkan) with metal2vulkan; first run downloads nightly-2026-11-03 and crates"
+  repro_flags
+  # Cargo hashes the absolute path of a path dependency that lies outside the workspace (metal2vulkan beside reims-vgpu) into the
+  # crate ids, and so into every Rust symbol name. No flag maps that away, so a build in another directory differs. When
+  # unprivileged user namespaces work, run cargo in a private mount namespace where $HOME_DIR is bound at the fixed path /mnt
+  # (nothing outside the namespace changes); otherwise build in place and the Rust half is reproducible only from the same directory.
+  if repro_ns_ok; then
+    info "building in a private mount namespace ($HOME_DIR as $REPRO_MNT) so the result does not depend on the directory"
+    # the namespace hides what is under $REPRO_MNT, so a release tree there would lose lib/sdl3-features.cmake: the file is read from a
+    # copy inside $HOME_DIR, which is what shows up at $REPRO_MNT (R25: the build died after 53 s with "Could not find toolchain file")
+    cp "$LIB/sdl3-features.cmake" "$HOME_DIR/sdl3-features.cmake"
+    # shellcheck disable=SC2016  # the script is for the inner bash, which expands it
+    unshare -rm env "RP_RUST=$RP_RUST" "RP_C=$RP_C" "HOME_DIR=$HOME_DIR" "MNT=$REPRO_MNT" "CMAKE_TOOLCHAIN_FILE=$REPRO_MNT/sdl3-features.cmake" bash -c '
+      mount --bind "$HOME_DIR" "$MNT" && cd "$MNT/src/reims-vgpu" \
+      && CARGO_TARGET_DIR=$MNT/build/reims-target RUSTFLAGS="$RP_RUST ${RUSTFLAGS:-}" CFLAGS="$RP_C ${CFLAGS:-}" \
+         cargo xtask dist --platform vulkan' || die "reims-vgpu build failed"
+  else
+    ( cd "$SRC/reims-vgpu" && CMAKE_TOOLCHAIN_FILE="$LIB/sdl3-features.cmake" CARGO_TARGET_DIR="$BUILD/reims-target" RUSTFLAGS="$RP_RUST ${RUSTFLAGS:-}" CFLAGS="$RP_C ${CFLAGS:-}" \
+        cargo xtask dist --platform vulkan ) || die "reims-vgpu build failed"
+  fi
+  [ -f "$BUILD/reims-target/dist-vulkan/lib/pkgconfig/reims-vgpu.pc" ] || die "reims-vgpu dist tree missing after build"
+  ok "reims-vgpu dist: $BUILD/reims-target/dist-vulkan"
+}
+
+QEMU_FEAT=(--without-default-features --enable-tcg --enable-tools --enable-pvg --enable-slirp --enable-vnc --enable-pixman
+           --enable-fdt=system --enable-gnutls --enable-zstd --enable-malloc-trim --enable-stack-protector)
+
+build_qemu() {
+  local dist=$BUILD/reims-target/dist-vulkan
+  [ -f "$dist/lib/pkgconfig/reims-vgpu.pc" ] || die "build reims-vgpu first (snapintosh build --only reims)"
+  clone_pin QEMU "$QEMU_REPO" "$QEMU_REF" "$SRC/qemu"
+  preflight_build make ninja meson pkg-config cc python3 || return 1
+  mkdir -p "$BUILD/qemu"
+  repro_flags
+  # P91: QEMU bakes its install prefix into the binary (data dir, module dir). Configure it for the fixed prefix /snapintosh,
+  # install into a staging DESTDIR and move that into $PREFIX: QEMU finds its data relative to its own location at run time,
+  # so the binary no longer depends on where it was built or installed (same md5 in any directory).
+  local stage=$BUILD/qemu-stage
+  rm -rf "$stage"
+  # decodetree.py walks Python sets and dicts of strings: without a fixed hash seed it emits the A32 and A64 decoders in a
+  # different order from run to run (different machine code, same behaviour), so even two builds in one directory differ.
+  # R13: QEMU's configure turns every optional feature on when its development package is installed, so the binary depended on
+  # which packages the host had (R12: three md5s from three package sets). Start from --without-default-features (everything off)
+  # and enable exactly what the lab binary uses: TCG, the vmapple machine's devices (default devices), pvg (reims-vgpu), slirp user
+  # networking, VNC (-vnc, screendump), pixman (VNC and the display core), gnutls (the only crypto backend with DES, which VNC
+  # password authentication needs: without it `-vnc ...,password-secret=` stops QEMU at start), libfdt (the system one: the in-tree
+  # fallback is a git clone from the network), zstd (snapshots), qemu-img/qemu-nbd/qemu-pcache-compact (tools), and what a plain configure gives on
+  # every host (malloc_trim, stack protector). Audio, USB passthrough, display backends, vhost,
+  # block formats other than raw, qcow2 and nbd, plugins and the rest stay off.
+  local -a feat=("${QEMU_FEAT[@]}")
+  # shellcheck disable=SC2030  # the export is meant for this subshell only
+  ( cd "$BUILD/qemu" && export PYTHONHASHSEED=0 && PKG_CONFIG_PATH="$dist/lib/pkgconfig" "$SRC/qemu/configure" \
+      --prefix=/snapintosh --target-list=aarch64-softmmu "${feat[@]}" --disable-docs \
+      --disable-werror --extra-cflags="-Wno-error $RP_C" \
+    && make -j"$JOBS" && make install DESTDIR="$stage" ) || die "qemu build failed"
+  mkdir -p "$PREFIX"
+  # a snapshot saved by the binary we are about to replace keeps working: if the state format changed, the old binary is kept beside it
+  python3 -I "$LIB/snapctl.py" keep "$PREFIX/bin/qemu-system-aarch64" "$SNAPSHOT_STATE_FORMAT" || true
+  cp -a "$stage/snapintosh/." "$PREFIX/" && rm -rf "$stage"
+  [ -x "$PREFIX/bin/qemu-system-aarch64" ] || die "qemu-system-aarch64 not installed"
+  mkdir -p "$PREFIX/share/snapintosh/27on86"
+  printf '%s\n' "$SNAPSHOT_STATE_FORMAT" > "$PREFIX/share/snapintosh/state-format"
+  rm -f "$PREFIX/share/snapintosh/pgo.txt"   # a plain build replaced a --pgo one
+  cp -a "$SRC/qemu/scripts/27on86/." "$PREFIX/share/snapintosh/27on86/" 2>/dev/null || true
+  ok "qemu: $PREFIX/bin/qemu-system-aarch64"
+}
+
+make_bundle() { # OUT.cpio BOOTARGS : Ambrosia config bundle (config.plist in a newc cpio), our 3 optional keys on
+  local out=$1 args=$2 d
+  need cpio "apt install cpio"
+  d=$(mktemp -d "${out%/*}/bundle-XXXXXX")   # next to the result, never in /tmp: a SIGKILL then leaves it inside the run dir that the next command removes (R29)
+  cat > "$d/config.plist" <<EOP
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>BootArgs</key>
+  <string>$args</string>
+  <key>Graphics</key>
+  <dict><key>KeepAppleGfx</key><true/></dict>
+  <key>Chosen</key><dict><key>internal-use-only-unit</key><integer>1</integer></dict>
+  <key>Asmb</key><dict><key>lp-sip0</key><integer>$AMBROSIA_LP_SIP0</integer></dict>
+</dict>
+</plist>
+EOP
+  local rc=0
+  ( cd "$d" && echo config.plist | cpio -o -H newc 2>/dev/null ) > "$out" || rc=$?
+  rm -rf "$d"
+  return "$rc"
+}
+
+build_ambrosia() {
+  mkdir -p "$SRC" "$BUILD"
+  clone_pin AMBROSIA "$AMBROSIA_REPO" "$AMBROSIA_REF" "$SRC/ambrosia"
+  # clean tree at the pin, then our 3 patches (KeepAppleGfx, Chosen, Asmb: optional config keys, an unpatched config boots as stock)
+  git -C "$SRC/ambrosia" reset --quiet --hard "$AMBROSIA_REF"
+  local pf n=0
+  for pf in "$ROOT"/patches/ambrosia/*.patch; do
+    git -C "$SRC/ambrosia" apply "$pf" || die "ambrosia patch does not apply: $pf"
+    n=$((n + 1))
+  done
+  ok "ambrosia patches applied: $n"
+  preflight_build cargo rustc rustup make cpio || return 1
+  info "building ambrosia (cross, aarch64-unknown-none); first run lets rustup fetch rust 1.99.1"
+  ( cd "$SRC/ambrosia" && make )
+  [ -f "$SRC/ambrosia/target/ambrosia.bin" ] || die "ambrosia.bin missing after build"
+  mkdir -p "$PREFIX/$AMB_DIR_REL"
+  cp "$SRC/ambrosia/target/ambrosia.bin" "$PREFIX/$AMB_DIR_REL/ambrosia.bin"
+  make_bundle "$PREFIX/$AMB_DIR_REL/config.cpio" "$AMBROSIA_BOOTARGS"
+  if [ "$(sha256sum "$PREFIX/$AMB_DIR_REL/ambrosia.bin" | cut -d' ' -f1)" = "$AMBROSIA_SHA256" ]; then ok "ambrosia.bin is byte-identical to the lab image"
+  else warn "ambrosia.bin differs from the lab image $AMBROSIA_SHA256 (other toolchain or pins); fine if it boots"; fi
+  ok "ambrosia: $PREFIX/$AMB_DIR_REL/ambrosia.bin ($(sha256sum "$PREFIX/$AMB_DIR_REL/ambrosia.bin" | cut -c1-12)), config.cpio with BootArgs '$AMBROSIA_BOOTARGS'"
+}
+
+build_mesa() {
+  clone_pin MESA "$MESA_REPO" "$MESA_REF" "$SRC/mesa"
+  preflight_build meson ninja llvm-config glslangValidator || return 1
+  if git -C "$SRC/mesa" apply --check "$ROOT/patches/mesa-lavapipe-immutable-samplers.patch" 2>/dev/null; then
+    git -C "$SRC/mesa" apply "$ROOT/patches/mesa-lavapipe-immutable-samplers.patch"
+  else
+    info "patch already applied or does not apply cleanly; continuing"
+  fi
+  meson setup "$BUILD/mesa" "$SRC/mesa" --prefix="$HOME_DIR/mesa" --buildtype=release \
+    -Dgallium-drivers=llvmpipe -Dvulkan-drivers=swrast -Dglx=disabled -Dgbm=disabled -Degl=disabled \
+    -Dplatforms= -Dllvm=enabled --reconfigure 2>/dev/null || meson setup "$BUILD/mesa" "$SRC/mesa" \
+    --prefix="$HOME_DIR/mesa" --buildtype=release -Dgallium-drivers=llvmpipe -Dvulkan-drivers=swrast \
+    -Dglx=disabled -Dgbm=disabled -Degl=disabled -Dplatforms= -Dllvm=enabled
+  ninja -C "$BUILD/mesa" -j"$JOBS" install
+  ok "lavapipe: $HOME_DIR/mesa"
+}
+
+# ---------------------------------------------------------------- build --pgo (R30)
+# Profile-guided optimisation plus full LTO of the QEMU binary, opt-in (P104: Safari open and drag stay within noise, boot to Dock and CPU use
+# gain a few percent). gcc's profile is exact only against the same source AT THE SAME ABSOLUTE PATH (it hashes the path of every static
+# function) and the same compiler, so the instrumented build G, the training boot and the final build C all run in ONE private mount
+# namespace (unshare -rm) that binds $HOME_DIR at $REPRO_MNT, as the reims build does. The profile is never bundled: it is made on this
+# host from this source. Everything the build makes lives in $PGO_WORK; the working binary is replaced only after C compiled with no
+# profile mismatch and starts, so a failed or killed build leaves nothing behind and changes nothing.
+PGO_WORK=$HOME_DIR/pgo-work
+PGO_EXPECT="about 50 minutes on 6 cores (49 min measured; up to about 4 h at the bounds)"
+pgo_plan() {
+  cat <<EOP
+snapintosh build --pgo: expected time $PGO_EXPECT (less with more cores):
+  1. instrumented QEMU build                      about 2 min
+  2. warm the translation pack of that build      2 boots, up to 45 min each (the instrumented binary is about 4x slower)
+  3. train: one boot with 2 vCPUs, Safari open to draw, window drag       about 20 min, repeated once if it fails (up to 75 min each)
+  4. final build with the profile and full LTO    3 to 5 min, profile mismatches fail the build
+  The running build is replaced only when all of it succeeded. Ctrl-C at any point removes everything this made.
+EOP
+}
+
+# pgo_stop_ns WORKDIR [MARKER]: stop every process of this user that is in the mount namespace the build of WORKDIR recorded (its own namespace:
+# nothing else shares it), whoever its parent is. A process is ours only when its environment carries SNAPINTOSH_PGO_WORK=MARKER. WORKDIR is
+# how THIS shell names the work dir, MARKER is how the build named it when it started everything: the OUTER path. Outside the namespace the two
+# are the same (the default); inside, WORKDIR is under $REPRO_MNT and MARKER is $SNAPINTOSH_PGO_WORK. Never match on a path that differs between
+# the two views.
+pgo_stop_ns() {
+  local ino p marker=${2:-$1}
+  ino=$(cat "$1/mntns" 2>/dev/null || true); [ -n "$ino" ] || return 0
+  for _ in 1 2 3; do
+    for p in /proc/[0-9]*; do
+      p=${p#/proc/}
+      [ "$p" = "$$" ] || [ "$p" = "${BASHPID:-$$}" ] && continue
+      [ "$(readlink "/proc/$p/ns/mnt" 2>/dev/null || true)" = "$ino" ] || continue
+      # the namespace may be long gone and its inode reused: only a process that carries this build's marker is ours
+      tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qxF "SNAPINTOSH_PGO_WORK=$marker" && kill -9 "$p" 2>/dev/null || true
+    done
+    sleep 0.2
+  done
+}
+
+# pgo_watchdog TARGET: runs in the namespace beside TARGET (the inner shell). When the snapintosh that started the build is gone (SIGKILL: no trap
+# ran) it kills TARGET, then everything else of the build in this namespace, and ends. One round only: no second kill, so a reused pid is safe.
+# PGO_WD_TICK is the poll interval in seconds (5; the tests use less).
+pgo_watchdog() {
+  while sleep "${PGO_WD_TICK:-5}"; do
+    if [ ! -f "$PGO_WORK/cli.pid" ] || cli_dead "$PGO_WORK"; then
+      kill -9 "$1" 2>/dev/null || true
+      pgo_stop_ns "$PGO_WORK" "${SNAPINTOSH_PGO_WORK:-$PGO_WORK}"
+      exit 0
+    fi
+  done
+}
+
+# pgo_unstage: the copies the install step makes beside the real files (an install that was cut short leaves them; 363 MB for the binary)
+pgo_unstage() {
+  find "$PREFIX" -name '*.pgo-new' -delete 2>/dev/null || true
+  rm -f "$PREFIX/share/snapintosh/pgo.txt.new"
+}
+
+# pgo_reap: the work dir of a --pgo build that died without cleaning up (SIGKILL, power loss) goes, and what still runs in its namespace stops.
+# Same proof as reap_leftovers: cli.pid names a snapintosh of this pid namespace that is gone. A live build keeps its dir.
+pgo_reap() {
+  local d
+  for d in "$PGO_WORK".new-*; do   # a build killed between making its private dir and taking the lock (its cli.pid is in it from the start)
+    [ -d "$d" ] && [ -f "$d/cli.pid" ] && cli_dead "$d" && rm -rf "$d"
+  done
+  [ -d "$PGO_WORK" ] || return 0
+  if [ -f "$PGO_WORK/cli.pid" ]; then
+    cli_dead "$PGO_WORK" || return 0
+  else
+    [ -n "$(find "$PGO_WORK" -maxdepth 0 -mmin +2 2>/dev/null)" ] || return 0   # a dir of an older snapintosh (it made the dir before cli.pid)
+  fi
+  pgo_stop_ns "$PGO_WORK"
+  pgo_unstage
+  rm -rf "$PGO_WORK"
+  echo "snapintosh: removed the work dir of an earlier build --pgo that died ($PGO_WORK)" >&2
+  return 0
+}
+
+pgo_preflight() {
+  [ -x "$PREFIX/bin/qemu-system-aarch64" ] || die "build --pgo improves a working build: run snapintosh build first (it trains on that setup)"
+  [ -f "$VM/golden/root-quiet.qcow2" ] || [ -f "$VM/golden/root-sshd.qcow2" ] \
+    || die "build --pgo trains on a boot of your golden image: run snapintosh make-disk golden first"
+  [ -f "$BUILD/reims-target/dist-vulkan/lib/pkgconfig/reims-vgpu.pc" ] || die "build --pgo needs the renderer library: snapintosh build --only reims first"
+  repro_ns_ok || die "build --pgo needs unprivileged user namespaces (unshare -rm, and the directory $REPRO_MNT): the profile only matches the source at one fixed path, which the private mount namespace gives.
+$(userns_fix)"
+  repro_mnt_check
+  case $ROOT in "$REPRO_MNT"|"$REPRO_MNT"/*) die "build --pgo binds $HOME_DIR over $REPRO_MNT, which would hide this release tree ($ROOT): run it from another directory" ;; esac
+  [ "$DRY" = 1 ] || preflight_build gcc make ninja meson pkg-config python3 unshare git || return 1
+}
+
+# pgo_compile FLAVOR STAGE LOG (inside the namespace): configure and make the pinned QEMU in $PGO_WORK/b, the same configure line and path maps
+# as build_qemu. G = instrumented (-fprofile-generate, counters not atomic, gcda in $PGO_WORK/prof). C = -fprofile-use with full LTO; the two
+# profile warnings are switched on in build.ninja after configure (its probes run with -Werror) so the log shows every mismatch.
+pgo_compile() {
+  local f=$1 stage=$2 log=$3 b=$PGO_WORK/b prof=$PGO_WORK/prof dist=$BUILD/reims-target/dist-vulkan cf lf="" mo=()
+  repro_flags
+  cf="-Wno-error $RP_C -fprofile-prefix-path=$b -fprofile-dir=$prof"
+  if [ "$f" = G ]; then cf="$cf -fprofile-generate -fprofile-update=single"; lf="-fprofile-generate -fprofile-update=single"
+  else cf="$cf -fprofile-use -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch"; lf="-fprofile-use -fprofile-correction"; mo=(-Db_lto=true "-Db_lto_threads=$JOBS"); fi
+  rm -rf "$b" "$stage"; mkdir -p "$b" "$prof"
+  # shellcheck disable=SC2031  # the export is meant for this subshell only
+  ( cd "$b" && export PYTHONHASHSEED=0 PKG_CONFIG_PATH="$dist/lib/pkgconfig" \
+    && "$SRC/qemu/configure" --prefix=/snapintosh --target-list=aarch64-softmmu "${QEMU_FEAT[@]}" --disable-docs --disable-werror \
+         --extra-cflags="$cf" --extra-ldflags="$lf" "${mo[@]}" \
+    && { [ "$f" != C ] || { sed -i 's/ -Wno-missing-profile//g; s/ -Wno-coverage-mismatch//g' build.ninja && ! grep -q -e -Wno-missing-profile build.ninja; }; } \
+    && make -j"$JOBS" && make install DESTDIR="$stage" >/dev/null ) > "$log" 2>&1 \
+    || { tail -n 25 "$log" >&2; die "build --pgo: the $f build failed (log $log)"; }
+  [ -x "$stage/snapintosh/bin/qemu-system-aarch64" ] || die "build --pgo: the $f build made no qemu-system-aarch64"
+}
+
+# free_port: a TCP port nothing listens on at this moment (the kernel picks it)
+free_port() { python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }   # callers that need two ask until they differ
+
+# pgo_bench NAME ARGS...: one `snapintosh bench` run of the instrumented build, in the home $PGO_WORK/home (its own pack, runs and snapshots: the
+# build is thrown away with the work dir). Bounded: 2.5 h.
+pgo_bench() {
+  local n=$1 h=$PGO_WORK/home rc=0 sp hp; shift
+  mkdir -p "$h/res/$n"
+  # ports nobody listens on (a VM the user started keeps 10022 and 18080), and the snapshots dir of this home, never the user's
+  sp=$(free_port); hp=$(free_port); while [ "$hp" = "$sp" ]; do hp=$(free_port); done
+  SNAPS=$h/snaps SNAPINTOSH_HOME=$h SNAPINTOSH_PREFIX=$h/prefix timeout 9000 bash "$SELF" bench --runs 1 --no-resume --ram 4G --ssh-port "$sp" --http-port "$hp" --out "$h/res/$n" "$@" \
+    > "$PGO_WORK/$n.out" 2>&1 &
+  track $!
+  wait $! || rc=$?
+  return "$rc"
+}
+
+# pgo_owner_alive: the snapintosh that started this build still runs. If it was SIGKILLed the namespace carries on, and nothing may
+# install a binary then (the next snapintosh command reaps the work dir, pgo_reap)
+pgo_owner_alive() {
+  if [ ! -f "$PGO_WORK/cli.pid" ] || cli_dead "$PGO_WORK"; then die "build --pgo: the snapintosh that started this build is gone; stopping, nothing installed"; fi
+}
+
+# pgo_train: the training boot, once and once more when it fails (the instrumented guest can wedge in the renderer). Every boot starts from an
+# empty profile directory: libgcov merges into the .gcda files it finds, so the counters of a failed boot (a guest at the Dock that never drew, a
+# 75 minute wedge) would weigh on the good one, and a QEMU killed while writing can leave a truncated file that the next boot cannot merge.
+pgo_train() {
+  local n ok=0
+  for n in train train2; do
+    rm -rf "$PGO_WORK/prof"; mkdir -p "$PGO_WORK/prof"
+    if pgo_bench "$n" --cpus 2 --pcache ro --settle 30 --drag-settle 30 --drag-secs 20 --draw-limit 900 --ssh-limit 2400 --dock-limit 2400 --secs-cold 4500; then ok=1; break; fi
+    info "pgo: training boot $n failed: $(grep -v '^[[:space:]]*$' "$PGO_WORK/$n.out" 2>/dev/null | tail -n 1 | cut -c1-200)"
+  done
+  [ "$ok" = 1 ] || { tail -n 20 "$PGO_WORK/$n.out" >&2; die "build --pgo: the training boot did not reach the Dock, draw Safari and drag cleanly (log $PGO_WORK/$n.out)"; }
+}
+
+# cmd_pgo_ns: the part that runs inside the namespace ($HOME_DIR is $REPRO_MNT here, started by build_qemu_pgo)
+cmd_pgo_ns() {
+  local stageG=$PGO_WORK/stage-G stageC=$PGO_WORK/stage-C h=$PGO_WORK/home f b warmcpus n mh rel
+  JOBS=${PGO_JOBS:-$(nproc)}
+  readlink /proc/self/ns/mnt > "$PGO_WORK/mntns"
+  # if the snapintosh that started this is SIGKILLed nothing else stops us: a watchdog ends the namespace within 5 s (and nothing is installed)
+  pgo_watchdog "$$" &
+  PGO_WD=$!
+  trap 'kill "$PGO_WD" 2>/dev/null || true' EXIT
+  pgo_owner_alive
+  info "pgo 1/4: instrumented build"
+  pgo_compile G "$stageG" "$PGO_WORK/G.log"
+  # a home of its own for the instrumented binary: its own translation pack (the pack is keyed by the binary), runs and snapshots; the golden,
+  # mesa, ssh host keys and every other file of the real prefix are shared
+  mkdir -p "$h/prefix/bin" "$h/pcache" "$h/snaps" "$h/runs"
+  ln -s "$VM" "$h/vm"
+  [ ! -e "$HOME_DIR/mesa" ] || ln -s "$HOME_DIR/mesa" "$h/mesa"
+  [ ! -f "$KNOWN_HOSTS" ] || cp "$KNOWN_HOSTS" "$h/known_hosts"
+  for f in "$PREFIX"/*; do b=${f##*/}; [ "$b" = bin ] || ln -s "$f" "$h/prefix/$b"; done
+  for f in "$PREFIX"/bin/*; do ln -s "$f" "$h/prefix/bin/${f##*/}"; done
+  rm -f "$h/prefix/bin/qemu-system-aarch64"; cp "$stageG/snapintosh/bin/qemu-system-aarch64" "$h/prefix/bin/qemu-system-aarch64"   # the release compactor stays: an instrumented one would keep writing profile
+  warmcpus=$JOBS; [ "$warmcpus" -le 6 ] || warmcpus=6
+  info "pgo 2/4: warming the translation pack of the instrumented build (2 boots, $warmcpus vCPUs; the page may not draw here, only the pack matters)"
+  for n in warm1 warm2; do
+    # bounded: an instrumented guest can wedge in the renderer (R30: 14 minutes in, QEMU idle), and the pack is written long before that matters
+    pgo_bench "$n" --cpus "$warmcpus" --pcache rw --no-drag --settle 20 --draw-limit 600 --ssh-limit 2400 --dock-limit 2400 --secs-cold 2700 || true
+    # shellcheck disable=SC2012
+    [ -n "$(ls "$h"/pcache/*.pack 2>/dev/null)" ] || { tail -n 20 "$PGO_WORK/$n.out" >&2; die "build --pgo: warm-up boot $n wrote no translation pack (log $PGO_WORK/$n.out)"; }
+  done
+  pgo_owner_alive
+  info "pgo 3/4: training boot (2 vCPUs: with 6 the instrumented guest cannot draw a page)"
+  pgo_train
+  python3 -I "$LIB/pgoctl.py" check-prof "$PGO_WORK/prof" || die "build --pgo: the training run left no usable profile"
+  pgo_owner_alive
+  info "pgo 4/4: final build with the profile and full LTO"
+  pgo_compile C "$stageC" "$PGO_WORK/C.log"
+  python3 -I "$LIB/pgoctl.py" check-log "$PGO_WORK/C.log" || die "build --pgo: the profile does not match the source (log $PGO_WORK/C.log); the working build is untouched"
+  mh=$("$stageC/snapintosh/bin/qemu-system-aarch64" -machine help 2>&1 || true)
+  case $mh in *vmapple*) ;; *) die "build --pgo: the new qemu-system-aarch64 does not start or lacks the vmapple machine; the working build is untouched" ;; esac
+  pgo_owner_alive
+  python3 -I "$LIB/snapctl.py" keep "$PREFIX/bin/qemu-system-aarch64" "$SNAPSHOT_STATE_FORMAT" || true
+  # file by file: a copy beside the target, then a rename (a kill leaves whole files, never a half-written binary)
+  # the QEMU binary goes in last, and pgo.txt right after it: a kill earlier leaves the old binary with its old marker, a kill later leaves the new
+  # binary with its marker (pgo_reap removes any .pgo-new copy)
+  while IFS= read -r -d '' f; do
+    rel=${f#"$stageC/snapintosh/"}
+    [ "$rel" != bin/qemu-system-aarch64 ] || continue
+    mkdir -p "$PREFIX/${rel%/*}"
+    cp -a "$f" "$PREFIX/$rel.pgo-new" || die "build --pgo: installing $rel failed (disk full?); the working build is as it was"
+    mv -f "$PREFIX/$rel.pgo-new" "$PREFIX/$rel"
+  done < <(find "$stageC/snapintosh" \( -type f -o -type l \) -print0)
+  mkdir -p "$PREFIX/share/snapintosh"
+  printf 'pgo build\nqemu_ref %s\ngcc %s\ndate %s\n' "$QEMU_REF" "$(gcc -dumpfullversion)" "$(date -u +%FT%TZ)" > "$PREFIX/share/snapintosh/pgo.txt.new"
+  cp -a "$stageC/snapintosh/bin/qemu-system-aarch64" "$PREFIX/bin/qemu-system-aarch64.pgo-new" || die "build --pgo: installing qemu-system-aarch64 failed (disk full?); the working binary is as it was"
+  mv -f "$PREFIX/bin/qemu-system-aarch64.pgo-new" "$PREFIX/bin/qemu-system-aarch64"
+  mv -f "$PREFIX/share/snapintosh/pgo.txt.new" "$PREFIX/share/snapintosh/pgo.txt"
+  ok "qemu (PGO + LTO): $PREFIX/bin/qemu-system-aarch64 ($(md5sum "$PREFIX/bin/qemu-system-aarch64" | cut -c1-12)); its translation pack is new, the first boots write it"
+}
+
+build_qemu_pgo() {
+  local rc=0
+  pgo_preflight || return 1
+  pgo_plan
+  [ "$DRY" = 1 ] && return 0
+  pgo_reap
+  # The lock is taken only once its owner proof exists: the work dir is made under a private name with cli.pid inside and the trap set, then
+  # renamed onto $PGO_WORK (rename fails when a build holds it: its dir is never empty). A die before that (clone_pin: no QEMU_REPO, pin
+  # missing) removes the private dir and never blocks the next try; a slow fetch cannot look like a dead owner to pgo_reap.
+  local tmpwork=$PGO_WORK.new-$$
+  rm -rf "$tmpwork"; mkdir "$tmpwork"
+  echo "$$:$(pstart "$$"):$PIDNS" > "$tmpwork/cli.pid"
+  CL_RMRUN=$tmpwork
+  cl_trap   # whatever ends this (die, Ctrl-C, SIGTERM) removes the work dir and stops the namespace
+  # the lock first (clone_pin checks out the pin in the shared $SRC/qemu, which a running build compiles from); a die after it removes the dir
+  mv -T "$tmpwork" "$PGO_WORK" 2>/dev/null || die "another build --pgo is running ($PGO_WORK)"
+  CL_RMRUN=$PGO_WORK; CL_PGO=$PGO_WORK
+  clone_pin QEMU "$QEMU_REPO" "$QEMU_REF" "$SRC/qemu"
+  # ssh refuses the system config in the namespace (root-owned files show as owned by nobody, and we are uid 0 there: "Bad owner or permissions"):
+  # an empty config of our own is bound over it, for this namespace only
+  mkdir -p "$PGO_WORK/ssh/config.d"; : > "$PGO_WORK/ssh/config"
+  # shellcheck disable=SC2016  # the script is for the inner bash, which expands it
+  unshare -rm env "HOME_DIR=$HOME_DIR" "MNT=$REPRO_MNT" "SNAPINTOSH_HOME=$REPRO_MNT" "PGO_JOBS=$JOBS" "SELF=$SELF" "SNAPINTOSH_PGO_WORK=$PGO_WORK" \
+    bash -c 'mount --bind "$HOME_DIR" "$MNT" \
+      && { [ ! -e /etc/ssh/ssh_config ] || mount --bind "$SNAPINTOSH_PGO_WORK/ssh/config" /etc/ssh/ssh_config; } \
+      && { [ ! -d /etc/ssh/ssh_config.d ] || mount --bind "$SNAPINTOSH_PGO_WORK/ssh/config.d" /etc/ssh/ssh_config.d; } \
+      && exec bash "$SELF" _pgo-ns' &
+  track $!
+  wait $! || rc=$?
+  if [ "$rc" != 0 ]; then
+    cleanup_reset
+    rm -rf "$PGO_WORK"
+    die "build --pgo failed (status $rc); nothing was installed, the work dir is removed and the working build is untouched"
+  fi
+  cleanup_reset
+  rm -rf "$PGO_WORK"
+}
+
+cmd_build() {
+  local only=all pgo=0
+  JOBS=$(nproc)
+  pgo_reap
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --deps) cmd_build_deps; return 0 ;;
+      --pgo) pgo=1 ;;
+      --only) only=$2; shift ;;
+      -j) JOBS=$2; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "build: unknown option $1" ;;
+    esac
+    shift
+  done
+  if [ "$pgo" = 1 ]; then
+    case $only in all|qemu) ;; *) die "build: --pgo is a QEMU build option: use it with --only qemu or with no --only" ;; esac
+    if [ "$DRY" = 1 ]; then build_qemu_pgo; return 0; fi
+  fi
+  case $only in
+    all) build_reims; { [ "$pgo" = 0 ] || [ ! -x "$PREFIX/bin/qemu-system-aarch64" ]; } && build_qemu; build_ambrosia; [ "$pgo" = 0 ] || build_qemu_pgo ;;
+    reims) build_reims ;;
+    qemu) if [ "$pgo" = 1 ]; then build_qemu_pgo; else build_qemu; fi ;;
+    ambrosia) build_ambrosia ;;
+    mesa) build_mesa ;;
+    *) die "build: --only reims|qemu|ambrosia|mesa" ;;
+  esac
+  echo "note: the build is path independent (P91): the same pins give the same md5 in any directory. It still differs from the lab binary qemu-p8p89q (md5 4381561b...), which was linked in the lab's own directories. The translation cache pack is keyed by the binary: the first boot writes a new pack (about 4 GiB), the second one uses it."
+}
+
+# ---------------------------------------------------------------- fetch
+remote_size() { # URL: the Content-Length the server announces for the final (redirected) response, empty if none
+  curl -fsIL --connect-timeout 30 --max-time 60 "$1" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "content-length:" {n = $2} END {if (n != "") print n}'
+}
+
+cmd_fetch() {
+  local url="" out=$DL build="" sha=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --build) build=$2; shift ;;
+      --url) url=$2; shift ;;
+      --sha256) sha=$2; shift ;;
+      --out) out=$2; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "fetch: unknown option $1" ;;
+    esac
+    shift
+  done
+  [ -z "$sha" ] || [[ $sha =~ ^[0-9a-fA-F]{64}$ ]] || die "fetch: --sha256 needs 64 hex digits"
+  [ -z "$build" ] || ipsw_pick "$build"
+  [ -n "$url" ] || url=$IPSW_URL
+  [ "$url" != "$IPSW_URL" ] || info "build $IPSW_BUILD (macOS $IPSW_VERSION), $((IPSW_SIZE / 1000000000)) GB"
+  if [ "$url" = "$IPSW_URL" ] && [ "$IPSW_BUILD" != 26A428 ]; then
+    warn "build $IPSW_BUILD: supported path, but this stack has not booted it. Needs its own Mac install and golden"
+  fi
+  need curl "apt install curl"
+  mkdir -p "$out"
+  local f; f=$out/$(basename "${url%%\?*}")
+  echo "Apple's restore image, from Apple's CDN, is for use on Apple hardware under the macOS EULA. We do not host or bundle it."
+  echo "url:  $url"
+  echo "file: $f"
+  [ "$DRY" = 1 ] && { echo "(dry run)"; return 0; }
+  # what the finished file must be: the pinned size and hash for a pinned build, else what the server announces (and --sha256)
+  local want_size="" want_sha=""
+  if [ "$url" = "$IPSW_URL" ]; then want_size=$IPSW_SIZE; want_sha=$IPSW_SHA256; else want_size=$(remote_size "$url"); fi
+  [ -z "$sha" ] || want_sha=${sha,,}
+  # --max-time bounds a single attempt; -C - resumes, the loop retries dropped connections (6 tries, 5 s apart, growing)
+  local attempt rc=0 max=${SNAPINTOSH_FETCH_ATTEMPTS:-6} nap PROG=(-sS) have
+  [ -t 2 ] && PROG=(--progress-bar)
+  for attempt in $(seq 1 "$max"); do
+    rc=0
+    curl -fL --retry 3 --connect-timeout 30 -C - -o "$f" ${SNAPINTOSH_FETCH_MAXTIME:+--max-time "$SNAPINTOSH_FETCH_MAXTIME"} \
+        "${PROG[@]}" "$url" || rc=$?
+    [ "$rc" != 0 ] || break
+    # 33 or 22 on a resume of a file that is already whole (range not satisfiable): the size decides, not the code
+    have=$(stat -c %s "$f" 2>/dev/null || echo 0)
+    if [ -n "$want_size" ] && [ "$have" = "$want_size" ]; then rc=0; break; fi
+    [ -z "${SNAPINTOSH_FETCH_MAXTIME:-}" ] || { echo "stopped by SNAPINTOSH_FETCH_MAXTIME; run again to resume ($have bytes so far)"; return 0; }
+    [ "$attempt" -lt "$max" ] || break
+    nap=${SNAPINTOSH_FETCH_SLEEP:-$((attempt < 12 ? attempt * 5 : 60))}
+    echo "attempt $attempt of $max failed (curl $rc), resuming in $nap s"
+    sleep "$nap"
+  done
+  [ "$rc" = 0 ] || die "download failed after $max attempts (curl exit $rc); the partial file stays at $f, run again to resume"
+  have=$(stat -c %s "$f")
+  if [ -n "$want_size" ]; then
+    if [ "$have" = "$want_size" ]; then ok "size $have matches the $([ "$url" = "$IPSW_URL" ] && echo "pinned build $IPSW_BUILD" || echo "size the server announced")"
+    else bad "size $have, expected $want_size: the file is incomplete (run again to resume) or not the expected image"; return 1; fi
+  else
+    warn "the server announced no size: the download cannot be checked for completeness without --sha256"
+  fi
+  if [ -n "$want_sha" ]; then
+    echo "verifying sha256 ($((have / 1000000000)) GB, takes a minute)"
+    local got; got=$(sha256sum "$f" | awk '{print $1}')
+    if [ "$got" = "$want_sha" ]; then ok "sha256 matches$([ "$url" = "$IPSW_URL" ] && echo " the pinned build $IPSW_BUILD")"
+    else bad "sha256 $got differs from the expected $want_sha"; return 1; fi
+  else
+    warn "custom URL: no hash to check against (pass --sha256 H). Only the size was checked; builds $IPSW_BUILDS are pinned"
+  fi
+}
+
+# ---------------------------------------------------------------- make-disk
+mac_steps() {
+  local ipsw; ipsw=$(basename "$IPSW_URL")
+  cat <<EOF
+make-disk: the one step that needs a Mac (Apple Silicon, macOS 13 or newer, Xcode command line tools).
+It exists because Apple's Virtualization.framework is the only tool that personalizes a macOS
+restore for a vmapple machine (it asks Apple to sign the install for a machine id) and produces
+aux.img. There is no Linux replacement yet. See docs/BLOCKERS.md item 1. Everything after it runs on Linux.
+Build $IPSW_BUILD (macOS $IPSW_VERSION). Install a build Apple still signs: ipsw.me does not track signing for
+VirtualMac, real Mac identifiers show 26A428 and 26B131 signed. Once installed, booting never
+asks Apple again. For 26B131 the Mac's own macOS must be able to host a 27.2 guest.
+
+  On the Mac (about 15 minutes plus the download, about 70 GB free):
+   1. Copy the IPSW and this repo's mac/ directory to the Mac (or fetch the IPSW there).
+   2. swiftc -O mac/vzinstall.swift -o vzinstall -framework Virtualization -framework AppKit
+      codesign --force --sign - --entitlements mac/vz.entitlements vzinstall
+   3. ./vzinstall install $ipsw ./vmdir 64
+         (the lab run took 296 s on an M3 Max; writes disk.img aux.img machineid.bin hardwaremodel.bin)
+   4. ./vzinstall run ./vmdir     (opens a window: MANUAL Setup Assistant)
+         English/US, no transfer, account name snap, password snaplab, no Apple Account, location
+         services off, analytics off, then System Settings > Users & Groups > automatic login as
+         snap, then Shut Down. About 3 minutes.
+   5. Copy vmdir/{disk.img,aux.img,machineid.bin,hardwaremodel.bin} to this Linux host (rsync --sparse), then:
+         snapintosh make-disk import ./vmdir
+
+  No AVPBooter is needed: Ambrosia replaces AVPBooter and iBoot (build it with 'snapintosh build').
+  Only the legacy path (run --fw avp) wants AVPBooter.vmapple2.bin, from your own Mac:
+      /System/Library/Frameworks/Virtualization.framework/Versions/A/Resources/AVPBooter.vmapple2.bin
+      (Apple file: never redistribute it)  then: snapintosh make-disk import ./vmdir --avpbooter ./AVPBooter.vmapple2.bin
+  Note: the install leaves Apple's LLB/iBoot code in aux.img. Ambrosia does not run it; the lab zeroed that range once
+  (first 0x80000 bytes) and the guest still booted. Not done by this CLI.
+  KDK: not needed for this path.
+EOF
+}
+
+cmd_make_disk() {
+  local step=${1:-}; shift || true
+  case $step in
+    "") die "usage: make-disk mac-steps|import DIR|golden|warm|adopt-golden FILE|sshd-interactive|quiet" ;;
+    mac-steps) [ "${1:-}" != --build ] || { ipsw_pick "${2:?usage: make-disk mac-steps --build B}"; }; mac_steps ;;
+    import) make_disk_import "$@" ;;
+    adopt-golden) make_disk_adopt_golden "$@" ;;
+    golden) make_disk_golden "$@" ;;
+    warm) make_disk_warm "$@" ;;
+    sshd-interactive) make_disk_sshd_interactive ;;
+    quiet) make_disk_quiet "$@" ;;
+    *) die "make-disk: unknown step $step (mac-steps, import, adopt-golden, golden, warm, sshd-interactive, quiet)" ;;
+  esac
+}
+
+make_disk_import() {
+  local dir=${1:-} boot=""
+  [ -n "$dir" ] || die "usage: make-disk import DIR [--avpbooter FILE]   (AVPBooter only for the legacy --fw avp path)"
+  shift
+  while [ $# -gt 0 ]; do case $1 in --avpbooter) boot=$2; shift ;; *) die "import: unknown option $1" ;; esac; shift; done
+  local f
+  for f in disk.img aux.img machineid.bin hardwaremodel.bin; do [ -f "$dir/$f" ] || die "$dir/$f missing: that file comes from the Mac step (snapintosh make-disk mac-steps)"; done
+  [ -z "$boot" ] || [ -f "$boot" ] || die "$boot: no such file (AVPBooter.vmapple2.bin comes from your Mac, legacy path only)"
+  python3 -I - "$dir/machineid.bin" <<'PY' >/dev/null || die "machineid.bin is not a plist with an ECID"
+import plistlib, sys
+assert "ECID" in plistlib.load(open(sys.argv[1], "rb"))
+PY
+  mkdir -p "$VM"
+  cp --sparse=always "$dir/disk.img" "$VM/disk.img"
+  # the lab trims the first 16 KiB of aux.img (one dd block of 0x4000) to get the 32 MiB pflash payload
+  cp "$dir/aux.img" "$VM/aux.full.img"
+  dd if="$VM/aux.full.img" of="$VM/aux.img" bs=$((0x4000)) skip=1 status=none
+  cp "$dir/machineid.bin" "$dir/hardwaremodel.bin" "$VM/"
+  [ -z "$boot" ] || cp "$boot" "$VM/AVPBooter.vmapple2.bin"
+  rm -f "$KNOWN_HOSTS"
+  ok "imported into $VM (master disk.img is never booted directly, runs use qcow2 overlays)"
+  echo "next: snapintosh make-disk golden (builds the tuned golden, tested in R10) or snapintosh make-disk adopt-golden FILE (you already have one)"
+}
+
+ecid() { python3 -I -c 'import plistlib,sys;print(plistlib.load(open(sys.argv[1],"rb"))["ECID"])' "$VM/machineid.bin"; }
+
+# golden_unfinished_phase1 GOLDENDIR: R27 (A3 finding 8). A snapintosh SIGKILLed during phase 1 leaves QEMU, qemu-nbd and the memfd holder in
+# GOLDENDIR/tmp and a half written root-sshd.qcow2. They are stopped like a dead run's, and the overlay is set aside as .failed (it is not a golden).
+golden_unfinished_phase1() {
+  local g=$1
+  [ -f "$g/tmp/phase1.running" ] || { reap_stale "$RUNS" "$g/tmp"; return 0; }
+  if ! cli_dead "$g/tmp"; then   # the snapintosh that owns this phase 1 still runs (or its cli.pid is unreadable): never build on its overlay
+    die "make-disk golden: phase 1 of another snapintosh is still running (see $g/tmp/cli.pid); wait for it, or if it is gone remove $g/tmp/phase1.running and $g/tmp/cli.pid"
+  fi
+  reap_stale "$RUNS" "$g/tmp"
+  kill_nbd "$g/tmp/nbd.pid" "$g/tmp/nbd.sock"
+  rm -f "$g/tmp/phase1.running" "$g/tmp/cli.pid"
+  [ -f "$g/root-sshd.qcow2" ] || return 0
+  mv -f "$g/root-sshd.qcow2" "$g/root-sshd.failed.qcow2"
+  warn "an earlier make-disk golden died during phase 1: its processes are stopped and its overlay is kept as $g/root-sshd.failed.qcow2; run make-disk golden again (without --again)"
+}
+make_disk_golden() { # [BASE-DISK] [--no-quiet] [--user U] [--password-file F]: installed disk to the tuned golden, no Mac needed
+  local base="" quiet=1 user=snap pw=${GUEST_PW:-snaplab} again=0 warm=0
+  local -a runopts=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --no-quiet) quiet=0 ;;
+      --warm) warm=$2; shift ;;   # R15: boots of the finished golden that fill the translation cache (0 = off)
+      --again) again=1 ;;   # phase 1 already done (golden/root-sshd.qcow2 exists, for example after a failed phase 2): run phase 2 only
+      --cpus|--gpu|--icd|--mesa|--ssh-port|--ram|--secs) runopts+=("$1" "$2"); shift ;;   # phase 2 is a normal boot: same options as run
+      --user) user=$2; shift ;;
+      --password-file) [ -r "${2:-}" ] || die "golden: --password-file: cannot read ${2:-}"; pw=$(head -n 1 "$2"); shift ;;
+      --password) die "golden: --password is gone (a password on the command line shows in ps): use --password-file FILE or the environment variable SNAPINTOSH_GUEST_PASSWORD" ;;
+      -*) die "golden: unknown option $1" ;;
+      *) base=$1 ;;
+    esac; shift
+  done
+  # the user name is typed into a root shell in the guest (and quoted there as well): a macOS short name only
+  [[ $user =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "golden: --user must be a short name: lower case letters, digits, _ and -, at most 32, not starting with a digit or dash"
+  [ -n "$pw" ] || die "golden: the guest password is empty"
+  [ -n "$base" ] || base=$VM/disk.img
+  [ -f "$base" ] || die "$base: no such file (usage: make-disk golden [BASE-DISK]; the default is the imported $VM/disk.img)"
+  base=$(readlink -f "$base")
+  [ -f "$VM/aux.img" ] && [ -f "$VM/machineid.bin" ] || die "aux.img / machineid.bin missing: run make-disk import first (the base disk is only the root disk)"
+  local q=$PREFIX/bin/qemu-system-aarch64 qimg=$PREFIX/bin/qemu-img
+  local helper=$PREFIX/share/snapintosh/27on86
+  [ "$FW" = ambrosia ] || die "golden: only the Ambrosia path is automated (the legacy --fw avp single-user flow is the lab's old manual one)"
+  echo "make-disk golden from $base (opened read only: every change goes into qcow2 overlays on top of it)"
+  echo " phase 1, offline, single-user boot on a serial socket (Ambrosia BootArgs '-s -v serial=11', the lab policy keys come from the bundle):"
+  echo "   ed25519 root key + sshd LaunchDaemon (persist-sshd.py), sshd ProcessType Interactive (P83), timed fix (P58), autologin fallback"
+  echo " phase 2, one normal boot, over ssh: quiet profile (apply-quiet.sh), clean shutdown. Result: golden/root-quiet.qcow2 on golden/root-sshd.qcow2 on the base"
+  parse_run_opts "${runopts[@]}"
+  [[ $warm =~ ^[0-9]+$ ]] || die "golden: --warm needs a number of boots (0 = none)"
+  [ "$DRY" = 1 ] && return 0
+  [ -x "$q" ] || die "QEMU not built: snapintosh build"
+  [ -f "$helper/persist-sshd.py" ] || die "persist-sshd.py missing under $helper (it is installed by 'build' from the QEMU fork's scripts/27on86)"
+  [ -f "$PREFIX/$AMB_DIR_REL/ambrosia.bin" ] || die "Ambrosia not built: snapintosh build --only ambrosia"
+  need cpio "apt install cpio"
+  local g=$VM/golden; mkdir -p "$g/ssh-state" "$g/tmp"
+  golden_unfinished_phase1 "$g"
+  # the unix sockets of phase 1 (serial.sock, nbd.sock, qmp.sock) must fit sun_path (108 bytes)
+  [ "$(path_bytes "$g/tmp/serial.sock")" -lt 108 ] || die "SNAPINTOSH_HOME is too long: the socket $g/tmp/serial.sock would not fit the 107 bytes of a unix socket path; use a shorter SNAPINTOSH_HOME"
+  if [ "$again" = 1 ]; then [ -f "$g/root-sshd.qcow2" ] || die "--again: no $g/root-sshd.qcow2 (phase 1 has not run)"
+  else
+  [ ! -e "$g/root-sshd.qcow2" ] || die "$g/root-sshd.qcow2 exists: move the golden directory away first, or use --again to run phase 2 on it (this step never overwrites a golden)"
+  rm -f "$KNOWN_HOSTS"   # a new golden has new ssh host keys; the first ssh pins them again (only after the refusal above: a refused run keeps the pin)
+  # from here on every exit path (die, a failing command, Ctrl-C) stops what phase 1 started and sets an unfinished overlay aside.
+  # A pid file from an earlier failed phase 1 is stale: gone before the trap exists, and the trap checks the process anyway (kill_nbd)
+  rm -f "$g/tmp/nbd.pid"
+  CL_PIDS=(); CL_CTLS=(); CL_NBDPID=$g/tmp/nbd.pid; CL_NBDSOCK=$g/tmp/nbd.sock; CL_P1=$g/root-sshd.qcow2; CL_RUN=$g/tmp; CL_COMPACT=""
+  cl_trap
+  echo "$$:$(pstart "$$"):$PIDNS" > "$g/tmp/cli.pid"; : > "$g/tmp/phase1.running"   # for reap_stale and golden_unfinished_phase1 of a later command
+  "$qimg" create -q -f qcow2 -b "$base" -F raw "$g/root-sshd.qcow2"
+  cp "$VM/aux.img" "$g/tmp/aux"
+  python3 -I "$helper/set-aux-boot-args.py" "$g/tmp/aux" "-s -v serial=11"
+  local sock=$g/tmp/serial.sock
+  rm -f "$sock" "$g/tmp/nbd.sock" "$g/tmp/qmp.sock"
+  "$PREFIX/bin/qemu-nbd" -k "$g/tmp/nbd.sock" -f qcow2 --shared=0 -t "$g/root-sshd.qcow2" --fork --pid-file="$g/tmp/nbd.pid"
+  python3 -I "$LIB/memfdhold.py" 8G "$g/tmp/memfd.path" 3600 & local mh=$!
+  track "$mh"
+  local i=0; until [ -s "$g/tmp/memfd.path" ]; do kill -0 "$mh" 2>/dev/null || die "memfd holder exited"; sleep 0.1; i=$((i + 1)); [ $i -lt 100 ] || die "memfd holder did not start"; done
+  make_bundle "$g/tmp/single.cpio" "-s -v serial=11"
+  local ep t0; t0=$(date +%s)
+  # no pcache here on purpose (R15): the single-user boot makes 0.24 million records (159 MiB), 1.6 percent of its own lookups hit and phase 2 gets
+  # about 1 percent fewer misses from them, so they are dead weight for the pack
+  timeout -k 10 1800 python3 -I "$LIB/pdeath.py" "$q" -accel tcg,tb-size=2047 \
+    -machine "vmapple,uuid=$(ecid),memory-backend=ram0,ambrosia=on" \
+    -bios "$PREFIX/$AMB_DIR_REL/ambrosia.bin" -device "loader,file=$g/tmp/single.cpio,addr=0x120000000,force-raw=on" \
+    -cpu max -smp 4 -m 8G \
+    -object "memory-backend-file,id=ram0,size=8G,mem-path=$(cat "$g/tmp/memfd.path"),share=on,align=2M" \
+    -display none -monitor none -parallel none \
+    -serial "unix:$sock,server=on,wait=off" -qmp "unix:$g/tmp/qmp.sock,server=on,wait=off" \
+    -drive if=pflash,format=raw,file.filename="$g/tmp/aux",file.locking=off \
+    -drive if=pflash,format=raw,file.driver=nbd,file.server.type=unix,file.server.path="$g/tmp/nbd.sock" \
+    -drive if=none,format=raw,file.filename="$g/tmp/aux",file.locking=off,id=aux \
+    -device "vmapple-virtio-blk-pci,variant=aux,drive=aux,share-rw=on" \
+    -drive if=none,format=raw,file.driver=nbd,file.server.type=unix,file.server.path="$g/tmp/nbd.sock",id=root \
+    -device "vmapple-virtio-blk-pci,variant=root,drive=root,share-rw=on" \
+    -netdev user,id=net0,ipv6=off -device virtio-net-pci,netdev=net0,romfile=,mac=52:54:00:76:61:70 >"$g/tmp/qemu.out" 2>&1 &
+  ep=$!
+  track "$ep"
+  local rc=0
+  # wait passively for the shell: anything typed while the boot runs makes it stop in its panic loop
+  i=0; until [ -S "$sock" ]; do sleep 1; i=$((i + 1)); [ $i -lt 120 ] || break; done
+  if python3 -I "$helper/persist-sshd.py" "$sock" "$g/ssh-state" \
+     && SNAPINTOSH_GUEST_PASSWORD=$pw python3 -I "$LIB/goldenctl.py" extra "$sock" "$helper" "$LIB/guest" --user "$user"; then :
+  else rc=1; warn "phase 1 failed, see $g/tmp/qemu.out"; fi
+  # the guest halts itself; give it 120 s, then ask QEMU to quit over QMP, then stop that exact PID
+  i=0; while plive "$ep" && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done
+  if plive "$ep"; then
+    python3 -I - "$g/tmp/qmp.sock" <<'PY' || true
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect(sys.argv[1]); f = s.makefile("rw"); f.readline()
+for c in ("qmp_capabilities", "quit"):
+    f.write(json.dumps({"execute": c}) + "\n"); f.flush(); f.readline()
+PY
+    sleep 3
+    kill "$ep" 2>/dev/null || true
+  fi
+  wait "$ep" 2>/dev/null || true
+  kill_nbd "$g/tmp/nbd.pid" "$g/tmp/nbd.sock"; kill "$mh" 2>/dev/null || true
+  [ $rc = 0 ] || { mv "$g/root-sshd.qcow2" "$g/root-sshd.failed.qcow2"; rm -f "$g/tmp/phase1.running" "$g/tmp/cli.pid"; die "golden phase 1 failed: overlay kept as $g/root-sshd.failed.qcow2, log $g/tmp/qemu.out (the base disk was not touched)"; }
+  cleanup_reset
+  rm -f "$g/tmp/phase1.running" "$g/tmp/cli.pid"
+  ok "phase 1: $g/root-sshd.qcow2 ($(( $(date +%s) - t0 )) s), key $g/ssh-state/id_ed25519"
+  fi
+  if [ "$quiet" = 1 ]; then
+    cp "$LIB/guest/apply-quiet.sh" "$g/tmp/apply-quiet.sh"
+    MODE=golden; SNAPNAME=golden; SAVESETTLE=0; launch
+    [ "$LAUNCH_RC" = 0 ] || die "golden phase 2 failed (see the run dir above, $RUNS/golden-*/golden.json and snapctl.log)"
+    [ -f "$g/root-quiet.qcow2" ] || die "phase 2 failed: no root-quiet.qcow2 (see $RUNS/golden-*/golden.json and snapctl.log)"
+    ok "golden: $g/root-quiet.qcow2"
+    [ "$warm" = 0 ] || warm_boots "$warm"
+  else
+    ok "golden: $g/root-sshd.qcow2 (quiet profile skipped: make-disk quiet later)"
+  fi
+  "$qimg" info -U --backing-chain "$g/$([ "$quiet" = 1 ] && echo root-quiet || echo root-sshd).qcow2" | grep -E '^image|backing file:'
+  echo "user actions left: none after make-disk import; check with: snapintosh run"
+}
+
+# R15: a new user's first `run` has no translation pack, so it translates about 6 million blocks itself (P91: Dock 80.8 s against 65.9 s warm).
+# The two golden boots already append to the pack (same QEMU, same key as `run`), but phase 2 is the not yet quiet guest, shut down right
+# after the profile is applied, and it never starts Safari. warm_boots boots the finished golden like a run: desktop, Safari open, Safari
+# quit, clean shutdown, pcache rw. The overlay is thrown away every time, the golden is not changed.
+warm_boots() { # N
+  local n i
+  dec_into n "$1" "warm-up boots" boots
+  [ "$n" -gt 0 ] || return 0
+  [ -f "$VM/golden/root-quiet.qcow2" ] || [ -f "$VM/golden/root-sshd.qcow2" ] || die "no golden image: snapintosh make-disk golden"
+  [ "$USE_PCACHE" = 1 ] || { warn "warm: --no-pcache set, nothing to warm"; return 0; }
+  local t0; t0=$(date +%s)
+  for ((i = 1; i <= n; i++)); do
+    echo "warm-up boot $i of $n: normal boot to the desktop, Safari opened and quit, shutdown (about 4 to 6 minutes); it only fills the translation cache"
+    MODE=warm; SNAPNAME=golden-warm; SAVESETTLE=0
+    launch
+    [ "$LAUNCH_RC" = 0 ] || { warn "warm-up boot $i failed"; return 1; }
+    # the pack of the previous boot is compacted detached after QEMU exits; the next boot reads the pack before that finishes, harmless
+  done
+  ok "warm-up: $n boot(s), $(( $(date +%s) - t0 )) s, translation cache $(du -ch "$PCACHE_DIR"/*.pack 2>/dev/null | tail -1 | cut -f1) in $PCACHE_DIR"
+}
+
+make_disk_warm() { # [N] [run options]
+  local n=1
+  if [[ ${1:-} =~ ^[0-9]+$ ]]; then n=$1; shift; fi
+  parse_run_opts "$@"
+  [ "$DRY" = 1 ] && return 0
+  [ -x "$PREFIX/bin/qemu-system-aarch64" ] || die "QEMU not built: snapintosh build"
+  warm_boots "$n"
+}
+
+make_disk_adopt_golden() { # FILE [--ssh-state DIR] [--name quiet|sshd]: copy an existing qcow2 golden chain next to the imported disk
+  local top=${1:-} sshdir="" name=quiet
+  [ -n "$top" ] || die "usage: make-disk adopt-golden FILE [--ssh-state DIR] [--name quiet|sshd]"
+  shift
+  while [ $# -gt 0 ]; do case $1 in --ssh-state) sshdir=$2; shift ;; --name) name=$2; shift ;; *) die "adopt-golden: unknown option $1" ;; esac; shift; done
+  case $name in quiet|sshd) ;; *) die "adopt-golden: --name quiet|sshd" ;; esac
+  [ -f "$top" ] || die "$top: no such file"
+  [ -f "$VM/disk.img" ] || die "no imported disk: run make-disk import first (the golden is an overlay on that disk.img)"
+  local qimg=qemu-img; [ -x "$PREFIX/bin/qemu-img" ] && qimg=$PREFIX/bin/qemu-img
+  need "$qimg" "apt install qemu-utils"
+  # the chain, top first: one "path" line per layer, the raw base last
+  local -a chain=()
+  mapfile -t chain < <("$qimg" info -U --backing-chain --output=json "$top" | python3 -I -c 'import json,sys
+for l in json.load(sys.stdin): print(l["filename"] + "\t" + l["format"])')
+  [ "${#chain[@]}" -ge 2 ] || die "$top has no backing file: not an overlay chain (expected layers on top of the disk.img)"
+  local g=$VM/golden n=$(( ${#chain[@]} - 1 )) i f fmt prev
+  mkdir -p "$g/ssh-state" "$g/chain"
+  # bottom-up: copy layer i, point it at the copy of layer i+1 (the raw base becomes $VM/disk.img)
+  prev=$VM/disk.img
+  local prevfmt=raw
+  for (( i = n; i >= 1; i-- )); do
+    f=${chain[$i - 1]%%$'\t'*}; fmt=${chain[$i - 1]##*$'\t'}
+    [ "$fmt" = qcow2 ] || die "layer $f is $fmt, only qcow2 layers are supported"
+    cp --sparse=always "$f" "$g/chain/layer$i.qcow2"
+    "$qimg" rebase -u -f qcow2 -F "$prevfmt" -b "$prev" "$g/chain/layer$i.qcow2"
+    prev=$g/chain/layer$i.qcow2; prevfmt=qcow2
+  done
+  ln -sf "chain/layer1.qcow2" "$g/root-$name.qcow2"
+  rm -f "$KNOWN_HOSTS"
+  [ -z "$sshdir" ] || { cp "$sshdir"/id_ed25519* "$g/ssh-state/" && chmod 600 "$g/ssh-state/id_ed25519"; }
+  [ -f "$g/ssh-state/id_ed25519" ] || warn "no ssh key in $g/ssh-state: pass --ssh-state DIR (the dir that holds id_ed25519), or ssh into the guest will not work"
+  ok "golden adopted: $g/root-$name.qcow2 ($n layers on $VM/disk.img)"
+  "$qimg" info -U --backing-chain "$g/root-$name.qcow2" | grep -E '^image|backing file:'
+}
+
+make_disk_sshd_interactive() {
+  echo "Optional, manual. The default lab golden has the sshd launchd job set to ProcessType Interactive (P83):"
+  echo "without it launchd throttles sshd and ssh-driven steps queue behind the login storm (desktop 109 s against 75 s, same binary)."
+  echo "Boot once with 'snapintosh run', then:"
+  echo "  scp -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=accept-new -P $SSH_PORT_DEFAULT -i $VM/golden/ssh-state/id_ed25519 $LIB/guest/apply-sshd-interactive.sh root@127.0.0.1:/tmp/"
+  echo "  ssh -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=accept-new -p $SSH_PORT_DEFAULT -i $VM/golden/ssh-state/id_ed25519 root@127.0.0.1 'sh /tmp/apply-sshd-interactive.sh; sync; shutdown -h now'"
+  echo "That boot's overlay holds the change. Commit it into the golden: qemu-img commit <run dir>/root.qcow2 (or keep the overlay as the golden:"
+  echo "the old golden must stay, the new file backs onto it). Not automated: it needs a booted guest."
+}
+
+make_disk_quiet() {
+  echo "Optional, manual (faster boot, but a cold quiet golden once had a broken window drag until kernelmanagerd was kept, P68)."
+  echo "Boot with 'snapintosh run', then"
+  echo "  scp -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=accept-new -P $SSH_PORT_DEFAULT -i $VM/golden/ssh-state/id_ed25519 $LIB/guest/apply-quiet.sh root@127.0.0.1:/tmp/"
+  echo "  ssh -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=accept-new -p $SSH_PORT_DEFAULT -i $VM/golden/ssh-state/id_ed25519 root@127.0.0.1 sh /tmp/apply-quiet.sh"
+  echo "The lab golden also set UseFilesystemTimestamp=NO in timed (lib/guest/guest-install-timed.sh, single-user shell) to cut boot stalls."
+  echo "Then save the disk state as the golden. The labels were found on 26A428: on 26B131 diff 'launchctl print system' against the list first."
+  echo "All of it is manual today (docs/BLOCKERS.md item 5). Also see: snapintosh make-disk sshd-interactive."
+}
+
+# ---------------------------------------------------------------- run / snapshot / resume
+CPUS=12; RAM=8G; FW=${SNAPINTOSH_FW:-ambrosia}; GPU=auto; ICD=""; MESA=""; VNC=""; VNC_INSECURE=0; SSHPORT=$SSH_PORT_DEFAULT; SECS=3600
+LAUNCH_RC=0   # launch always returns 0 (it runs with its own error handling); its verdict is here and the callers act on it
+PCMODE=rw; USE_PCACHE=1
+MODE=cold; SNAPNAME=""; SAVE_APP=""; SAVE_OPEN_URL=""
+
+# R29: what --app and --open may carry: both end up in a command that runs in the guest (see lib/guestapp.py), so a strict whitelist
+app_name_ok() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9.\ -]{0,63}$ ]]; }
+open_url_ok() { [[ $1 =~ ^(https?|file)://[A-Za-z0-9._~:/?=#%+,@-]+$ ]]; }
+
+parse_run_opts() {
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --cpus) CPUS=$2; shift ;;
+      --fw) FW=$2; shift ;;
+      --ram) RAM=$2; shift ;;
+      --gpu) GPU=$2; shift ;;
+      --icd) ICD=$2; shift ;;
+      --mesa) MESA=$2; shift ;;
+      --vnc) if [[ ${2:-} =~ ^[0-9]+$ ]]; then dec_into VNC "$2" "--vnc PORT"; shift; else VNC=5900; fi
+             [ "$VNC" -ge 5900 ] && [ "$VNC" -le 65535 ] || die "--vnc PORT: a TCP port from 5900 to 65535 (display N is port 5900+N)" ;;
+      --vnc-insecure) VNC_INSECURE=1 ;;
+      --ssh-port) SSHPORT=$2; shift ;;
+      --secs) dec_into SECS "${2:-}" --secs seconds; shift ;;
+      --settle) SAVESETTLE=$2; shift ;;
+      --app) app_name_ok "${2:-}" || die "--app NAME: the name of an app in /Applications (letters, digits, space, dot, dash; at most 64), for example Safari"
+             SAVE_APP=$2; shift ;;
+      --open) open_url_ok "${2:-}" || die "--open URL: an http://, https:// or file:// URL of letters, digits and - . _ ~ : / ? = # % + , @ only (no spaces, quotes or shell characters)"
+              SAVE_OPEN_URL=$2; shift ;;
+      --no-pcache) USE_PCACHE=0 ;;
+      --pcache-ro) PCMODE=ro ;;
+      --dry-run) DRY=1 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option $1 (snapintosh --help lists the options)" ;;
+    esac
+    shift
+  done
+}
+
+pick_gpu() {
+  # echo "1 ICD" for a real GPU, "0" for lavapipe
+  if [ "$GPU" = 0 ]; then echo 0; return; fi
+  local f found=""
+  if [ -n "$ICD" ]; then echo "1 $ICD"; return; fi
+  for f in /usr/share/vulkan/icd.d/nvidia_icd.json /usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+           /usr/share/vulkan/icd.d/radeon_icd.json /usr/share/vulkan/icd.d/intel_icd.x86_64.json \
+           /usr/share/vulkan/icd.d/intel_icd.json; do
+    [ -f "$f" ] || continue
+    # Debian's mesa-vulkan-drivers installs radeon_icd.json and intel_icd.json on every host, GPU or not: an ICD file is no proof of a
+    # device (a VM with none aborted phase 2 of make-disk golden with "Failed to detect any valid GPUs"). --gpu auto asks it.
+    if command -v vulkaninfo >/dev/null 2>&1 && ! VK_ICD_FILENAMES=$f timeout 30 vulkaninfo --summary 2>/dev/null \
+         | grep -Eq 'deviceType *= *PHYSICAL_DEVICE_TYPE_(DISCRETE|INTEGRATED)_GPU'; then continue; fi
+    found=$f; break
+  done
+  if [ -n "$found" ]; then echo "1 $found"
+  elif [ "$GPU" = 1 ]; then die "--gpu 1 but no GPU ICD found in /usr/share/vulkan/icd.d; pass --icd"
+  else echo 0; fi
+}
+
+snapname_check() { valid_snapname "$1" || die "invalid snapshot name '$1': use 1 to 64 of A-Z a-z 0-9 . _ - (first one a letter or digit, no '..')"; }
+save_only_opts() { [ -z "$SAVE_APP$SAVE_OPEN_URL" ] || die "--app and --open belong to snapshot (they decide whether a save goes ahead)"; }
+cmd_run() { MODE=cold; parse_run_opts "$@"; save_only_opts; launch; return "$LAUNCH_RC"; }
+cmd_snapshot() {
+  MODE=save; SNAPNAME=${1:-}; [ -n "$SNAPNAME" ] || die "usage: snapshot NAME [options]"; snapname_check "$SNAPNAME"; shift
+  parse_run_opts "$@"; launch; return "$LAUNCH_RC"
+}
+cmd_resume() {
+  MODE=resume; SNAPNAME=${1:-}; [ -n "$SNAPNAME" ] || die "usage: resume NAME [options]"; snapname_check "$SNAPNAME"; shift
+  settime_budget >/dev/null   # a bad SETTIME_TIMEOUT stops here, before QEMU starts
+  parse_run_opts "$@"; save_only_opts; launch; return "$LAUNCH_RC"
+}
+
+# bytes of a path (a unix socket address holds 107 plus the NUL, bytes, not characters)
+path_bytes() { local LC_ALL=C; printf '%s' "${#1}"; }
+# R23: the sockets in a run dir (nbd.sock, qmp.sock, and ssh.ctl, to which ssh appends a 17 byte temporary suffix while it binds) must fit
+# sun_path (108 bytes). The run dir is $RUNS/NAME-XXXXXX, so the name has a limit that depends on the length of SNAPINTOSH_HOME.
+sock_name_check() { # NAME
+  local n=$1 max
+  max=$(( 107 - 17 - 8 - 7 - 1 - $(path_bytes "$RUNS") ))   # minus the ssh suffix, "/ssh.ctl", "-XXXXXX", the "/" after runs
+  [ "$max" -ge 8 ] || die "SNAPINTOSH_HOME is too long ($(path_bytes "$HOME_DIR") bytes): the sockets in $RUNS/<name>-XXXXXX/ would not fit the 107 bytes of a unix socket path; use a shorter SNAPINTOSH_HOME"
+  [ "$(path_bytes "$n")" -le "$max" ] || die "name '$n' is too long for this SNAPINTOSH_HOME: at most $max bytes (the sockets in the run dir $RUNS/<name>-XXXXXX/ must fit the 107 bytes of a unix socket path)"
+}
+
+launch() {
+  LAUNCH_RC=0
+  local Q=$PREFIX/bin/qemu-system-aarch64 QIMG=$PREFIX/bin/qemu-img QNBD=$PREFIX/bin/qemu-nbd
+  sock_name_check "${SNAPNAME:-run}"
+  # these paths go into QEMU option strings, where a comma starts the next option
+  case $HOME_DIR$PREFIX$SNAPS in *,*|*$'\n'*) die "SNAPINTOSH_HOME, SNAPINTOSH_PREFIX and SNAPS must not contain a comma or a newline" ;; esac
+  case $FW in ambrosia|avp) ;; *) die "--fw ambrosia|avp" ;; esac
+  local base=$VM/golden/root-quiet.qcow2
+  [ -f "$base" ] || base=$VM/golden/root-sshd.qcow2
+  [ "$MODE" = golden ] && base=$VM/golden/root-sshd.qcow2   # make-disk golden phase 2: the quiet profile goes on top of phase 1
+  local key=$VM/golden/ssh-state/id_ed25519
+  if [ "$DRY" != 1 ]; then
+    [ -x "$Q" ] || die "QEMU not built: snapintosh build"
+    [ -f "$VM/aux.img" ] || die "no disk: snapintosh make-disk mac-steps"
+    if [ "$FW" = ambrosia ]; then
+      [ -f "$PREFIX/$AMB_DIR_REL/ambrosia.bin" ] && [ -f "$PREFIX/$AMB_DIR_REL/config.cpio" ] || die "Ambrosia not built: snapintosh build --only ambrosia"
+    else
+      [ -f "$VM/AVPBooter.vmapple2.bin" ] || die "legacy path needs AVPBooter.vmapple2.bin: snapintosh make-disk import --avpbooter, or run with the default --fw ambrosia"
+    fi
+    [ -f "$base" ] || die "no golden image: snapintosh make-disk golden"
+    [ -e /dev/udmabuf ] || warn "/dev/udmabuf missing: the GPU path will not work"
+  fi
+  # resume: the build that saved the snapshot, or one with the same state format, or the older binary `build` kept (snapctl.py pick)
+  [ "$MODE" = resume ] && [ "$DRY" != 1 ] && { Q=$(python3 -I "$LIB/snapctl.py" pick "$SNAPNAME" "$Q") || exit 3; }
+  local f gpu_sel; gpu_sel=$(pick_gpu); local gpu=${gpu_sel%% *}
+  local ECID; ECID=$([ -f "$VM/machineid.bin" ] && ecid || echo 0)
+  local extra=""
+  [ "$MODE" != cold ] && [ "$MODE" != golden ] && [ "$MODE" != warm ] && extra="-global apple-gfx-mmio.disable-argument-buffers=on"
+  local pcache=""
+  if [ "$USE_PCACHE" = 1 ]; then pcache=",pcache=$PCACHE_DIR,pcache-mode=$PCMODE,pcache-stats=0"; fi
+  # the run dir: unique (mktemp), made by the first real step; a dry run only shows the name pattern
+  local R=$RUNS/${SNAPNAME:-run}-XXXXXX
+
+  # environment the lab run.sh sets
+  # D3 defaults: P79 IOFence patch on (any-build matcher, refuses unknown builds), P86 DSB skips (P80_BC, P85_BC) and the
+  # early pack open on resume (P82_PCOPEN) are on inside the binary and need no variable
+  export SNAP_IOFENCE_PATCH=${SNAP_IOFENCE_PATCH:-1}
+  export LP_NUM_THREADS=${LP_NUM_THREADS:-8} REIMS_VGPU_WINDOW=0 M2V_INPLACE_RT=${M2V_INPLACE_RT:-1} REIMS_VGPU_LOG=${REIMS_VGPU_LOG:-warn}
+  if [ "$gpu" = 1 ]; then
+    export VK_ICD_FILENAMES=${gpu_sel#* }
+  else
+    local m=${MESA:-$HOME_DIR/mesa}
+    local lvp=""
+    for f in "$m"/share/vulkan/icd.d/lvp_icd*.json; do [ -f "$f" ] && { lvp=$f; break; }; done
+    if [ -n "$lvp" ]; then export VK_ICD_FILENAMES=$lvp LD_LIBRARY_PATH="$m/lib/x86_64-linux-gnu:$m/lib"; fi
+    [ -n "$lvp" ] || { [ "$DRY" = 1 ] || warn "no patched lavapipe under $m (snapintosh build --only mesa): stock lavapipe lacks interlock and the guest will not render"; }
+  fi
+
+  local ramobj="memory-backend-file,id=ram0,size=$RAM,mem-path=\$MEMFD,share=on,align=2M"
+  local machine bios
+  local -a fwdev=()
+  # Q3: sync-clock-on-load is opt-in (SYNCCLOCK=1, or SYNCCLOCK=auto: on for a snapshot younger than SYNCMAXAGE seconds, default 300).
+  # It moves the guest counter forward by the time since the save, so the clock is right at once, but the guest then runs the work
+  # that fell due in the gap: fine for seconds, slow for hours. The Ambrosia machine does not need it (its avp-rtc follows the host
+  # through a load, 10 of 10 resumes within 1 s in the Q3 measurements); the legacy --fw avp machine lags by the gap
+  # until timed steps the clock about 60 s later.
+  local syncclock=${SYNCCLOCK:-}
+  if [ "$MODE" = resume ] && [ "$syncclock" = auto ] && [ "$DRY" != 1 ]; then
+    local sage; sage=$(python3 -I "$LIB/snapctl.py" age "$SNAPNAME" 2>/dev/null || echo 999999999)
+    if [ "$sage" -lt "${SYNCMAXAGE:-300}" ] 2>/dev/null; then syncclock=1; else syncclock=0; fi
+  fi
+  if [ "$FW" = ambrosia ]; then
+    # boot args and policy (internal-use-only-unit, lp-sip0) come from the config bundle, not from machine properties
+    machine="vmapple,uuid=$ECID,memory-backend=ram0,ambrosia=on"
+    bios=$PREFIX/$AMB_DIR_REL/ambrosia.bin
+    fwdev=(-device "loader,file=$PREFIX/$AMB_DIR_REL/config.cpio,addr=0x120000000,force-raw=on")
+  else
+    machine="vmapple,uuid=$ECID,internal-use-only-unit=on,memory-backend=ram0,csr-config=0x7f,xnu-boot-args=-v"
+    bios=$VM/AVPBooter.vmapple2.bin
+  fi
+  local -a cmd=("$Q" -accel "tcg,tb-size=2047$pcache"
+    -machine "$machine"
+    -cpu max -smp "$CPUS" -m "$RAM"
+    -object "$ramobj"
+    -display none -monitor none -parallel none)
+  if [ -n "$VNC" ]; then
+    cmd+=(-L "$PREFIX/share/qemu")
+    if [ "$VNC_INSECURE" = 1 ]; then cmd+=(-vnc "127.0.0.1:$((VNC - 5900))")
+    else cmd+=(-object "secret,id=vncsec,file=$R/vnc.pass" -vnc "127.0.0.1:$((VNC - 5900)),password-secret=vncsec"); fi
+  fi
+  cmd+=(-serial "file:$R/serial.log" -qmp "unix:$R/qmp.sock,server=on,wait=off")
+  [ "$MODE" = resume ] && cmd+=(-incoming defer)
+  # shellcheck disable=SC2206
+  [ -n "$extra" ] && cmd+=($extra)
+  [ "$MODE" = resume ] && [ "$syncclock" = 1 ] && machine="$machine,sync-clock-on-load=on"
+  cmd[4]=$machine
+  cmd+=(-bios "$bios" "${fwdev[@]}"
+    -drive "if=pflash,format=raw,file.filename=$R/aux,file.locking=off"
+    -drive "if=pflash,format=raw,file.driver=nbd,file.server.type=unix,file.server.path=$R/nbd.sock"
+    -drive "if=none,format=raw,file.filename=$R/aux,file.locking=off,id=aux"
+    -device "vmapple-virtio-blk-pci,variant=aux,drive=aux,share-rw=on"
+    -drive "if=none,format=raw,file.driver=nbd,file.server.type=unix,file.server.path=$R/nbd.sock,id=root"
+    -device "vmapple-virtio-blk-pci,variant=root,drive=root,share-rw=on"
+    -netdev "user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:$SSHPORT-:22"
+    -device "virtio-net-pci,netdev=net0,romfile=,mac=52:54:00:76:61:70")
+
+  if [ "$DRY" = 1 ]; then
+    echo "mode=$MODE fw=$FW gpu=$gpu${VK_ICD_FILENAMES:+ ICD=$VK_ICD_FILENAMES} cpus=$CPUS ram=$RAM golden=$base"
+    echo "env: SNAP_IOFENCE_PATCH=$SNAP_IOFENCE_PATCH LP_NUM_THREADS=$LP_NUM_THREADS REIMS_VGPU_WINDOW=0 M2V_INPLACE_RT=$M2V_INPLACE_RT REIMS_VGPU_LOG=$REIMS_VGPU_LOG"
+    printf '%q ' "${cmd[@]}"; echo
+    return 0
+  fi
+
+  # Resume: refuse before anything is created if the snapshot does not match this QEMU and these options
+  if [ "$MODE" = resume ]; then python3 -I "$LIB/snapctl.py" check "$SNAPNAME" "$Q" "$CPUS" "$RAM" "$extra" "$gpu" || exit 3; fi
+  # From here on every exit path (die, a failing command, Ctrl-C, SIGTERM) runs cleanup_all, which stops every process this run started
+  # (helper, tail, QEMU, memfd holder and what they started), qemu-nbd and the ssh master, drops an unfinished snapshot's staging
+  # directory and removes an empty run dir. Ctrl-C and SIGTERM then end the CLI with 128+signal. The trap comes BEFORE the first resource.
+  reap_stale "$RUNS" "$VM/golden/tmp"
+  reap_leftovers "$RUNS"
+  pgo_reap
+  CL_PIDS=(); CL_CTLS=(); CL_RMDIR=""; CL_P1=""; CL_NBDPID=""; CL_NBDSOCK=""; CL_ABORT=(); CL_RMRUN=""; CL_RUN=""; CL_COMPACT=""
+  cl_trap
+  mkdir -p "$RUNS" "$PCACHE_DIR" "$SNAPS"
+  R=$(mktemp -d "$RUNS/${SNAPNAME:-run}-XXXXXX")
+  if [ "${PCCOMPACT:-1}" = 1 ] && [ "$USE_PCACHE" = 1 ] && [ "$PCMODE" = rw ] && [ -x "$PREFIX/bin/qemu-pcache-compact" ]; then CL_COMPACT=$PREFIX/bin/qemu-pcache-compact; fi
+  CL_RUN=$R; CL_RMDIR=$R; CL_NBDPID=$R/nbd.pid; CL_NBDSOCK=$R/nbd.sock; CL_CTLS=("$R/ssh.ctl")
+  echo "$$:$(pstart "$$"):$PIDNS" > "$R/cli.pid"   # R24: who owns this run (pid, start tick, pid namespace), for reap_stale of a later command
+  [ "$MODE" = save ] && CL_ABORT=("$SNAPNAME" "$R")
+  # an interrupted run leaves no run dir behind (a golden keeps its overlay there: only the other modes)
+  { [ "$MODE" = golden ] || [ "${KEEP_RUNS:-0}" = 1 ]; } || CL_RMRUN=$R
+  { [ "$MODE" = golden ] || [ "${KEEP_RUNS:-0}" = 1 ]; } && : > "$R/keep"   # reap_leftovers keeps this one if the CLI dies
+  # re-derive the arguments that carry the run dir now that its name is known (the pattern is quoted: no glob, and no `&` problem with patsub_replacement off)
+  cmd=("${cmd[@]//"$RUNS/${SNAPNAME:-run}-XXXXXX"/$R}")
+  local snapdir=""
+  if [ "$MODE" = resume ]; then
+    snapdir=$SNAPS/$SNAPNAME
+    cp --sparse=always "$snapdir/aux" "$R/aux"
+    "$QIMG" create -q -f qcow2 -b "$snapdir/root.qcow2" -F qcow2 "$R/root.qcow2"
+  else
+    cp --sparse=always "$VM/aux.img" "$R/aux"
+    "$QIMG" create -q -f qcow2 -b "$base" -F qcow2 "$R/root.qcow2"
+  fi
+  if [ -n "$VNC" ] && [ "$VNC_INSECURE" != 1 ]; then
+    python3 -I -c 'import secrets, string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8)))' > "$R/vnc.pass"
+    chmod 600 "$R/vnc.pass"
+    echo "vnc: 127.0.0.1:$VNC, password in $R/vnc.pass (mode 600)"
+  fi
+  "$QNBD" -k "$R/nbd.sock" -f qcow2 --shared=0 -t "$R/root.qcow2" --fork --pid-file="$R/nbd.pid"
+  python3 -I "$LIB/memfdhold.py" "$RAM" "$R/memfd.path" $((SECS + 120)) & local mh=$!
+  track "$mh"
+  local i=0; until [ -s "$R/memfd.path" ]; do kill -0 "$mh" 2>/dev/null || die "memfd holder exited (is --ram $RAM valid?)"; sleep 0.1; i=$((i + 1)); [ $i -lt 100 ] || die "memfd holder did not start"; done
+  cmd=("${cmd[@]/\$MEMFD/$(cat "$R/memfd.path")}")
+  echo "run dir: $R   ssh: ssh -p $SSHPORT -i $key -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=accept-new root@127.0.0.1   renderer: $([ "$gpu" = 1 ] && echo "GPU ${VK_ICD_FILENAMES}" || echo lavapipe)"
+  date +%s.%N > "$R/start"
+  timeout "$SECS" python3 -I "$LIB/pdeath.py" "${cmd[@]}" >"$R/qemu.out" 2>&1 &
+  QP=$!
+  track "$QP"
+  echo $QP > "$R/qemu.pid"
+  # A helper that fails kills QEMU at once: nothing is left idling until --secs.
+  local hp=""
+  case $MODE in
+    golden)
+      python3 -I "$LIB/goldenctl.py" quiet "$R" "$SSHPORT" "$key" "$VM/golden/tmp/apply-quiet.sh" "${GOLDEN_SSH_TIMEOUT:-2400}" \
+        >"$R/snapctl.log" 2>&1 & hp=$!
+      ;;
+    warm)
+      python3 -I "$LIB/goldenctl.py" warm "$R" "$SSHPORT" "$key" "${GOLDEN_SSH_TIMEOUT:-2400}" >"$R/snapctl.log" 2>&1 & hp=$!
+      ;;
+    save)
+      { SAVE_APP=$SAVE_APP SAVE_OPEN_URL=$SAVE_OPEN_URL python3 -I "$LIB/snapctl.py" save "$SNAPNAME" "$R" "$Q" "$CPUS" "$RAM" "$extra" "$gpu" "$SSHPORT" "$key" "${SAVESETTLE:-60}" \
+          || { local hrc=$?; [ "$hrc" != 5 ] || echo 5 > "$R/helper.rc"; kill "$QP" 2>/dev/null; exit "$hrc"; }; } >"$R/snapctl.log" 2>&1 & hp=$!
+      ;;
+    resume)
+      # the loading is the part that must work; the clock step afterwards (own budget, see settime_budget, and a hard
+      # limit 30 s above it) only reports: a guest whose clock is off is running and usable
+      local stb; stb=$(settime_budget)
+      { python3 -I "$LIB/snapctl.py" incoming "$SNAPNAME" "$R" || { kill "$QP" 2>/dev/null; exit 1; }
+        if [ "${SNAPINTOSH_NO_SETTIME:-0}" != 1 ]; then
+          timeout -k 5 $((stb + 30)) python3 -I "$LIB/snapctl.py" settime "$R" "$SSHPORT" "$key" 0.5 "$stb" \
+            || echo "SETTIME did not confirm the guest clock (helper exit status $?; the guest is running; budget $stb s, raise it with SETTIME_TIMEOUT=SECONDS)"
+        fi; } >"$R/snapctl.log" 2>&1 & hp=$!
+      ;;
+  esac
+  # show the helper's progress lines (snapshot steps, resume clock, golden phases) while it works: a save takes about 2 minutes
+  # and a golden 10, and the helper only writes to $R/snapctl.log
+  [ -z "$hp" ] || track "$hp"
+  local tp=""
+  if [ -n "$hp" ]; then tail -n +1 -F "$R/snapctl.log" 2>/dev/null & tp=$!; track "$tp"; fi
+  local qrc=0 hprc=0
+  wait "$QP" || qrc=$?
+  # P89b: the pack QEMU appended to is compacted here, after the VM has exited, not on QEMU's exit path. qemu-pcache-compact takes the pack's lock
+  # (a VM started meanwhile reads the old pack and loses nothing but its own new records), writes <pack>.tmp, fdatasync, rename. Detached, idle
+  # priority, report in <pcache dir>/compact.log. PCCOMPACT=0 turns it off.
+  # R18: no -q, and a start and an end line with the exit code. R19: lib/compact.sh retries rc 2 (lock still held by the exiting QEMU) for up to 30 s
+  compact_detached "$R"
+  [ -z "$hp" ] || wait "$hp" 2>/dev/null || hprc=$?
+  # the exit status of a helper's subshell does not always survive its EXIT trap: a refusal (5) is also written to a file
+  { [ "$MODE" = save ] && [ "$(cat "$R/helper.rc" 2>/dev/null)" = 5 ]; } && hprc=5
+  kill_nbd "$R/nbd.pid" "$R/nbd.sock"; kill "$mh" 2>/dev/null || true
+  local clean=1 refused=0
+  if [ "$MODE" = save ]; then
+    if [ "$hprc" = 0 ]; then sleep 2; python3 -I "$LIB/snapctl.py" finish "$SNAPNAME" "$R" "$Q" "$CPUS" "$RAM" "$extra" "$gpu" >>"$R/snapctl.log" 2>&1 || clean=0
+    else python3 -I "$LIB/snapctl.py" abort "$SNAPNAME" "$R" || true; fi   # the older snapshot of this name stays as it was
+  fi
+  [ -z "$tp" ] || { sleep 1; kill "$tp" 2>/dev/null || true; wait "$tp" 2>/dev/null || true; }
+  # the verdict: QEMU exited 0, reached --secs (timeout, 124) or was stopped by Ctrl-C/SIGTERM (130, 143), the helper succeeded (or was interrupted), the save's
+  # finish step passed, and a golden boot finished. Anything else is a failure and the exit code says so.
+  local rc=0
+  # R23: a helper killed by a signal (130, 143) is a failure, never a success: nothing it was doing is done. A save also needs QEMU to
+  # have quit by itself (status 0), because that is how a finished save ends it.
+  case $qrc in 0|124|130|143) ;; *) rc=1; echo "snapintosh: QEMU exited with status $qrc (log: $R/qemu.out)" >&2 ;; esac
+  { [ "$MODE" = save ] && [ "$qrc" != 0 ]; } && { rc=1; echo "snapintosh: the snapshot was not saved: QEMU ended with status $qrc before the save finished (log: $R/qemu.out)" >&2; }
+  { [ "$hprc" = 0 ] || { [ "$MODE" = save ] && [ "$hprc" = 5 ]; }; } || { rc=1; echo "snapintosh: the $MODE helper failed with status $hprc (log: $R/snapctl.log)" >&2; }
+  # R29: a save that refused because the app was not on screen says why in the log and ends with status 5, not the generic 1
+  { [ "$MODE" = save ] && [ "$hprc" = 5 ]; } && {
+    rc=5; echo "snapintosh: the snapshot was NOT saved: ${SAVE_APP:-Safari} was not on screen (see the SAVE refused line above); an older snapshot of this name is as it was" >&2
+    case $qrc in 0|124|130|143) refused=1 ;; esac   # a refusal is an answer, not a failure of the run: its run dir is not kept (A4 #10)
+  }
+  [ "$clean" = 1 ] || { rc=1; echo "snapintosh: the $MODE did not complete (log: $R/snapctl.log)" >&2; }
+  { [ "$MODE" = golden ] && ! grep -q '"ok": true' "$R/golden.json" 2>/dev/null; } && { rc=1; clean=0; }
+  [ "$rc" = 0 ] || clean=0
+  # a golden phase 2 overlay becomes the quiet golden only after the whole verdict is good (QEMU status included)
+  if [ "$MODE" = golden ]; then
+    if [ "$rc" = 0 ]; then mv "$R/root.qcow2" "$VM/golden/root-quiet.qcow2"
+    else warn "phase 2 did not finish cleanly, overlay left in $R"; fi
+  fi
+  cleanup_reset   # nothing of this run is left: ssh master, nbd, memfd holder, QEMU
+  # R18: a run dir (aux copy, overlay, logs: 12 to 200 MB) is removed after a clean exit and kept after a failure.
+  # KEEP_RUNS=1 keeps every run dir. A golden whose phase 2 failed keeps its overlay in $R (warned above).
+  if { [ "$clean" = 1 ] || [ "$refused" = 1 ]; } && [ "${KEEP_RUNS:-0}" != 1 ]; then
+    rm -rf "$R"; echo "done: run dir removed (KEEP_RUNS=1 keeps it)"
+  else
+    echo "done: $R"
+    : > "$R/keep"   # a failed run's logs are wanted: reap_leftovers of a later command leaves it alone (R29)
+  fi
+  LAUNCH_RC=$rc
+  return 0
+}
+
+cmd_bench() { # R20: lib/benchctl.py drives `run`, `snapshot` and `resume` of this CLI and measures them
+  need python3 "python3"; need ssh "openssh-client"
+  case ${1:-} in -h|--help) python3 -I "$LIB/benchctl.py" --help; return 0 ;; esac
+  export BENCH_IPSW_BUILD=$IPSW_BUILD SNAPINTOSH_CLI=$SELF BENCH_ROOT=$ROOT BENCH_HOME=$HOME_DIR BENCH_PREFIX=$PREFIX BENCH_VM=$VM BENCH_PCACHE=$PCACHE_DIR BENCH_SNAPS=$SNAPS
+  python3 -I "$LIB/benchctl.py" "$@"
+}
+
+cmd_status() {
+  echo "home:   $HOME_DIR"
+  echo "prefix: $PREFIX $([ -x "$PREFIX/bin/qemu-system-aarch64" ] && echo '(qemu built)' || echo '(qemu not built)')"
+  local f
+  for f in "$DL"/*.ipsw; do [ -e "$f" ] && echo "ipsw:   $f ($(du -h "$f" | cut -f1))"; done
+  [ -f "$PREFIX/$AMB_DIR_REL/ambrosia.bin" ] && echo "ambrosia: built" || echo "ambrosia: not built (snapintosh build --only ambrosia)"
+  [ -f "$VM/disk.img" ] && echo "disk:   imported" || echo "disk:   not imported (make-disk mac-steps)"
+  if [ -f "$VM/golden/root-quiet.qcow2" ]; then echo "golden: quiet (sshd + quiet profile)"
+  elif [ -f "$VM/golden/root-sshd.qcow2" ]; then echo "golden: sshd (quiet profile not applied: make-disk golden --again)"
+  else echo "golden: none (make-disk golden)"; fi
+  for f in "$SNAPS"/*/meta.json; do [ -f "$f" ] && echo "snap:   $(basename "$(dirname "$f")")"; done
+  return 0
+}
+
+# ---------------------------------------------------------------- main
+sub=${1:-}
+[ $# -gt 0 ] && shift
+case $sub in build|fetch|make-disk|run|snapshot|resume|bench) ensure_home ;; esac
+# umask 077 is for what holds guest state and secrets (it lives in $HOME_DIR, 0700). build and fetch write a toolchain prefix and a download
+# directory that may be shared (SNAPINTOSH_PREFIX=/opt/snapintosh, fetch --out): normal modes there, so other users can use them
+case $sub in build|fetch|_pgo-ns) umask 022 ;; esac
+case $sub in
+  check-host) cmd_check_host "$@" ;;
+  build) cmd_build "$@" ;;
+  _pgo-ns) cmd_pgo_ns "$@" ;;   # internal: the part of build --pgo that runs inside the private mount namespace
+  fetch) cmd_fetch "$@" ;;
+  make-disk) cmd_make_disk "$@" ;;
+  run) cmd_run "$@" ;;
+  snapshot) cmd_snapshot "$@" ;;
+  resume) cmd_resume "$@" ;;
+  bench) cmd_bench "$@" ;;
+  status) cmd_status "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

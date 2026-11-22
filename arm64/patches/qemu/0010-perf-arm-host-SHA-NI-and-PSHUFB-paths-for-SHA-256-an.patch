@@ -1,0 +1,825 @@
+From f63e155e01cafdf683e87894a00310eb96bbfd0d Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] perf(arm): host SHA-NI and PSHUFB paths for SHA-256 and
+ TBL/TBX
+
+Use the host instructions for the AArch64 SHA-256 helpers and for the
+vector TBL and TBX helpers when cpuinfo reports them. Adds h1-hostops
+and builds bti-guarded with clang (x16 is an output there).
+---
+ host/include/x86_64/host/cpuinfo.h        |   2 +
+ target/arm/tcg/crypto_helper.c            | 133 +++++++
+ target/arm/tcg/vec_helper64.c             |  47 +++
+ target/arm/tcg/vec_internal.h             |  13 +
+ tests/tcg/aarch64/Makefile.softmmu-target |   5 +
+ tests/tcg/aarch64/system/bti-guarded.c    |   4 +-
+ tests/tcg/aarch64/system/h1-hostops.c     | 458 ++++++++++++++++++++++
+ util/cpuinfo-i386.c                       |   3 +
+ 8 files changed, 663 insertions(+), 2 deletions(-)
+ create mode 100644 tests/tcg/aarch64/system/h1-hostops.c
+
+diff --git a/host/include/x86_64/host/cpuinfo.h b/host/include/x86_64/host/cpuinfo.h
+index 93d029d499..61a1768654 100644
+--- a/host/include/x86_64/host/cpuinfo.h
++++ b/host/include/x86_64/host/cpuinfo.h
+@@ -28,6 +28,8 @@
+ #define CPUINFO_AES             (1u << 18)
+ #define CPUINFO_PCLMUL          (1u << 19)
+ #define CPUINFO_GFNI            (1u << 20)
++#define CPUINFO_SSSE3           (1u << 21)
++#define CPUINFO_SHA             (1u << 22)
+ 
+ /* Initialized with a constructor. */
+ extern unsigned cpuinfo;
+diff --git a/target/arm/tcg/crypto_helper.c b/target/arm/tcg/crypto_helper.c
+index 11977cb772..ebc52710fe 100644
+--- a/target/arm/tcg/crypto_helper.c
++++ b/target/arm/tcg/crypto_helper.c
+@@ -17,6 +17,27 @@
+ #include "crypto/sm4.h"
+ #include "helper.h"
+ #include "vec_internal.h"
++#include "qemu/cutils.h"
++#ifdef H1_HOSTOPS_X86
++#include <immintrin.h>
++#include "host/cpuinfo.h"
++#endif
++
++unsigned h1_hostops = ~0u;
++
++static void __attribute__((constructor)) h1_hostops_init(void)
++{
++    const char *e = getenv("H1_HOSTOPS");
++    unsigned long v;
++
++    if (e) {
++        if (qemu_strtoul(e, NULL, 0, &v) || v > UINT_MAX) {
++            fprintf(stderr, "H1_HOSTOPS=%s ignored: not a 32 bit number\n", e);
++        } else {
++            h1_hostops = v;
++        }
++    }
++}
+ 
+ union CRYPTO_STATE {
+     uint8_t    bytes[16];
+@@ -294,6 +315,90 @@ static uint32_t s1(uint32_t x)
+     return ror32(x, 17) ^ ror32(x, 19) ^ (x >> 10);
+ }
+ 
++#ifdef H1_HOSTOPS_X86
++/*
++ * SHA-NI versions of the SHA-256 helpers.  The architectural state is
++ * abcd and efgh with element 0 holding the first letter; SHA256RNDS2
++ * wants ABEF and CDGH with the first letter in the top element, so the
++ * state is shuffled in and out around each four round group.  Operands
++ * are read before any result is stored, as vd may alias vn or vm.
++ */
++#define SHA_NI_FN __attribute__((target("sha,ssse3")))
++
++typedef struct SHA256Quad {
++    __m128i abcd, efgh;
++} SHA256Quad;
++
++SHA_NI_FN
++static inline SHA256Quad sha256_4rounds_ni(const uint64_t *rabcd,
++                                           const uint64_t *refgh,
++                                           const uint64_t *rwk)
++{
++    SHA256Quad r;
++
++    __m128i abcd = _mm_loadu_si128((const __m128i *)rabcd);
++    __m128i efgh = _mm_loadu_si128((const __m128i *)refgh);
++    __m128i wk = _mm_loadu_si128((const __m128i *)rwk);
++    __m128i abef = _mm_shuffle_epi32(_mm_unpacklo_epi32(efgh, abcd),
++                                     _MM_SHUFFLE(1, 3, 0, 2));
++    __m128i cdgh = _mm_shuffle_epi32(_mm_unpackhi_epi32(efgh, abcd),
++                                     _MM_SHUFFLE(1, 3, 0, 2));
++
++    /* After the first pair: cdgh holds ABEF2, which is also CDGH4. */
++    cdgh = _mm_sha256rnds2_epu32(cdgh, abef, wk);
++    wk = _mm_shuffle_epi32(wk, _MM_SHUFFLE(0, 0, 3, 2));
++    abef = _mm_sha256rnds2_epu32(abef, cdgh, wk);
++
++    abef = _mm_shuffle_epi32(abef, _MM_SHUFFLE(0, 1, 2, 3));
++    cdgh = _mm_shuffle_epi32(cdgh, _MM_SHUFFLE(0, 1, 2, 3));
++    r.abcd = _mm_unpacklo_epi64(abef, cdgh);
++    r.efgh = _mm_unpackhi_epi64(abef, cdgh);
++    return r;
++}
++
++SHA_NI_FN
++static void sha256h_ni(void *vd, void *vn, void *vm)
++{
++    SHA256Quad r = sha256_4rounds_ni(vd, vn, vm);
++
++    _mm_storeu_si128(vd, r.abcd);
++}
++
++SHA_NI_FN
++static void sha256h2_ni(void *vd, void *vn, void *vm)
++{
++    /* Here vd holds efgh and vn holds abcd. */
++    SHA256Quad r = sha256_4rounds_ni(vn, vd, vm);
++
++    _mm_storeu_si128(vd, r.efgh);
++}
++
++SHA_NI_FN
++static void sha256su0_ni(void *vd, void *vm)
++{
++    __m128i d = _mm_loadu_si128(vd);
++    __m128i m = _mm_loadu_si128(vm);
++
++    _mm_storeu_si128(vd, _mm_sha256msg1_epu32(d, m));
++}
++
++SHA_NI_FN
++static void sha256su1_ni(void *vd, void *vn, void *vm)
++{
++    __m128i d = _mm_loadu_si128(vd);
++    __m128i n = _mm_loadu_si128(vn);
++    __m128i m = _mm_loadu_si128(vm);
++
++    d = _mm_add_epi32(d, _mm_alignr_epi8(m, n, 4));
++    _mm_storeu_si128(vd, _mm_sha256msg2_epu32(d, m));
++}
++
++static inline bool h1_sha256_ni(void)
++{
++    return (cpuinfo & CPUINFO_SHA) && (h1_hostops & H1_HOSTOP_SHA256);
++}
++#endif
++
+ void HELPER(crypto_sha256h)(void *vd, void *vn, void *vm, uint32_t desc)
+ {
+     uint64_t *rd = vd;
+@@ -304,6 +409,13 @@ void HELPER(crypto_sha256h)(void *vd, void *vn, void *vm, uint32_t desc)
+     union CRYPTO_STATE m = { .l = { rm[0], rm[1] } };
+     int i;
+ 
++#ifdef H1_HOSTOPS_X86
++    if (h1_sha256_ni()) {
++        sha256h_ni(vd, vn, vm);
++        clear_tail_16(vd, desc);
++        return;
++    }
++#endif
+     for (i = 0; i < 4; i++) {
+         uint32_t t = cho(CR_ST_WORD(n, 0), CR_ST_WORD(n, 1), CR_ST_WORD(n, 2))
+                      + CR_ST_WORD(n, 3) + S1(CR_ST_WORD(n, 0))
+@@ -339,6 +451,13 @@ void HELPER(crypto_sha256h2)(void *vd, void *vn, void *vm, uint32_t desc)
+     union CRYPTO_STATE m = { .l = { rm[0], rm[1] } };
+     int i;
+ 
++#ifdef H1_HOSTOPS_X86
++    if (h1_sha256_ni()) {
++        sha256h2_ni(vd, vn, vm);
++        clear_tail_16(vd, desc);
++        return;
++    }
++#endif
+     for (i = 0; i < 4; i++) {
+         uint32_t t = cho(CR_ST_WORD(d, 0), CR_ST_WORD(d, 1), CR_ST_WORD(d, 2))
+                      + CR_ST_WORD(d, 3) + S1(CR_ST_WORD(d, 0))
+@@ -363,6 +482,13 @@ void HELPER(crypto_sha256su0)(void *vd, void *vm, uint32_t desc)
+     union CRYPTO_STATE d = { .l = { rd[0], rd[1] } };
+     union CRYPTO_STATE m = { .l = { rm[0], rm[1] } };
+ 
++#ifdef H1_HOSTOPS_X86
++    if (h1_sha256_ni()) {
++        sha256su0_ni(vd, vm);
++        clear_tail_16(vd, desc);
++        return;
++    }
++#endif
+     CR_ST_WORD(d, 0) += s0(CR_ST_WORD(d, 1));
+     CR_ST_WORD(d, 1) += s0(CR_ST_WORD(d, 2));
+     CR_ST_WORD(d, 2) += s0(CR_ST_WORD(d, 3));
+@@ -383,6 +509,13 @@ void HELPER(crypto_sha256su1)(void *vd, void *vn, void *vm, uint32_t desc)
+     union CRYPTO_STATE n = { .l = { rn[0], rn[1] } };
+     union CRYPTO_STATE m = { .l = { rm[0], rm[1] } };
+ 
++#ifdef H1_HOSTOPS_X86
++    if (h1_sha256_ni()) {
++        sha256su1_ni(vd, vn, vm);
++        clear_tail_16(vd, desc);
++        return;
++    }
++#endif
+     CR_ST_WORD(d, 0) += s1(CR_ST_WORD(m, 2)) + CR_ST_WORD(n, 1);
+     CR_ST_WORD(d, 1) += s1(CR_ST_WORD(m, 3)) + CR_ST_WORD(n, 2);
+     CR_ST_WORD(d, 2) += s1(CR_ST_WORD(d, 0)) + CR_ST_WORD(n, 3);
+diff --git a/target/arm/tcg/vec_helper64.c b/target/arm/tcg/vec_helper64.c
+index d8b25b868e..c07fc00e70 100644
+--- a/target/arm/tcg/vec_helper64.c
++++ b/target/arm/tcg/vec_helper64.c
+@@ -18,6 +18,10 @@
+ #include "qemu/int128.h"
+ #include "crypto/clmul.h"
+ #include "vec_internal.h"
++#ifdef H1_HOSTOPS_X86
++#include <immintrin.h>
++#include "host/cpuinfo.h"
++#endif
+ 
+ DO_3OP(gvec_fdiv_h, float16_div, float16)
+ DO_3OP(gvec_fdiv_s, float32_div, float32)
+@@ -97,6 +101,41 @@ DO_3OP_PAIR(gvec_ah_fminp_h, helper_vfp_ah_minh, float16, H2)
+ DO_3OP_PAIR(gvec_ah_fminp_s, helper_vfp_ah_mins, float32, H4)
+ DO_3OP_PAIR(gvec_ah_fminp_d, helper_vfp_ah_mind, float64, /**/)
+ 
++#ifdef H1_HOSTOPS_X86
++/*
++ * TBL and TBX with PSHUFB.  Each table register is looked up with the
++ * index rebased to that register; PSHUFB returns zero when bit 7 of the
++ * index byte is set, and the saturating add of 0x70 sets it for every
++ * rebased index outside 0..15 and leaves the low four bits alone inside.
++ * The table registers and the destination are read before the store as
++ * vd may overlap either.
++ */
++__attribute__((target("ssse3")))
++static void tblx_ssse3(void *vd, const void *vm, CPUARMState *env,
++                       uint32_t rn, bool is_tbx, uint32_t table_len)
++{
++    const __m128i c70 = _mm_set1_epi8(0x70);
++    __m128i idx = _mm_loadu_si128(vm);
++    __m128i dst = _mm_loadu_si128(vd);
++    __m128i acc = _mm_setzero_si128();
++
++    for (uint32_t k = 0; k < table_len / 16; k++) {
++        __m128i t = _mm_loadu_si128((const __m128i *)
++                                    aa64_vfp_qreg(env, (rn + k) % 32));
++        __m128i ix = _mm_adds_epu8(_mm_sub_epi8(idx, _mm_set1_epi8(16 * k)),
++                                   c70);
++        acc = _mm_or_si128(acc, _mm_shuffle_epi8(t, ix));
++    }
++    if (is_tbx) {
++        __m128i lim = _mm_set1_epi8(table_len - 1);
++        __m128i inrange = _mm_cmpeq_epi8(_mm_min_epu8(idx, lim), idx);
++
++        acc = _mm_or_si128(acc, _mm_andnot_si128(inrange, dst));
++    }
++    _mm_storeu_si128(vd, acc);
++}
++#endif
++
+ void HELPER(simd_tblx)(void *vd, void *vm, CPUARMState *env, uint32_t desc)
+ {
+     const uint8_t *indices = vm;
+@@ -109,6 +148,14 @@ void HELPER(simd_tblx)(void *vd, void *vm, CPUARMState *env, uint32_t desc)
+         uint64_t d[2];
+     } result;
+ 
++#ifdef H1_HOSTOPS_X86
++    if ((cpuinfo & CPUINFO_SSSE3) && (h1_hostops & H1_HOSTOP_TBL)) {
++        tblx_ssse3(vd, vm, env, rn, is_tbx, table_len);
++        clear_tail(vd, oprsz, simd_maxsz(desc));
++        return;
++    }
++#endif
++
+     /*
+      * We must construct the final result in a temp, lest the output
+      * overlaps the input table.  For TBL, begin with zero; for TBX,
+diff --git a/target/arm/tcg/vec_internal.h b/target/arm/tcg/vec_internal.h
+index 038a2a3439..015575e301 100644
+--- a/target/arm/tcg/vec_internal.h
++++ b/target/arm/tcg/vec_internal.h
+@@ -102,6 +102,19 @@ static inline uint64_t expand_pred_h(uint8_t byte)
+     return expand_pred_h_data[byte & 0x55];
+ }
+ 
++/*
++ * Host fast paths for guest vector and crypto helpers (x86 hosts only).
++ * Bit mask, all set by default; the environment variable H1_HOSTOPS
++ * (a number, e.g. 0 for none, 1 for SHA only, 2 for TBL/TBX only)
++ * clears bits so that a run can be compared against the portable code.
++ */
++#ifdef __x86_64__
++#define H1_HOSTOPS_X86     1
++#endif
++#define H1_HOSTOP_SHA256   1u
++#define H1_HOSTOP_TBL      2u
++extern unsigned h1_hostops;
++
+ static inline void clear_tail(void *vd, uintptr_t opr_sz, uintptr_t max_sz)
+ {
+     uint64_t *d = vd + opr_sz;
+diff --git a/tests/tcg/aarch64/Makefile.softmmu-target b/tests/tcg/aarch64/Makefile.softmmu-target
+index 8f3ee1da78..382c9b5f0b 100644
+--- a/tests/tcg/aarch64/Makefile.softmmu-target
++++ b/tests/tcg/aarch64/Makefile.softmmu-target
+@@ -72,6 +72,11 @@ run-semiconsole: semiconsole
+ run-plugin-semiconsole-with-%: semiconsole
+ 	$(call skip-test, $<, "MANUAL ONLY")
+ 
++# SHA-256 and TBL/TBX against a model.  The host fast paths are on by
++# default; run again with H1_HOSTOPS=0 in the environment of QEMU for the
++# portable helpers and compare the checksum line of the two runs.
++h1-hostops: CFLAGS+=-march=armv8.2-a+crypto -O2
++run-h1-hostops: QEMU_OPTS=$(QEMU_BASE_MACHINE) $(QEMU_BASE_ARGS) -kernel
+ # these need secondary vCPUs (TLBI broadcast, cross-vCPU code rewrite)
+ run-asid-retain: QEMU_OPTS=$(QEMU_BASE_MACHINE) -m 512M -smp 4 $(QEMU_BASE_ARGS) -kernel
+ run-indirect-branch: QEMU_OPTS=$(QEMU_BASE_MACHINE) -smp 4 $(QEMU_BASE_ARGS) -kernel
+diff --git a/tests/tcg/aarch64/system/bti-guarded.c b/tests/tcg/aarch64/system/bti-guarded.c
+index 41336f490e..71d3fa4763 100644
+--- a/tests/tcg/aarch64/system/bti-guarded.c
++++ b/tests/tcg/aarch64/system/bti-guarded.c
+@@ -163,7 +163,7 @@ static int call_entry(uint64_t entry, uint64_t target, int via_blr)
+                      "1:"
+                      : "+r" (x1), "+r" (x16)
+                      : [rp] "r" (rp), [e] "r" (entry)
+-                     : "x2", "x16", "x17", "x30", "memory", "cc");
++                     : "x2", "x17", "x30", "memory", "cc");
+     } else {
+         asm volatile("adr x2, 1f\n\t"
+                      "str x2, [%[rp]]\n\t"
+@@ -172,7 +172,7 @@ static int call_entry(uint64_t entry, uint64_t target, int via_blr)
+                      "1:"
+                      : "+r" (x1), "+r" (x16)
+                      : [rp] "r" (rp), [e] "r" (entry)
+-                     : "x2", "x16", "x17", "x30", "memory", "cc");
++                     : "x2", "x17", "x30", "memory", "cc");
+     }
+     return trapped;
+ }
+diff --git a/tests/tcg/aarch64/system/h1-hostops.c b/tests/tcg/aarch64/system/h1-hostops.c
+new file mode 100644
+index 0000000000..c8ac005ab4
+--- /dev/null
++++ b/tests/tcg/aarch64/system/h1-hostops.c
+@@ -0,0 +1,458 @@
++/*
++ * Differential test of the SHA-256 and TBL/TBX instructions.
++ *
++ * Every case runs the instruction on random state, with and without the
++ * operand aliasing the instruction allows, and compares the whole vector
++ * register file against a model written from the Arm ARM pseudocode (the
++ * SHA-256 round on eight words rotated one step at a time, TBL and TBX
++ * byte by byte).  A checksum of all results is printed as well, so that a
++ * run with the host fast paths (the default on x86) can be compared with
++ * a run of the portable helpers (H1_HOSTOPS=0 in the environment of QEMU).
++ *
++ * Build with -DN_SHA=<cases per form> and -DN_TBL=<cases per variant>;
++ * -DBENCH runs one long loop of each kind instead and prints no model.
++ *
++ * Copyright (c) 2026 Snapintosh contributors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include <stdint.h>
++#include <minilib.h>
++
++#ifndef N_SHA
++#define N_SHA 20000
++#endif
++#ifndef N_TBL
++#define N_TBL 4000
++#endif
++
++/* the compiler turns struct copies into calls, there is no libc here */
++void *memcpy(void *d, const void *s, unsigned long n)
++{
++    uint8_t *dp = d;
++    const uint8_t *sp = s;
++
++    while (n--) {
++        *dp++ = *sp++;
++        asm volatile("");
++    }
++    return d;
++}
++
++static uint64_t rng_state = 0x9e3779b97f4a7c15ull;
++static uint64_t rng(void)
++{
++    uint64_t x = rng_state;
++    x ^= x << 13;
++    x ^= x >> 7;
++    x ^= x << 17;
++    rng_state = x;
++    return x * 0x2545f4914f6cdd1dull;
++}
++
++static uint64_t csum = 0xcbf29ce484222325ull;
++static void mix(uint64_t v)
++{
++    csum = (csum ^ v) * 0x100000001b3ull;
++    csum ^= csum >> 29;
++}
++
++typedef struct { uint8_t b[16]; } reg_t;
++typedef struct { reg_t r[32]; } rf_t;
++
++#define LOADALL                                                  \
++    "ldp q0, q1, [%0]\n ldp q2, q3, [%0, #32]\n"                 \
++    "ldp q4, q5, [%0, #64]\n ldp q6, q7, [%0, #96]\n"            \
++    "ldp q8, q9, [%0, #128]\n ldp q10, q11, [%0, #160]\n"        \
++    "ldp q12, q13, [%0, #192]\n ldp q14, q15, [%0, #224]\n"      \
++    "ldp q16, q17, [%0, #256]\n ldp q18, q19, [%0, #288]\n"      \
++    "ldp q20, q21, [%0, #320]\n ldp q22, q23, [%0, #352]\n"      \
++    "ldp q24, q25, [%0, #384]\n ldp q26, q27, [%0, #416]\n"      \
++    "ldp q28, q29, [%0, #448]\n ldp q30, q31, [%0, #480]\n"
++#define STOREALL                                                 \
++    "stp q0, q1, [%0]\n stp q2, q3, [%0, #32]\n"                 \
++    "stp q4, q5, [%0, #64]\n stp q6, q7, [%0, #96]\n"            \
++    "stp q8, q9, [%0, #128]\n stp q10, q11, [%0, #160]\n"        \
++    "stp q12, q13, [%0, #192]\n stp q14, q15, [%0, #224]\n"      \
++    "stp q16, q17, [%0, #256]\n stp q18, q19, [%0, #288]\n"      \
++    "stp q20, q21, [%0, #320]\n stp q22, q23, [%0, #352]\n"      \
++    "stp q24, q25, [%0, #384]\n stp q26, q27, [%0, #416]\n"      \
++    "stp q28, q29, [%0, #448]\n stp q30, q31, [%0, #480]\n"
++
++#define CLOBBERS "memory", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7",   \
++    "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17",      \
++    "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27",    \
++    "v28", "v29", "v30", "v31"
++
++#define VARIANT(fn, insn)                                                    \
++    static void fn(rf_t *rf)                                                 \
++    {                                                                        \
++        asm volatile(".arch_extension sha2\n" LOADALL insn "\n" STOREALL     \
++                     : : "r"(rf) : CLOBBERS);                                \
++    }
++
++/* ---- SHA-256 model ---- */
++
++static uint32_t ror(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
++static uint32_t sig0(uint32_t x) { return ror(x, 7) ^ ror(x, 18) ^ (x >> 3); }
++static uint32_t sig1(uint32_t x) { return ror(x, 17) ^ ror(x, 19) ^ (x >> 10); }
++static uint32_t Sig0(uint32_t x) { return ror(x, 2) ^ ror(x, 13) ^ ror(x, 22); }
++static uint32_t Sig1(uint32_t x) { return ror(x, 6) ^ ror(x, 11) ^ ror(x, 25); }
++
++static void ld4(uint32_t *w, const reg_t *r)
++{
++    for (int i = 0; i < 4; i++) {
++        w[i] = r->b[4 * i] | r->b[4 * i + 1] << 8 | r->b[4 * i + 2] << 16 |
++               (uint32_t)r->b[4 * i + 3] << 24;
++    }
++}
++
++static void st4(reg_t *r, const uint32_t *w)
++{
++    for (int i = 0; i < 4; i++) {
++        for (int j = 0; j < 4; j++) {
++            r->b[4 * i + j] = w[i] >> (8 * j);
++        }
++    }
++}
++
++/* SHA256hash(X, Y, W): X is the low half of the 256-bit pair, Y the high. */
++static void model_hash(uint32_t *s, const uint32_t *w)
++{
++    for (int e = 0; e < 4; e++) {
++        uint32_t ch = (s[4] & s[5]) ^ (~s[4] & s[6]);
++        uint32_t mj = (s[0] & s[1]) ^ (s[0] & s[2]) ^ (s[1] & s[2]);
++        uint32_t t = s[7] + Sig1(s[4]) + ch + w[e];
++        uint32_t last;
++
++        s[3] = t + s[3];
++        s[7] = t + Sig0(s[0]) + mj;
++        last = s[7];
++        for (int i = 7; i > 0; i--) {
++            s[i] = s[i - 1];
++        }
++        s[0] = last;
++    }
++}
++
++enum { SHA256H, SHA256H2, SHA256SU0, SHA256SU1 };
++
++/* d, n, m are register numbers; the result goes to rf[d]. */
++static void model_sha(rf_t *rf, int op, int d, int n, int m)
++{
++    uint32_t dw[4], nw[4], mw[4], s[8], out[4];
++
++    ld4(dw, &rf->r[d]);
++    ld4(nw, &rf->r[n]);
++    ld4(mw, &rf->r[m]);
++    switch (op) {
++    case SHA256H:
++        for (int i = 0; i < 4; i++) {
++            s[i] = dw[i];
++            s[4 + i] = nw[i];
++        }
++        model_hash(s, mw);
++        for (int i = 0; i < 4; i++) {
++            out[i] = s[i];
++        }
++        break;
++    case SHA256H2:
++        for (int i = 0; i < 4; i++) {
++            s[i] = nw[i];
++            s[4 + i] = dw[i];
++        }
++        model_hash(s, mw);
++        for (int i = 0; i < 4; i++) {
++            out[i] = s[4 + i];
++        }
++        break;
++    case SHA256SU0:
++        /* Vn is the second source here, its register number is n */
++        out[0] = dw[0] + sig0(dw[1]);
++        out[1] = dw[1] + sig0(dw[2]);
++        out[2] = dw[2] + sig0(dw[3]);
++        out[3] = dw[3] + sig0(nw[0]);
++        break;
++    default:
++        out[0] = dw[0] + sig1(mw[2]) + nw[1];
++        out[1] = dw[1] + sig1(mw[3]) + nw[2];
++        out[2] = dw[2] + sig1(out[0]) + nw[3];
++        out[3] = dw[3] + sig1(out[1]) + mw[0];
++        break;
++    }
++    st4(&rf->r[d], out);
++    /* the instruction writes all 128 bits, nothing else changes */
++}
++
++VARIANT(h_plain,   "sha256h q0, q1, v2.4s")
++VARIANT(h_d_n,     "sha256h q1, q1, v2.4s")
++VARIANT(h_d_m,     "sha256h q2, q1, v2.4s")
++VARIANT(h_n_m,     "sha256h q0, q1, v1.4s")
++VARIANT(h_all,     "sha256h q1, q1, v1.4s")
++VARIANT(h2_plain,  "sha256h2 q0, q1, v2.4s")
++VARIANT(h2_d_n,    "sha256h2 q1, q1, v2.4s")
++VARIANT(h2_d_m,    "sha256h2 q2, q1, v2.4s")
++VARIANT(h2_n_m,    "sha256h2 q0, q1, v1.4s")
++VARIANT(h2_all,    "sha256h2 q1, q1, v1.4s")
++VARIANT(su0_plain, "sha256su0 v0.4s, v1.4s")
++VARIANT(su0_same,  "sha256su0 v1.4s, v1.4s")
++VARIANT(su1_plain, "sha256su1 v0.4s, v1.4s, v2.4s")
++VARIANT(su1_d_n,   "sha256su1 v1.4s, v1.4s, v2.4s")
++VARIANT(su1_d_m,   "sha256su1 v2.4s, v1.4s, v2.4s")
++VARIANT(su1_n_m,   "sha256su1 v0.4s, v1.4s, v1.4s")
++VARIANT(su1_all,   "sha256su1 v1.4s, v1.4s, v1.4s")
++
++static const struct {
++    const char *name;
++    void (*fn)(rf_t *);
++    int op, d, n, m;
++} sha_forms[] = {
++    { "sha256h",         h_plain,   SHA256H,   0, 1, 2 },
++    { "sha256h d=n",     h_d_n,     SHA256H,   1, 1, 2 },
++    { "sha256h d=m",     h_d_m,     SHA256H,   2, 1, 2 },
++    { "sha256h n=m",     h_n_m,     SHA256H,   0, 1, 1 },
++    { "sha256h all",     h_all,     SHA256H,   1, 1, 1 },
++    { "sha256h2",        h2_plain,  SHA256H2,  0, 1, 2 },
++    { "sha256h2 d=n",    h2_d_n,    SHA256H2,  1, 1, 2 },
++    { "sha256h2 d=m",    h2_d_m,    SHA256H2,  2, 1, 2 },
++    { "sha256h2 n=m",    h2_n_m,    SHA256H2,  0, 1, 1 },
++    { "sha256h2 all",    h2_all,    SHA256H2,  1, 1, 1 },
++    { "sha256su0",       su0_plain, SHA256SU0, 0, 1, 0 },
++    { "sha256su0 d=n",   su0_same,  SHA256SU0, 1, 1, 1 },
++    { "sha256su1",       su1_plain, SHA256SU1, 0, 1, 2 },
++    { "sha256su1 d=n",   su1_d_n,   SHA256SU1, 1, 1, 2 },
++    { "sha256su1 d=m",   su1_d_m,   SHA256SU1, 2, 1, 2 },
++    { "sha256su1 n=m",   su1_n_m,   SHA256SU1, 0, 1, 1 },
++    { "sha256su1 all",   su1_all,   SHA256SU1, 1, 1, 1 },
++};
++
++/* ---- TBL / TBX model ---- */
++
++/* the model of the lookup is by definition, byte by byte */
++static void model_tbl(rf_t *rf, int d, int t, int nreg, int m, int tbx, int q)
++{
++    reg_t res;
++    int bytes = q ? 16 : 8;
++
++    for (int i = 0; i < 16; i++) {
++        res.b[i] = 0;
++    }
++    for (int i = 0; i < bytes; i++) {
++        unsigned idx = rf->r[m].b[i];
++
++        if (idx < 16u * nreg) {
++            res.b[i] = rf->r[(t + idx / 16) % 32].b[idx % 16];
++        } else if (tbx) {
++            res.b[i] = rf->r[d].b[i];
++        }
++    }
++    rf->r[d] = res;
++}
++
++VARIANT(t1,     "tbl v0.16b, {v1.16b}, v5.16b")
++VARIANT(t2,     "tbl v0.16b, {v1.16b, v2.16b}, v5.16b")
++VARIANT(t3,     "tbl v0.16b, {v1.16b, v2.16b, v3.16b}, v5.16b")
++VARIANT(t4,     "tbl v0.16b, {v1.16b, v2.16b, v3.16b, v4.16b}, v5.16b")
++VARIANT(x1,     "tbx v0.16b, {v1.16b}, v5.16b")
++VARIANT(x2,     "tbx v0.16b, {v1.16b, v2.16b}, v5.16b")
++VARIANT(x3,     "tbx v0.16b, {v1.16b, v2.16b, v3.16b}, v5.16b")
++VARIANT(x4,     "tbx v0.16b, {v1.16b, v2.16b, v3.16b, v4.16b}, v5.16b")
++VARIANT(t1_8,   "tbl v0.8b, {v1.16b}, v5.8b")
++VARIANT(t2_8,   "tbl v0.8b, {v1.16b, v2.16b}, v5.8b")
++VARIANT(x1_8,   "tbx v0.8b, {v1.16b}, v5.8b")
++VARIANT(x2_8,   "tbx v0.8b, {v1.16b, v2.16b}, v5.8b")
++VARIANT(x4_8,   "tbx v0.8b, {v1.16b, v2.16b, v3.16b, v4.16b}, v5.8b")
++VARIANT(t1_dm,  "tbl v5.16b, {v1.16b}, v5.16b")
++VARIANT(t2_dm,  "tbl v5.16b, {v1.16b, v2.16b}, v5.16b")
++VARIANT(x2_dm,  "tbx v5.16b, {v1.16b, v2.16b}, v5.16b")
++VARIANT(t2_dt0, "tbl v1.16b, {v1.16b, v2.16b}, v5.16b")
++VARIANT(x2_dt0, "tbx v1.16b, {v1.16b, v2.16b}, v5.16b")
++VARIANT(t2_dt1, "tbl v2.16b, {v1.16b, v2.16b}, v5.16b")
++VARIANT(x2_dt1, "tbx v2.16b, {v1.16b, v2.16b}, v5.16b")
++VARIANT(x1_all, "tbx v5.16b, {v5.16b}, v5.16b")
++VARIANT(x4_dt3, "tbx v4.16b, {v1.16b, v2.16b, v3.16b, v4.16b}, v5.16b")
++VARIANT(t2_wrap,  "tbl v0.16b, {v31.16b, v0.16b}, v5.16b")
++VARIANT(x2_wrap,  "tbx v0.16b, {v31.16b, v0.16b}, v5.16b")
++VARIANT(t4_wrap,  "tbl v7.16b, {v30.16b, v31.16b, v0.16b, v1.16b}, v5.16b")
++VARIANT(x4_wrap,  "tbx v31.16b, {v30.16b, v31.16b, v0.16b, v1.16b}, v5.16b")
++VARIANT(x3_wrap8, "tbx v0.8b, {v30.16b, v31.16b, v0.16b}, v5.8b")
++
++static const struct {
++    const char *name;
++    void (*fn)(rf_t *);
++    int d, t, nreg, m, tbx, q;
++} tbl_forms[] = {
++    { "tbl 1",          t1,       0, 1, 1, 5, 0, 1 },
++    { "tbl 2",          t2,       0, 1, 2, 5, 0, 1 },
++    { "tbl 3",          t3,       0, 1, 3, 5, 0, 1 },
++    { "tbl 4",          t4,       0, 1, 4, 5, 0, 1 },
++    { "tbx 1",          x1,       0, 1, 1, 5, 1, 1 },
++    { "tbx 2",          x2,       0, 1, 2, 5, 1, 1 },
++    { "tbx 3",          x3,       0, 1, 3, 5, 1, 1 },
++    { "tbx 4",          x4,       0, 1, 4, 5, 1, 1 },
++    { "tbl 1 8b",       t1_8,     0, 1, 1, 5, 0, 0 },
++    { "tbl 2 8b",       t2_8,     0, 1, 2, 5, 0, 0 },
++    { "tbx 1 8b",       x1_8,     0, 1, 1, 5, 1, 0 },
++    { "tbx 2 8b",       x2_8,     0, 1, 2, 5, 1, 0 },
++    { "tbx 4 8b",       x4_8,     0, 1, 4, 5, 1, 0 },
++    { "tbl 1 d=idx",    t1_dm,    5, 1, 1, 5, 0, 1 },
++    { "tbl 2 d=idx",    t2_dm,    5, 1, 2, 5, 0, 1 },
++    { "tbx 2 d=idx",    x2_dm,    5, 1, 2, 5, 1, 1 },
++    { "tbl 2 d=t0",     t2_dt0,   1, 1, 2, 5, 0, 1 },
++    { "tbx 2 d=t0",     x2_dt0,   1, 1, 2, 5, 1, 1 },
++    { "tbl 2 d=t1",     t2_dt1,   2, 1, 2, 5, 0, 1 },
++    { "tbx 2 d=t1",     x2_dt1,   2, 1, 2, 5, 1, 1 },
++    { "tbx 1 all",      x1_all,   5, 5, 1, 5, 1, 1 },
++    { "tbx 4 d=t3",     x4_dt3,   4, 1, 4, 5, 1, 1 },
++    { "tbl 2 wrap",     t2_wrap,  0, 31, 2, 5, 0, 1 },
++    { "tbx 2 wrap",     x2_wrap,  0, 31, 2, 5, 1, 1 },
++    { "tbl 4 wrap",     t4_wrap,  7, 30, 4, 5, 0, 1 },
++    { "tbx 4 wrap",     x4_wrap,  31, 30, 4, 5, 1, 1 },
++    { "tbx 3 wrap 8b",  x3_wrap8, 0, 30, 3, 5, 1, 0 },
++};
++
++static void fill(rf_t *rf)
++{
++    uint64_t *p = (uint64_t *)rf;
++
++    for (int i = 0; i < 64; i++) {
++        p[i] = rng();
++    }
++    /* now and then, degenerate register contents */
++    switch (rng() & 31) {
++    case 0:
++        for (int i = 0; i < 64; i++) {
++            p[i] = 0;
++        }
++        break;
++    case 1:
++        for (int i = 0; i < 64; i++) {
++            p[i] = ~0ull;
++        }
++        break;
++    default:
++        break;
++    }
++}
++
++/* make about half of the index bytes land near the end of the table */
++static void tune_idx(rf_t *rf, int m, int nreg)
++{
++    for (int i = 0; i < 16; i++) {
++        if (rng() & 1) {
++            rf->r[m].b[i] = rng() % (16 * nreg + 24);
++        }
++    }
++}
++
++static int fails;
++
++static int equal(const rf_t *a, const rf_t *b)
++{
++    const uint64_t *x = (const uint64_t *)a, *y = (const uint64_t *)b;
++
++    for (int i = 0; i < 64; i++) {
++        if (x[i] != y[i]) {
++            return 0;
++        }
++    }
++    return 1;
++}
++
++static void mixrf(const rf_t *rf)
++{
++    const uint64_t *p = (const uint64_t *)rf;
++
++    for (int i = 0; i < 64; i++) {
++        mix(p[i]);
++    }
++}
++
++#ifdef BENCH
++int main(void)
++{
++    rf_t a;
++
++    fill(&a);
++    ml_printf("bench\n");
++    for (unsigned long i = 0; i < N_SHA; i++) {
++        h_plain(&a);
++        h2_plain(&a);
++        su0_plain(&a);
++        su1_plain(&a);
++    }
++    for (unsigned long i = 0; i < N_TBL; i++) {
++        t1(&a);
++        t2(&a);
++        x2(&a);
++        x1(&a);
++    }
++    mixrf(&a);
++    ml_printf("csum %lx\n", csum);
++    return 0;
++}
++#else
++int main(void)
++{
++    static rf_t in, got, want;
++    unsigned long n_sha = 0, n_tbl = 0;
++
++    ml_printf("SHA-256 and TBL/TBX differential test, %d and %d cases"
++              " per form\n", N_SHA, N_TBL);
++    for (unsigned f = 0; f < sizeof(sha_forms) / sizeof(sha_forms[0]); f++) {
++        unsigned long bad = 0;
++
++        for (int i = 0; i < N_SHA; i++) {
++            fill(&in);
++            got = in;
++            want = in;
++            sha_forms[f].fn(&got);
++            model_sha(&want, sha_forms[f].op, sha_forms[f].d,
++                      sha_forms[f].n, sha_forms[f].m);
++            if (!equal(&got, &want)) {
++                if (!bad) {
++                    const uint64_t *w = (const uint64_t *)&want;
++                    const uint64_t *g = (const uint64_t *)&got;
++                    int r = sha_forms[f].d;
++
++                    ml_printf("FAIL %s case %d: want %lx %lx got %lx %lx\n",
++                              sha_forms[f].name, i, w[2 * r], w[2 * r + 1],
++                              g[2 * r], g[2 * r + 1]);
++                }
++                bad++;
++            }
++            mixrf(&got);
++            n_sha++;
++        }
++        fails += bad != 0;
++        ml_printf("%s: %s\n", sha_forms[f].name, bad ? "FAIL" : "ok");
++    }
++    for (unsigned f = 0; f < sizeof(tbl_forms) / sizeof(tbl_forms[0]); f++) {
++        unsigned long bad = 0;
++
++        for (int i = 0; i < N_TBL; i++) {
++            fill(&in);
++            tune_idx(&in, tbl_forms[f].m, tbl_forms[f].nreg);
++            got = in;
++            want = in;
++            tbl_forms[f].fn(&got);
++            model_tbl(&want, tbl_forms[f].d, tbl_forms[f].t,
++                      tbl_forms[f].nreg, tbl_forms[f].m, tbl_forms[f].tbx,
++                      tbl_forms[f].q);
++            if (!equal(&got, &want)) {
++                if (!bad) {
++                    ml_printf("FAIL %s case %d\n", tbl_forms[f].name, i);
++                }
++                bad++;
++            }
++            mixrf(&got);
++            n_tbl++;
++        }
++        fails += bad != 0;
++        ml_printf("%s: %s\n", tbl_forms[f].name, bad ? "FAIL" : "ok");
++    }
++    ml_printf("cases %lu sha, %lu tbl, checksum %lx\n", n_sha, n_tbl, csum);
++    ml_printf(fails ? "FAILED\n" : "OK\n");
++    return fails != 0;
++}
++#endif
+diff --git a/util/cpuinfo-i386.c b/util/cpuinfo-i386.c
+index f4c5b6ff40..df3761e8eb 100644
+--- a/util/cpuinfo-i386.c
++++ b/util/cpuinfo-i386.c
+@@ -39,6 +39,9 @@ unsigned __attribute__((constructor)) cpuinfo_init(void)
+         info |= (c & bit_MOVBE ? CPUINFO_MOVBE : 0);
+         info |= (c & bit_POPCNT ? CPUINFO_POPCNT : 0);
+         info |= (c & bit_PCLMUL ? CPUINFO_PCLMUL : 0);
++        info |= (c & bit_SSSE3 ? CPUINFO_SSSE3 : 0);
++        /* SHA-NI is only used together with PSHUFB and PALIGNR. */
++        info |= ((b7 & bit_SHA) && (c & bit_SSSE3) ? CPUINFO_SHA : 0);
+ 
+         /* Our AES support requires PSHUFB as well. */
+         info |= ((c & bit_AES) && (c & bit_SSSE3) ? CPUINFO_AES : 0);

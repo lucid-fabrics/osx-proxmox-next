@@ -1,0 +1,482 @@
+From f9135a7cd4af4d93a6a89f24ff51eafc45c93291 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(vmapple): add the ambrosia=on machine layout
+
+-machine vmapple,ambrosia=on boots through the Ambrosia open firmware
+instead of AVPBooter: RAM at 0x100000000 with the PCIe MMIO window
+below it, 64-bit IOSurface registers, an avp-rtc at 0x30240000, a
+doorbell and no SME.
+---
+ hw/display/apple-gfx-mmio.c  |  20 +++-
+ hw/vmapple/Kconfig           |   5 +
+ hw/vmapple/meson.build       |   1 +
+ hw/vmapple/rtc.c             | 196 +++++++++++++++++++++++++++++++++++
+ hw/vmapple/trace-events      |   4 +
+ hw/vmapple/vmapple.c         |  69 +++++++++++-
+ include/hw/vmapple/vmapple.h |   2 +
+ 7 files changed, 292 insertions(+), 5 deletions(-)
+ create mode 100644 hw/vmapple/rtc.c
+
+diff --git a/hw/display/apple-gfx-mmio.c b/hw/display/apple-gfx-mmio.c
+index 3db2cded7d..d97ecef819 100644
+--- a/hw/display/apple-gfx-mmio.c
++++ b/hw/display/apple-gfx-mmio.c
+@@ -66,6 +66,8 @@ struct AppleGFXMMIOState {
+     RvgIOSurfaceDevice *pgiosfc;
+     /* suspended for a save: the library device is quiet, state is kept */
+     bool suspended;
++    /* pass the IOSurface registers' 64 bits through (RAM above 4 GiB) */
++    bool iosfc_wide;
+     NotifierWithReturn mig_notifier;
+     VMChangeStateEntry *vmsh;
+     /* saved with the state and checked at a load */
+@@ -96,8 +98,11 @@ struct AppleGFXMMIOState {
+ static uint64_t iosfc_read(void *opaque, hwaddr offset, unsigned size)
+ {
+     AppleGFXMMIOState *s = opaque;
+-    uint64_t value = (uint32_t)rvg_iosurface_device_mmio_read(s->pgiosfc,
+-                                                              offset);
++    uint64_t value = rvg_iosurface_device_mmio_read(s->pgiosfc, offset);
++
++    if (!s->iosfc_wide) {
++        value = (uint32_t)value;
++    }
+ 
+     trace_apple_gfx_mmio_iosfc_read(offset, value);
+     return value;
+@@ -152,7 +157,9 @@ static void iosfc_write(void *opaque, hwaddr offset, uint64_t val,
+     AppleGFXMMIOState *s = opaque;
+ 
+     /* The library's registers are 64 bits wide, this declaration 32 */
+-    val = (uint32_t)val;
++    if (!s->iosfc_wide) {
++        val = (uint32_t)val;
++    }
+     if (offset == IOSFC_REG_RING_RD) {
+         s->iosfc_seen = val;
+     } else if (offset == IOSFC_REG_RING_WR) {
+@@ -621,6 +628,13 @@ static const Property apple_gfx_mmio_properties[] = {
+      * argument buffers need; without them a restored guest creates its
+      * resources again with no clash.
+      */
++    /*
++     * Pass the IOSurface device's 64-bit registers (ring and descriptor
++     * bases, which hold guest physical addresses) through whole. Needed when
++     * guest RAM sits at 4 GiB and above (vmapple ambrosia=on): the default
++     * 32-bit truncation drops the address's bit 32.
++     */
++    DEFINE_PROP_BOOL("iosfc-wide", AppleGFXMMIOState, iosfc_wide, false),
+     DEFINE_PROP_BOOL("disable-argument-buffers", AppleGFXMMIOState,
+                      disable_argument_buffers, false),
+     /*
+diff --git a/hw/vmapple/Kconfig b/hw/vmapple/Kconfig
+index 2aa1a9b8ca..ed055c561a 100644
+--- a/hw/vmapple/Kconfig
++++ b/hw/vmapple/Kconfig
+@@ -11,6 +11,9 @@ config VMAPPLE_CFG
+ 
+ config VMAPPLE_MSI_FRAME
+     bool
++config VMAPPLE_RTC
++    bool
++
+ config VMAPPLE_VIRTIO_BLK
+     bool
+ 
+@@ -33,5 +36,7 @@ config VMAPPLE
+     select VMAPPLE_BDIF
+     select VMAPPLE_CFG
+     select VMAPPLE_MSI_FRAME
++    select VMAPPLE_RTC
++    select UNIMP
+     imply MAC_PVG_MMIO
+     select VMAPPLE_VIRTIO_BLK
+diff --git a/hw/vmapple/meson.build b/hw/vmapple/meson.build
+index 518d304798..99a6c8801b 100644
+--- a/hw/vmapple/meson.build
++++ b/hw/vmapple/meson.build
+@@ -4,5 +4,6 @@ system_ss.add(when: 'CONFIG_VMAPPLE_AES',  if_true: files('aes.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_BDIF', if_true: files('bdif.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_CFG',  if_true: files('cfg.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_MSI_FRAME', if_true: files('msi-frame.c'))
++system_ss.add(when: 'CONFIG_VMAPPLE_RTC',  if_true: files('rtc.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_VIRTIO_BLK',  if_true: files('virtio-blk.c'))
+ specific_ss.add(when: 'CONFIG_VMAPPLE',     if_true: files('vmapple.c', 'iofence-patch.c', 'iofence-match.c'))
+diff --git a/hw/vmapple/rtc.c b/hw/vmapple/rtc.c
+new file mode 100644
+index 0000000000..0a4f880913
+--- /dev/null
++++ b/hw/vmapple/rtc.c
+@@ -0,0 +1,196 @@
++/*
++ * VMApple RTC
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++/*
++ * Beside its PL031, Virtualization.framework's machine has a clock that the
++ * guest's device tree lists as avp-rtc ("avp,rtc"), and that macOS drives
++ * with its AppleVirtualPlatformRTC driver. The driver reads the device's
++ * counter of microseconds and keeps the offset from it to calendar time in
++ * NVRAM, as com.apple.System.rtc-offset, which it sets whenever the guest
++ * sets its clock. It gives that offset to userspace as
++ * kern.monotoniclock_offset_usecs, from which timed tells whether the clock
++ * was reset. macOS's PL031 driver has no offset, so on the PL031 alone timed
++ * takes the clock for reset on every boot, and sets it back to the last
++ * write to the guest's filesystem.
++ *
++ * The counter counts microseconds of QEMU's rtc clock from the Unix epoch,
++ * as the PL031 counts seconds, so -rtc base= and clock= apply to both. The
++ * driver uses 64-bit accesses; the registers are:
++ *
++ *   0x00  COUNTER   read only, the counter
++ *   0x18  CTRL      bit 0 enables the clock; reads back what was written
++ *   0x20  INT_EN    interrupt enables; reads back what was written
++ *   0x30  INT_STAT  pending interrupts; always 0
++ *   0x38  INT_CLR   write ones to clear pending interrupts
++ *   0x40  ID        reads 0xf001
++ *
++ * The driver passes interrupts 1 and 2 on to its user clients. Nothing here
++ * raises them, so the device has no interrupt line. iBoot keeps avp-rtc in
++ * the device tree and drops pl031-rtc when ID reads 0xf001, and the reverse
++ * otherwise.
++ */
++
++#include "qemu/osdep.h"
++#include "trace.h"
++#include "hw/core/sysbus.h"
++#include "hw/vmapple/vmapple.h"
++#include "qemu/bitops.h"
++#include "qemu/cutils.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "system/rtc.h"
++#include "system/system.h"
++
++OBJECT_DECLARE_SIMPLE_TYPE(VMAppleRTCState, VMAPPLE_RTC)
++
++#define VMAPPLE_RTC_SIZE 0x1000
++
++#define REG_COUNTER  0x00
++#define REG_CTRL     0x18
++#define REG_INT_EN   0x20
++#define REG_INT_STAT 0x30
++#define REG_INT_CLR  0x38
++#define REG_ID       0x40
++
++#define VMAPPLE_RTC_ID 0xf001
++
++struct VMAppleRTCState {
++    SysBusDevice parent_obj;
++
++    MemoryRegion iomem;
++    /* Seconds from the rtc clock to the guest's time, as the PL031 keeps */
++    int64_t tick_offset;
++    uint64_t ctrl;
++    uint64_t int_en;
++};
++
++static uint64_t vmapple_rtc_usecs(VMAppleRTCState *s)
++{
++    int64_t now = qemu_clock_get_ns(rtc_clock);
++
++    return (s->tick_offset * NANOSECONDS_PER_SECOND + now) / SCALE_US;
++}
++
++static uint64_t vmapple_rtc_reg(VMAppleRTCState *s, hwaddr reg)
++{
++    switch (reg) {
++    case REG_COUNTER:
++        return vmapple_rtc_usecs(s);
++    case REG_CTRL:
++        return s->ctrl;
++    case REG_INT_EN:
++        return s->int_en;
++    case REG_INT_STAT:
++    case REG_INT_CLR:
++        return 0;
++    case REG_ID:
++        return VMAPPLE_RTC_ID;
++    default:
++        qemu_log_mask(LOG_UNIMP, "%s: unknown register 0x%" HWADDR_PRIx "\n",
++                      __func__, reg);
++        return 0;
++    }
++}
++
++static uint64_t vmapple_rtc_read(void *opaque, hwaddr offset, unsigned size)
++{
++    VMAppleRTCState *s = opaque;
++    unsigned shift = (offset & 7) * BITS_PER_BYTE;
++    uint64_t val;
++
++    val = extract64(vmapple_rtc_reg(s, offset & ~7ULL), shift,
++                    size * BITS_PER_BYTE);
++    trace_vmapple_rtc_read(offset, size, val);
++    return val;
++}
++
++static void vmapple_rtc_write(void *opaque, hwaddr offset, uint64_t val,
++                              unsigned size)
++{
++    VMAppleRTCState *s = opaque;
++    unsigned shift = (offset & 7) * BITS_PER_BYTE;
++    unsigned len = size * BITS_PER_BYTE;
++
++    trace_vmapple_rtc_write(offset, size, val);
++    switch (offset & ~7ULL) {
++    case REG_CTRL:
++        s->ctrl = deposit64(s->ctrl, shift, len, val);
++        break;
++    case REG_INT_EN:
++        s->int_en = deposit64(s->int_en, shift, len, val);
++        break;
++    case REG_INT_CLR:
++        /* No interrupt is ever pending. */
++        break;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "%s: write to read-only or unknown register 0x%"
++                      HWADDR_PRIx "\n", __func__, offset);
++        break;
++    }
++}
++
++static const MemoryRegionOps vmapple_rtc_ops = {
++    .read = vmapple_rtc_read,
++    .write = vmapple_rtc_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++    /* Whole, so that the counter's halves come from one reading. */
++    .impl = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++};
++
++static void vmapple_rtc_reset(Object *obj, ResetType type)
++{
++    VMAppleRTCState *s = VMAPPLE_RTC(obj);
++
++    s->ctrl = 0;
++    s->int_en = 0;
++}
++
++static void vmapple_rtc_init(Object *obj)
++{
++    VMAppleRTCState *s = VMAPPLE_RTC(obj);
++    struct tm tm;
++
++    memory_region_init_io(&s->iomem, obj, &vmapple_rtc_ops, s, "vmapple-rtc",
++                          VMAPPLE_RTC_SIZE);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++
++    qemu_get_timedate(&tm, 0);
++    s->tick_offset = mktimegm(&tm) -
++        qemu_clock_get_ns(rtc_clock) / NANOSECONDS_PER_SECOND;
++}
++
++static void vmapple_rtc_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++
++    dc->desc = "VMApple RTC";
++    rc->phases.hold = vmapple_rtc_reset;
++}
++
++static const TypeInfo vmapple_rtc_info = {
++    .name          = TYPE_VMAPPLE_RTC,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(VMAppleRTCState),
++    .instance_init = vmapple_rtc_init,
++    .class_init    = vmapple_rtc_class_init,
++};
++
++static void vmapple_rtc_register_types(void)
++{
++    type_register_static(&vmapple_rtc_info);
++}
++
++type_init(vmapple_rtc_register_types)
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index 62680bcbcf..4340e71162 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -23,3 +23,7 @@ bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, in
+ # msi-frame.c
+ vmapple_msi_frame_read(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
+ vmapple_msi_frame_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
++
++# rtc.c
++vmapple_rtc_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
++vmapple_rtc_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 8bd509a6c8..057696ad09 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -46,6 +46,7 @@
+ #include "hw/intc/arm_gic.h"
+ #include "hw/intc/arm_gicv3_common.h"
+ #include "hw/misc/pvpanic.h"
++#include "hw/misc/unimp.h"
+ #include "hw/pci-host/gpex.h"
+ #include "hw/usb/hcd-xhci-pci.h"
+ #include "hw/virtio/virtio-net.h"
+@@ -75,6 +76,8 @@ struct VMAppleMachineState {
+     Notifier machine_done;
+     struct arm_boot_info bootinfo;
+     const MemMapEntry *memmap;
++    /* ambrosia=on: the Ambrosia machine layout, see vmapple_ambrosia_layout() */
++    bool ambrosia;
+     const int *irqmap;
+     DeviceState *gic;
+     DeviceState *cfg;
+@@ -137,6 +140,8 @@ enum {
+     VMAPPLE_AES_2,
+     VMAPPLE_BDOOR,
+     VMAPPLE_MSIF,
++    VMAPPLE_AVP_RTC,
++    VMAPPLE_DMA_CONFIG,
+     VMAPPLE_MEMMAP_LAST,
+ };
+ 
+@@ -177,6 +182,25 @@ static const int irqmap[] = {
+ 
+ #define GPEX_NUM_IRQS 16
+ 
++/*
++ * The machine Ambrosia (steelbrain/ambrosia) expects, selected with
++ * -machine ambrosia=on: RAM at 4 GiB and the PCIe MMIO window below it, the
++ * second clock avp-rtc at 0x30240000, and an inert doorbell at 0x004ffff8 for
++ * macOS's DMA config request. Everything else is the stock map. AVPBooter
++ * does not boot on this layout (its stack is at 0x70053ff0).
++ */
++static const MemMapEntry *vmapple_ambrosia_layout(void)
++{
++    static MemMapEntry map[VMAPPLE_MEMMAP_LAST];
++
++    memcpy(map, memmap, sizeof(memmap));
++    map[VMAPPLE_PCIE_MMIO] = (MemMapEntry){ 0x50000000, 0xb0000000 };
++    map[VMAPPLE_MEM] = (MemMapEntry){ 0x100000000ULL, GiB };
++    map[VMAPPLE_AVP_RTC] = (MemMapEntry){ 0x30240000, 0x00001000 };
++    map[VMAPPLE_DMA_CONFIG] = (MemMapEntry){ 0x004ffff8, 0x00000008 };
++    return map;
++}
++
+ static void create_bdif(VMAppleMachineState *vms, MemoryRegion *mem)
+ {
+     DeviceState *bdif;
+@@ -283,6 +307,9 @@ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+     SysBusDevice *gfx;
+ 
+     gfx = SYS_BUS_DEVICE(qdev_new("apple-gfx-mmio"));
++    if (vms->ambrosia) {
++        qdev_prop_set_bit(DEVICE(gfx), "iosfc-wide", true);
++    }
+     sysbus_mmio_map(gfx, 0, vms->memmap[VMAPPLE_APV_GFX].base);
+     sysbus_mmio_map(gfx, 1, vms->memmap[VMAPPLE_APV_IOSFC].base);
+     sysbus_connect_irq(gfx, 0, qdev_get_gpio_in(vms->gic, irq_gfx));
+@@ -460,6 +487,18 @@ static void create_rtc(const VMAppleMachineState *vms)
+     int irq = vms->irqmap[VMAPPLE_RTC];
+ 
+     sysbus_create_simple("pl031", base, qdev_get_gpio_in(vms->gic, irq));
++    if (vms->ambrosia) {
++        /*
++         * macOS keeps its clock's offset to calendar time only with avp-rtc,
++         * and Ambrosia reads its ID register, an external abort under TCG
++         * without the device. It sits above the 0x30240000 inert window.
++         */
++        sysbus_create_simple(TYPE_VMAPPLE_RTC,
++                             vms->memmap[VMAPPLE_AVP_RTC].base, NULL);
++        create_unimplemented_device("vmapple.dma-config",
++                                    vms->memmap[VMAPPLE_DMA_CONFIG].base,
++                                    vms->memmap[VMAPPLE_DMA_CONFIG].size);
++    }
+ }
+ 
+ static DeviceState *gpio_key_dev;
+@@ -1044,7 +1083,7 @@ static void mach_vmapple_init(MachineState *machine)
+     unsigned int smp_cpus = machine->smp.cpus;
+     unsigned int max_cpus = machine->smp.max_cpus;
+ 
+-    vms->memmap = memmap;
++    vms->memmap = vms->ambrosia ? vmapple_ambrosia_layout() : memmap;
+     machine->usb = true;
+ 
+     possible_cpus = mc->possible_cpu_arch_ids(machine);
+@@ -1100,6 +1139,11 @@ static void mach_vmapple_init(MachineState *machine)
+                                      &error_fatal);
+         }
+ 
++        if (vms->ambrosia && tcg_enabled() && object_property_find(cpu, "sme")) {
++            /* TCG's max CPU offers 2048-bit SME vectors, which oversize a
++             * zone element in macOS 14 and later; an M1 to M3 has none. */
++            object_property_set_bool(cpu, "sme", false, &error_fatal);
++        }
+         object_property_set_link(cpu, "memory", OBJECT(sysmem), &error_abort);
+         qdev_realize(DEVICE(cpu), NULL, &error_fatal);
+         object_unref(cpu);
+@@ -1144,7 +1188,12 @@ static void mach_vmapple_init(MachineState *machine)
+     vms->bootinfo.firmware_loaded = true;
+     vms->machine_done.notify = vmapple_machine_done;
+     qemu_add_machine_init_done_notifier(&vms->machine_done);
+-    if (vms->internal_use_only_unit || vms->xnu_boot_args ||
++    if (vms->ambrosia &&
++        (vms->internal_use_only_unit || vms->xnu_boot_args ||
++         vms->csr_config >= 0)) {
++        warn_report("vmapple: ambrosia=on, ignoring the XNU handoff hook "
++                    "options (Ambrosia sets boot args and policy itself)");
++    } else if (vms->internal_use_only_unit || vms->xnu_boot_args ||
+         vms->csr_config >= 0) {
+         if (!tcg_enabled()) {
+             error_report("vmapple: the XNU handoff hook needs TCG");
+@@ -1260,6 +1309,16 @@ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
+                      G_N_ELEMENTS(vmapple_compat_defaults));
+ }
+ 
++static bool vmapple_get_ambrosia(Object *obj, Error **errp)
++{
++    return VMAPPLE_MACHINE(obj)->ambrosia;
++}
++
++static void vmapple_set_ambrosia(Object *obj, bool value, Error **errp)
++{
++    VMAPPLE_MACHINE(obj)->ambrosia = value;
++}
++
+ static bool vmapple_get_run_installer(Object *obj, Error **errp)
+ {
+     return VMAPPLE_MACHINE(obj)->run_installer;
+@@ -1280,6 +1339,12 @@ static void vmapple_instance_init(Object *obj)
+                                    OBJ_PROP_FLAG_READWRITE);
+     object_property_set_description(obj, "uuid", "Machine UUID (SDOM)");
+ 
++    object_property_add_bool(obj, "ambrosia", vmapple_get_ambrosia,
++                             vmapple_set_ambrosia);
++    object_property_set_description(obj, "ambrosia",
++                                    "Machine layout for the Ambrosia "
++                                    "firmware: RAM at 4 GiB, avp-rtc, DMA "
++                                    "config doorbell, no SME (default off)");
+     object_property_add_bool(obj, "run-installer",
+                              vmapple_get_run_installer,
+                              vmapple_set_run_installer);
+diff --git a/include/hw/vmapple/vmapple.h b/include/hw/vmapple/vmapple.h
+index 01a59af698..01861d9feb 100644
+--- a/include/hw/vmapple/vmapple.h
++++ b/include/hw/vmapple/vmapple.h
+@@ -18,6 +18,8 @@
+ 
+ #define TYPE_VMAPPLE_CFG "vmapple-cfg"
+ 
++#define TYPE_VMAPPLE_RTC "vmapple-rtc"
++
+ #define TYPE_VMAPPLE_VIRTIO_BLK_PCI "vmapple-virtio-blk-pci"
+ 
+ /* USB identity of Apple's virtual keyboard, which macOS classifies by ID */
