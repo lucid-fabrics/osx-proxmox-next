@@ -1882,7 +1882,7 @@ function nullmoth_guest_address() {
 function nullmoth_first_boot() {
   local vmid="$1" parsed state detail kexts display ip note old_trap
   msg_info "First boot with the card: the guest turns on remote access, installs the driver and restarts (about 10 minutes)"
-  { qm status "$vmid" 2>/dev/null | grep -q 'status: running' || qm start "$vmid" >/dev/null; } || { msg_error "Could not start VM $vmid"; nullmoth_cleanup "$vmid"; return 1; }
+  { qm status "$vmid" 2>/dev/null | grep -q 'status: running' || { qm start "$vmid" >/dev/null && { [ -z "${DRIVER_VMID:-}" ] || echo "  Started the Mac"; }; }; } || { msg_error "Could not start VM $vmid"; nullmoth_cleanup "$vmid"; return 1; }
   old_trap=$(trap -p INT TERM)
   # shellcheck disable=SC2064
   trap "nullmoth_cleanup '$vmid'; exit 130" INT TERM
@@ -8233,14 +8233,14 @@ from pathlib import Path
 
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
-        STATE_DIR, STEPS, acquire_lock, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, resume_index,
+        STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
+        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
-        STATE_DIR, STEPS, acquire_lock, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, resume_index,
+        STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
+        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -8270,13 +8270,17 @@ REFUSE_NEWER_SNAPSHOTS = "Newer snapshots exist (%s). Proxmox cannot roll back p
 REFUSE_NOT_STOPPED = "The Mac is not stopped, so its OpenCore disk is not touched."
 REFUSE_MAPS_HELD = ("Device maps still hold the disks of VM %s (%s), so they cannot be rolled back or removed. Nothing was "
                     "changed. Remove them with: %s (then try again).")
+FIRST_BOOT_STUCK = 600      # seconds without disk I/O in the first boot, with no result, before the Mac counts as stuck
+INTEL_BOOT_NOTE = ("The update ends with a first boot of macOS with the iGPU. If this Mac already stops at startup with "
+                   "the iGPU (a kernel panic), the update cannot finish: fix that first.")
+FROM_RECORD = "(from the last update)"      # shown after versions that the record gave because the Mac's disk could not be read
 UP_TO_DATE = "Up to date: nothing to do."
 NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothing can undo the update if it goes wrong. "
                        "Type '%s' to go on without one." % NO_SNAPSHOT_PHRASE)
 TEXTS = {"REFUSE_INSTALLING": REFUSE_INSTALLING, "REFUSE_CARD_SETUP": REFUSE_CARD_SETUP, "REFUSE_LOCKED": REFUSE_LOCKED,
          "REFUSE_NO_CARD": REFUSE_NO_CARD, "REFUSE_UNKNOWN_KIND": REFUSE_UNKNOWN_KIND, "REFUSE_NOT_MAC": REFUSE_NOT_MAC,
          "REFUSE_NOTHING_TO_UNDO": REFUSE_NOTHING_TO_UNDO, "UP_TO_DATE": UP_TO_DATE,
-         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
+         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
          "REFUSE_CARD_CHANGED": REFUSE_CARD_CHANGED, "REFUSE_NEWER_SNAPSHOTS": REFUSE_NEWER_SNAPSHOTS,
          "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED, "REFUSE_MAPS_HELD": REFUSE_MAPS_HELD}
 VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
@@ -8489,10 +8493,11 @@ def change_lines(kind, installed, target):
 
 
 def retention_line(older):
-    """The sentence about the snapshot an update replaces: at most one snapshot of this tool is kept per Mac."""
+    """The sentence about the snapshot an update replaces: at most one snapshot of this tool is kept per Mac, so the
+    older one goes as soon as the new one is saved."""
     if not older:
         return ""
-    return "The previous driver snapshot%s %s %s removed after a successful update." % (
+    return "The previous driver snapshot%s %s %s removed once the new one is saved." % (
         "s" if len(older) > 1 else "", ", ".join(older), "are" if len(older) > 1 else "is")
 
 
@@ -8503,17 +8508,62 @@ def replace_names(installed, target, reinstall=False):
     return todo or (list(target) if reinstall else [])
 
 
-def before_facts(kind, snapshot, supported=True, older=()):
+def undo_line(undo=""):
+    """How to undo, in the words of the tool that prints it: the TUI and the CLI have the key r, the bash installer has
+    its own command (*undo*, like `osx-proxmox-next.sh driver-undo 101`)."""
+    if undo:
+        return "Afterwards %s undoes the driver update." % undo
+    return "Afterwards r undoes the driver update (osx-next-cli driver-undo)."
+
+
+def before_facts(kind, snapshot, supported=True, older=(), undo=""):
     """The facts "Before you continue" and the CLI plan state: how long, what comes off, the snapshot."""
     lines = ["The Mac stops for %s." % MINUTES[kind]]
     if kind != "amd":
         lines.append("The card comes off and goes back on.")
     lines.append("If macOS does not shut down within 2 minutes the Mac is stopped by force.")
     lines.append("A snapshot called %s is saved first." % snapshot if supported else NO_SNAPSHOT_WARNING)
-    lines.append("Afterwards r undoes the driver update (osx-next-cli driver-undo).")
+    lines.append(undo_line(undo))
     if older:
         lines.append(retention_line(older))
     return lines
+
+
+def todo_steps(kind, name, running, state):
+    """The steps a Finish still has to do: the plan's steps without the ones the stopped run finished."""
+    done = {r["id"] for r in (state or {}).get("steps", []) if r.get("state") == "done"}
+    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done]
+
+
+def finish_facts(kind, snapshot="", undo=""):
+    """What "Finish" does, for a run that stopped. It saves no new snapshot: the one of the run stays."""
+    lines = ["The Mac is stopped first when it runs."]
+    if kind != "amd":
+        lines.append("The card is taken off when a step needs it, and put back.")
+    lines.append("No new snapshot is saved: %s from before the update stays." % (snapshot or "the snapshot")
+                 if snapshot else "No new snapshot is saved: this update ran without one.")
+    lines.append(undo_line(undo))
+    return lines
+
+
+# ── the first boot that never reports ────────────────────────────────
+
+def first_boot_text(result, waited, idle, stopped):
+    """Why an Intel update's first boot with the card ended without the package installed, in words. *result* is what the
+    guest left on the payload disk ('' or 'staged' when it never ran), *waited* the seconds the host waited, *idle* the
+    seconds the Mac's disks did nothing at the end, *stopped* True when the host had to stop the Mac (it did not power
+    off by itself). What was seen first, then what to do."""
+    said = (result or "").strip()
+    if said and said != "staged":
+        return "The graphics package is not installed: %s." % re.sub(r"^not installed: ", "", said)
+    minutes = max(1, int(waited // 60))
+    seen = "The Mac did not report back within %d minutes: the staged package never ran" % minutes
+    if idle >= FIRST_BOOT_STUCK:
+        seen += ", and its disks did nothing for the last %d minutes, so macOS most likely stopped at startup" % (idle // 60)
+    return (seen + ". The graphics package needs WhateverXe running: when the iGPU does not start under it, macOS panics in "
+            "IntelAccelerator::probe, with or without this update. A kernel console shows it (osx-next-cli igpu-watchdog "
+            "<vmid>, then start the Mac). If the Mac does the same after r (undo), the iGPU setup is the cause, not the "
+            "update. The Mac was left %s." % ("stopped" if stopped else "as it is"))
 
 
 # ── snapshots ────────────────────────────────────────────────────────
@@ -8680,7 +8730,15 @@ def main(argv):
         sys.stdout.write("\n".join(change_lines(argv[2], json.loads(argv[3]), json.loads(argv[4]))) + "\n")
     elif cmd == "facts" and len(argv) >= 4:
         flag = argv[4] if len(argv) > 4 and argv[4] in ("supported", "unsupported") else ""
-        sys.stdout.write("\n".join(before_facts(argv[2], argv[3], flag != "unsupported", argv[5 if flag else 4:])) + "\n")
+        rest = list(argv[5 if flag else 4:])
+        undo = next((a[len("undo="):] for a in rest if a.startswith("undo=")), "")
+        sys.stdout.write("\n".join(before_facts(argv[2], argv[3], flag != "unsupported",
+                                                 [a for a in rest if not a.startswith("undo=")], undo)) + "\n")
+    elif cmd == "todo-steps" and len(argv) in (5, 6):
+        sys.stdout.write("\n".join("%s %s" % p for p in todo_steps(argv[3], argv[4], argv[5:] != ["stopped"], read_update(argv[2]))) + "\n")
+    elif cmd == "finish-facts" and len(argv) >= 3:
+        sys.stdout.write("\n".join(finish_facts(argv[2], argv[3] if len(argv) > 3 else "",
+                                                 argv[4] if len(argv) > 4 else "")) + "\n")
     elif cmd == "steps" and len(argv) in (4, 5):
         sys.stdout.write("\n".join("%s %s" % p for p in plan_steps(argv[2], argv[3], argv[4:] != ["stopped"])) + "\n")
     elif cmd == "fingerprint":
@@ -8693,6 +8751,8 @@ def main(argv):
         sys.stdout.write("\n".join(stale_maps(sys.stdin.read(), argv[2:])) + "\n")
     elif cmd == "maps-held" and len(argv) >= 4:
         sys.stdout.write(maps_held_text(argv[2], argv[3:]) + "\n")
+    elif cmd == "first-boot-text" and len(argv) == 6:
+        sys.stdout.write(first_boot_text(argv[2], float(argv[3]), float(argv[4]), argv[5] == "yes") + "\n")
     elif cmd == "snapshot-name":
         sys.stdout.write(snapshot_name() + "\n")
     elif cmd == "snapshot-argv" and len(argv) == 5:
@@ -8716,12 +8776,13 @@ def main(argv):
     elif cmd == "unfinished" and len(argv) == 3:
         _emit(unfinished(argv[2]))
     elif cmd in ("update-init", "update-resume", "update-begin", "update-end", "update-fail", "update-set", "update-clear",
-                 "update-get", "pending-kind", "failure-text", "card-changed", "kind", "replace-names", "snapshot-date",
+                 "update-get", "update-add-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
+                 "snapshot-date",
                  "newer-than", "all-snapshots"):
         return run_update_command(cmd, argv[2:])
     else:
-        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|steps|snapshot-name|"
-                         "snapshot-argv|tool-snapshots|snapshot-support|text|from-igpu|compare|unfinished|update-*|failure-text|kind|"
+        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|finish-facts|todo-steps|steps|snapshot-name|"
+                         "snapshot-argv|tool-snapshots|snapshot-support|first-boot-text|text|from-igpu|compare|unfinished|update-*|failure-text|kind|"
                          "fingerprint|trusted|stamp|stale-maps|maps-held ...\n")
         return 64
     return 0
@@ -8763,7 +8824,10 @@ def update_state_command(cmd, args):
         state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7])
         state.update(original=json.loads(args[8]) if len(args) > 8 and args[8] else None)
     elif cmd == "update-resume":
-        state.update(resume_at=resume_index(state), phase="running", error="")
+        reset_for_resume(state)
+        state.update(phase="running", error="")
+    elif cmd == "update-add-disk":
+        add_disk(state, args[1])
     elif cmd == "update-begin":                   # exit 3: a resumed run finished this step before the point it goes on from
         if not begin_step(state, args[1]):
             return 3
@@ -8973,6 +9037,31 @@ def resume_index(state):
     return next((i for i, r in enumerate(state.get("steps", [])) if r["state"] != "done"), len(state.get("steps", [])))
 
 
+def reset_for_resume(state):
+    """A run that goes on from where it stopped starts its own list: the steps the earlier run finished stay done (and
+    carry no time of this run), the others are pending again with no time, so nothing of the old run's clock shows."""
+    resume_at = resume_index(state)
+    for idx, row in enumerate(state.get("steps", [])):
+        row.pop("started", None)
+        row.pop("ended", None)
+        if idx < resume_at:
+            row["carried"] = True
+        else:
+            if row["state"] in ("active", "fail") and row["id"] in ("stage", "replace"):
+                state["partial"] = row["id"]      # a step that was cut off half way: what it left is still on the Mac
+            row["state"] = "pending"
+            row.pop("carried", None)
+    state["resume_at"] = resume_at
+
+
+def add_disk(state, ref):
+    """Remember a volume this run created (the recovery or payload disk), so a Mac that was rolled back by hand and
+    kept it as an unused disk can have exactly that one removed."""
+    disks = state.setdefault("disks", [])
+    if ref and ref not in disks:
+        disks.append(ref)
+
+
 def begin_step(state, sid):
     """Start a step. False, changing nothing, for a step that a resumed run finished before the point it goes on from."""
     row = _row(state, sid)
@@ -9001,6 +9090,8 @@ def fail_update(state, error):
 def failure_text(state, running):
     """What a failed run left behind, from its steps: what changed on the Mac and whether it is running."""
     rows = {r["id"]: r["state"] for r in state.get("steps", [])}
+    if state.get("partial") and rows.get(state["partial"]) != "done":
+        rows[state["partial"]] = "fail"
     if state.get("kind") == "amd":
         what = {"done": "The kexts on the OpenCore disk were replaced.",
                 "active": "The OpenCore disk may be half changed: Lilu and WhateverGreen may not match.",
@@ -9830,6 +9921,40 @@ function igpu_wait_first_boot() {
   return 1
 }
 
+# Disk reads plus writes of every disk of the running Mac (qm status --verbose), nothing when it gives none. A network counter
+# would tell nothing: a hung guest kernel still answers ARP. Mirrors igpu_finish.disk_ops. $1 vmid
+function driver_disk_ops() { qm status "$1" --verbose 2>/dev/null | awk '/^[[:space:]]*(rd|wr)_operations:/ {n += $2; f = 1} END {if (f) print n}'; }
+
+# Like igpu_wait_first_boot, and it also watches whether the Mac does anything: a guest that never reaches the first boot
+# script (macOS panicked at startup) does no disk I/O, and the host should not wait the whole timeout for it. The wait ends
+# early, with DRIVER_STUCK=yes, after DRIVER_STUCK_AFTER seconds without I/O and without a result on the payload disk. Sets
+# DRIVER_WAITED and DRIVER_IDLE (seconds). rc 0 when the Mac powered itself off. Mirrors igpu_finish.watch_first_boot.
+# $1 vmid $2 payload volume $3 tahoe yes|no
+DRIVER_STUCK_AFTER="${DRIVER_STUCK_AFTER:-600}"; DRIVER_POLL="${DRIVER_POLL:-10}"; DRIVER_STUCK=no; DRIVER_WAITED=0; DRIVER_IDLE=0
+function driver_watch_first_boot() {
+  local vmid="$1" ref="$2" tahoe="$3" start now last_look ops moved cur res stopped=no
+  start=$(date +%s); last_look=$start; moved=$start; ops=$(driver_disk_ops "$vmid"); DRIVER_STUCK=no
+  while :; do
+    now=$(date +%s)
+    (( now - start < IGPU_FIRSTBOOT_TIMEOUT )) || break
+    if driver_is_stopped "$vmid"; then stopped=yes; break; fi
+    if [ "$tahoe" == yes ] && (( now - last_look >= IGPU_RESULT_POLL )); then
+      last_look=$now
+      res=$(igpu_engine result "$(pve_vol_path "$ref")" 2>/dev/null || true)
+      case "$res" in installed*|failed:*|"not installed:"*) sleep "$IGPU_RESULT_GRACE"; break ;; esac
+    fi
+    cur=$(driver_disk_ops "$vmid")
+    if [ "$cur" != "$ops" ]; then ops="$cur"; moved=$now
+    elif [ -n "$cur" ] && (( now - moved >= DRIVER_STUCK_AFTER )); then
+      res=$(igpu_engine result "$(pve_vol_path "$ref")" 2>/dev/null || true)
+      case "$res" in installed*|failed:*|"not installed:"*) ;; *) DRIVER_STUCK=yes; break ;; esac
+    fi
+    sleep "$DRIVER_POLL"
+  done
+  now=$(date +%s); DRIVER_WAITED=$((now - start)); DRIVER_IDLE=$((now - moved))
+  [ "$stopped" == yes ]
+}
+
 # Import a raw image as a disk of the VM and print the volume id. $1 vmid $2 file $3 storage
 function igpu_import_disk() {
   local vmid="$1" file="$2" storage="$3" out ref cmd=(qm importdisk)
@@ -9837,6 +9962,9 @@ function igpu_import_disk() {
   out=$("${cmd[@]}" "$vmid" "$file" "$storage" --format raw 2>&1) || { echo "$out" >&2; return 1; }
   ref=$(printf '%s\n' "$out" | sed -n "s/.*successfully imported disk '\([^']\+\)'.*/\1/p" | tr -d "\r\"'")
   [ -n "$ref" ] || { echo "$out" >&2; return 1; }
+  # a driver update writes down every disk it creates, so a Mac rolled back by hand that keeps one as an unused disk can
+  # have exactly that one removed
+  [ "${DRIVER_VMID:-}" != "$vmid" ] || driver_engine update-add-disk "$vmid" "$ref" >/dev/null 2>&1 || true
   echo "$ref"
 }
 
@@ -10249,10 +10377,20 @@ function driver_is_stopped() { qm status "$1" 2>/dev/null | grep -q 'status: sto
 function driver_card_on() { qm config "$1" 2>/dev/null | grep -q '^hostpci0:'; }
 function driver_json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
 
-# Mount the Mac's ide0 (OpenCore) disk, run oc_kext.py with the arguments after $1, unmount. $1 vmid. Refuses unless the
-# Mac is stopped (checked here, so no caller can skip it), mounts read only for `versions`, and unmounts whatever ends
-# the subshell (also Ctrl-C and TERM).
+# Mount the Mac's ide0 (OpenCore) disk, run oc_kext.py with the arguments after $1, unmount. $1 vmid. Whatever the call
+# did (it also refuses on a running Mac), none of this tool's partition maps stays on the Mac's volumes afterwards: a map
+# left on a volume blocks the next rollback or removal.
 function driver_oc_kext() {
+  local rc=0
+  driver_oc_kext_run "$@" || rc=$?
+  driver_release_disks "$1" >/dev/null 2>&1 || true
+  return "$rc"
+}
+
+# The call itself. Refuses unless the Mac is stopped (checked here, so no caller can skip it), mounts read only for
+# `versions`, and unmounts whatever ends the subshell (also Ctrl-C and TERM). The loop device exists before anything else
+# touches a device: partprobe only ever runs on it.
+function driver_oc_kext_run() {
   local vmid="$1" vol path
   shift
   gpu_engine_init || return 1
@@ -10407,6 +10545,8 @@ print(json.dumps({c["name"]: c["version"] for c in d.get("components", []) if c[
     disk=$(driver_oc_kext "$vmid" versions $names 2>/dev/null | gpu_json 'json.dumps({k[:-5]: v for k, v in d.items() if v})') || disk="{}"
   fi
   [ -n "$disk" ] || disk="{}"
+  # whose word the versions are: the record's when the disk was not read (Intel and AMD only; NVIDIA has only the record)
+  { [ "$disk" == "{}" ] && [ -n "$names" ] && [ "$json" != "{}" ] && echo record || echo disk; } >"${TEMP_DIR:-/tmp}/osx-next-driver-src-$vmid" 2>/dev/null || true
   python3 -c 'import json,re,sys
 have, found = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 def key(t):
@@ -10490,18 +10630,30 @@ sys.exit(0 if s.get("vm") == int(sys.argv[2]) and s.get("gpu") and not s.get("fi
 }
 
 # What `driver_update` prints before it asks: the same lines as driver_plan.DriverPlan.lines. $1 vmid $2 name $3 kind
-# $4 installed json $5 target json $6 snapshot name $7 snapshot ok yes|no $8 running yes|no ("Stop the Mac" is listed only then)
+# $4 installed json $5 target json $6 snapshot name $7 snapshot ok yes|no $8 running yes|no ("Stop the Mac" is listed only
+# then) $9 macos $10 yes when it is the Finish of a stopped update (its own plan: no new snapshot, the steps still to do)
 function driver_print_plan() {
-  local vmid="$1" name="$2" kind="$3" installed="$4" target="$5" snap="$6" snap_ok="$7" running="${8:-yes}" label line n=0 first older
+  local vmid="$1" name="$2" kind="$3" installed="$4" target="$5" snap="$6" snap_ok="$7" running="${8:-yes}" macos="${9:-}" finishing="${10:-no}"
+  local label line n=0 first older undo="osx-proxmox-next.sh driver-undo $1"
   case "$kind" in nvidia) label=NVIDIA ;; intel) label=Intel ;; amd) label=AMD ;; esac
-  echo "Update the ${label} driver of ${name:-VM $vmid} (VM ${vmid})"
+  if [ "$finishing" == yes ]; then echo "Finish the ${label} driver update of ${name:-VM $vmid} (VM ${vmid})"
+  else echo "Update the ${label} driver of ${name:-VM $vmid} (VM ${vmid})"; fi
   driver_engine changes "$kind" "$installed" "$DRIVER_VERSIONS" | sed 's/^/  /'
   first=$(driver_step_name "$kind" "$target")
   echo "Steps:"
-  while read -r _ line; do n=$((n + 1)); echo "  ${n}. ${line}"; done < <(driver_engine steps "$kind" "$first" $([ "$running" == yes ] || echo stopped))
-  older=$(driver_snapshots "$vmid" | paste -sd' ' -)
-  # shellcheck disable=SC2086
-  driver_engine facts "$kind" "$snap" "$([ "$snap_ok" == yes ] && echo supported || echo unsupported)" $older
+  if [ "$finishing" == yes ]; then
+    while read -r _ line; do n=$((n + 1)); echo "  ${n}. ${line}"; done < <(driver_engine todo-steps "$vmid" "$kind" "$first" $([ "$running" == yes ] || echo stopped) | sed '/^$/d')
+    driver_engine finish-facts "$kind" "$(driver_engine update-get "$vmid" snapshot | gpu_json 'd or ""')" "$undo"
+  else
+    while read -r _ line; do n=$((n + 1)); echo "  ${n}. ${line}"; done < <(driver_engine steps "$kind" "$first" $([ "$running" == yes ] || echo stopped))
+    older=$(driver_snapshots "$vmid" | paste -sd' ' -)
+    # shellcheck disable=SC2086
+    driver_engine facts "$kind" "$snap" "$([ "$snap_ok" == yes ] && echo supported || echo unsupported)" $older "undo=$undo"
+  fi
+  if [ "$kind" == intel ] && [ "${macos,,}" != monterey ]; then
+    [ "${macos,,}" != tahoe ] || echo "Warning: $IGPU_TAHOE_NOTE"
+    echo "Warning: $(driver_text INTEL_BOOT_NOTE)"
+  fi
 }
 
 # What the stage step names: NullMoth v2.9, WhateverXe 1.2; "the driver" for AMD. $1 kind $2 target json
@@ -10519,6 +10671,34 @@ function driver_snapshot_create() {
   ( trap '' INT TERM; "${argv[@]}" >/dev/null 2>&1 ) || { msg_error "Could not save a snapshot of VM $vmid"; return 1; }
   DRIVER_SNAPSHOT="$2"
   msg_ok "Saved the snapshot $2"
+}
+
+# At most one driver snapshot of this tool per Mac: every other one goes, nobody else's. Says what it removed and what it could
+# not. $1 vmid $2 the snapshot to keep
+function driver_prune_older() {
+  local vmid="$1" keep="$2" old removed="" failed=""
+  for old in $(driver_snapshots "$vmid"); do
+    [ "$old" != "$keep" ] || continue
+    if driver_release_disks "$vmid" >/dev/null && ( trap '' INT TERM; qm delsnapshot "$vmid" "$old" >/dev/null 2>&1 ); then removed="$removed $old"; else failed="$failed $old"; fi
+  done
+  [ -z "$removed" ] || echo "Removed the previous driver snapshot:${removed}"
+  [ -z "$failed" ] || echo "NOTE: Could not remove these older driver snapshots:${failed}"
+}
+
+# The recovery or payload disk of a run that a manual `qm rollback` left as an unused disk goes, and only those: they are found
+# by the volume ids the run wrote down. rc 1, with the exact command on stdout, when a device map still holds one. $1 vmid
+function driver_drop_unused() {
+  local vmid="$1" ref key out gone=""
+  local -a refs
+  mapfile -t refs < <({ driver_engine update-get "$vmid" disks | gpu_json '"\n".join(d or [])'; driver_engine update-get "$vmid" payload_ref | gpu_json 'd or ""'; } | sed '/^$/d' | awk '!seen[$0]++')
+  for ref in "${refs[@]}"; do
+    [ -n "$ref" ] || continue
+    key=$(qm config "$vmid" 2>/dev/null | sed -n "s/^\(unused[0-9]*\): ${ref//\//\\/}\(,.*\)\?\$/\1/p" | head -1)
+    [ -n "$key" ] || continue
+    if ! out=$(driver_release_paths "$vmid" $(driver_disk_paths "$vmid" "$ref")); then echo "$out"; return 1; fi
+    qm set "$vmid" --delete "$key" >/dev/null 2>&1 && gone="${gone:+$gone, }$ref"
+  done
+  [ -z "$gone" ] || echo "  Removed the leftover disk of the update: $gone"
 }
 
 # ── the state of a run: the same steps and the same file as the Python twin ──
@@ -10577,6 +10757,7 @@ function driver_step_snapshot() {
   if [ -n "$DRIVER_WANT_SNAPSHOT" ]; then
     driver_snapshot_create "$1" "$DRIVER_WANT_SNAPSHOT" "$DRIVER_VERSION_TEXT" || return 1
     driver_engine update-set "$1" snapshot "$(driver_json_str "$DRIVER_SNAPSHOT")" >/dev/null
+    driver_prune_older "$1" "$DRIVER_SNAPSHOT"     # at most one driver snapshot per Mac, from the moment the new one exists
   else
     driver_engine update-set "$1" no_snapshot true >/dev/null
   fi
@@ -10601,6 +10782,7 @@ function driver_step_start() {
   driver_begin start || return 0
   if ! qm status "$1" 2>/dev/null | grep -q 'status: running'; then
     qm start "$1" >/dev/null || { msg_error "Could not start VM $1"; return 1; }
+    echo "  Started the Mac"
   fi
   driver_end start
 }
@@ -10692,7 +10874,7 @@ function driver_run_nvidia() {
 # Intel: stage the graphics package from recovery with the card off, swap WhateverXe on the OpenCore disk, put the
 # card back, first boot installs the package. $1 vmid $2 cfg $3 macos
 function driver_run_intel() {
-  local vmid="$1" cfg="$2" ver="$3" storage payload_ref rec_ref result rc=0 leftover payload
+  local vmid="$1" cfg="$2" ver="$3" storage payload_ref rec_ref result rc=0 leftover payload silent
   driver_prefetch_intel "$vmid" "$ver" || return 1
   payload="$DRIVER_PAYLOAD"
   driver_step_stop "$vmid" || return 1
@@ -10730,11 +10912,14 @@ function driver_run_intel() {
   driver_step_putback "$vmid" || return 1
   if driver_begin start; then
     msg_info "First boot with the card: the guest installs the graphics package and powers off"
-    if ! qm status "$vmid" 2>/dev/null | grep -q 'status: running'; then qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }; fi
+    if ! qm status "$vmid" 2>/dev/null | grep -q 'status: running'; then qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }; echo "  Started the Mac"; fi
     driver_end start
   fi
   driver_begin verify || true
-  if ! igpu_wait_first_boot "$vmid" "$payload_ref" "$([ "$ver" == "tahoe" ] && echo yes || echo no)"; then
+  if ! driver_watch_first_boot "$vmid" "$payload_ref" "$([ "$ver" == "tahoe" ] && echo yes || echo no)"; then
+    if [ "$DRIVER_STUCK" == yes ]; then
+      echo "  The Mac's disks did nothing for $((DRIVER_IDLE / 60)) minutes and the guest reported nothing: stopping it instead of waiting on"
+    fi
     qm stop "$vmid" >/dev/null 2>&1 || true
     igpu_wait_stopped "$vmid" 120 || true
   fi
@@ -10742,8 +10927,10 @@ function driver_run_intel() {
   igpu_drop_disk "$vmid" sata2
   rm -f "$payload"
   if [ "$result" != "installed" ]; then
-    qm start "$vmid" >/dev/null 2>&1 || true
-    msg_error "The graphics package is not installed: ${result:-the guest reported nothing}."
+    silent=no
+    case "$result" in ""|staged) silent=yes ;; esac       # the guest never ran its script: starting it again would only repeat that
+    [ "$silent" == yes ] || qm start "$vmid" >/dev/null 2>&1 || true
+    msg_error "$(driver_engine first-boot-text "$result" "$DRIVER_WAITED" "$DRIVER_IDLE" "$silent")"
     return 1
   fi
   driver_igpu_oc_patch "$vmid" mark || echo -e "${INFO}${YW}Could not note the installed package on the OpenCore disk.${CL}"
@@ -10819,7 +11006,7 @@ function driver_running_step() {
 
 # `osx-proxmox-next.sh driver-status <vmid> [--json]`
 function driver_status_command() {
-  local vmid="${1:-}" json=no cfg kind installed line running=no snaps known pending interrupted=no step verdict="" latest="{}" have_latest=no
+  local vmid="${1:-}" json=no cfg kind installed line running=no snaps known pending interrupted=no step verdict="" latest="{}" have_latest=no from_record=no
   [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh driver-status <vmid> [--json]"; return 1; }
   [ "${2:-}" != "--json" ] || json=yes
   cfg=$(qm config "$vmid" 2>/dev/null) || { msg_error "VM $vmid not found."; return 1; }
@@ -10838,6 +11025,7 @@ function driver_status_command() {
   if [ -z "$step" ]; then
     installed=$(driver_installed "$vmid" "$kind" "$running")
     known=yes; [ "$installed" != "{}" ] || known=no
+    [ "$known" == yes ] && [ "$(cat "${TEMP_DIR:-/tmp}/osx-next-driver-src-$vmid" 2>/dev/null)" == record ] && from_record=yes
     if driver_target "$kind" "" "" "" 2>/dev/null; then
       have_latest=yes; latest="$DRIVER_VERSIONS"
       verdict=$(driver_engine judge "$installed" "$DRIVER_VERSIONS" | gpu_json 'd["state"]')
@@ -10846,8 +11034,8 @@ function driver_status_command() {
     installed="{}"; known=no
   fi
   if [ "$json" == yes ]; then
-    python3 -c 'import json,sys; print(json.dumps({"vmid": int(sys.argv[1]), "kind": sys.argv[2], "installed": json.loads(sys.argv[3]) if sys.argv[4] == "yes" else None, "latest": json.loads(sys.argv[5]), "state": sys.argv[6], "snapshots": sys.argv[7].split(), "unfinished": sys.argv[8] == "yes", "updating": bool(sys.argv[9]), "step": sys.argv[9]}, indent=2, sort_keys=True))' \
-      "$vmid" "$kind" "$installed" "$known" "$latest" "$verdict" "$snaps" "$interrupted" "$step"
+    python3 -c 'import json,sys; print(json.dumps({"vmid": int(sys.argv[1]), "kind": sys.argv[2], "installed": json.loads(sys.argv[3]) if sys.argv[4] == "yes" else None, "installed_from_record": sys.argv[10] == "yes", "latest": json.loads(sys.argv[5]), "state": sys.argv[6], "snapshots": sys.argv[7].split(), "unfinished": sys.argv[8] == "yes", "updating": bool(sys.argv[9]), "step": sys.argv[9]}, indent=2, sort_keys=True))' \
+      "$vmid" "$kind" "$installed" "$known" "$latest" "$verdict" "$snaps" "$interrupted" "$step" "$from_record"
     return 0
   fi
   echo "VM $vmid $(sed -n 's/^name: //p' <<<"$cfg"): $(case "$kind" in nvidia) echo NVIDIA ;; intel) echo Intel ;; amd) echo AMD ;; esac) card"
@@ -10857,7 +11045,7 @@ function driver_status_command() {
     return 0
   fi
   [ "$interrupted" != yes ] || echo "The driver update stopped before it finished. Finish it: osx-proxmox-next.sh driver-update $vmid --finish --yes (or undo it: osx-proxmox-next.sh driver-undo $vmid --yes)."
-  if [ "$known" == yes ]; then echo "Installed: $(python3 -c 'import json,sys; names={"nvidia": ["NullMoth"], "intel": ["WhateverXe", "WhateverXe Graphics"], "amd": ["Lilu", "WhateverGreen"]}[sys.argv[2]]; d=json.loads(sys.argv[1]); print(" and ".join("%s %s" % (n, d[n]) for n in names if d.get(n)))' "$installed" "$kind")"
+  if [ "$known" == yes ]; then echo "Installed: $(python3 -c 'import json,sys; names={"nvidia": ["NullMoth"], "intel": ["WhateverXe", "WhateverXe Graphics"], "amd": ["Lilu", "WhateverGreen"]}[sys.argv[2]]; d=json.loads(sys.argv[1]); print(" and ".join("%s %s" % (n, d[n]) for n in names if d.get(n)))' "$installed" "$kind")$([ "$from_record" != yes ] || echo " $(driver_text FROM_RECORD)")"
   else echo "Installed: installed version unknown"; fi
   if [ "$have_latest" == yes ]; then
     echo "Latest:    $(python3 -c 'import json,sys; names={"nvidia": ["NullMoth"], "intel": ["WhateverXe", "WhateverXe Graphics"], "amd": ["Lilu", "WhateverGreen"]}[sys.argv[2]]; d=json.loads(sys.argv[1]); print(" and ".join("%s %s" % (n, d[n]) for n in names if d.get(n)))' "$latest" "$kind")"
@@ -10925,7 +11113,7 @@ function driver_update_command() {
   if [ "$resume" == yes ] && { [ -n "$(driver_engine update-get "$vmid" snapshot | gpu_json 'd or ""')" ] || [ "$(driver_engine update-get "$vmid" no_snapshot)" == true ]; }; then nosnap=yes; fi
   DRIVER_VERSION_TEXT=$(gpu_json '", ".join(d.values())' <<<"$DRIVER_VERSIONS")
   DRIVER_INSTALLED="$installed"; DRIVER_REINSTALL="$reinstall"
-  driver_print_plan "$vmid" "$name" "$kind" "$installed" "$DRIVER_TARGET" "$snap" "$snap_ok" "$running"
+  driver_print_plan "$vmid" "$name" "$kind" "$installed" "$DRIVER_TARGET" "$snap" "$snap_ok" "$running" "$macos" "$resume"
   if [ "$verdict" == current ] && [ "$reinstall" != yes ]; then driver_text UP_TO_DATE; return 0; fi
   [ "$dry" != yes ] || { echo "DRY RUN - nothing is changed."; return 0; }
   if [ "$kind" == nvidia ]; then
@@ -10957,12 +11145,13 @@ function driver_apply() {
 }
 
 function driver_apply_run() {
-  local vmid="$1" kind="$2" cfg="$3" macos="$4" snap="$5" snap_ok="$6" tag="${7:-}" resume="${8:-no}" name="${9:-}" rc=0 old removed failed running=no
+  local vmid="$1" kind="$2" cfg="$3" macos="$4" snap="$5" snap_ok="$6" tag="${7:-}" resume="${8:-no}" name="${9:-}" rc=0 running=no
   DRIVER_VMID="$vmid"; DRIVER_SNAPSHOT=""; DRIVER_WANT_SNAPSHOT=""; DRIVER_EXTRA="{}"
   [ "$snap_ok" != yes ] || DRIVER_WANT_SNAPSHOT="$snap"
   if [ "$resume" == yes ]; then
     driver_engine update-resume "$vmid"
     DRIVER_SNAPSHOT=$(driver_state_get snapshot)
+    driver_drop_unused "$vmid" || true     # a disk a device map still holds is told with its command, not a reason to stop
   else
     driver_engine update-init "$vmid" "$kind" "$name" "$DRIVER_VERSION_TEXT" "$(driver_step_name "$kind" "$DRIVER_TARGET")" \
       "$(gpu_json 'json.dumps({n: d.get(n, {}).get("tag", "") for n in ("NullMoth", "WhateverXe", "WhateverXe Graphics")})' <<<"$DRIVER_TARGET")" \
@@ -10982,15 +11171,7 @@ function driver_apply_run() {
     return 1
   fi
   driver_write_record "$vmid" "$kind" "$DRIVER_INSTALLED" "$DRIVER_SNAPSHOT" "$(driver_state_get card)"
-  if [ -n "$DRIVER_SNAPSHOT" ]; then
-    removed=""; failed=""
-    for old in $(driver_snapshots "$vmid"); do
-      [ "$old" != "$DRIVER_SNAPSHOT" ] || continue
-      if driver_release_disks "$vmid" >/dev/null && ( trap '' INT TERM; qm delsnapshot "$vmid" "$old" >/dev/null 2>&1 ); then removed="$removed $old"; else failed="$failed $old"; fi
-    done
-    [ -z "$removed" ] || echo "Removed the previous driver snapshot:${removed}"
-    [ -z "$failed" ] || echo "NOTE: Could not remove these older driver snapshots:${failed}"
-  fi
+  [ -z "$DRIVER_SNAPSHOT" ] || driver_prune_older "$vmid" "$DRIVER_SNAPSHOT"      # one snapshot of this tool per Mac: none left over
   driver_engine update-clear "$vmid"
   msg_ok "Done. The driver of VM $vmid is updated.${DRIVER_SNAPSHOT:+ Driver snapshot $DRIVER_SNAPSHOT is kept. driver-undo goes back to it.}"
 }
@@ -11064,6 +11245,11 @@ function driver_undo_command() {
     driver_lock_release "$vmid"
     return 1
   fi
+  driver_drop_unused "$vmid" || true     # a disk the update added and the snapshot lacks
+  # after a good undo the snapshot it went back to is spent: at most one driver snapshot of this tool per Mac
+  if driver_release_disks "$vmid" >/dev/null && ( trap '' INT TERM; qm delsnapshot "$vmid" "$DRIVER_UNDO_NAME" >/dev/null 2>&1 ); then
+    echo "  Removed the driver snapshot $DRIVER_UNDO_NAME"
+  else echo "  Could not remove the driver snapshot $DRIVER_UNDO_NAME. Remove it with: qm delsnapshot $vmid $DRIVER_UNDO_NAME"; fi
   driver_engine revert "$vmid" || true
   driver_engine stamp "$vmid" "$(driver_fingerprint "$vmid")" || true
   driver_engine update-clear "$vmid"

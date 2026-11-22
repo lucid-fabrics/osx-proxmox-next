@@ -264,7 +264,7 @@ def test_after_an_update_only_the_previous_driver_snapshot_goes(tmp_path, stubs,
     failing = nv_pve(snapshots=[OLD_SNAP])
     stubs.guest = ["failed: x"]
     assert not first_run(stubs, rec, tmp_path, failing).ok
-    assert OLD_SNAP in failing.snapshots                               # a failed update removes nothing
+    assert failing.snapshots == [NEW_SNAP]                             # the new one replaced it as soon as it was saved: one stays
 
 
 def test_a_new_snapshot_name_has_seconds_so_a_retry_in_the_same_minute_is_a_new_one():

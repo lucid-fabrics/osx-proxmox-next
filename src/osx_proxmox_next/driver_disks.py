@@ -6,9 +6,10 @@ from __future__ import annotations
 import re
 
 from . import driver_engine as engine
+from .gpu import parse_config
 from .infrastructure import ProxmoxAdapter
 
-__all__ = ["MapsHeld", "disk_refs", "fingerprint", "record_is_true", "release_maps", "volume_paths"]
+__all__ = ["MapsHeld", "disk_refs", "drop_unused", "fingerprint", "own_disks", "record_is_true", "release_maps", "volume_paths"]
 
 _DISK_KEY = re.compile(r"^(virtio|sata|scsi|ide|efidisk|tpmstate|unused)\d*$")
 
@@ -77,3 +78,25 @@ def record_is_true(pve: ProxmoxAdapter, vmid: int, record: dict, cfg: dict[str, 
     if not record.get("fingerprint"):
         return True
     return engine.record_trusted(record, fingerprint(pve, cfg))
+
+
+def own_disks(state: dict) -> list[str]:
+    """The volumes a run created, from its own record (the recovery and payload disks): nothing else is ever matched."""
+    return [r for r in dict.fromkeys([*state.get("disks", []), state.get("payload_ref", "")]) if r]
+
+
+def drop_unused(pve: ProxmoxAdapter, vmid: int, refs: list[str]) -> list[str]:
+    """Remove the Mac's `unusedN` disks that are exactly one of *refs*: what a manual `qm rollback` leaves of the disks
+    this tool added after the snapshot. Any other unused disk is the Mac's own and stays. Returns the volumes removed;
+    raises MapsHeld when a device map still holds one."""
+    if not refs:
+        return []
+    cfg = parse_config(pve.qm("config", str(vmid)).output)
+    removed = []
+    for key, value in cfg.items():
+        ref = value.split(",", 1)[0]
+        if re.fullmatch(r"unused\d+", key) and ref in refs:
+            release_maps(pve, vmid, volume_paths(pve, [ref]))
+            if pve.qm("set", str(vmid), "--delete", key).ok:
+                removed.append(ref)
+    return removed

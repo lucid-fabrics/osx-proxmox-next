@@ -37,6 +37,9 @@ class DriverPlan:
     older_snapshots: list[str] = field(default_factory=list)
     interrupted: bool = False         # an update was cut off and nobody runs it
     cfg: dict[str, str] = field(default_factory=dict)
+    from_record: bool = False         # the installed versions are the record's: the Mac's disk could not be read (it runs)
+    undo: str = ""                    # how this tool says "undo" (empty: the key r and osx-next-cli; bash has its own command)
+    resume: dict = field(default_factory=dict)   # the state of the stopped run a Finish goes on with
 
     @property
     def ok(self) -> bool:
@@ -59,20 +62,32 @@ class DriverPlan:
         return engine.judge(self.installed, self.target.versions() if self.target else {})
 
     def lines(self) -> list[str]:
-        """The plan in plain words: the refusals, what changes, the steps, the facts."""
+        """The plan in plain words: the refusals, what changes, the steps, the facts. A stopped update shows what Finish
+        does (no new snapshot, the steps still to do), never the plan of a new update."""
         out = ["Refused: " + r for r in self.refusals]
         if not self.ok or self.target is None:
             return out
         label = engine.CARD_NAME[self.kind]
-        out.append(f"Update the {label} driver of {self.name or 'VM %d' % self.vmid} (VM {self.vmid})")
+        who = f"{self.name or 'VM %d' % self.vmid} (VM {self.vmid})"
+        finishing = self.finishing
+        out.append(f"Finish the {label} driver update of {who}" if finishing else f"Update the {label} driver of {who}")
         out += ["  " + l for l in engine.change_lines(self.kind, self.installed, self.target.versions())]
         if self.nothing_to_do:
             return out + [engine.UP_TO_DATE]
         out.append("Steps:")
-        out += [f"  {n}. {t}" for n, (_i, t) in enumerate(engine.plan_steps(self.kind, self.step_name(), self.running), 1)]
-        out += engine.before_facts(self.kind, self.snapshot, self.snapshot_ok, self.older_snapshots)
+        if finishing:
+            out += [f"  {n}. {t}" for n, (_i, t) in enumerate(engine.todo_steps(self.kind, self.step_name(), self.running, self.resume), 1)]
+            out += engine.finish_facts(self.kind, self.resume.get("snapshot", ""), self.undo)
+        else:
+            out += [f"  {n}. {t}" for n, (_i, t) in enumerate(engine.plan_steps(self.kind, self.step_name(), self.running), 1)]
+            out += engine.before_facts(self.kind, self.snapshot, self.snapshot_ok, self.older_snapshots, self.undo)
         out += ["Warning: " + w for w in self.warnings]
         return out
+
+    @property
+    def finishing(self) -> bool:
+        """The plan is for the Finish of a stopped run, not for a new update."""
+        return self.interrupted and bool(self.resume)
 
     def step_name(self) -> str:
         """What the stage step names: `NullMoth v2.9`, `WhateverXe 1.2`; the AMD update has no stage step."""
@@ -88,7 +103,9 @@ def commands(plan: DriverPlan) -> list[str]:
     when the Mac runs, the recovery and payload disks, the OpenCore kext swap."""
     v = str(plan.vmid)
     out = [f"qm shutdown {v} --timeout 120"] if plan.running else []
-    out.append(f"qm snapshot {v} {plan.snapshot} --description \"{engine.snapshot_description(plan.version_label)}\"")
+    if not plan.finishing:       # Finish saves no new snapshot
+        out.append(f"qm snapshot {v} {plan.snapshot} --description \"{engine.snapshot_description(plan.version_label)}\"")
+        out += [f"qm delsnapshot {v} {name}   (the previous driver snapshot)" for name in plan.older_snapshots]
     if plan.kind == "amd":
         out.append("(the OpenCore disk is mounted: Lilu.kext and WhateverGreen.kext are replaced)")
     else:
@@ -100,7 +117,8 @@ def commands(plan: DriverPlan) -> list[str]:
         out.append("(the OpenCore disk is mounted: WhateverXe.kext and AMFIPass.kext are replaced)" if plan.kind == "intel"
                    else "(the OpenCore disk is mounted: AMFIPass.kext is replaced when it is another version)")
         out.append(f"qm set {v} --hostpci0 <as it was>  --vga <as it was>  --args <as it was>  --boot <as it was>")
-    return out + [f"qm start {v}", f"qm rollback {v} {plan.snapshot}   (r, driver-undo)"]
+    undo_to = (plan.resume.get("snapshot") if plan.finishing else "") or plan.snapshot
+    return out + [f"qm start {v}", f"qm rollback {v} {undo_to}   (r, driver-undo)"]
 
 
 def card_setup_waiting(vmid: int) -> bool:
@@ -129,15 +147,17 @@ DISK_COMPONENTS = {"amd": ("Lilu", "WhateverGreen"), "intel": ("WhateverXe",)}
 
 
 def installed_versions(pve: ProxmoxAdapter, vmid: int, kind: str, running: bool,
-                       cfg: dict[str, str] | None = None) -> tuple[dict[str, str], bool]:
+                       cfg: dict[str, str] | None = None, source: dict | None = None) -> tuple[dict[str, str], bool]:
     """(versions, known). What the Mac itself says wins over the record: the kexts on a stopped Mac's OpenCore disk
     (Lilu and WhateverGreen for AMD, WhateverXe for Intel; the disk is not mounted under a running Mac). A record made for
     other disks than the Mac has now (a manual rollback happened since) is not believed, and one that disagrees with the
-    OpenCore disk is not either: the versions are then unknown or the disk's."""
+    OpenCore disk is not either: the versions are then unknown or the disk's. *source*, when given, gets "record" set to True
+    when the versions of an Intel or AMD Mac are the record's because the disk was not read (the Mac runs)."""
     record = engine.read_record(vmid)
     have = {n: v for n, v in engine.installed_versions(record).items() if n in engine.COMPONENTS[kind] or n == "AMFIPass"}
     if have and cfg is not None and not driver_disks.record_is_true(pve, vmid, record, cfg):
         have = {}
+    found: dict[str, str] = {}
     if kind in DISK_COMPONENTS and not running:
         try:
             found = driver_oc.read_versions(pve, vmid, list(DISK_COMPONENTS[kind]))
@@ -148,6 +168,8 @@ def installed_versions(pve: ProxmoxAdapter, vmid: int, kind: str, running: bool,
             if any(n in have and engine.compare(have[n], v) != 0 for n, v in found.items()):
                 have = {}       # the disk disagrees: what the record says about the other parts is stale too
             have.update(found)
+    if source is not None:
+        source["record"] = bool(have) and kind in DISK_COMPONENTS and not found
     return have, bool(have)
 
 
@@ -176,7 +198,10 @@ def prepare(vmid: int, choice: Choice | None = None, pve: ProxmoxAdapter | None 
     except igpu_engine.ReleaseError as exc:
         plan.refusals.append(str(exc))
         return plan
-    plan.installed, plan.installed_known = installed_versions(pve, vmid, plan.kind, plan.running, plan.cfg)
+    where: dict = {}
+    plan.installed, plan.installed_known = installed_versions(pve, vmid, plan.kind, plan.running, plan.cfg, where)
+    plan.from_record = bool(where.get("record"))
+    plan.resume = resume or (engine.unfinished(vmid, base) if plan.interrupted else {})
     plan.verdict = plan.judged()["state"]
     plan.snapshot = snapshot if engine.SNAPSHOT_RE.match(snapshot or "") else engine.snapshot_name()
     plan.snapshot_ok, plan.snapshot_reason = driver_snapshot.check_support(pve, plan.cfg)
@@ -212,6 +237,8 @@ def _kind_checks(plan: DriverPlan) -> None:
             plan.refusals.append(UNSUPPORTED_NOTE)
         elif plan.macos == "tahoe":
             plan.warnings.append(TAHOE_NOTE)
+        if plan.macos not in UNSUPPORTED_MACOS:
+            plan.warnings.append(engine.INTEL_BOOT_NOTE)
     if plan.kind in ("nvidia", "intel") and not plan.macos:
         plan.refusals.append("Cannot tell which macOS this Mac runs (its description or name should say). "
                              "Pass --macos (ventura, sonoma, sequoia or tahoe).")

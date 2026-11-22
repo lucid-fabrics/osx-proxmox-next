@@ -303,8 +303,8 @@ def test_only_what_is_behind_is_replaced_and_a_newer_kext_is_kept():
 
 def test_the_retention_rule_and_snapshot_helpers():
     assert e.retention_line([]) == ""
-    assert e.retention_line(["a"]) == "The previous driver snapshot a is removed after a successful update."
-    assert e.retention_line(["a", "b"]) == "The previous driver snapshots a, b are removed after a successful update."
+    assert e.retention_line(["a"]) == "The previous driver snapshot a is removed once the new one is saved."
+    assert e.retention_line(["a", "b"]) == "The previous driver snapshots a, b are removed once the new one is saved."
     assert e.before_facts("amd", "s", True, ["osx-next-driver-20261101-0900"])[-1].startswith("The previous driver snapshot ")
     assert e.snapshot_date("osx-next-driver-20261121-103005") == "2026-11-21 10:30" and e.snapshot_date("x") == ""
     listing = "`-> osx-next-driver-20261120-0900  2026  x\n `-> mine  2026  y\n  `-> current  You are here!\n"

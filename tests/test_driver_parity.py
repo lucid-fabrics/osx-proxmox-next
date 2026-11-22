@@ -38,7 +38,10 @@ case "$1" in
            *) shift ;;
          esac
        done ;;
-  status) echo "status: $(st)" ;;
+  status) if [ "${3:-}" = "--verbose" ] && [ -f "$QM_DIR/ops" ]; then
+            printf 'blockstat:\n\tvirtio0:\n\t\trd_operations: %s\n\t\twr_operations: 0\n' "$(cat "$QM_DIR/ops")"
+          fi
+          echo "status: $(st)" ;;
   shutdown|stop) echo stopped > "$QM_DIR/status" ;;
   rollback) [ -f "$QM_DIR/rollback_fails" ] && exit 1 ;;
   start) echo running > "$QM_DIR/status" ;;
@@ -128,9 +131,15 @@ def write_record(host, kind, **versions):
     (host.state / "109.json").write_text(json.dumps({"vmid": 109, "kind": kind, "components": comps(**versions)}))
 
 
-def py_lines(kind, installed, target, snapshot, ok=True, older=(), running=False):
-    plan = DriverPlan(109, "macos-sequoia", kind, "sequoia", running, installed, True, Target(kind, target), "update", snapshot=snapshot,
-                      snapshot_ok=ok, older_snapshots=list(older))
+UNDO = "osx-proxmox-next.sh driver-undo 109"
+
+
+def py_lines(kind, installed, target, snapshot, ok=True, older=(), running=False, macos="sequoia", resume=None):
+    """The Python plan, in the words the bash installer uses for undo."""
+    plan = DriverPlan(109, "macos-sequoia", kind, macos, running, installed, True, Target(kind, target), "update", snapshot=snapshot,
+                      snapshot_ok=ok, older_snapshots=list(older), undo=UNDO, interrupted=bool(resume), resume=resume or {})
+    from osx_proxmox_next.driver_plan import _kind_checks
+    _kind_checks(plan)
     return plan.lines()
 
 
@@ -186,7 +195,7 @@ def test_the_bash_plan_lines_are_the_python_plan_lines(host):
     (host.qm_dir / "snaps").write_text(older + "\n")
     out = host.run(snippet).stdout.splitlines()
     assert out == py_lines("nvidia", {"NullMoth": "v2.8.1"}, NV, snap, older=[older])
-    assert out[-1] == f"The previous driver snapshot {older} is removed after a successful update."
+    assert out[-1] == f"The previous driver snapshot {older} is removed once the new one is saved."
 
 
 @needs_bash4
@@ -229,7 +238,7 @@ def test_bash_status_matches_the_python_status(host, capsys, monkeypatch):
                    "A newer driver is available.", "Driver snapshots: none"]                       # the lines the Python status prints
     (host.qm_dir / "snaps").write_text("osx-next-driver-20261120-0900\n")
     data = json.loads(host.run(STUB_NULLMOTH + "driver_status_command 109 --json\n").stdout)
-    assert data == {"vmid": 109, "kind": "nvidia", "installed": {"NullMoth": "v2.8.1"}, "latest": {"NullMoth": "v2.9"}, "state": "update",
+    assert data == {"vmid": 109, "kind": "nvidia", "installed": {"NullMoth": "v2.8.1"}, "installed_from_record": False, "latest": {"NullMoth": "v2.9"}, "state": "update",
                     "snapshots": ["osx-next-driver-20261120-0900"], "unfinished": False, "updating": False, "step": ""}
     (host.state / "109.json").unlink()
     out = host.run(STUB_NULLMOTH + "gpu_record_load() { REC_VENDOR=nvidia; return 0; }\ndriver_status_command 109\n").stdout
@@ -290,7 +299,7 @@ def test_a_bash_amd_update_replaces_the_kexts_with_a_snapshot_and_records_it(hos
     calls = host.calls()
     assert [c for c in calls if c.split()[0] in ("shutdown", "snapshot", "delsnapshot", "start", "stop")] == [
         f"snapshot 109 {SNAP} --description before driver update to 1.7.2 1.7.0",
-        "start 109", "delsnapshot 109 osx-next-driver-20261101-0900"]
+        "delsnapshot 109 osx-next-driver-20261101-0900", "start 109"]       # the older one goes as soon as the new one is saved
     oc = (host.qm_dir / "oc.log").read_text().splitlines()
     assert oc[0].startswith("oc_kext 109 replace Lilu.kext ") and oc[1].startswith("oc_kext 109 replace WhateverGreen.kext ")
     rec = engine.read_record(109, str(host.state))
@@ -380,8 +389,8 @@ def test_bash_undo_rolls_back_to_the_newest_snapshot_and_reverts_the_record(host
     (host.qm_dir / "status").write_text("running\n")
     out = host.run("driver_undo_command 109 --yes\n").stdout
     assert f"its disks go back to the snapshot of 2026-11-21 10:30 ({SNAP})" in out and f"Done. VM 109 is back to {SNAP}." in out
-    calls = [c for c in host.calls() if c.split()[0] in ("shutdown", "rollback", "start")]
-    assert calls == ["shutdown 109 --timeout 120", f"rollback 109 {SNAP}", "start 109"]
+    calls = [c for c in host.calls() if c.split()[0] in ("shutdown", "rollback", "delsnapshot", "start")]
+    assert calls == ["shutdown 109 --timeout 120", f"rollback 109 {SNAP}", f"delsnapshot 109 {SNAP}", "start 109"]   # the spent snapshot goes
     assert engine.installed_versions(engine.read_record(109, str(host.state))) == {"NullMoth": "v2.8.1"}
     (host.qm_dir / "snaps").write_text("")
     assert "nothing to undo" in host.run("driver_undo_command 109 --yes\n", expect=2).stdout

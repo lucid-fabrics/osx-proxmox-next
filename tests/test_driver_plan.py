@@ -213,7 +213,7 @@ def test_storage_that_cannot_snapshot_is_said_and_older_snapshots_are_listed(tar
     assert not plan.snapshot_ok and plan.needs_no_snapshot_phrase and "type lvm" in plan.snapshot_reason
     lines = plan.lines()
     assert engine.NO_SNAPSHOT_WARNING in lines
-    assert "The previous driver snapshot osx-next-driver-20261101-0900 is removed after a successful update." in lines
+    assert "The previous driver snapshot osx-next-driver-20261101-0900 is removed once the new one is saved." in lines
 
 
 def test_the_commands_are_written_out(target):

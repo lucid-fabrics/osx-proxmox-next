@@ -168,6 +168,58 @@ def _wait_first_boot(pve: ProxmoxAdapter, vmid: int, timeout: float, tahoe: bool
     return False
 
 
+OPS_RE = re.compile(r"^\s*(?:rd|wr)_operations:\s*(\d+)\s*$", re.M)
+
+
+def disk_ops(pve: ProxmoxAdapter, vmid: int) -> int | None:
+    """Disk reads plus writes of every disk of the running Mac (`qm status --verbose`), None when it gives none. A
+    network counter would tell nothing: a hung guest kernel still answers ARP."""
+    res = pve.qm("status", str(vmid), "--verbose")
+    found = OPS_RE.findall(res.output) if res.ok else []
+    return sum(int(n) for n in found) if found else None
+
+
+@dataclass
+class FirstBoot:
+    stopped: bool = False       # the Mac powered itself off (the package script's last step)
+    waited: float = 0.0         # seconds the host waited
+    idle: float = 0.0           # seconds the Mac's disks did nothing at the end
+    stuck: bool = False         # the wait ended early: no result and no disk I/O for `stuck_after` seconds
+
+
+def watch_first_boot(pve: ProxmoxAdapter, vmid: int, timeout: float, tahoe: bool, payload_ref: str,
+                     clock: Callable[[], float], sleep: Callable[[float], None],
+                     stuck_after: float = driver_engine.FIRST_BOOT_STUCK) -> FirstBoot:
+    """Like _wait_first_boot, and it also watches whether the Mac does anything: a guest that never reaches the first
+    boot script (macOS panicked at startup) does no disk I/O, and the host should not wait the whole timeout for it. The
+    wait ends early, with `stuck` set, after *stuck_after* seconds without I/O and without a result on the payload disk."""
+    start = clock()
+    deadline = start + timeout
+    last_look = start
+    ops, moved = disk_ops(pve, vmid), start
+    out = FirstBoot()
+    while clock() < deadline:
+        if "stopped" in pve.qm("status", str(vmid)).output:
+            out.stopped = True
+            break
+        now = clock()
+        if tahoe and now - last_look >= RESULT_POLL:
+            last_look = now
+            if _read_payload_result(pve, payload_ref).startswith(KNOWN_RESULTS):
+                sleep(RESULT_GRACE)
+                break
+        now_ops = disk_ops(pve, vmid)
+        if now_ops != ops:
+            ops, moved = now_ops, now
+        elif now_ops is not None and now - moved >= stuck_after and not _read_payload_result(pve, payload_ref).startswith(KNOWN_RESULTS):
+            out.stuck = True
+            break
+        sleep(POLL)
+    out.waited = clock() - start
+    out.idle = clock() - moved
+    return out
+
+
 def _check_vm(vmid: int, pve: ProxmoxAdapter) -> dict[str, str]:
     info = fetch_vm_info(vmid, adapter=pve)
     if info is None:
@@ -346,6 +398,7 @@ class StageJob:
     sleep: Callable[[float], None] = time.sleep
     tahoe: bool = False
     leftover_args: tuple[str, ...] = ()   # -set device.hostpci0 args of an earlier attach: QEMU stops without the device
+    on_disk: Callable[[str], None] = lambda _ref: None    # told the volume id of each disk the staging creates
 
 
 def stage_recovery(job: StageJob, payload: Path, recovery: Path, cfg: dict[str, str]) -> str:
@@ -358,7 +411,9 @@ def stage_recovery(job: StageJob, payload: Path, recovery: Path, cfg: dict[str, 
     payload_ref = ""
     try:
         payload_ref = _import_disk(pve, vmid, payload, job.storage)
+        job.on_disk(payload_ref)
         recovery_ref = _import_disk(pve, vmid, recovery, job.storage)
+        job.on_disk(recovery_ref)
         for argv in (["--sata1", f"{recovery_ref},media=disk"], ["--sata2", f"{payload_ref},media=disk"],
                      ["--boot", "order=sata1;virtio0;ide0"]):
             res = pve.qm("set", str(vmid), *argv)

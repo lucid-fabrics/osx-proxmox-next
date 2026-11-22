@@ -36,14 +36,12 @@ def _record(u: Updater) -> None:
 def _execute(u: Updater) -> RunResult:
     result = u.result
     try:
+        if u.resumed:
+            drop_leftover_disks(u.pve, u.vmid, u.state, u.say)
         RUNNERS[u.plan.kind](u)
         _record(u)
-        if u.state.get("snapshot"):        # one snapshot of this tool per Mac: the previous ones go, nobody else's
-            removed, failed = driver_snapshot.prune_older(u.pve, u.vmid, u.state["snapshot"])
-            if removed:
-                u.say("Removed the previous driver snapshot: " + ", ".join(removed))
-            if failed:
-                result.notes.append("Could not remove these older driver snapshots: " + ", ".join(failed))
+        if u.state.get("snapshot"):        # one snapshot of this tool per Mac (also after the snapshot step): none left over
+            u.replace_older_snapshots(u.state["snapshot"])
         u.state.update(phase="done", error="")
         if u.env.ask_first_boot:
             u.persist()   # stays until the first boot question is answered: a reopened screen asks it again
@@ -53,6 +51,19 @@ def _execute(u: Updater) -> RunResult:
     except Exception as exc:  # noqa: BLE001 - every failure ends the same way: the run is kept and says what it left
         result.error = _abandon(u, exc)
     return result
+
+
+def drop_leftover_disks(pve, vmid: int, state: dict, say=lambda _m: None) -> None:
+    """The recovery or payload disk of a run that a manual `qm rollback` left as an unused disk goes, and only those
+    two: they are found by the volume ids the run wrote down, never by their look. A disk that a device map still holds
+    stays and is told with the exact command: it is the Mac's wasted space, not a reason to stop what the Mac is about."""
+    try:
+        gone = driver_disks.drop_unused(pve, vmid, driver_disks.own_disks(state))
+    except driver_disks.MapsHeld as exc:
+        say(f"Could not remove the leftover disk of the update. {exc}")
+        return
+    if gone:
+        say("Removed the leftover disk of the update: " + ", ".join(gone))
 
 
 def _leftover_disks(u: Updater) -> None:
@@ -148,6 +159,16 @@ def _drop_added_disks(vmid: int, env: RunEnv, name: str) -> None:
             _drop_disk(env.pve, vmid, slot, strict=True)
 
 
+def _remove_used_snapshot(env: RunEnv, vmid: int, name: str) -> None:
+    """After a good undo the snapshot it went back to is spent: at most one driver snapshot of this tool per Mac, so
+    none is left. A failure to remove it is told, never fatal: the Mac is back."""
+    try:
+        driver_snapshot.remove(env.pve, vmid, name)
+        env.on_event(f"Removed the driver snapshot {name}")
+    except driver_snapshot.SnapshotError as exc:
+        env.on_event(f"Could not remove the driver snapshot {name} ({exc}). Remove it with: qm delsnapshot {vmid} {name}")
+
+
 def _step(env: RunEnv, sid: str, state: str, titles: dict[str, tuple[str, str]]) -> None:
     env.on_step(sid, state)
     if state != "active":
@@ -176,7 +197,10 @@ def put_back(vmid: int, env: RunEnv) -> str:
         _step(env, "release", "done", titles)
         current = "rollback"
         _step(env, "rollback", "active", titles)
+        was_update = engine.read_update(vmid, env.base)
         driver_snapshot.rollback(env.pve, vmid, name)
+        drop_leftover_disks(env.pve, vmid, was_update, env.on_event)      # a disk the update added and the snapshot lacks
+        _remove_used_snapshot(env, vmid, name)
         engine.revert_record(vmid, env.base)
         engine.stamp_record(vmid, driver_disks.fingerprint(env.pve, parse_config(env.pve.qm("config", str(vmid)).output)), env.base)
         engine.clear_update(vmid, env.base)

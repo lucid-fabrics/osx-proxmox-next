@@ -15,6 +15,7 @@ from osx_proxmox_next.driver_core import DriverError, RunEnv, Updater
 from osx_proxmox_next.driver_plan import DriverPlan
 from osx_proxmox_next.driver_targets import Choice, Target
 from osx_proxmox_next.executor import ApplyResult, StepResult
+from osx_proxmox_next.igpu_finish import FirstBoot
 
 VERIFIED = "verified: kexts=5 display=no ip=10.0.0.9"
 NEW_SNAP = "osx-next-driver-20261121-1030"
@@ -98,7 +99,7 @@ def stubs(tmp_path, monkeypatch):
         picks = assets.picks
     monkeypatch.setattr(driver_intel, "ensure_igpu_assets", lambda *a, **k: Assets(assets_map))
     monkeypatch.setattr(igpu_engine, "build_payload", lambda pkg, out: (s.payload_ok, "disk full"))
-    monkeypatch.setattr(driver_intel, "_wait_first_boot", lambda *a: s.wait_first)
+    monkeypatch.setattr(driver_intel, "watch_first_boot", lambda *a, **k: FirstBoot(stopped=s.wait_first, waited=1500, idle=0))
     monkeypatch.setattr(driver_intel, "_read_payload_result", lambda pve, ref: s.package)
 
     def apply(steps, execute=True, adapter=None, **k):
@@ -127,7 +128,8 @@ def test_an_nvidia_update_runs_every_step_and_records_the_new_version(tmp_path, 
     calls = calls_after_snapshot(pve)
     assert calls[0] == ("shutdown", "9", "--timeout", "120")
     assert calls[1] == ("snapshot", "9", NEW_SNAP, "--description", "before driver update to v2.9")
-    assert calls[2] == ("set", "9", "--delete", "hostpci0")
+    assert calls[2] == ("delsnapshot", "9", OLD_SNAP)                  # the leftover goes as soon as the new one is saved
+    assert calls[3] == ("set", "9", "--delete", "hostpci0")
     # the card, the display and the args go back exactly as the Mac had them, then it starts
     assert ("set", "9", "--hostpci0", "0000:01:00,pcie=0") in calls and ("set", "9", "--vga", "none") in calls
     assert ("set", "9", "--args", mac()["args"]) in calls and ("set", "9", "--boot", "order=ide0;virtio0") in calls
@@ -389,7 +391,7 @@ def test_intel_failures_put_the_card_back(tmp_path, stubs, rec):
     res = driver_run.run_update(_intel_plan(cfg), env_for(DPve(cfg=cfg), rec, tmp_path))
     assert not res.ok and "graphics package is not installed: failed: WhateverXe is not loaded" in res.error
     stubs.package = ""
-    assert "guest reported nothing" in driver_run.run_update(_intel_plan(cfg), env_for(DPve(cfg=cfg), rec, tmp_path)).error
+    assert "never ran" in driver_run.run_update(_intel_plan(cfg), env_for(DPve(cfg=cfg), rec, tmp_path)).error
     stubs.stage_error = "The staging command did not start after 3 tries."
     assert "did not start" in driver_run.run_update(_intel_plan(cfg), env_for(DPve(cfg=cfg), rec, tmp_path)).error
 

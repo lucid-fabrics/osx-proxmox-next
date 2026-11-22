@@ -148,6 +148,9 @@ def _network_steps(config: VmConfig, vmid: str, cpu_flag: str) -> list[PlanStep]
             argv=[
                 "qm", "create", vmid,
                 "--name", config.name,
+                # the release goes into the description, as the bash installer does: whatever the VM is called, the tool
+                # finds it again (driver updates and card setups need to know which macOS the Mac runs)
+                "--description", f"{SUPPORTED_MACOS[config.macos]['label']} VM (made by osx-proxmox-next)",
                 "--ostype", "other",
                 "--machine", "q35",
                 "--bios", "ovmf",

@@ -93,7 +93,7 @@ class Updater:
             plan.kind, plan.name, plan.version_label, plan.step_name(), self._choice(),
             [{"name": n, "version": v} for n, v in plan.installed.items()], plan.cfg.get("hostpci0", ""))
         if resume:
-            self.state["resume_at"] = engine.resume_index(self.state)
+            engine.reset_for_resume(self.state)
             self.state.setdefault("card", (self.state.get("original") or {}).get("hostpci0") or "")
         self.state.update(phase="running", error="", pid=os.getpid())
 
@@ -194,12 +194,28 @@ class Updater:
             self.state["snapshot"] = name
             self.result.snapshot = name
             self.say(f"Saved the snapshot {name}")
+            self.replace_older_snapshots(name)
         elif self.env.no_snapshot:
             self.state["no_snapshot"] = True
             self.say("Going on without a snapshot, as you typed. Nothing can put this Mac back.")
         else:
             raise DriverError(engine.NO_SNAPSHOT_WARNING)
         self.end("snapshot")
+
+    def replace_older_snapshots(self, keep: str) -> None:
+        """At most one driver snapshot of this tool per Mac, whatever happens next: the new one replaces a leftover as
+        soon as it is saved, so a failed update keeps one too. Only this tool's snapshots are ever touched."""
+        removed, failed = driver_snapshot.prune_older(self.pve, self.vmid, keep)
+        if removed:
+            self.say("Removed the previous driver snapshot: " + ", ".join(removed))
+        if failed:
+            self.result.notes.append("Could not remove these older driver snapshots: " + ", ".join(failed))
+
+    def track_disk(self, ref: str) -> None:
+        """A volume this run just created (recovery or payload disk): written down at once, so a cut-off run or a manual
+        rollback that leaves it as an unused disk can have exactly that one removed."""
+        engine.add_disk(self.state, ref)
+        self.persist()
 
     def take_card_off(self) -> None:
         """Remember hostpci0, vga, args and boot as they are, then remove the card so recovery can run on the emulated
@@ -236,3 +252,4 @@ class Updater:
         res = self.pve.qm("start", str(self.vmid))
         if not res.ok:
             raise DriverError(f"Could not start VM {self.vmid}: {res.output.strip()[-300:]}")
+        self.say("Started the Mac")

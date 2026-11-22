@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import igpu_engine
+from . import driver_engine as engine, igpu_engine
 from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .downloader import DownloadError
@@ -16,8 +16,8 @@ from .executor import apply_plan
 from .igpu_attach import oc_step
 from .planner import stopped_guard
 from .igpu_finish import (
-    FIRSTBOOT_TIMEOUT, FinishError, StageJob, _drop_disk, _read_payload_result, _storage_of, _wait_first_boot,
-    stage_recovery, wait_stopped,
+    FIRSTBOOT_TIMEOUT, FinishError, StageJob, _drop_disk, _read_payload_result, _storage_of, stage_recovery,
+    wait_stopped, watch_first_boot,
 )
 from .oc_builder import ensure_igpu_assets
 
@@ -81,7 +81,7 @@ def run(u: Updater) -> None:
             for slot in ("sata1", "sata2"):
                 _drop_disk(pve, vmid, slot)
         job = StageJob(vmid, pve, env.console, _storage_of(u.plan.cfg), u.say, env.clock, env.sleep, tahoe,
-                       tuple(igpu_engine.vm_settings(0, "")["args_add"]))
+                       tuple(igpu_engine.vm_settings(0, "")["args_add"]), u.track_disk)
         try:
             u.state.update(payload_ref=stage_recovery(job, payload, recovery, u.staging_cfg()), staged=True)
             u.persist()
@@ -99,15 +99,21 @@ def run(u: Updater) -> None:
         u.end("start")
     u.begin("verify")
     ref = u.payload_ref()
-    if not _wait_first_boot(pve, vmid, FIRSTBOOT_TIMEOUT, tahoe, ref, env.clock, env.sleep):
+    boot = watch_first_boot(pve, vmid, FIRSTBOOT_TIMEOUT, tahoe, ref, env.clock, env.sleep)
+    if not boot.stopped:
+        if boot.stuck:
+            u.say(f"The Mac's disks did nothing for {int(boot.idle // 60)} minutes and the guest reported nothing: "
+                  "stopping it instead of waiting on")
         pve.qm("stop", str(vmid))
         wait_stopped(pve, vmid, 120, env.clock, env.sleep)
     result = _read_payload_result(pve, ref)
     _drop_disk(pve, vmid, "sata2")
     payload.unlink(missing_ok=True)
     if result != "installed":
-        pve.qm("start", str(vmid))
-        raise DriverError("The graphics package is not installed: " + (result or "the guest reported nothing") + ".")
+        silent = result in ("", "staged")        # the guest never ran its script: starting it again would only repeat that
+        if not silent:
+            pve.qm("start", str(vmid))
+        raise DriverError(engine.first_boot_text(result, boot.waited, boot.idle, silent))
     if not apply_plan([guarded_step(vmid, "mark", "Note in OpenCore that the graphics package is installed")],
                       execute=True, adapter=pve).ok:
         u.result.notes.append("Could not note the installed package on the OpenCore disk.")

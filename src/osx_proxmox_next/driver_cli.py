@@ -91,7 +91,7 @@ def status_data(vmid: int, plan: DriverPlan, latest_error: str = "") -> dict:
     running = _running_step(vmid)
     refused = [r for r in plan.refusals if not (running and r == engine.REFUSE_LOCKED)]     # the running update says it better
     return {"vmid": vmid, "name": plan.name, "kind": plan.kind, "refused": refused,
-            "installed": plan.installed if plan.installed_known else None,
+            "installed": plan.installed if plan.installed_known else None, "installed_from_record": plan.from_record,
             "latest": plan.target.versions() if plan.target else {}, "state": judged["state"],
             "snapshots": snaps, "unfinished": plan.interrupted, "latest_error": latest_error,
             "updating": bool(running), "step": running}
@@ -130,7 +130,8 @@ def run_status(args: argparse.Namespace) -> int:
     if plan.interrupted:
         print("The driver update stopped before it finished. Finish it: osx-next-cli driver-update --vmid %d --finish --yes"
               " (or undo it: osx-next-cli driver-undo --vmid %d)." % (args.vmid, args.vmid))
-    print("Installed: " + (engine.driver_line(plan.kind, plan.installed) if plan.installed_known else "installed version unknown"))
+    print("Installed: " + (engine.driver_line(plan.kind, plan.installed) + (" " + engine.FROM_RECORD if plan.from_record else "")
+                           if plan.installed_known else "installed version unknown"))
     if plan.target:
         print("Latest:    " + engine.driver_line(plan.kind, plan.target.versions()))
         print({"update": "A newer driver is available.", "current": "Up to date.",

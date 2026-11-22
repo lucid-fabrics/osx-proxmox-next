@@ -17,14 +17,14 @@ from pathlib import Path
 
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
-        STATE_DIR, STEPS, acquire_lock, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, resume_index,
+        STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
+        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
-        STATE_DIR, STEPS, acquire_lock, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, resume_index,
+        STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
+        lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -54,13 +54,17 @@ REFUSE_NEWER_SNAPSHOTS = "Newer snapshots exist (%s). Proxmox cannot roll back p
 REFUSE_NOT_STOPPED = "The Mac is not stopped, so its OpenCore disk is not touched."
 REFUSE_MAPS_HELD = ("Device maps still hold the disks of VM %s (%s), so they cannot be rolled back or removed. Nothing was "
                     "changed. Remove them with: %s (then try again).")
+FIRST_BOOT_STUCK = 600      # seconds without disk I/O in the first boot, with no result, before the Mac counts as stuck
+INTEL_BOOT_NOTE = ("The update ends with a first boot of macOS with the iGPU. If this Mac already stops at startup with "
+                   "the iGPU (a kernel panic), the update cannot finish: fix that first.")
+FROM_RECORD = "(from the last update)"      # shown after versions that the record gave because the Mac's disk could not be read
 UP_TO_DATE = "Up to date: nothing to do."
 NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothing can undo the update if it goes wrong. "
                        "Type '%s' to go on without one." % NO_SNAPSHOT_PHRASE)
 TEXTS = {"REFUSE_INSTALLING": REFUSE_INSTALLING, "REFUSE_CARD_SETUP": REFUSE_CARD_SETUP, "REFUSE_LOCKED": REFUSE_LOCKED,
          "REFUSE_NO_CARD": REFUSE_NO_CARD, "REFUSE_UNKNOWN_KIND": REFUSE_UNKNOWN_KIND, "REFUSE_NOT_MAC": REFUSE_NOT_MAC,
          "REFUSE_NOTHING_TO_UNDO": REFUSE_NOTHING_TO_UNDO, "UP_TO_DATE": UP_TO_DATE,
-         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
+         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
          "REFUSE_CARD_CHANGED": REFUSE_CARD_CHANGED, "REFUSE_NEWER_SNAPSHOTS": REFUSE_NEWER_SNAPSHOTS,
          "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED, "REFUSE_MAPS_HELD": REFUSE_MAPS_HELD}
 VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
@@ -273,10 +277,11 @@ def change_lines(kind, installed, target):
 
 
 def retention_line(older):
-    """The sentence about the snapshot an update replaces: at most one snapshot of this tool is kept per Mac."""
+    """The sentence about the snapshot an update replaces: at most one snapshot of this tool is kept per Mac, so the
+    older one goes as soon as the new one is saved."""
     if not older:
         return ""
-    return "The previous driver snapshot%s %s %s removed after a successful update." % (
+    return "The previous driver snapshot%s %s %s removed once the new one is saved." % (
         "s" if len(older) > 1 else "", ", ".join(older), "are" if len(older) > 1 else "is")
 
 
@@ -287,17 +292,62 @@ def replace_names(installed, target, reinstall=False):
     return todo or (list(target) if reinstall else [])
 
 
-def before_facts(kind, snapshot, supported=True, older=()):
+def undo_line(undo=""):
+    """How to undo, in the words of the tool that prints it: the TUI and the CLI have the key r, the bash installer has
+    its own command (*undo*, like `osx-proxmox-next.sh driver-undo 101`)."""
+    if undo:
+        return "Afterwards %s undoes the driver update." % undo
+    return "Afterwards r undoes the driver update (osx-next-cli driver-undo)."
+
+
+def before_facts(kind, snapshot, supported=True, older=(), undo=""):
     """The facts "Before you continue" and the CLI plan state: how long, what comes off, the snapshot."""
     lines = ["The Mac stops for %s." % MINUTES[kind]]
     if kind != "amd":
         lines.append("The card comes off and goes back on.")
     lines.append("If macOS does not shut down within 2 minutes the Mac is stopped by force.")
     lines.append("A snapshot called %s is saved first." % snapshot if supported else NO_SNAPSHOT_WARNING)
-    lines.append("Afterwards r undoes the driver update (osx-next-cli driver-undo).")
+    lines.append(undo_line(undo))
     if older:
         lines.append(retention_line(older))
     return lines
+
+
+def todo_steps(kind, name, running, state):
+    """The steps a Finish still has to do: the plan's steps without the ones the stopped run finished."""
+    done = {r["id"] for r in (state or {}).get("steps", []) if r.get("state") == "done"}
+    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done]
+
+
+def finish_facts(kind, snapshot="", undo=""):
+    """What "Finish" does, for a run that stopped. It saves no new snapshot: the one of the run stays."""
+    lines = ["The Mac is stopped first when it runs."]
+    if kind != "amd":
+        lines.append("The card is taken off when a step needs it, and put back.")
+    lines.append("No new snapshot is saved: %s from before the update stays." % (snapshot or "the snapshot")
+                 if snapshot else "No new snapshot is saved: this update ran without one.")
+    lines.append(undo_line(undo))
+    return lines
+
+
+# ── the first boot that never reports ────────────────────────────────
+
+def first_boot_text(result, waited, idle, stopped):
+    """Why an Intel update's first boot with the card ended without the package installed, in words. *result* is what the
+    guest left on the payload disk ('' or 'staged' when it never ran), *waited* the seconds the host waited, *idle* the
+    seconds the Mac's disks did nothing at the end, *stopped* True when the host had to stop the Mac (it did not power
+    off by itself). What was seen first, then what to do."""
+    said = (result or "").strip()
+    if said and said != "staged":
+        return "The graphics package is not installed: %s." % re.sub(r"^not installed: ", "", said)
+    minutes = max(1, int(waited // 60))
+    seen = "The Mac did not report back within %d minutes: the staged package never ran" % minutes
+    if idle >= FIRST_BOOT_STUCK:
+        seen += ", and its disks did nothing for the last %d minutes, so macOS most likely stopped at startup" % (idle // 60)
+    return (seen + ". The graphics package needs WhateverXe running: when the iGPU does not start under it, macOS panics in "
+            "IntelAccelerator::probe, with or without this update. A kernel console shows it (osx-next-cli igpu-watchdog "
+            "<vmid>, then start the Mac). If the Mac does the same after r (undo), the iGPU setup is the cause, not the "
+            "update. The Mac was left %s." % ("stopped" if stopped else "as it is"))
 
 
 # ── snapshots ────────────────────────────────────────────────────────
@@ -464,7 +514,15 @@ def main(argv):
         sys.stdout.write("\n".join(change_lines(argv[2], json.loads(argv[3]), json.loads(argv[4]))) + "\n")
     elif cmd == "facts" and len(argv) >= 4:
         flag = argv[4] if len(argv) > 4 and argv[4] in ("supported", "unsupported") else ""
-        sys.stdout.write("\n".join(before_facts(argv[2], argv[3], flag != "unsupported", argv[5 if flag else 4:])) + "\n")
+        rest = list(argv[5 if flag else 4:])
+        undo = next((a[len("undo="):] for a in rest if a.startswith("undo=")), "")
+        sys.stdout.write("\n".join(before_facts(argv[2], argv[3], flag != "unsupported",
+                                                 [a for a in rest if not a.startswith("undo=")], undo)) + "\n")
+    elif cmd == "todo-steps" and len(argv) in (5, 6):
+        sys.stdout.write("\n".join("%s %s" % p for p in todo_steps(argv[3], argv[4], argv[5:] != ["stopped"], read_update(argv[2]))) + "\n")
+    elif cmd == "finish-facts" and len(argv) >= 3:
+        sys.stdout.write("\n".join(finish_facts(argv[2], argv[3] if len(argv) > 3 else "",
+                                                 argv[4] if len(argv) > 4 else "")) + "\n")
     elif cmd == "steps" and len(argv) in (4, 5):
         sys.stdout.write("\n".join("%s %s" % p for p in plan_steps(argv[2], argv[3], argv[4:] != ["stopped"])) + "\n")
     elif cmd == "fingerprint":
@@ -477,6 +535,8 @@ def main(argv):
         sys.stdout.write("\n".join(stale_maps(sys.stdin.read(), argv[2:])) + "\n")
     elif cmd == "maps-held" and len(argv) >= 4:
         sys.stdout.write(maps_held_text(argv[2], argv[3:]) + "\n")
+    elif cmd == "first-boot-text" and len(argv) == 6:
+        sys.stdout.write(first_boot_text(argv[2], float(argv[3]), float(argv[4]), argv[5] == "yes") + "\n")
     elif cmd == "snapshot-name":
         sys.stdout.write(snapshot_name() + "\n")
     elif cmd == "snapshot-argv" and len(argv) == 5:
@@ -500,12 +560,13 @@ def main(argv):
     elif cmd == "unfinished" and len(argv) == 3:
         _emit(unfinished(argv[2]))
     elif cmd in ("update-init", "update-resume", "update-begin", "update-end", "update-fail", "update-set", "update-clear",
-                 "update-get", "pending-kind", "failure-text", "card-changed", "kind", "replace-names", "snapshot-date",
+                 "update-get", "update-add-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
+                 "snapshot-date",
                  "newer-than", "all-snapshots"):
         return run_update_command(cmd, argv[2:])
     else:
-        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|steps|snapshot-name|"
-                         "snapshot-argv|tool-snapshots|snapshot-support|text|from-igpu|compare|unfinished|update-*|failure-text|kind|"
+        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|finish-facts|todo-steps|steps|snapshot-name|"
+                         "snapshot-argv|tool-snapshots|snapshot-support|first-boot-text|text|from-igpu|compare|unfinished|update-*|failure-text|kind|"
                          "fingerprint|trusted|stamp|stale-maps|maps-held ...\n")
         return 64
     return 0
@@ -547,7 +608,10 @@ def update_state_command(cmd, args):
         state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7])
         state.update(original=json.loads(args[8]) if len(args) > 8 and args[8] else None)
     elif cmd == "update-resume":
-        state.update(resume_at=resume_index(state), phase="running", error="")
+        reset_for_resume(state)
+        state.update(phase="running", error="")
+    elif cmd == "update-add-disk":
+        add_disk(state, args[1])
     elif cmd == "update-begin":                   # exit 3: a resumed run finished this step before the point it goes on from
         if not begin_step(state, args[1]):
             return 3

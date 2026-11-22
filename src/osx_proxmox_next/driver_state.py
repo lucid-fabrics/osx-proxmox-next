@@ -185,6 +185,31 @@ def resume_index(state):
     return next((i for i, r in enumerate(state.get("steps", [])) if r["state"] != "done"), len(state.get("steps", [])))
 
 
+def reset_for_resume(state):
+    """A run that goes on from where it stopped starts its own list: the steps the earlier run finished stay done (and
+    carry no time of this run), the others are pending again with no time, so nothing of the old run's clock shows."""
+    resume_at = resume_index(state)
+    for idx, row in enumerate(state.get("steps", [])):
+        row.pop("started", None)
+        row.pop("ended", None)
+        if idx < resume_at:
+            row["carried"] = True
+        else:
+            if row["state"] in ("active", "fail") and row["id"] in ("stage", "replace"):
+                state["partial"] = row["id"]      # a step that was cut off half way: what it left is still on the Mac
+            row["state"] = "pending"
+            row.pop("carried", None)
+    state["resume_at"] = resume_at
+
+
+def add_disk(state, ref):
+    """Remember a volume this run created (the recovery or payload disk), so a Mac that was rolled back by hand and
+    kept it as an unused disk can have exactly that one removed."""
+    disks = state.setdefault("disks", [])
+    if ref and ref not in disks:
+        disks.append(ref)
+
+
 def begin_step(state, sid):
     """Start a step. False, changing nothing, for a step that a resumed run finished before the point it goes on from."""
     row = _row(state, sid)
@@ -213,6 +238,8 @@ def fail_update(state, error):
 def failure_text(state, running):
     """What a failed run left behind, from its steps: what changed on the Mac and whether it is running."""
     rows = {r["id"]: r["state"] for r in state.get("steps", [])}
+    if state.get("partial") and rows.get(state["partial"]) != "done":
+        rows[state["partial"]] = "fail"
     if state.get("kind") == "amd":
         what = {"done": "The kexts on the OpenCore disk were replaced.",
                 "active": "The OpenCore disk may be half changed: Lilu and WhateverGreen may not match.",
