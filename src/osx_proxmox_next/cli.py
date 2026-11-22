@@ -29,7 +29,7 @@ from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints
 from .support import SUPPORT_LINE, SUPPORT_LINES_POST_INSTALL
-from . import driver_cli, gpu_attach, gpu_setup_cli, igpu_cli, nullmoth, nullmoth_cli
+from . import arm64_cli, driver_cli, gpu_attach, gpu_setup_cli, igpu_cli, nullmoth, nullmoth_cli
 
 _MB = 1024 * 1024
 
@@ -169,6 +169,7 @@ def _add_simple_subparsers(sub: argparse._SubParsersAction) -> None:
                         help="Directory used to cache the pinned AMFIPass download")
     sub.add_parser("nullmoth-versions", help="List the NullMoth driver releases nvidia-attach can install")
     gpu_setup_cli.add_parser(sub)
+    arm64_cli.add_parser(sub)
     detach = sub.add_parser(
         "nvidia-detach",
         help="Remove the NVIDIA GPU, the MMIO window and the NullMoth OpenCore changes from a VM",
@@ -348,6 +349,8 @@ def _dispatch_simple_commands(args: argparse.Namespace) -> int | None:
         return _run_install_unattended(args)
     if args.cmd == "nvidia-attach":
         return _run_nvidia_attach(args)
+    if args.cmd == "arm64":
+        return arm64_cli.run(args)
     if args.cmd == "nullmoth-versions":
         return nullmoth_cli.run_versions(args)
     if args.cmd == "nvidia-detach":
