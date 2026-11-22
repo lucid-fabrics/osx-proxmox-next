@@ -1,0 +1,94 @@
+"""The macOS 27 arm64 (beta) target: what the user chooses and the rules every value must pass.
+
+The target runs inside a Debian runner VM that Proxmox manages like any other VM. Nothing is installed on the Proxmox
+host itself. Every value below ends up in a `qm` argument or in the runner's cloud-init files, so each one is
+restricted to a small character set here, before any plan is built."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+__all__ = [
+    "ARM64_LABEL", "ARM64_TAG", "DEBIAN_IMAGE_URL", "DEBIAN_SUMS_URL", "DEFAULT_SOURCE_URL", "Arm64Config",
+    "DEFAULT_CORES", "DEFAULT_DISK_GB", "DEFAULT_MEMORY_MB", "MIN_CORES", "MIN_DISK_GB", "MIN_MEMORY_MB",
+    "RUNNER_USER", "validate_arm64_config",
+]
+
+ARM64_LABEL = "macOS 27 arm64 (beta)"
+ARM64_TAG = "osx-next-arm64"        # the Proxmox tag the runner VM carries
+RUNNER_USER = "snapintosh"
+
+DEBIAN_IMAGE_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+DEBIAN_SUMS_URL = "https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
+# the runner downloads the arm64/ tree of this repository at {ref}
+DEFAULT_SOURCE_URL = "https://github.com/lucid-fabrics/osx-proxmox-next/archive/{ref}.tar.gz"
+
+MIN_VMID = 100
+MAX_VMID = 999999
+DEFAULT_CORES = 6
+MIN_CORES = 4
+DEFAULT_MEMORY_MB = 8192
+MIN_MEMORY_MB = 8192
+DEFAULT_DISK_GB = 120
+MIN_DISK_GB = 100
+
+_NAME_RE = re.compile(r"[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?")
+_STORAGE_RE = re.compile(r"[a-zA-Z0-9_\-]+")
+_BRIDGE_RE = re.compile(r"vmbr[0-9]+")
+_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/\-]{0,99}")
+_URL_RE = re.compile(r"https://[A-Za-z0-9._\-]+(:[0-9]{1,5})?/[A-Za-z0-9._/\-{}]*")
+_PCI_RE = re.compile(r"([0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]")
+_SSH_KEY_RE = re.compile(r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}( [A-Za-z0-9_.@\-]{1,64})?")
+
+
+@dataclass
+class Arm64Config:
+    vmid: int
+    name: str
+    storage: str
+    cores: int = DEFAULT_CORES
+    memory_mb: int = DEFAULT_MEMORY_MB
+    disk_gb: int = DEFAULT_DISK_GB
+    bridge: str = "vmbr0"
+    vlan: int = 0                    # 0 = untagged
+    cpu_units: int = 0               # 0 = the Proxmox default (1024)
+    ssh_public_key: str = ""         # login for the runner; empty = no remote login
+    gpu_pci: str = ""                # a free host GPU to pass to the runner; empty = none (lavapipe)
+    source_url: str = DEFAULT_SOURCE_URL
+    source_ref: str = "main"
+
+    @property
+    def archive_url(self) -> str:
+        return self.source_url.replace("{ref}", self.source_ref)
+
+
+def validate_arm64_config(config: Arm64Config) -> list[str]:
+    issues: list[str] = []
+    if not MIN_VMID <= config.vmid <= MAX_VMID:
+        issues.append(f"VMID must be between {MIN_VMID} and {MAX_VMID}.")
+    if not 3 <= len(config.name) <= 63 or not _NAME_RE.fullmatch(config.name):
+        issues.append("VM name must be 3 to 63 characters, start with alphanumeric and contain only [a-zA-Z0-9.-].")
+    if not config.storage or not _STORAGE_RE.fullmatch(config.storage):
+        issues.append("Storage target must be alphanumeric, hyphens, underscores only.")
+    if config.cores < MIN_CORES:
+        issues.append(f"At least {MIN_CORES} CPU cores are required.")
+    if config.memory_mb < MIN_MEMORY_MB:
+        issues.append(f"At least {MIN_MEMORY_MB} MB RAM is required.")
+    if config.disk_gb < MIN_DISK_GB:
+        issues.append(f"At least {MIN_DISK_GB} GB disk is required.")
+    if not _BRIDGE_RE.fullmatch(config.bridge):
+        issues.append("Bridge must match vmbr<N> (e.g. vmbr0).")
+    if config.vlan and not 1 <= config.vlan <= 4094:
+        issues.append("VLAN tag must be between 1 and 4094 (or 0 for untagged).")
+    if config.cpu_units and not 1 <= config.cpu_units <= 10000:
+        issues.append("CPU units must be between 1 and 10000 (or 0 for the default).")
+    if config.ssh_public_key and not _SSH_KEY_RE.fullmatch(config.ssh_public_key):
+        issues.append("SSH public key must be one line: a key type, the key and an optional comment.")
+    if config.gpu_pci and not _PCI_RE.fullmatch(config.gpu_pci):
+        issues.append("GPU address must look like 0000:03:00.0 or 03:00.0.")
+    if not _URL_RE.fullmatch(config.source_url):
+        issues.append("Source URL must be https and contain only URL-safe characters.")
+    if not _REF_RE.fullmatch(config.source_ref) or ".." in config.source_ref:
+        issues.append("Source ref must be a branch, tag or commit name ([A-Za-z0-9._/-]).")
+    return issues
