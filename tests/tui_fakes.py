@@ -117,13 +117,44 @@ def patch_host(monkeypatch, vms=None, checks=None, drivers=None, grab=None, fact
     monkeypatch.setattr(LiveScreen, "grabber", staticmethod(frames))
 
 
-async def settle(pilot, predicate, tries: int = 150, step: float = 0.04) -> None:
-    """Wait until *predicate()* is true; a worker thread and a redraw may be needed first."""
+async def settle(pilot, predicate, tries: int = 150, step: float = 0.04, what: str = "") -> None:
+    """Wait until *predicate()* is true, yielding to the app with pilot.pause() between checks.
+
+    A worker thread, a screen push or a key press needs a few event-loop turns before its widgets exist, so a
+    predicate that queries a node may raise QueryError meanwhile: that counts as "not yet". Bounded, never sleeps."""
+    from textual.css.query import QueryError
+
     for _ in range(tries):
         await pilot.pause(step)
-        if predicate():
-            return
-    raise AssertionError("the screen never reached the expected state")
+        try:
+            if predicate():
+                return
+        except QueryError:
+            continue
+    raise AssertionError(f"timed out after {tries * step:.1f}s waiting for {what or 'the screen to reach the expected state'}")
+
+
+async def settle_screen(pilot, app, screen_cls, what: str = "") -> None:
+    """Wait until a *screen_cls* is the active screen and attached."""
+    await settle(pilot, lambda: isinstance(app.screen, screen_cls) and app.screen.is_attached,
+                 what=what or f"{screen_cls.__name__} to be the active screen")
+
+
+async def settle_query(pilot, app, selector: str, what: str = "") -> None:
+    """Wait until the active screen holds a node matching *selector* (a pushed screen has finished composing)."""
+    await settle(pilot, lambda: bool(app.screen.query(selector)), what=what or f"{selector} on the active screen")
+
+
+async def settle_text(pilot, read, *needles: str, tries: int = 150) -> None:
+    """Wait until every needle shows in read(): state set on a worker thread is drawn a few turns later."""
+    await settle(pilot, lambda: all(n in read() for n in needles), tries=tries,
+                 what="the screen to show " + " and ".join(repr(n) for n in needles))
+
+
+async def screen_gone(pilot, app, screen_cls) -> None:
+    """Wait until no *screen_cls* is left in the app's screen stack (a switch_screen has finished)."""
+    await settle(pilot, lambda: not any(isinstance(s, screen_cls) for s in app.screen_stack),
+                 what=f"{screen_cls.__name__} to leave the screen stack")
 
 
 def text_of(widget) -> str:

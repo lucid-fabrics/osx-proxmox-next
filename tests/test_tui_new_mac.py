@@ -306,7 +306,8 @@ async def test_enter_creates_the_mac_and_opens_the_build_screen(monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         screen = await new_mac(pilot, app)
         await pilot.press("enter")
-        await F.settle(pilot, lambda: bool(started))
+        await F.settle(pilot, lambda: bool(started), what="the build screen to start")
+        await F.screen_gone(pilot, app, NewMacScreen)
         config, unattended, force = started[0]
         assert (config.vmid, config.name, config.macos) == (105, "macos-sequoia", "sequoia")
         assert (config.cores, config.memory_mb, config.disk_gb, config.storage) == (8, 16384, 128, "local-lvm")

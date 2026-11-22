@@ -557,6 +557,7 @@ async def test_the_footer_and_help_name_every_key_of_the_flow(tmp_path):
     async with app.run_test(size=SIZE) as pilot:
         await at_choose(pilot, app, env)
         await pilot.press("f1")
+        await F.settle_query(pilot, app, "#help-keys", "the help screen")
         shown = F.text_of(app.screen.query_one("#help-keys"))
         for word in ("See every change", "Put everything back", "Check again", "Yes, all good", "No, help me", "Leave"):
             assert word in shown
@@ -585,10 +586,14 @@ async def test_the_palette_opens_the_flow_without_a_preselected_mac(tmp_path, mo
     monkeypatch.setattr("osx_proxmox_next.screens.gpu.Session", lambda: env.session())
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
-        await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen) and app.screen.loaded)
+        await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen) and app.screen.loaded and app.screen.is_attached)
         app.action_gpu()
-        await F.settle(pilot, lambda: isinstance(app.screen, GpuScreen))
-        assert app.screen.vmid is None and not app.screen.fixed_vm
+        await F.settle_screen(pilot, app, GpuScreen)
+        screen = app.screen
+        await F.settle(pilot, lambda: screen.mode == "choose" and not screen.working and bool(screen.query("#g-mac")),
+                       what="the GPU screen to finish loading")
+        await screen.workers.wait_for_complete()       # its loader queries the screen: let it end before the app closes
+        assert screen.vmid is None and not screen.fixed_vm
 
 
 # ── the BIOS screen ──────────────────────────────────────────────────

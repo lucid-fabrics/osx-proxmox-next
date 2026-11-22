@@ -98,11 +98,16 @@ async def test_a_hands_off_build_reaches_the_install_phase_with_the_live_screen(
         screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=deps()))
         await open_build(pilot, app, screen)
         await F.settle(pilot, lambda: screen.pipe.safe_to_close and screen.query_one("#build-live", LiveScreen).status == "running")
+        for line in ("✓ Checked this host", "✓ Downloaded macOS", "✓ Rehearsed all 14 steps",
+                     "✓ Created VM 105", "◐ Installing macOS", "· Ready"):
+            await F.settle_text(pilot, lambda: timeline(screen), line)
         text = timeline(screen)
         for line in ("✓ Checked this host", "✓ Downloaded macOS", "✓ Rehearsed all 14 steps",
                      "✓ Created VM 105", "◐ Installing macOS", "· Ready"):
             assert line in text
-        await F.settle(pilot, lambda: "◐ Installing, restarting" in timeline(screen), tries=300)  # the driver log is read
+        await F.settle_text(pilot, lambda: timeline(screen), "◐ Installing, restarting", "✓ Booted the recovery",
+                            "· Ready at Setup Assistant", tries=300)  # the driver log is read
+        await F.settle_text(pilot, lambda: note(screen), "Safe to close.", "this view is back when you reopen osx-next")
         text = timeline(screen)
         for line in ("✓ Booted the recovery", "✓ Erased the new disk", "✓ Started the installer",
                      "◐ Installing, restarting", "· First start", "· Ready at Setup Assistant"):
@@ -147,6 +152,8 @@ async def test_quit_asks_while_an_in_process_phase_runs_and_esc_waits(monkeypatc
         screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=deps(dry_run=slow_dry_run)))
         await open_build(pilot, app, screen)
         await F.settle(pilot, lambda: screen.busy())
+        await F.settle_text(pilot, lambda: note(screen), "Nothing on the host changes until the rehearsal has passed.")
+        await F.settle_text(pilot, lambda: timeline(screen), "◐ Rehearse all 14 steps")
         assert "Nothing on the host changes until the rehearsal has passed." in note(screen)
         assert "◐ Rehearse all 14 steps" in timeline(screen)
         await pilot.press("escape")
@@ -261,9 +268,14 @@ async def test_the_full_log_is_a_scrolling_screen_with_every_line(monkeypatch, t
         await open_build(pilot, app, screen)
         await F.settle(pilot, lambda: pipe.safe_to_close)
         await pilot.press("l")
-        assert isinstance(app.screen, LogScreen)
-        await pilot.pause(0.2)
-        lines = [strip.text for strip in app.screen.query_one(RichLog).lines]
+        await F.settle_screen(pilot, app, LogScreen)
+
+        def log_lines() -> list:
+            return [strip.text for strip in app.screen.query_one(RichLog).lines]
+
+        await F.settle(pilot, lambda: any("Waiting for the OpenCore boot picker" in line for line in log_lines())
+                       and any("Rehearsing all 14 steps" in line for line in log_lines()), what="the log screen to fill")
+        lines = log_lines()
         assert any("Rehearsing all 14 steps" in line for line in lines)
         assert any("Waiting for the OpenCore boot picker" in line for line in lines)
         assert "Scroll" in keys(app)
@@ -301,13 +313,16 @@ async def test_z_zooms_the_live_screen_and_esc_comes_back(monkeypatch):
         screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=deps(live=slow_live)))
         await open_build(pilot, app, screen)
         await F.settle(pilot, lambda: screen.pipe.phase("create").status == "active")
+        await F.settle_text(pilot, lambda: note(screen), "Creating the VM. This takes about a minute.")
         assert "Creating the VM. This takes about a minute." in note(screen)
         await pilot.press("z")                              # no VM yet: nothing to zoom
+        await F.settle_text(pilot, lambda: F.text_of(screen.query_one("#build-caption")),
+                            "The Mac's screen shows here once the VM exists.")
         assert app.screen is screen and "The Mac's screen shows here once the VM exists." in F.text_of(screen.query_one("#build-caption"))
         gate.set()
         await F.settle(pilot, lambda: screen.pipe.safe_to_close and screen.query_one("#build-live", LiveScreen).status == "running")
         await pilot.press("z")
-        assert isinstance(app.screen, ZoomScreen)
+        await F.settle_screen(pilot, app, ZoomScreen)
         live = app.screen.query_one("#zoom-live", LiveScreen)
         await F.settle(pilot, lambda: live.grabs > 0)
         assert live.size.width >= 98 and live.placeholder == ""
