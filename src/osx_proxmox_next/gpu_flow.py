@@ -237,6 +237,7 @@ class Before:
     nvidia: bool = False       # the NVIDIA acknowledgement is typed
     phrase_text: str = ""      # the phrase typed when `phrase` is set (empty: "I understand")
     go_label: str = ""         # the label of the approve button (empty: "Set it up")
+    once: bool = True          # the dialog says "asked once, never again" (a card setup is approved once; a driver update every time)
 
     @property
     def empty(self) -> bool:

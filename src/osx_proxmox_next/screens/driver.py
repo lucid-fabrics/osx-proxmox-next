@@ -1,7 +1,8 @@
 """Graphics card of a Mac that already has one: the driver it runs, whether a newer one exists, and the update.
 
 One approval, then the update runs by itself in a detached process (`osx-next-cli driver-update`) and this screen
-reads its steps from the update state file, so a reopened terminal shows the same run. u puts the Mac back."""
+reads its steps from the update state file, so a reopened terminal shows the same run. r undoes the driver update
+(back to its snapshot); u keeps its meaning from the card setup: put the card setup back."""
 
 from __future__ import annotations
 
@@ -20,8 +21,9 @@ from textual.widgets import Button, Static
 from .. import driver_engine as engine, driver_spawn, igpu_engine, nullmoth_finish
 from ..driver_core import DriverError, RunEnv
 from ..driver_plan import DriverPlan, commands, prepare
-from ..driver_run import put_back, remove_safety_snapshot
+from ..driver_run import put_back, remove_safety_snapshot, undo_target
 from ..driver_targets import Choice
+from ..gpu import load_record
 from ..gpu_flow import Before
 from ..nullmoth import NOTICE_BODY, NOTICE_TITLE
 from ..services import get_proxmox_adapter
@@ -65,8 +67,8 @@ def load_view(vmid: int, choice: Choice | None = None, releases: bool = True) ->
 
 def build_before(plan: DriverPlan) -> Before:
     """The warnings, the facts and the NullMoth notice of one update, as "Before you continue" shows them."""
-    out = Before(go_label="Reinstall" if plan.verdict == "current" else "Update driver")
-    facts = [n for n in engine.before_facts(plan.kind, plan.snapshot, True)
+    out = Before(go_label="Reinstall" if plan.verdict == "current" else "Update driver", once=False)
+    facts = [n for n in engine.before_facts(plan.kind, plan.snapshot, True, plan.older_snapshots)
              if plan.snapshot_ok or not n.startswith("A snapshot called")]
     out.notes = ["\n".join(facts)]      # one block: the dialog has to fit 80x24 with the notice and the phrase
     out.warnings = ["Warning: " + w for w in plan.warnings]
@@ -85,7 +87,8 @@ class DriverScreen(OsxScreen):
     BINDINGS = [
         Binding("enter", "primary", "Update driver"),
         Binding("p", "changes", "See every change"),
-        Binding("u", "undo", "Put it back"),
+        Binding("r", "undo_driver", "Undo driver update"),
+        Binding("u", "undo_card", "Put everything back"),
         Binding("y", "yes", "Yes, all good"),
         Binding("n", "no", "No, help me"),
         Binding("escape", "back", "Leave"),
@@ -105,6 +108,7 @@ class DriverScreen(OsxScreen):
         self.helping = False
         self.error = ""
         self._label = "Update driver"
+        self._after_card = False
 
     # ── layout ───────────────────────────────────────────────────────
 
@@ -180,58 +184,94 @@ class DriverScreen(OsxScreen):
         assert self.view is not None
         return self.view.plan
 
-    def _driver_text(self) -> Text:
+    def _driver_rows(self) -> list[Widget]:
+        """The installed version, one row per component (a long pair would wrap): the Driver row never wraps."""
+        plan = self.plan
+        pal = self.app.get_css_variables()
+        if not plan.installed_known:
+            return [Static(self._row("Driver", Text("installed version unknown", style=pal["muted"])), id="d-driver")]
+        parts = [f"{n} {plan.installed[n]}" for n in engine.COMPONENTS[plan.kind] if plan.installed.get(n)]
+        return [Static(self._row("Driver" if i == 0 else "", Text(part, style="bold")), id="d-driver" if i == 0 else f"d-driver-{i + 1}")
+                for i, part in enumerate(parts)]
+
+    def _row(self, label: str, value: Text) -> Text:
+        """One line of the Driver block: the label, then the value, cut with an ellipsis when it would not fit."""
+        out = Text(" " + label.ljust(DRIVER_LABEL), style=self.app.get_css_variables()["muted"], no_wrap=True, overflow="ellipsis")
+        value.truncate(max(12, self.size.width - 52), overflow="ellipsis")      # the form is the screen less the side panel
+        out.append_text(value)
+        return out
+
+    def _status_text(self) -> Text:
+        """What an update would do, in a short form of its own row: `v2.9 available`, `✓ up to date`."""
         pal = self.app.get_css_variables()
         plan = self.plan
-        out = Text()
-        if plan.installed_known:
-            out.append(engine.driver_line(plan.kind, plan.installed), style="bold")
-        else:
-            out.append("installed version unknown", style=pal["muted"])
-        verdict = plan.verdict
-        if verdict == "update" and plan.installed_known:
-            out.append("   " + "  ".join(f"{n} {v} available" for n, h, v, s in plan.judged()["rows"] if s == "update"),
-                       style=pal["accent"])
-        elif verdict == "current":
-            out.append("   ✓ up to date", style=pal["success"])
-        elif plan.target is not None:
-            out.append("   " + engine.driver_line(plan.kind, plan.target.versions()) + " available", style=pal["accent"])
-        return out
+        rows = plan.judged()["rows"] if plan.target is not None else []
+        if plan.verdict == "current":
+            return Text("✓ up to date", style=pal["success"], no_wrap=True)
+        if len(rows) != 1:      # a pair: the plan (p) lists each one
+            return Text("update available", style=pal["accent"], no_wrap=True)
+        name, version = rows[0][0], rows[0][2]
+        return Text((version if plan.installed_known else f"{name} {version}") + " available", style=pal["accent"], no_wrap=True)
+
+    def _pending_text(self) -> str:
+        """What the screen says about an update that stopped: where the card is, and the two ways on."""
+        card = "hostpci0" in self.plan.cfg
+        ways = "enter finishes it" + (", r undoes the driver update." if self._has_snapshot() else ".")
+        return ("The driver update stopped before it finished." + ("" if card else " The card is off this Mac.") + " " + ways)
+
+    def _has_snapshot(self) -> bool:
+        """A driver snapshot of this Mac exists (or the run that is shown made one): r can undo the update."""
+        return bool(self.view and self.view.plan.older_snapshots) or bool(self._state().get("snapshot"))
 
     async def _show_attached(self) -> None:
         pal = self.app.get_css_variables()
         plan = self.plan
         title = Text.assemble((f"{plan.name or 'VM %d' % self.vmid} graphics card", "bold"),
                               ("  " + (engine.CARD_NAME.get(plan.kind, "") + " card" if plan.kind else ""), pal["muted"]))
+        pending = plan.interrupted
         rows: list[Widget] = []
         if plan.refusals:
             rows.append(Static(Text("\n".join("! " + r for r in plan.refusals), style=pal["warning"]), id="g-reason"))
         else:
-            rows.append(Static(Text.assemble((" " + "Driver".ljust(DRIVER_LABEL), pal["muted"]), self._driver_text()),
-                               id="d-driver"))
-        picker = self._picker(plan)
+            rows += self._driver_rows()
+            rows.append(Static(self._row("Status", self._status_text()), id="d-status"))
+        picker = None if pending else self._picker(plan)
         if picker is not None:
             rows.append(picker)
-        elif plan.kind == "amd":
+        elif plan.kind == "amd" and not pending and not plan.refusals:
             rows.append(Static(Text(" " + "Version".ljust(DRIVER_LABEL) + "the versions this release pins",
                                     style=pal["muted"]), id="d-pinned"))
-        pending = engine.unfinished(self.vmid)
         if pending:
-            rows.append(Static(Text("! An earlier update was cut off. enter finishes it, u puts the Mac back.",
-                                    style=pal["warning"]), id="d-unfinished"))
-        safe = Text.assemble(("✓ ", pal["success"]), "A snapshot is saved first. ", ("u", "bold " + pal["accent"]),
-                             " puts the Mac back.")
+            rows.append(Static(Text("\n! " + self._pending_text(), style=pal["warning"]), id="d-unfinished"))
         side = Vertical(Static(Text("What happens", style=pal["muted"]), classes="side-title"), Lines(id="d-facts"),
                         id="g-side")
-        form = Vertical(*rows, Static(safe, id="g-safe"), id="g-form")
-        self._label = self._enter_label(bool(pending))
-        action = Horizontal(Static(Text("Nothing changes until you press enter.", style=pal["muted"]), id="g-note"),
-                            Button(self._label, id="d-go", classes="primary", disabled=not self._can_go(bool(pending))),
-                            id="g-action")
+        form = Vertical(*rows, Static(self._safe_text(), id="g-safe"), id="g-form")
+        self._label = self._enter_label(pending)
+        can_go = self._can_go(pending)
+        action = Horizontal(Static(Text(self._note_text(can_go, picker is not None, pending), style=pal["muted"]), id="g-note"),
+                            *([Button(self._label, id="d-go", classes="primary")] if can_go else []), id="g-action")
         await self._show(Static(title, id="g-title"), Horizontal(form, side, id="g-cols"), Static("", id="g-result"),
                          action, mode="attached")
         self._facts()
         self._focus_row()
+
+    def _safe_text(self) -> Text:
+        """The snapshot line: before any update it says one is saved first; after one, what r does."""
+        pal = self.app.get_css_variables()
+        snaps = self.plan.older_snapshots if self.view else []
+        if snaps:
+            return Text.assemble(("✓ ", pal["success"]), f"Driver snapshot of {engine.snapshot_date(snaps[-1])}. ",
+                                 ("r", "bold " + pal["accent"]), " undoes the driver update.")
+        return Text.assemble(("✓ ", pal["success"]), "A snapshot is saved first, so the update can be undone.")
+
+    def _note_text(self, can_go: bool, has_picker: bool, pending: bool = False) -> str:
+        if pending:
+            return "Finish goes on from the step that stopped."
+        if can_go:
+            return "Nothing changes until you press enter."
+        if self.plan.refusals:
+            return ""
+        return "Nothing to update." + (" ←→ picks another release to install it again." if has_picker else "")
 
     def _picker(self, plan: DriverPlan) -> ChoiceRow | None:
         found = self.view.releases if self.view else []
@@ -271,7 +311,7 @@ class DriverScreen(OsxScreen):
     def _can_go(self, pending: bool) -> bool:
         plan = self.plan if self.view else None
         if plan is None or plan.refusals:
-            return bool(pending and plan is not None and not plan.refusals)
+            return False
         return pending or not plan.nothing_to_do or self.touched and bool(self.query("ChoiceRow"))
 
     def _enter_label(self, pending: bool) -> str:
@@ -279,21 +319,28 @@ class DriverScreen(OsxScreen):
             return "Finish"
         return "Reinstall" if self.plan.verdict == "current" else "Update driver"
 
+    def _card_record(self) -> bool:
+        """The card setup of this Mac left a record: u can put it back, as in the Mac's own view."""
+        return load_record(self.vmid) is not None
+
     def footer_items(self) -> list[tuple]:
+        undo = [("r", "Undo driver update", "screen.undo_driver")] if self._has_snapshot() else []
         if self.mode == "first_boot":
             if self.helping:
                 return [("enter", "Back", "screen.primary"), ("esc", "Back", "screen.back")]
-            return [("y", "Yes, all good", "screen.yes"), ("n", "No, help me", "screen.no"), ("u", "Put it back", "screen.undo"),
+            return [("y", "Yes, all good", "screen.yes"), ("n", "No, help me", "screen.no"), *undo,
                     ("esc", "Your Macs", "screen.back")]
         items: list[tuple] = []
-        if self.mode == "attached" and self.view and self._can_go(bool(engine.unfinished(self.vmid))):
+        if self.mode == "attached" and self.view and self._can_go(self.plan.interrupted):
             items.append(("enter", self._label, "screen.primary"))
         if self.mode == "attached" and self.query("ChoiceRow"):
             items.append(("←→", "Version", None))
         if self.mode in ("attached", "run") and self.view and not self.view.plan.refusals:
             items.append(("p", "See every change", "screen.changes"))
-        if self.mode in ("attached", "run", "first_boot"):
-            items.append(("u", "Put it back", "screen.undo"))
+        if self.mode in ("attached", "run"):
+            items += undo
+            if self._card_record():
+                items.append(("u", "Put everything back", "screen.undo_card"))
         items += [("esc", "Back", "screen.back"), ("?", "Help", "app.help")]
         return items
 
@@ -310,7 +357,7 @@ class DriverScreen(OsxScreen):
             return
         if self.mode != "attached" or self.view is None:
             return
-        pending = bool(engine.unfinished(self.vmid))
+        pending = self.plan.interrupted
         if not self._can_go(pending):
             return
         if pending:
@@ -343,10 +390,12 @@ class DriverScreen(OsxScreen):
         self.run_worker(self._show_run(), exclusive=True, group="drv-mode")
 
     def _finish_run(self) -> None:
+        """Continue the run that stopped, from the step it stopped at, with the releases it started with. The NullMoth
+        notice was approved when that run started, so Finish does not ask for it again."""
         state = engine.read_update(self.vmid)
         tags = state.get("choice", {})
         self._spawn(Choice(tags.get("NullMoth", ""), tags.get("WhateverXe", ""), tags.get("WhateverXe Graphics", "")),
-                    finish=True, accept_risk=state.get("kind") == "nvidia", no_snapshot=not state.get("snapshot"))
+                    finish=True, accept_risk=state.get("kind") == "nvidia", no_snapshot=bool(state.get("no_snapshot")))
 
     # ── p: see every change ──────────────────────────────────────────
 
@@ -388,8 +437,8 @@ class DriverScreen(OsxScreen):
     def _run_box(self, state: dict) -> tuple[str, list[str]]:
         phase = state.get("phase", "")
         if self.error or phase == "failed":
-            return "The update did not finish", [self.error or state.get("error", ""), "",
-                                                   "enter finishes it. u puts the Mac back to the snapshot."]
+            ways = "enter finishes it." + (" r undoes the driver update." if self._has_snapshot() else "")
+            return "The update did not finish", [self.error or state.get("error", ""), "", ways]
         recent = [e[9:] for e in state.get("events", [])][-6:]
         return "Updating the driver", recent or ["Starting..."]
 
@@ -403,8 +452,8 @@ class DriverScreen(OsxScreen):
                        id="g-box", classes="fail" if self.error or state.get("phase") == "failed" else "")
         await self._show(Static(Text(head, style="bold"), id="g-run-title"),
                          Horizontal(Static(self.timeline(state), id="g-timeline"), box, id="g-run-cols"),
-                         Static(Text("Safe to leave: the update keeps running. u puts the Mac back.",
-                                     style=pal["muted"]), id="g-run-note"), mode="run")
+                         Static(Text("Safe to leave: the update keeps running.", style=pal["muted"]), id="g-run-note"),
+                         mode="run")
 
     def tick(self) -> None:
         """Once a second: the run view follows the state file; a finished run asks the first boot question."""
@@ -443,7 +492,7 @@ class DriverScreen(OsxScreen):
                        Static(Text(body), id="g-box-text"), Horizontal(*buttons, id="g-box-buttons"), id="g-box")
         await self._show(Static(Text(f"{self.mac or 'The Mac'} is starting with the new driver", style="bold"), id="g-run-title"),
                          Horizontal(Static(self.timeline(state), id="g-timeline"), box, id="g-run-cols"),
-                         Static(Text("Not happy with it? u puts the Mac back to the snapshot.", style=pal["muted"]),
+                         Static(Text("Not happy with it? r undoes the driver update." if self._has_snapshot() else "", style=pal["muted"]),
                                 id="g-run-note"), mode="first_boot")
 
     def on_button_pressed_boot(self, bid: str) -> None:
@@ -463,44 +512,61 @@ class DriverScreen(OsxScreen):
             self.app.notify("The driver is updated.")
             super().action_back()
             return
-        self.app.push_screen(ChoiceDialog("Remove the safety snapshot?", [
-            f"{snapshot} can put the Mac back. It uses disk space.", "Keep it until you are sure everything works."],
-            [Pick("keep", "Keep", "primary"), Pick("remove", "Remove it")], focus="keep"), self._snapshot_answer)
+        self.app.push_screen(ChoiceDialog("Remove the driver snapshot?", [
+            f"{snapshot} can undo the driver update. It uses disk space.", "Keep it until you are sure everything works."],
+            [Pick("keep", "Keep", "primary"), Pick("remove", "Remove it")], focus="keep"),
+            lambda answer: self._snapshot_answer(answer, snapshot))
 
-    def _snapshot_answer(self, answer: str | None) -> None:
+    def _snapshot_answer(self, answer: str | None, snapshot: str = "") -> None:
         if answer == "remove":
             try:
-                name = remove_safety_snapshot(self.vmid, RunEnv(get_proxmox_adapter()))
-                self.app.notify(f"Removed the safety snapshot {name}.")
+                name = remove_safety_snapshot(self.vmid, RunEnv(get_proxmox_adapter()), snapshot)
+                self.app.notify(f"Removed the driver snapshot {name}.")
             except DriverError as exc:
                 self.app.notify(str(exc), severity="error")
         else:
-            self.app.notify("The driver is updated. The safety snapshot is kept.")
+            self.app.notify("The driver is updated. The driver snapshot is kept.")
         super().action_back()
 
     def action_no(self) -> None:
         if self.mode == "first_boot" and not self.helping:
             self.run_worker(self._show_first_boot(True), exclusive=True, group="drv-mode")
 
-    # ── u: put it back ───────────────────────────────────────────────
+    # ── r: undo the driver update, u: put the card setup back ────────
 
-    def action_undo(self) -> None:
+    def action_undo_driver(self) -> None:
+        """Ask which snapshot (and whether the card setup still matches it) off the UI thread, then confirm."""
         if self.working:
             return
-        snaps = engine.tool_snapshots("\n".join(self.view.plan.older_snapshots)) if self.view else []
-        state = self._state()
-        name = state.get("snapshot") or (snaps[-1] if snaps else "")
-        if not name:
+        if not self._has_snapshot():
             self.app.notify(engine.REFUSE_NOTHING_TO_UNDO, severity="warning")
             return
+        self.working = True
+
+        def work() -> None:
+            try:
+                name = undo_target(self.vmid, RunEnv(get_proxmox_adapter()))
+            except DriverError as exc:
+                self.app.call_from_thread(self._undo_refused, str(exc))
+                return
+            self.app.call_from_thread(self._confirm_undo, name)
+
+        self.run_worker(work, thread=True, exit_on_error=False, group="drv-undo")
+
+    def _undo_refused(self, text: str) -> None:
+        self.working = False
+        self.app.notify(text, severity="error")
+
+    def _confirm_undo(self, name: str) -> None:
+        self.working = False
 
         def answer(result: str | None) -> None:
             if result == "yes":
                 self._put_back()
 
-        self.app.push_screen(ConfirmDialog("Put the Mac back?", [
-            f"The Mac stops, goes back to {name} and starts again.", "Everything done since is lost."],
-            confirm="Put it back", danger=True), answer)
+        self.app.push_screen(ConfirmDialog("Undo the driver update?", [
+            f"The Mac stops, its disks go back to the snapshot of {engine.snapshot_date(name)} and it starts again.",
+            "Everything you did in macOS since then is lost."], confirm="Undo driver update", danger=True), answer)
 
     def _put_back(self) -> None:
         self.working = True
@@ -508,7 +574,7 @@ class DriverScreen(OsxScreen):
         def work() -> None:
             try:
                 name = put_back(self.vmid, RunEnv(get_proxmox_adapter()))
-                self.app.call_from_thread(self._put_back_done, f"Put the Mac back to {name}.", False)
+                self.app.call_from_thread(self._put_back_done, f"Undid the driver update: the Mac is back to {name}.", False)
             except DriverError as exc:
                 self.app.call_from_thread(self._put_back_done, str(exc), True)
 
@@ -519,6 +585,23 @@ class DriverScreen(OsxScreen):
         self.app.notify(text, severity="error" if failed else "information")
         self.mode = "loading"
         self.load()
+
+    def action_undo_card(self) -> None:
+        """u keeps its meaning from the card setup: the Mac's own undo of everything the card setup did."""
+        if self.working or self.mode not in ("attached", "run"):
+            return
+        if not self._card_record():
+            self.app.notify("The card setup of this Mac has nothing to put back.", severity="warning")
+            return
+        from .gpu import GpuScreen
+        self._after_card = True
+        self.app.push_screen(GpuScreen(vmid=self.vmid, undo=True))
+
+    def on_screen_resume(self) -> None:
+        if self._after_card:     # back from the card setup's undo: the Mac may have no card now
+            self._after_card = False
+            self.mode = "loading"
+            self.load()
 
     def action_back(self) -> None:
         if self.mode == "first_boot" and self.helping:

@@ -53,7 +53,8 @@ class BeforeDialog(ModalScreen):
         with Vertical(id="before-box", classes="dialog warn"):
             with Horizontal(id="before-head"):
                 yield Static("Before you continue", classes="dialog-title")
-                yield Static("asked once, never again", classes="muted before-once")
+                if b.once:
+                    yield Static("asked once, never again", classes="muted before-once")
             yield Static("", classes="blank")
             if b.warnings:
                 yield Static(Text("\n".join(self._bang(line, self._inner()) for line in b.warnings),
