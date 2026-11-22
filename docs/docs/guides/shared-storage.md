@@ -36,7 +36,7 @@ osx-next-cli download --macos sequoia --dest /mnt/pve/nas/template/iso
 
 ### TUI
 
-The wizard auto-detects storage pools including NAS mounts under `/mnt/pve/*/template/iso`. Select your shared storage in the **Lives on** row of the New Mac screen.
+The New Mac screen auto-detects storage pools including NAS mounts under `/mnt/pve/*/template/iso`. Select your shared storage in the **Lives on** row of the New Mac screen.
 
 ## Smart Caching
 

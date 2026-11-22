@@ -7,7 +7,8 @@
 <p align="center">
   <strong>You're losing 3–6 hours every time you set up a macOS VM on Proxmox.</strong><br>
   OpenCore plist editing. GenSMBIOS. Manual <code>qm</code> commands. One wrong flag and you start over.<br>
-  <strong>osx-proxmox-next does it in under 5 minutes. One command. One screen. Done.</strong>
+  <strong>osx-proxmox-next does it in under 5 minutes.</strong><br>
+  <strong>One command. One screen. Done.</strong>
 </p>
 
 <p align="center">
@@ -93,8 +94,6 @@ osx-proxmox-next replaces all of it with one screen that runs on your Proxmox ho
 
 ### Demo
 
-**The TUI: your Macs, the New Mac screen and the build timeline with the VM's live screen:**
-
 **CLI tools (preflight, plan, doctor):**
 
 ![osx-proxmox-next CLI demo](docs/static/img/demo-cli.gif)
@@ -104,21 +103,21 @@ osx-proxmox-next replaces all of it with one screen that runs on your Proxmox ho
 <table>
   <tr>
     <td align="center">
-      <img src="docs/static/img/screenshots/tui-home.png" alt="Your Macs: cards with a live screen each" width="400"><br>
+      <img src="docs/static/img/tui/home.png" alt="Your Macs: three cards with a live screen, a name and a status each, and a New Mac strip below" width="400"><br>
       <strong>Your Macs:</strong> a live screen for every VM
     </td>
     <td align="center">
-      <img src="docs/static/img/screenshots/tui-new-mac.png" alt="New Mac: one screen, everything prefilled" width="400"><br>
+      <img src="docs/static/img/tui/new_mac.png" alt="New Mac: one prefilled form on the left and capacity bars for the host on the right" width="400"><br>
       <strong>New Mac:</strong> everything prefilled, press enter
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="docs/static/img/screenshots/tui-build.png" alt="Build: timeline with the live VM screen" width="400"><br>
+      <img src="docs/static/img/tui/build.png" alt="Build: a phase timeline on the left and the live screen of the VM on the right" width="400"><br>
       <strong>Build:</strong> the timeline and the Mac's screen
     </td>
     <td align="center">
-      <img src="docs/static/img/screenshots/tui-gpu.png" alt="Graphics card: choose and approve once" width="400"><br>
+      <img src="docs/static/img/tui/gpu_choose.png" alt="Graphics card: choose the card and the Mac, with the plan listed on the right" width="400"><br>
       <strong>Graphics card:</strong> choose and approve once
     </td>
   </tr>
@@ -473,7 +472,7 @@ Use `--verbose-boot` flag in CLI: `osx-next-cli apply --verbose-boot ...`. This 
 One guided flow takes a card from "it is in the server" to "macOS uses it": scan, a BIOS screen with a QR code, host setup with a diff and backups, VM attach, first boot, and a full undo. It resumes across reboots.
 
 ```bash
-osx-next-cli gpu-setup            # or: TUI > GPU Passthrough, or osx-proxmox-next.sh gpu-setup
+osx-next-cli gpu-setup            # or: press g on a Mac in the TUI, or osx-proxmox-next.sh gpu-setup
 osx-next-cli gpu-setup --status   # read only
 osx-next-cli gpu-setup --undo     # put everything back
 ```
@@ -769,7 +768,7 @@ The OpenCore ISO is cached on disk and reused on every run. To pull a fresh copy
 osx-next-cli download --macos <version> --force
 ```
 
-In the TUI, tick **Force fresh download (ignore cached ISO)** on the Review step. Note this only refreshes the image for new installs; it does not modify the EFI of a VM you already created.
+In the TUI, switch the **Download** row under **More** on the New Mac screen to **On**. Note this only refreshes the image for new installs; it does not modify the EFI of a VM you already created.
 
 ---
 

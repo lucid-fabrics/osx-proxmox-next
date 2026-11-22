@@ -45,7 +45,7 @@ The command refuses to start if the VM is not running, or if the disk size canno
 
 ### TUI
 
-When the checkbox is ticked, the wizard spawns the driver as a detached process after the VM is created, so it keeps running when you close the TUI. Progress goes to a log file:
+When the **Install** row is on **Hands-off**, the build starts the driver as a detached process after the VM is created, so it keeps running when you close the TUI. Reopen osx-next and the Mac opens on the same Build screen. Progress goes to a log file:
 
 ```bash
 tail -f /var/log/osx-next-unattended-910.log

@@ -12,7 +12,7 @@ Common questions about OSX Proxmox Next that don't fall under troubleshooting.
 <details>
 <summary><strong>Can I run multiple macOS VMs at once?</strong></summary>
 
-Yes. Each VM gets its own VMID, SMBIOS identity, and disk. Run the wizard or CLI multiple times with different VMIDs. Smart caching means OpenCore and recovery images are downloaded once and reused across VM installs.
+Yes. Each VM gets its own VMID, SMBIOS identity, and disk. Press `n` in the TUI or run the CLI again with a different VMID. Smart caching means OpenCore and recovery images are downloaded once and reused across VM installs.
 
 ```bash
 osx-next-cli apply --execute --vmid 910 --name macos-dev --macos sequoia ...
@@ -26,7 +26,7 @@ Each VM needs its own CPU, RAM, and disk allocation. Don't overcommit host resou
 <details>
 <summary><strong>Can I use GPU passthrough?</strong></summary>
 
-Yes. Run `osx-next-cli gpu-setup` (or pick **GPU Passthrough** in the TUI). It scans your cards, shows the BIOS settings to change on a card you can photograph, configures the host with a preview, backup and undo, attaches the card to your VM and walks you through the first boot. See [GPU passthrough (guided)](gpu-passthrough.md).
+Yes. Run `osx-next-cli gpu-setup` (or press `g` on a Mac in the TUI). It scans your cards, shows the BIOS settings to change on a card you can photograph, configures the host with a preview, backup and undo, attaches the card to your VM and walks you through the first boot. See [GPU passthrough (guided)](gpu-passthrough.md).
 
 AMD Polaris, Vega and Navi 10, 14, 21 and 23 cards use Apple's own drivers. NVIDIA Turing and newer cards work in beta through the third-party NullMoth driver on macOS Sequoia 15.5+ and Tahoe 26, with core macOS security turned off. See [NVIDIA GPU (NullMoth, Beta)](nvidia-nullmoth.md).
 
