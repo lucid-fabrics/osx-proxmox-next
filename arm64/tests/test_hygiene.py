@@ -1,5 +1,5 @@
 """Tree hygiene: no references to private planning files, lab machines, plan ids or hard-coded lab paths, no em-dashes.
-vendor/ holds third-party sources and patches/ and docs/bench/ are records, so they are not scanned."""
+patches/ and docs/bench/ are records, so they are not scanned."""
 import os, re, sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -16,7 +16,7 @@ PATTERNS = {
 }
 bad = []
 for root, dirs, files in os.walk(HERE):
-    dirs[:] = [d for d in dirs if d not in (".git", "__pycache__", "vendor", "patches", "bench")]
+    dirs[:] = [d for d in dirs if d not in (".git", "__pycache__", "patches", "bench")]
     for n in files:
         p = os.path.join(root, n)
         if n == os.path.basename(__file__) or n.endswith((".pyc", ".img", ".bin")):

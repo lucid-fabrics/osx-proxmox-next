@@ -39,7 +39,7 @@ What is still open for 26B131:
 
 ## 4. Sources (SOLVED: shipped in this repository)
 
-The QEMU fork is the series in `patches/qemu/` on upstream QEMU v11.1.0 (a build fetches the tag from gitlab.com/qemu-project/qemu and applies them). reims-vgpu and metal2vulkan are vendored in `vendor/` at the exact commits the release is tested with (their upstream bases are no longer served, `vendor/README.md` has the details). Ambrosia is fetched from its upstream tag plus our three patches in `patches/ambrosia/`, and the Mesa fix is `patches/mesa-lavapipe-immutable-samplers.patch`. The reference binary md5 is in `pins.env`.
+The QEMU fork is the series in `patches/qemu/` on upstream QEMU v11.1.0 (a build fetches the tag from gitlab.com/qemu-project/qemu and applies them). reims-vgpu and metal2vulkan come as one release tarball at the exact commits the release is tested with, checked against a sha256 in `pins.env` before it is unpacked (their upstream bases are no longer served, `docs/RENDERER.md` has the details). Ambrosia is fetched from its upstream tag plus our three patches in `patches/ambrosia/`, and the Mesa fix is `patches/mesa-lavapipe-immutable-samplers.patch`. The reference binary md5 is in `pins.env`.
 
 ## 5. The golden (ssh-ready, tuned image) is automated since the golden step was automated
 

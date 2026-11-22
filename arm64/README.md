@@ -13,7 +13,7 @@ We ship no Apple code and no Apple files. You bring your own:
 
 `AVPBooter.vmapple2.bin` is no longer an input. Ambrosia (https://github.com/steelbrain/ambrosia, v0.1.3, GPL-2.0-or-later OR LGPL-3.0-or-later) replaces AVPBooter and iBoot, so no Apple boot file is run or needed. Our three small Ambrosia patches (optional config keys) are in `patches/ambrosia/` under the same license, and `snapintosh build` builds Ambrosia from the upstream tag plus those patches. The legacy `--fw avp` path still exists and then needs the AVPBooter file from your own Mac, which you must not redistribute. The install leaves Apple's boot code inside your own `aux.img`; Ambrosia does not run it.
 
-The QEMU fork is GPL and its source goes with any release. The series that makes it is in `patches/qemu/` and the renderer sources are in `vendor/`.
+The QEMU fork is GPL and its source goes with any release. The series that makes it is in `patches/qemu/` and the renderer sources come as one checksummed release tarball (`docs/RENDERER.md`).
 
 Apple's macOS license allows macOS virtual machines only on Apple-branded hardware. Running macOS on a PC is, by that license, not permitted. This project is research tooling: you are responsible for what you run and under which terms. Nothing here is legal advice.
 
@@ -160,7 +160,7 @@ Mac      once, to install macOS into a disk image (Apple silicon, Virtualization
 2. snapintosh build --deps               print the packages, install them. rustup comes first on a clean user
                                          (curl https://sh.rustup.rs | sh): build then fetches nightly-2026-11-03 and
                                          rust 1.99.1 by itself
-                                         (QEMU comes from upstream plus patches/qemu, the renderer from vendor/; set QEMU_REPO,
+                                         (QEMU comes from upstream plus patches/qemu, the renderer from the release tarball; set QEMU_REPO,
                                          REIMS_REPO or M2V_REPO to build from a clone of your own at the commit pinned in pins.env)
    snapintosh build                      reims-vgpu + metal2vulkan, the QEMU fork, then Ambrosia, into the prefix (4 min
                                          on 16 threads, 557 s on 6 shared threads; it prints a lot and is not hung)

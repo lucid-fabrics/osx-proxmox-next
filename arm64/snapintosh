@@ -265,7 +265,7 @@ usage: snapintosh <command> [options]
                              build reims-vgpu + metal2vulkan, the QEMU fork and Ambrosia (X: reims, qemu, ambrosia, mesa).
                              --pgo (opt-in, off by default): build QEMU with profile-guided optimisation and full LTO. It trains on a boot
                              of your golden, so it needs a working build and a golden first and takes about 50 minutes on 6 cores, up to 4 h at its bounds (README)
-  build --deps               print the Debian/Ubuntu packages and the cross toolchain the build needs
+  build --deps [--apt]       print the Debian/Ubuntu packages and the cross toolchain the build needs (--apt: package names only, one per line)
   fetch [--build B] [--url U [--sha256 H]] [--out D]
                              download the macOS 27 IPSW from Apple (resumable). The pinned builds are checked for size and sha256;
                              a --url file is checked for the size the server announces, and for the hash when you pass --sha256.
@@ -547,11 +547,15 @@ EOF
 clone_pin() {
   local name=$1 repo=$2 ref=$3 dest=$4 pdir=${5:-} f stamp
   [ -n "$repo" ] || die "${name}_REPO is not set: export ${name}_REPO=file:///path/to/clone (or a https or ssh URL) or put it in $CONF"
+  # a pin is a full commit id: a tag or branch name can move, an abbreviation can become ambiguous
+  [ "${#ref}" -eq 40 ] && [ -z "$(printf '%s' "$ref" | tr -d '0-9a-f')" ] || die "$name: the pin must be a full 40 digit commit id, got '$ref'"
   if [ ! -d "$dest/.git" ]; then
     mkdir -p "$dest"
     git -C "$dest" init --quiet
     git -C "$dest" remote add origin "$repo"
   fi
+  # a tree left by an earlier build may point at another repository: fetch from the one asked for now
+  git -C "$dest" remote set-url origin "$repo"
   # fetch the pinned commit alone first (small, and tolerates partial clones on the remote), else everything
   git -C "$dest" cat-file -e "$ref^{commit}" 2>/dev/null \
     || git -C "$dest" fetch --quiet --depth 1 origin "$ref" 2>/dev/null \
@@ -565,25 +569,47 @@ clone_pin() {
       for f in "$pdir"/*.patch; do git -C "$dest" apply --whitespace=nowarn "$f" || die "$name: patch does not apply: $f"; done
       printf '%s\n' "$stamp" > "$dest/.git/snapintosh-patched"
     fi
+    [ "$(git -C "$dest" rev-parse HEAD)" = "$ref" ] || die "$name: the checkout is at $(git -C "$dest" rev-parse HEAD), not at the pin $ref"
     set -- "$pdir"/*.patch
     ok "$name at $(git -C "$dest" rev-parse --short=12 HEAD) plus $# patches"
     return 0
   fi
   git -C "$dest" checkout --quiet --detach "$ref"
+  [ "$(git -C "$dest" rev-parse HEAD)" = "$ref" ] || die "$name: the checkout is at $(git -C "$dest" rev-parse HEAD), not at the pin $ref"
   ok "$name at $(git -C "$dest" rev-parse --short=12 HEAD)"
 }
 
-# vendor_pin NAME REPO REF DEST: the renderer sources. With no repository set the copy shipped in vendor/ is used (the pinned
-# commits, no history); a REPO from the environment or pins.env wins and is cloned like any other pin.
-vendor_pin() {
-  local name=$1 repo=$2 ref=$3 dest=$4 dir=$5
+# renderer_pin NAME REPO REF DEST DIR: the renderer sources. A REPO from the environment or pins.env is cloned like any other pin. With
+# no repository the tree comes from the release tarball RENDERER_URL (the pinned commits, no history, one archive for both trees):
+# downloaded once into $HOME_DIR/cache, checked against RENDERER_SHA256 before anything is read from it, and unpacked into $SRC.
+# A file that does not match the checksum is deleted and the build stops; nothing from it is ever extracted.
+renderer_pin() {
+  local name=$1 repo=$2 ref=$3 dest=$4 dir=$5 f part got bad
   if [ -n "$repo" ]; then clone_pin "$name" "$repo" "$ref" "$dest"; return; fi
-  [ -d "$ROOT/vendor/$dir" ] || die "$name: no vendor/$dir in $ROOT and ${name}_REPO is not set"
-  # a clone left by an earlier build with a ${name}_REPO is replaced; cp -a keeps mtimes so cargo does not rebuild
+  [ -n "${RENDERER_URL:-}" ] && [ "${#RENDERER_SHA256}" -eq 64 ] || die "$name: ${name}_REPO is not set and pins.env has no RENDERER_URL and RENDERER_SHA256"
+  case $RENDERER_SHA256 in *[!0-9a-f]*) die "$name: RENDERER_SHA256 must be 64 lowercase hex digits" ;; esac
+  f=$HOME_DIR/cache/renderer-$RENDERER_SHA256.tar.gz
+  if [ -f "$f" ] && [ "$(sha256sum "$f" | cut -d' ' -f1)" != "$RENDERER_SHA256" ]; then
+    warn "$name: the cached $f does not match RENDERER_SHA256, downloading it again"; rm -f "$f"
+  fi
+  if [ ! -f "$f" ]; then
+    mkdir -p "$HOME_DIR/cache"; part=$f.part.$$
+    info "$name: downloading $RENDERER_URL"
+    curl -fL -sS --retry 3 -o "$part" "$RENDERER_URL" || { rm -f "$part"; die "$name: download of $RENDERER_URL failed"; }
+    got=$(sha256sum "$part" | cut -d' ' -f1)
+    if [ "$got" != "$RENDERER_SHA256" ]; then rm -f "$part"; die "$name: checksum mismatch for $RENDERER_URL: got $got, want $RENDERER_SHA256 (nothing was unpacked)"; fi
+    mv "$part" "$f"
+  fi
+  if [ "$(cat "$dest/.renderer-sha256" 2>/dev/null)" = "$RENDERER_SHA256" ]; then ok "$name from the release tarball (already unpacked, pinned commit ${ref:0:12})"; return 0; fi
+  # members must stay inside their own tree: no absolute path, no .. and nothing outside $dir
+  bad=$(tar -tzf "$f" | grep -Ev '^(reims-vgpu|metal2vulkan)(/|$)' || true)
+  [ -z "$bad" ] || die "$name: the tarball holds paths outside reims-vgpu/ and metal2vulkan/: $(printf '%s' "$bad" | head -3 | tr '\n' ' ')"
+  tar -tzf "$f" | grep -q '\.\./' && die "$name: the tarball holds a path with .. in it"
+  mkdir -p "$SRC"
   rm -rf "$dest"
-  mkdir -p "$(dirname "$dest")"
-  cp -a "$ROOT/vendor/$dir" "$dest" || die "$name: could not copy vendor/$dir"
-  ok "$name from vendor/$dir (pinned commit ${ref:0:12})"
+  tar -xzf "$f" -C "$SRC" --no-same-owner "$dir" || die "$name: could not unpack $dir from the tarball"
+  printf '%s\n' "$RENDERER_SHA256" > "$dest/.renderer-sha256"
+  ok "$name from the release tarball (pinned commit ${ref:0:12})"
 }
 
 preflight_build() { # tools...
@@ -666,8 +692,8 @@ SNAPINTOSH_NO_REPRO=1 (the Rust half then depends on the directory, so the binar
 build_reims() {
   if repro_ns_ok; then repro_mnt_check; fi   # first: a hidden path used to fail the build after 53 s
   mkdir -p "$SRC" "$BUILD"
-  vendor_pin M2V "$M2V_REPO" "$M2V_REF" "$SRC/metal2vulkan" metal2vulkan
-  vendor_pin REIMS "$REIMS_REPO" "$REIMS_REF" "$SRC/reims-vgpu" reims-vgpu
+  renderer_pin M2V "$M2V_REPO" "$M2V_REF" "$SRC/metal2vulkan" metal2vulkan
+  renderer_pin REIMS "$REIMS_REPO" "$REIMS_REF" "$SRC/reims-vgpu" reims-vgpu
   preflight_build cargo rustc clang ld.lld lld-link make cmake || return 1
   info "building reims-vgpu dist (vulkan) with metal2vulkan; first run downloads nightly-2026-11-03 and crates"
   repro_flags

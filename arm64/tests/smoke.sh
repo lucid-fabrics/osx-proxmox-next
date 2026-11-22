@@ -36,7 +36,7 @@ t sshd-interactive-note bash -c "'$S' make-disk sshd-interactive | grep -q Proce
 t quiet-note bash -c "'$S' make-disk quiet | grep -q apply-quiet.sh"
 t install-not-yet bash -c "'$S' install 2>&1 | grep -q 'Mac-free install is not in this beta build yet'; [ \$('$S' install >/dev/null 2>&1; echo \$?) -eq 3 ]"
 t build-needs-repo bash -c "! '$S' build --only qemu 2>&1 | grep -q 'unexpected'; REIMS_REPO=file:///nonexistent M2V_REPO=file:///nonexistent '$S' build --only reims 2>&1 | grep -q 'is not in'"
-t vendor-trees bash -c ". '$HERE/pins.env'; [ -z \"\$REIMS_REPO\" ] && [ -z \"\$M2V_REPO\" ] && [ -f '$HERE/vendor/reims-vgpu/Cargo.toml' ] && [ -f '$HERE/vendor/metal2vulkan/Cargo.toml' ] && grep -q \"\$REIMS_REF\" '$HERE/vendor/README.md' && grep -q \"\$M2V_REF\" '$HERE/vendor/README.md'"
+t renderer-pin bash -c ". '$HERE/pins.env'; [ -z \"\$REIMS_REPO\" ] && [ -z \"\$M2V_REPO\" ] && [ \${#RENDERER_SHA256} -eq 64 ] && case \$RENDERER_URL in https://*) ;; *) exit 1 ;; esac && [ ! -e '$HERE/vendor' ] && grep -q \"\$REIMS_REF\" '$HERE/docs/RENDERER.md' && grep -q \"\$M2V_REF\" '$HERE/docs/RENDERER.md'"
 
 # import: synthetic bundle (random bytes, a real machineid plist)
 B=$T/bundle; mkdir -p "$B"
