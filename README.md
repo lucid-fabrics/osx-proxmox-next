@@ -497,7 +497,7 @@ NVIDIA support relies on NullMoth, a community driver tested by its own communit
 
 ### Updating the driver
 Press `g` on a Mac that has a card: the Driver row shows what is installed and what is newer, and enter updates it after one approval (a snapshot is saved first).
-`r` undoes the driver update. The shell does the same, and the [guide](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough#updating-the-driver) has the detail per card.
+`r` undoes the driver update. The Intel update is beta. The shell does the same, and the [guide](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough#updating-the-driver) has the detail per card.
 ```bash
 osx-next-cli driver-status --vmid 101                    # installed, newest, snapshots; driver-update updates (--dry-run previews)
 osx-next-cli driver-undo --vmid 101                      # undo the driver update (osx-proxmox-next.sh has all three commands too)
