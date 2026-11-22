@@ -274,7 +274,7 @@ osx-next-cli driver-status --vmid 101
 # Update the graphics driver of a Mac that has a card (snapshot first)
 osx-next-cli driver-update --vmid 101
 
-# Put the Mac back to the snapshot of its last driver update
+# Undo the last driver update (the Mac goes back to its driver snapshot)
 osx-next-cli driver-undo --vmid 101
 
 # BETA: hands-off install - run right after apply --execute; erases the new
@@ -496,19 +496,12 @@ Laptop NVIDIA GPUs are not supported: the scan marks them "not supported (laptop
 NVIDIA support relies on NullMoth, a community driver tested by its own community: this tool downloads the driver, verifies it and installs it for you, but we take no responsibility for the driver or its install. AMD cards and the host setup steps (kernel command line, vfio binding, host reboot) are covered by tests but not yet tried on real hardware. Full guide with the supported-cards matrix and a page per BIOS vendor: [GPU passthrough (guided)](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough).
 
 ### Updating the driver
-
-A Mac that already has a card can get a newer driver without setting the card up again. For an NVIDIA card that is NullMoth inside macOS, for an Intel iGPU it is WhateverXe and its graphics package, and for an AMD card it is Lilu and WhateverGreen on the OpenCore disk, updated to the versions this release pins (macOS ships the AMD driver itself). In the TUI, press `g` on the Mac: the Driver line shows what is installed and what is available, `←` and `→` pick another release, and enter updates after one approval.
-
+Press `g` on a Mac that has a card: the Driver row shows what is installed and what is newer, and enter updates it after one approval (a snapshot is saved first).
+`r` undoes the driver update. The shell does the same, and the [guide](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough#updating-the-driver) has the detail per card.
 ```bash
-osx-next-cli driver-status --vmid 101                    # what is installed, what is newer, your safety snapshots
-osx-next-cli driver-update --vmid 101 --dry-run          # show the plan and change nothing
-osx-next-cli driver-update --vmid 101                    # update to the latest
-osx-next-cli driver-update --vmid 101 --version v2.8.1   # NVIDIA: pick a NullMoth release (Intel: --wex-version, --graphics-version)
-osx-next-cli driver-undo --vmid 101                      # put the Mac back to the snapshot of the last update
-osx-proxmox-next.sh driver-update 101                    # the same from the standalone installer
+osx-next-cli driver-status --vmid 101                    # installed, newest, snapshots; driver-update updates (--dry-run previews)
+osx-next-cli driver-undo --vmid 101                      # undo the driver update (osx-proxmox-next.sh has all three commands too)
 ```
-
-The Mac stops for about 10 minutes for NVIDIA and Intel and about 1 minute for AMD. A snapshot is saved first, and `driver-undo` (or `u` in the TUI) rolls the Mac back to it. Details: [Updating the driver](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/gpu-passthrough#updating-the-driver).
 
 ---
 
@@ -782,7 +775,7 @@ Avoid changing the SMBIOS model to dodge the warning if you already have iCloud/
 
 ### How do I update the NVIDIA, Intel or AMD driver?
 
-Press `g` on the Mac in the TUI and press enter on the Driver line, or run `osx-next-cli driver-update --vmid <id>`. It saves a snapshot first, so `osx-next-cli driver-undo --vmid <id>` can put the Mac back. See [Updating the driver](#updating-the-driver).
+Press `g` on the Mac in the TUI and press enter on the Driver line, or run `osx-next-cli driver-update --vmid <id>`. It saves a snapshot first, so `r` in the TUI (or `osx-next-cli driver-undo --vmid <id>`) can undo the driver update. See [Updating the driver](#updating-the-driver).
 
 ### My desktop wallpaper is white or blank
 
