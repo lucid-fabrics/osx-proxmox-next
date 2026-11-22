@@ -73,7 +73,7 @@ def test_the_ssh_key_goes_through_a_private_file_because_qm_reads_a_path():
     cloud = by_title(steps, "Set up cloud-init").argv
     assert cloud[cloud.index("--sshkeys") + 1] == "/var/lib/vz/snippets/osx-next-arm64-478.pub"
     write = by_title(steps, "Write the SSH key file")
-    assert write.argv[4:] == [KEY, key_path(478)] and "umask 077" in write.argv[2]
+    assert write.argv[4:] == [KEY, key_path(478)] and "install -m 600" in write.argv[2]
     assert titles(steps).index("Write the SSH key file") < titles(steps).index("Set up cloud-init")
     plain = build_arm64_plan(cfg())
     assert "--sshkeys" not in by_title(plain, "Set up cloud-init").argv and "Write the SSH key file" not in titles(plain)
@@ -173,3 +173,8 @@ def test_destroy_purges_the_vm_and_removes_what_the_plan_left():
 def test_destroy_refuses_a_vmid_out_of_range(vmid):
     with pytest.raises(ValueError, match="VMID"):
         build_arm64_destroy_plan(vmid)
+
+
+def test_the_setup_script_traps_errors_in_functions_and_checks_the_rustup_download():
+    script = render_setup_script(cfg())
+    assert "set -Eeuo pipefail" in script and "set -o pipefail; curl -fsSL https://sh.rustup.rs" in script

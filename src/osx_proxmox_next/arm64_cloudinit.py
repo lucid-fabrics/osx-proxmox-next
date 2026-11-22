@@ -20,7 +20,7 @@ SETUP_PATH = "/usr/local/sbin/osx-next-arm64-setup"
 _SETUP = """\
 #!/bin/bash
 # Written by osx-proxmox-next for the macOS 27 arm64 (beta) runner. Progress: {status}, log: {log}.
-set -euo pipefail
+set -Eeuo pipefail
 export HOME=/root   # systemd-run starts this without one, and snapintosh refuses to run without it
 exec >>{log} 2>&1
 mkdir -p "$(dirname {status})"
@@ -40,7 +40,7 @@ apt-get update
 packages=$({snap} build --deps --apt)
 [ -n "$packages" ] || {{ echo "snapintosh listed no packages" >&2; exit 1; }}
 apt-get install -y --no-install-recommends $packages
-as_user 'command -v rustup >/dev/null || curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal'
+as_user 'command -v rustup >/dev/null || {{ set -o pipefail; curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal; }}'
 
 say building
 as_user {snap} build -j "$(nproc)"

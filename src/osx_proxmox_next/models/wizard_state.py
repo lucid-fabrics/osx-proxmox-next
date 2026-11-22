@@ -161,17 +161,20 @@ def validate_arm64_new_mac(
     """(errors by row key in screen order, the Arm64Config when there are none), for the arm64 (beta) choice."""
     cores, memory_mb, disk = effective_size(state, presets)
     errors: dict[str, str] = {}
-    if not (cores.isdigit() and memory_mb.isdigit() and disk.isdigit() and state.vmid.strip().isdigit()
-            and (not state.vlan.strip() or state.vlan.strip().isdigit())):
+    def number(text: str) -> bool:
+        return text.isascii() and text.isdigit()
+
+    vmid, vlan = state.vmid.strip(), state.vlan.strip()
+    if not (number(cores) and number(memory_mb) and number(disk) and number(vmid) and (not vlan or number(vlan))):
         for key, value in (("cores", cores), ("memory", memory_mb), ("disk", disk), ("vmid", state.vmid.strip())):
-            if not value.isdigit():
+            if not number(value):
                 errors[key] = f"{key.capitalize()} must be a whole number."
-        if state.vlan.strip() and not state.vlan.strip().isdigit():
+        if vlan and not number(vlan):
             errors["vlan"] = "VLAN must be a whole number."
         return errors, None
     config = Arm64Config(
-        vmid=int(state.vmid), name=state.name.strip(), storage=state.storage.strip(), cores=int(cores),
-        memory_mb=int(memory_mb), disk_gb=int(disk), bridge=state.bridge.strip(), vlan=int(state.vlan or 0),
+        vmid=int(vmid), name=state.name.strip(), storage=state.storage.strip(), cores=int(cores),
+        memory_mb=int(memory_mb), disk_gb=int(disk), bridge=state.bridge.strip(), vlan=int(vlan or 0),
     )
     for issue in validate_arm64_config(config):
         for pattern, row in _ARM64_ISSUE_ROWS:

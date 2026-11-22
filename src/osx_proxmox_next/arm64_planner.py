@@ -44,7 +44,7 @@ pvesm status --content snippets | awk 'NR > 1 { print $1 }' | grep -qx "$1" \\
 """
 
 _WRITE_FILE = 'set -euo pipefail\nprintf "%s" "$1" > "$2"\n'
-_WRITE_PRIVATE = 'set -euo pipefail\numask 077\nprintf "%s\\n" "$1" > "$2"\n'
+_WRITE_PRIVATE = 'set -euo pipefail\nprintf "%s\\n" "$1" | install -m 600 /dev/stdin "$2"\n'
 
 
 def snippet_path(vmid: int) -> str:

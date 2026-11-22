@@ -179,3 +179,10 @@ async def test_a_crash_in_the_worker_is_shown_not_swallowed(monkeypatch):
         log = "\n".join(line.text for line in screen.query_one("#arm64-log").lines)
         assert not screen.ok and "Unexpected error: no qm here" in log and "Stopped." in log
 
+
+
+def test_blank_and_non_ascii_digits_are_errors_not_crashes():
+    errors, config = validate_arm64_new_mac(state(vlan="  ", vmid="\u00b2"), presets())
+    assert config is None and "vmid" in errors
+    errors, config = validate_arm64_new_mac(state(vlan="  "), presets())
+    assert errors == {} and config.vlan == 0
