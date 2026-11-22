@@ -604,7 +604,8 @@ renderer_pin() {
   # members must stay inside their own tree: no absolute path, no .. and nothing outside $dir
   bad=$(tar -tzf "$f" | grep -Ev '^(reims-vgpu|metal2vulkan)(/|$)' || true)
   [ -z "$bad" ] || die "$name: the tarball holds paths outside reims-vgpu/ and metal2vulkan/: $(printf '%s' "$bad" | head -3 | tr '\n' ' ')"
-  tar -tzf "$f" | grep -q '\.\./' && die "$name: the tarball holds a path with .. in it"
+  bad=$(tar -tzf "$f" | grep -E '(^|/)\.\.(/|$)' || true)
+  [ -z "$bad" ] || die "$name: the tarball holds a path with .. in it: $(printf '%s' "$bad" | head -1)"
   mkdir -p "$SRC"
   rm -rf "$dest"
   tar -xzf "$f" -C "$SRC" --no-same-owner "$dir" || die "$name: could not unpack $dir from the tarball"

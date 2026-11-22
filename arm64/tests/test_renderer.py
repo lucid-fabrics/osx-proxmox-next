@@ -92,6 +92,11 @@ make_tar(bad2, extra=["/abs/escape"])
 rc, out = build(T + "/h5", RENDERER_URL="file://" + bad2, RENDERER_SHA256=sha(bad2))
 check("absolute-path-is-refused", rc != 0 and "outside" in out, out)
 
+bad3 = T + "/bad3.tar.gz"
+make_tar(bad3, extra=["reims-vgpu/../../escape2", "metal2vulkan/sub/.."])
+rc, out = build(T + "/h5b", RENDERER_URL="file://" + bad3, RENDERER_SHA256=sha(bad3))
+check("dotdot-inside-a-tree-is-refused", rc != 0 and "with .. in it" in out and not os.path.exists(T + "/escape2"), out)
+
 # 5. no download and no repository: a malformed or missing checksum is refused
 rc, out = build(T + "/h6", RENDERER_URL="file://" + good, RENDERER_SHA256="abc")
 check("short-checksum-refused", rc != 0 and "RENDERER_SHA256" in out, out)
