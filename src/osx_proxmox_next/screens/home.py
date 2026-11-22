@@ -15,6 +15,7 @@ from textual.widgets import Static
 
 from .. import host_setup
 from ..defaults import default_disk_gb, detect_cpu_cores, detect_memory_mb
+from .. import driver_check
 from ..services import VmRecord, list_macos_vm_records
 from ..services.detection_service import detect_storage_free_gb
 from ..services.unattended_service import DriverState, read_driver_state
@@ -34,6 +35,7 @@ GRID_GAP = 2
 COMPACT_BELOW = 64
 HOME_REFRESH_SECONDS = 10
 THUMB_REFRESH_SECONDS = 5
+DRIVER_MARK = "\u25cf driver update"
 
 
 def status_line(record: VmRecord, driver: DriverState | None, now: float | None = None,
@@ -53,9 +55,11 @@ def status_line(record: VmRecord, driver: DriverState | None, now: float | None 
 class VmCard(Widget, can_focus=True):
     """One Mac: thumbnail, name, VM ID and a status line. The focused card is the selected one."""
 
-    def __init__(self, record: VmRecord, driver: DriverState | None, compact: bool, name_width: int = 0) -> None:
+    def __init__(self, record: VmRecord, driver: DriverState | None, compact: bool, name_width: int = 0,
+                 update: bool = False) -> None:
         super().__init__(id=f"vm-{record.vmid}")
         self.record = record
+        self.update = update
         self.driver = driver
         self.compact = compact
         self.name_width = name_width
@@ -94,7 +98,11 @@ class VmCard(Widget, can_focus=True):
         glyph, label = status_line(self.record, self.driver, shutdown=self._shutdown())
         text = Text(glyph + " ", style=self._tone(glyph))
         text.append(label, style="" if glyph != "\u25cb" else pal["muted"])
-        text.append(self._facts_tail(glyph), style=pal["muted"])
+        if self.update:   # the card is narrow: the marker takes the place of the cores and memory
+            text.append(" \u00b7 ", style=pal["muted"])
+            text.append(DRIVER_MARK, style=pal["accent"])
+        else:
+            text.append(self._facts_tail(glyph), style=pal["muted"])
         return text
 
     def _compact_line(self) -> Text:
@@ -108,6 +116,8 @@ class VmCard(Widget, can_focus=True):
         text.append(f"{self.record.vmid:<5}  ", style=pal["muted"])
         text.append(label, style=self._tone(glyph))
         text.append(self._facts_tail(glyph), style=pal["muted"])
+        if self.update:
+            text.append("   " + DRIVER_MARK, style=pal["accent"])
         return text
 
     def _repaint_compact(self) -> None:
@@ -124,8 +134,8 @@ class VmCard(Widget, can_focus=True):
     def on_blur(self) -> None:
         self._repaint_compact()
 
-    def update_record(self, record: VmRecord, driver: DriverState | None) -> None:
-        self.record, self.driver = record, driver
+    def update_record(self, record: VmRecord, driver: DriverState | None, update: bool = False) -> None:
+        self.record, self.driver, self.update = record, driver, update
         if not self.compact:
             facts = record.facts
             self.query_one(LiveScreen).set_state(record.status, facts.display_on_gpu)
@@ -192,6 +202,7 @@ class HomeScreen(VmActionScreen):
         super().__init__()
         self.records: list[VmRecord] = []
         self.drivers: dict[int, DriverState] = {}
+        self.updates: set[int] = set()   # Macs with a newer driver known (from local files)
         self.compact_override: bool | None = None
         self.loaded = False
         self.resume_text = ""
@@ -213,6 +224,16 @@ class HomeScreen(VmActionScreen):
     def on_mount(self) -> None:
         self.refresh_now()
         self.set_interval(HOME_REFRESH_SECONDS, self.refresh_now)
+        self.run_worker(self._check_drivers, thread=True, group="driver-check", exit_on_error=False)
+
+    def _check_drivers(self) -> None:
+        """Once a day, in the background: ask which driver releases are newest. Never blocks the screen."""
+        try:
+            vmids = [r.vmid for r in list_macos_vm_records()]
+            if driver_check.refresh_if_due(vmids):
+                self.app.call_from_thread(self.refresh_now)
+        except Exception:  # noqa: BLE001 - the marker is a courtesy
+            log.debug("driver check failed", exc_info=True)
 
     def on_screen_resume(self) -> None:
         self.refresh_now()
@@ -236,6 +257,7 @@ class HomeScreen(VmActionScreen):
         except Exception:  # noqa: BLE001
             free = {}
         resume = self._resume_text(records)
+        self.updates = {r.vmid for r in records if driver_check.has_update(r.vmid)}
         try:
             self.app.call_from_thread(self._show, records, drivers, free, resume, listed)
         except Exception:  # noqa: BLE001 - closing
@@ -272,7 +294,7 @@ class HomeScreen(VmActionScreen):
             for card in self.query(VmCard):
                 rec = next((r for r in records if r.vmid == card.record.vmid), None)
                 if rec is not None:
-                    card.update_record(rec, drivers.get(rec.vmid))
+                    card.update_record(rec, drivers.get(rec.vmid), rec.vmid in self.updates)
         else:
             await self._rebuild(keep)
         self._update_texts()
@@ -290,7 +312,7 @@ class HomeScreen(VmActionScreen):
         await grid.remove_children()
         compact = self._compact()
         width = max((len(r.name) for r in self.records), default=0)
-        cards = [VmCard(r, self.drivers.get(r.vmid), compact, width) for r in self.records]
+        cards = [VmCard(r, self.drivers.get(r.vmid), compact, width, r.vmid in self.updates) for r in self.records]
         grid.set_class(compact, "compact")
         if cards:
             await grid.mount(*cards)

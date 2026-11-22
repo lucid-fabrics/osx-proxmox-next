@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from ..driver_plan import card_setup_waiting
 from ..services import VmRecord, get_proxmox_adapter
 from .base import OsxScreen
 from .dialogs import EditDialog, RemoveDialog, StopDialog
@@ -128,4 +129,8 @@ class VmActionScreen(OsxScreen):
 
     def action_gpu(self) -> None:
         record = self.current_record()
+        if record is not None and record.facts.has_gpu and not card_setup_waiting(record.vmid):
+            from .driver import DriverScreen     # a Mac with a card: its driver, not the choice of a card
+            self.app.push_screen(DriverScreen(record.vmid, record.name))
+            return
         self.app.action_gpu(record.vmid if record else None)

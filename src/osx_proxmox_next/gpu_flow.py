@@ -235,6 +235,8 @@ class Before:
     notice_body: str = ""
     phrase: bool = False       # "I understand" is typed
     nvidia: bool = False       # the NVIDIA acknowledgement is typed
+    phrase_text: str = ""      # the phrase typed when `phrase` is set (empty: "I understand")
+    go_label: str = ""         # the label of the approve button (empty: "Set it up")
 
     @property
     def empty(self) -> bool:
