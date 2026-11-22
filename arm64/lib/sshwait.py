@@ -1,8 +1,8 @@
-"""Patient ssh readiness wait (S5, S6).
+"""Patient ssh readiness wait.
 
 A booting macOS guest answers ssh late and slowly: while the login session starts all vCPUs are busy and the sshd banner can
 take 10 to 30 s. A try that is killed after 6 to 25 s abandons a login that is still in progress, and the guest then spends its
-scarce CPU on the next sshd-session and sshd-auth. S5 measured 7 of 14 boots at 95-108 s with short tries against 0 of 14 with
+scarce CPU on the next sshd-session and sshd-auth. A measurement showed 7 of 14 boots at 95-108 s with short tries against 0 of 14 with
 one patient try, and under host load a login after 21-27 s against none in 420 s. So: one connection attempt in flight, started
 at first_at seconds after t_ref, ConnectTimeout 120, and a try is never killed before the overall deadline.
 

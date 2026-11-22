@@ -238,7 +238,7 @@ class GuestClock:
     """A guest clock reader that costs one line per sample. Spawning `perl` over ssh for every sample (g_read) costs a login
     shell, an exec and a session teardown, which take seconds while the guest catches up after a resume (load average 500 on
     6 threads) and 0.7 s when it is idle; the guest reads its clock somewhere in that time, so the sample is biased by up to half of it
-    (R28: spawn rtt 1.3 s read +0.65 s while a line to a running perl, rtt 6 ms, read -0.005 s at the same moment: the clock was right and
+    (spawn rtt 1.3 s read +0.65 s while a line to a running perl, rtt 6 ms, read -0.005 s at the same moment: the clock was right and
     the old check called it off). Here one perl runs in the guest for the whole check and answers each line with its time.
     sample() returns (rtt, guest minus host) or None; step(host_time) sets the guest clock with settimeofday (sub-second)."""
 
@@ -354,7 +354,7 @@ def g_step(ssh, lat):
 
 
 def clock_step(ssh, tries=4, want=0.4):
-    """Q3: put the guest clock on host time before a save (a guest that was never stepped is some seconds off, and the counter
+    """put the guest clock on host time before a save (a guest that was never stepped is some seconds off, and the counter
     advance of the next resume carries that error). Readings and the step go through one running perl in the guest (GuestClock);
     only when that gives nothing at all, spawned `date` steps (g_step) with the delay learned from the reading before."""
     gc = GuestClock(ssh)
@@ -398,7 +398,7 @@ def parse_ppm(data):
 def colour_counts(w, h, px):
     """(full, edge). full: distinct colours of a sparse sample of the whole screen (a good desktop 1100 to 1500, a black
     wallpaper under the Dock and widgets about 100). edge: distinct colours of the two side columns (2.5 % wide each, between
-    the menu bar and the Dock), the larger of the two. S7: a Safari window covering most of the screen leaves full at 317 to 365
+    the menu bar and the Dock), the larger of the two. a Safari window covering most of the screen leaves full at 317 to 365
     although the desktop is drawn, but the side columns stay uncovered, show only wallpaper (5000 to 11000 colours drawn, 1 to
     23 black) and the Dock, widgets and windows never reach them."""
     full = len(set(px[i:i + 3] for i in range(0, len(px), 3 * 997)))
@@ -452,8 +452,8 @@ def screen_colours(q, path):
 
 
 def crash_page(w, h, px):
-    """R29 (c05 of the first live soak): WebKit's web-process error page ("A problem repeatedly occurred" with a Reload button, left
-    by the Q1 GPU watchdog loop) has a window, a stable page process and a quiet guest, so only the picture tells it from a page.
+    """A live soak showed: WebKit's web-process error page ("A problem repeatedly occurred" with a Reload button, left
+    by the GPU watchdog loop) has a window, a stable page process and a quiet guest, so only the picture tells it from a page.
     Signature (tools/q1/scan.py, 1440x1080, scaled to any size): the middle of the window is one flat light grey (246 +-6) over more than
     80 percent, and the Reload button's blue (r < 150, 120 < g < 210, b > 235) sits at the centre of the screen, more than 100 of 3200
     sampled pixels there."""
@@ -506,7 +506,7 @@ def open_in_guest(ssh, app, url):
 
 
 def app_gate(ssh, app, required, q=None, rundir=None, reopen=None):
-    """R29 (S9 bug 2): do not save a snapshot of an app that never drew. When APP is running (or --app / --open named it) its window
+    """do not save a snapshot of an app that never drew. When APP is running (or --app / --open named it) its window
     must be on screen, and for Safari its page process must have stayed up; wait for that at most APPWAIT seconds (default 180). A Safari that shows WebKit's error page (picture check, crash_page) is not on screen either; with --open the page is opened again.
     A miss refuses the save (returns APP_REFUSED, nothing is written, an older snapshot stays) when the app was named, else warns.
     A guest that cannot say (osascript failing) is reported and never blocks. APPWAIT=0 turns the check off."""
@@ -528,12 +528,12 @@ def app_gate(ssh, app, required, q=None, rundir=None, reopen=None):
                 state, detail = "not-ready", "Safari shows its 'A problem repeatedly occurred' page"
                 if reopen and time.time() - last_reopen >= 45:
                     last_reopen = time.time()
-                    print("SAVE: Safari shows the error page left by the WebKit watchdog loop (Q1); opening the page again", flush=True)
+                    print("SAVE: Safari shows the error page left by the WebKit watchdog loop; opening the page again", flush=True)
                     reopen()
         if state != "unknown":
             answered = detail
         if state == "ready":
-            # seen on the guest (R29): a ready moment between two restarts of the page process; only a state that holds counts
+            # seen on the guest: a ready moment between two restarts of the page process; only a state that holds counts
             first_ready = first_ready or time.time()
             if time.time() - first_ready >= stable:
                 print("SAVE: %s is on screen (%s) after %d s, ready for %d s" % (app, detail, time.time() - t0, time.time() - first_ready), flush=True)
@@ -563,10 +563,10 @@ def app_gate(ssh, app, required, q=None, rundir=None, reopen=None):
 
 
 def wallpaper_wait(q, rundir):
-    """R10c: on a slow host (6 cores) the wallpaper is drawn 3 to 4 minutes after boot, later than ssh plus the settle, and a
-    snapshot saved before it resumes with a black desktop (2 of 9 resumes in R10c). Wait, at most WALLWAIT seconds (default
+    """on a slow host (6 cores) the wallpaper is drawn 3 to 4 minutes after boot, later than ssh plus the settle, and a
+    snapshot saved before it resumes with a black desktop (2 of 9 resumes). Wait, at most WALLWAIT seconds (default
     300, 0 turns it off), until the desktop is drawn (drawn(): more than 500 colours on the sparse sample, or the side columns
-    show the wallpaper; R18: a large Safari window used to hold the first test below 500 for the whole WALLWAIT)."""
+    show the wallpaper; a large Safari window used to hold the first test below 500 for the whole WALLWAIT)."""
     limit = float(os.environ.get("WALLWAIT", "300"))
     if limit <= 0:
         return 0.0
@@ -658,7 +658,7 @@ def _save(d, name, rundir, qemu, cpus, ram, extra, gpu, port, key, settle, pre):
     q = Qmp(rundir + "/qmp.sock")
     print("SAVE: step 1 of 4: waiting for the guest to boot until ssh answers (a boot takes 1 to 3 minutes; nothing is hung)", flush=True)
     t = time.time()
-    # S6: one patient try at a time (lib/sshwait.py), the first at 45 s; a short try abandons a login that is still in progress
+    # one patient try at a time (lib/sshwait.py), the first at 45 s; a short try abandons a login that is still in progress
     # alive: the wait ends the moment QEMU is gone (it used to retry "connection refused" until SAVE_SSH_WAIT, an hour)
     r, _ = sshwait().wait_ssh(ssh, "true", time.time() + float(os.environ.get("SAVE_SSH_WAIT", "3600")),
                               first_at=float(os.environ.get("SAVE_SSH_FIRST", "45")), t_ref=t_start, alive=lambda: qemu_alive(rundir))
@@ -671,7 +671,7 @@ def _save(d, name, rundir, qemu, cpus, ram, extra, gpu, port, key, settle, pre):
     print("SAVE: ssh answered %d s after QEMU started" % T["boot_to_ssh_s"], flush=True)
     if pre:
         subprocess.run(ssh + [pre], capture_output=True)
-    # R29: one multiplexed connection for the app steps and the clock step (see below); ControlMaster=auto starts it when first used
+    # one multiplexed connection for the app steps and the clock step (see below); ControlMaster=auto starts it when first used
     ctl = rundir + "/ssh.ctl"
     ssh_c = ssh[:1] + ["-o", "ControlMaster=auto", "-o", "ControlPersist=120"] + sshwait().opt("ControlPath", ctl) + ssh[1:]
     app, required, url = save_app_options()
@@ -681,8 +681,8 @@ def _save(d, name, rundir, qemu, cpus, ram, extra, gpu, port, key, settle, pre):
     t = time.time()
     time.sleep(float(settle))
     T["settle_s"] = round(time.time() - t, 1)
-    # R18: the clock step used a new ssh login per command; with Safari still loading each login took seconds and the step ran 18 to
-    # 57 s (S7 bug 3, cycles 5, 8, 10). One multiplexed connection, as settime uses, makes every command a round trip on a live session.
+    # the clock step used a new ssh login per command; with Safari still loading each login took seconds and the step ran 18 to
+    # 57 s. One multiplexed connection, as settime uses, makes every command a round trip on a live session.
     T["wallpaper_wait_s"] = round(wallpaper_wait(q, rundir), 1)
     t = time.time()
     ga = guestapp()
@@ -771,12 +771,12 @@ def settime(rundir, port, key, limit="0.5", budget=None):
     """after a resume: wait for ssh, put the guest clock on the host clock, check it, record the timings in
     rundir/resume.json (ssh_s = seconds from cont to the first ssh answer, diff_s = guest minus host after the step).
     The guest clock is read through one running perl (GuestClock), never one spawned process per reading: while the guest
-    catches up a spawn takes seconds and its reading is biased by half of that (R28: "off by 1.15 s" with the clock at -0.005 s).
+    catches up a spawn takes seconds and its reading is biased by half of that ("off by 1.15 s" with the clock at -0.005 s).
     A reading counts only when its round trip is at most half the limit; slower ones are dropped and sampling goes on, since the
     guest gets quicker as it settles. A guest outside the limit is stepped (settimeofday in that perl, sub-second) and read again,
     until it is within the limit or the budget is used up; every sample is logged in rundir/settime.samples.
     A snapshot older than SYNCMAXAGE is resumed without the counter advance (the overdue work of a long gap makes ssh slow);
-    a younger one gets sync-clock-on-load and is already right here (Q3).
+    a younger one gets sync-clock-on-load and is already right here.
     The whole thing, ssh wait included, has one budget (BUDGET seconds, default SETTIME_TIMEOUT or 120); the CLI's `timeout`
     around this helper is longer than that, so the helper always ends on its own and closes its ssh master."""
     end = time.time() + float(budget or os.environ.get("SETTIME_TIMEOUT", "120"))
@@ -826,7 +826,7 @@ def settle_clock(make, r, limit, end, log, fallback=None):
 
 
 def banner_probe(port, t_cont, out, stop):
-    """R29 (S9 bug 4): split "ssh answered N s after cont" into the guest's sshd saying hello (the TCP banner) and the login behind it. A
+    """split "ssh answered N s after cont" into the guest's sshd saying hello (the TCP banner) and the login behind it. A
     probe that connects to the forwarded port and reads the first bytes: slirp forwards to the guest, so SSH- arrives only when the guest's
     sshd is up. Records out["banner_s"] (seconds after cont) once; gives up when stop is set. One short connection per second at most."""
     while not stop.is_set():
@@ -845,7 +845,7 @@ def banner_probe(port, t_cont, out, stop):
 
 
 def banner_note(r):
-    """" (sshd banner after B s, login took L s more)" when the probe heard the guest's sshd first, else "" (R29, S9 bug 4)"""
+    """" (sshd banner after B s, login took L s more)" when the probe heard the guest's sshd first, else """""
     b = r.get("ssh_banner_s")
     if b is None or b >= r["ssh_s"]:
         return ""
@@ -857,7 +857,7 @@ def _settime(rundir, base, limit, end):
     r = json.load(open(rundir + "/resume.json"))
     probe, stop = {}, threading.Event()
     threading.Thread(target=banner_probe, args=(base[base.index("-p") + 1], r["t_cont"], probe, stop), daemon=True).start()
-    # S6: one patient try at a time, never killed before the deadline (a short try abandons a login in progress)
+    # one patient try at a time, never killed before the deadline (a short try abandons a login in progress)
     w, _ = sshwait().wait_ssh(base, "true", end, interval=1, alive=lambda: qemu_alive(rundir))
     if w is None:
         print("SETTIME: ssh never answered"); return 1
@@ -962,7 +962,7 @@ def newest_write(path):
 
 
 def reap(runs, orphans, *dead):
-    """R29 (S9 bug 1): a snapintosh that was SIGKILLed during a save leaves `.stage-*` (the RAM, 4 GiB) and perhaps `.old-*` in SNAPS.
+    """a snapintosh that was SIGKILLed during a save leaves `.stage-*` (the RAM, 4 GiB) and perhaps `.old-*` in SNAPS.
     Those of a run in DEAD (run dir names the CLI proved dead) go; so do orphans, the ones whose run dir is gone and that nothing wrote
     to for LEFTOVER_QUIET_S, but only when ORPHANS is "1" (the CLI passes it when SNAPS is this home's own snaps dir: with a shared SNAPS another home's live save has its run dir elsewhere). `.old-NAME` is the snapshot a save was
     replacing: when NAME is missing (the kill came between the two renames) it is put back, never deleted. Prints what it did."""

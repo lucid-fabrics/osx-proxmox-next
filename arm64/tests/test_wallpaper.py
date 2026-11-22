@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline replay of saved screenshots through snapctl's "desktop is drawn" check. Run: python3 -I tests/test_wallpaper.py
 Fixtures (tests/fixtures/screens, gzip ppm): black = VM screen before the desktop (p18), wallpaper = a drawn desktop (p42, scaled to
-720x540), safari = a real S7 screendump with a full-size Safari window (346 sparse colours, the case that stalled WALLWAIT)."""
+720x540), safari = a real screendump with a full-size Safari window (346 sparse colours, the case that stalled WALLWAIT)."""
 import gzip, importlib.util, os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -33,7 +33,7 @@ def check(label, frame, want):
 black, wall, saf = load("black"), load("wallpaper"), load("safari")
 check("black screen", black, False)
 check("wallpaper, no window", wall, True)
-check("real Safari-covered screen (S7)", saf, True)
+check("real Safari-covered screen", saf, True)
 check("wallpaper, window 92x87 %", cover(*wall, .04, .03, .96, .90), True)
 check("wallpaper, window over left half", cover(*wall, 0, .03, .60, .90), True)
 check("wallpaper, window over right half", cover(*wall, .40, .03, 1, .90), True)

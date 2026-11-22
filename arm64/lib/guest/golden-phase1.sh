@@ -1,8 +1,8 @@
 #!/bin/sh
 # Runs in the VMApple single-user serial shell, after persist-sshd.py has installed the key and the sshd LaunchDaemon
-# (R10). Adds what a golden needs on top of that, all offline (no normal boot):
-#   1. sshd job ProcessType Interactive (P83): sshd answers early in the login storm
-#   2. timed UseFilesystemTimestamp=NO (P58): removes a boot clock stall
+#. Adds what a golden needs on top of that, all offline (no normal boot):
+#   1. sshd job ProcessType Interactive: sshd answers early in the login storm
+#   2. timed UseFilesystemTimestamp=NO: removes a boot clock stall
 #   3. automatic login fallback: only if the installed disk has none (kcpassword staged next to this script)
 # Idempotent. Needs the Data volume mounted (persist-sshd.py leaves it mounted).
 set -eu

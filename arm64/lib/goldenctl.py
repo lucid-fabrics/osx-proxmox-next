@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""goldenctl.py: helpers for `snapintosh make-disk golden` (R10).
+"""goldenctl.py: helpers for `snapintosh make-disk golden`.
 
   goldenctl.py extra SOCK HELPERDIR GUESTDIR [--user U]
         the autologin password is read from the environment (SNAPINTOSH_GUEST_PASSWORD), never from the command line.
         single-user shell on the serial socket SOCK: stage and run guest/golden-phase1.sh (sshd Interactive, timed fix,
         autologin fallback), then sync and halt. HELPERDIR holds persist-sshd.py and serial-command.py (from the QEMU fork).
   goldenctl.py warm RUNDIR PORT KEY [TIMEOUT]
-        normal boot of the finished golden (R15): wait for ssh and the desktop, settle, open Safari on a local page, wait until its
+        normal boot of the finished golden: wait for ssh and the desktop, settle, open Safari on a local page, wait until its
         WebContent process runs, quit Safari, shut the guest down. Only purpose: the QEMU translation cache pack (rw) learns the boot.
   goldenctl.py quiet RUNDIR PORT KEY QUIETSH [TIMEOUT]
         normal boot: wait for ssh (proves the phase 1 sshd), run apply-quiet.sh, check the result, shut the guest down.
@@ -81,20 +81,20 @@ def pid_alive(pid):
         return False
 
 
-# R21: what a slow host needs. The guest shutdown takes as long as the host is slow (30 to 60 s on 16 threads, minutes on 6 shared ones), so the
+# what a slow host needs. The guest shutdown takes as long as the host is slow (30 to 60 s on 16 threads, minutes on 6 shared ones), so the
 # wait for QEMU to exit is a bound, not a time: it ends the moment QEMU is gone. SHUTDOWN_WAIT is only the point where we give up and quit over QMP.
 SHUTDOWN_WAIT = 900
 
 
 def guest_shutdown(ssh):
-    """`shutdown -h now` in the FOREGROUND of the ssh command. R21: the old `nohup shutdown -h now >/dev/null 2>&1 &` was killed together with
+    """`shutdown -h now` in the FOREGROUND of the ssh command. the old `nohup shutdown -h now >/dev/null 2>&1 &` was killed together with
     the ssh session in 100 percent of the runs seen (the guest stayed up for 5 minutes and more), so QEMU never exited by itself and the CLI
     cut the power by QMP after its grace period, an unclean shutdown. In the foreground it prints "System shutdown time has arrived" and
     QEMU exits by itself. The connection may drop while it runs, so the result is ignored."""
     sh(ssh + ["sync; sync; shutdown -h now"], 120)
 
 
-# a guest that is awake and unlocked however long the first login takes: display sleep and the screen saver lock (R21)
+# a guest that is awake and unlocked however long the first login takes: display sleep and the screen saver lock
 GUARD = ("pmset -a displaysleep 0 sleep 0 disksleep 0 2>&1; U=${LABUSER:-snap}; "
          "sudo -u $U defaults write com.apple.screensaver idleTime -int 0; sudo -u $U defaults write com.apple.screensaver askForPassword -int 0; "
          "sudo -u $U defaults -currentHost write com.apple.screensaver idleTime -int 0; echo guard-done")
@@ -162,7 +162,7 @@ def quiet(rundir, port, key, quietsh, timeout):
     if res["ssh_s"] is None:
         json.dump(res, open(os.path.join(rundir, "golden.json"), "w")); print("no ssh within %ss" % timeout); return 1
     print("ssh up at %.1f s; waiting for the login session (Dock and Finder), then applying the quiet profile (about 2 minutes)" % res["ssh_s"], flush=True)
-    # R21: first the guard. On a slow host the first login takes 7 to 11 minutes; the guest is idle meanwhile and, with the default 10 minute
+    # first the guard. On a slow host the first login takes 7 to 11 minutes; the guest is idle meanwhile and, with the default 10 minute
     # display sleep, sleeps its display and locks the session. The guard needs no login session.
     res["guard"] = set_guard(ssh, deadline, lambda: pid_alive(qpid))
     print("stay-awake guard: %s" % ("set after %.0f s" % (time.time() - t0) if res["guard"] else "NOT SET"), flush=True)
@@ -225,7 +225,7 @@ def warm(rundir, port, key, timeout, settle=30):
     print("warm-up: desktop at %.1f s, settling %d s, then Safari" % (res["desktop_s"], settle), flush=True)
     time.sleep(settle)
     sh(ssh + ["printf '%s' '" + WARM_HTML + "' > /Users/Shared/snapintosh-warm.html; chmod 644 /Users/Shared/snapintosh-warm.html"], 30)
-    opened = load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "guestapp.py"), "guestapp").open_app(ssh, "Safari", "file:///Users/Shared/snapintosh-warm.html", log=lambda m: print("warm-up: " + m, flush=True))   # R29
+    opened = load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "guestapp.py"), "guestapp").open_app(ssh, "Safari", "file:///Users/Shared/snapintosh-warm.html", log=lambda m: print("warm-up: " + m, flush=True))
     print("warm-up: Safari open %s" % ("ok" if opened["ok"] else "did not start (continuing)"), flush=True)
     t1 = time.time()
     for _ in range(60):
@@ -234,7 +234,7 @@ def warm(rundir, port, key, timeout, settle=30):
             res["safari_s"] = round(time.time() - t1, 1); break
         time.sleep(3)
     print("warm-up: Safari WebContent %s" % ("running after %.1f s" % res["safari_s"] if "safari_s" in res else "not seen (continuing)"), flush=True)
-    time.sleep(25)   # let the first page draw (P91: about 30 s from the open command to the first drawn page on 12 vCPUs)
+    time.sleep(25)   # let the first page draw (about 30 s from the open command to the first drawn page on 12 vCPUs)
     sh(ssh + ["launchctl asuser 501 osascript -e 'tell application \"Safari\" to quit'"], 60)
     for _ in range(20):
         r = sh(ssh + ["pgrep -x Safari >/dev/null || echo gone"], 20)

@@ -1,23 +1,23 @@
-"""Guest app helpers (R29, S9 bugs 2 and 3): the one place that opens an app in the guest and asks whether it is on screen.
+"""Guest app helpers: the one place that opens an app in the guest and asks whether it is on screen.
 
-`ssh ... "launchctl asuser 501 open -a Safari URL"` blocked for 90 s in 7 of 12 settles of the S9 soak on a 6 thread host (and failed with
+`ssh ... "launchctl asuser 501 open -a Safari URL"` blocked for 90 s in 7 of 12 settles of a soak run on a 6 thread host (and failed with
 255 now and then) while the guest was busy with its login session. The open is therefore started detached on the guest (the remote shell
 returns at once, so ssh does too, and the open survives the end of the ssh session) and verified by looking for the process, with a bounded retry. A saved snapshot of an app that never drew
 is no use, so `ready` tells whether the app has a window on screen (CoreGraphics window list, no extra permission needed) and, for Safari,
-whether its WebContent and GPU processes have stayed up (processes killed and restarted in a loop are the slow-host Safari problem, Q1).
+whether its WebContent and GPU processes have stayed up (processes killed and restarted in a loop are the slow-host Safari problem).
 
 Load it by path (callers run under python3 -I): importlib.util.spec_from_file_location."""
 import json, re, shlex, subprocess, time
 
 USER_UID = 501
 WEBCONTENT = "com.apple.WebKit.WebContent"
-WEBGPU = "com.apple.WebKit.GPU"   # Q1: killed after 3 s when it is slow to start, which takes every WebContent process down with it
+WEBGPU = "com.apple.WebKit.GPU"   # killed after 3 s when it is slow to start, which takes every WebContent process down with it
 
 
 def detached_open(app, url=""):
     """the remote command: `open` in the user's session, in a session of its own (perl setsid) and in the background, so the ssh that
     carries it ends at once. The setsid matters: a plain `nohup sh -c ... &` is killed when the ssh session ends, before `open` has done
-    anything (R29, tried on the guest: Safari never started; with setsid it did)"""
+    anything (tried on the guest: Safari never started; with setsid it did)"""
     args = ["launchctl", "asuser", str(USER_UID), "open", "-a", app] + ([url] if url else [])
     return "perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' %s >/dev/null 2>&1 </dev/null &" % " ".join(shlex.quote(a) for a in args)
 
@@ -119,9 +119,9 @@ def ready(ssh, app, stable_s=15, run=subprocess.run, sleep=time.sleep):
             return "not-ready", "Safari has a window but no page process (WebContent) is running"
         if age < stable_s:
             return "not-ready", "Safari's page process is only %d s old (it is being restarted)" % age
-        gpu = youngest_age(ssh, WEBGPU, run=run, sleep=sleep)   # none at all is fine (a build without one); a young one is the Q1 loop
+        gpu = youngest_age(ssh, WEBGPU, run=run, sleep=sleep)   # none at all is fine (a build without one); a young one is the Safari kill loop
         if gpu is not None and gpu < stable_s:
-            return "not-ready", "Safari's GPU process is only %d s old (WebKit's 3 s watchdog is still killing it, Q1)" % gpu
+            return "not-ready", "Safari's GPU process is only %d s old (WebKit's 3 s watchdog is still killing it)" % gpu
     return "ready", "%d window(s) on screen" % n
 
 

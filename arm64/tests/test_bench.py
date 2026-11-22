@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline test for the parsing and statistics code of lib/benchctl.py (R20). Run: python3 -I tests/test_bench.py"""
+"""Offline test for the parsing and statistics code of lib/benchctl.py. Run: python3 -I tests/test_bench.py"""
 import importlib.util, os
 
 HERE = os.path.dirname(os.path.abspath(__file__))

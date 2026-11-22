@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pgoctl.py: the checks of `snapintosh build --pgo` (R30).
+"""pgoctl.py: the checks of `snapintosh build --pgo`.
 
   check-log LOG      read the compile log of the profile-use build and refuse (exit 1) when the profile does not match the source:
                      any missing-profile or coverage warning raised while compiling an object of accel/tcg, target/arm or hw/vmapple

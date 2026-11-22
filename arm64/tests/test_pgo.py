@@ -1,4 +1,4 @@
-"""`snapintosh build --pgo` (R30): the profile checks of lib/pgoctl.py, the refusals of the flag, the plan it prints and the clean-up after
+"""`snapintosh build --pgo`: the profile checks of lib/pgoctl.py, the refusals of the flag, the plan it prints and the clean-up after
 a kill. No compiler runs: the QEMU the build would fetch is a few-line fake whose `configure` stays alive, so the tests reach the
 point where the instrumented build is in progress inside the private mount namespace and then end the CLI the hard way."""
 import hashlib
@@ -77,7 +77,7 @@ check("check-prof accepts the three areas", ctl("check-prof", prof).returncode =
 check("check-prof refuses a missing directory", ctl("check-prof", os.path.join(tmp, "nope")).returncode == 1)
 
 
-# ---- A4 (R29/R30 audit) regression tests that need no namespace: the functions are cut out of the CLI and run on their own
+# ---- Audit regression tests that need no namespace: the functions are cut out of the CLI and run on their own
 def fn_src(*names):
     """the source of top-level shell functions of the CLI (a one-line function, or from `name() {` to the next line that is `}`)"""
     lines = open(CLI).read().split("\n")
@@ -383,7 +383,7 @@ else:
     check("a failing pgo build exits non-zero and removes its work dir", r.returncode != 0 and not os.path.exists(os.path.join(home, "pgo-work")), r.stdout + r.stderr)
     check("a failing pgo build leaves the working binary", hashlib.md5(open(os.path.join(home, "prefix/bin/qemu-system-aarch64"), "rb").read()).hexdigest() == want)
 
-    # A4 #1: SIGKILL of the CLI and no further command: the watchdog inside the namespace ends everything the build started within seconds
+    # SIGKILL of the CLI and no further command: the watchdog inside the namespace ends everything the build started within seconds
     home = os.path.join(tmp, "kWD")
     shutil.copytree(h2, home, symlinks=True)
     p = start(home)

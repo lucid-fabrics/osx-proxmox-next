@@ -1,5 +1,5 @@
 """pdeath.py CMD ARGS...: run CMD so that it dies the moment its parent dies (PR_SET_PDEATHSIG, SIGKILL), then exec it.
-R24 (S8 bug 1): QEMU runs under `timeout`; when that wrapper was SIGKILLed QEMU lived on (ppid 1) with the pack lock and the ssh port.
+QEMU runs under `timeout`; when that wrapper was SIGKILLed QEMU lived on (ppid 1) with the pack lock and the ssh port.
 With this in between, `timeout` is the parent of QEMU and its death takes QEMU with it. The exec keeps the setting (it is only cleared
 for set-uid programs). Run it as `python3 -I pdeath.py`."""
 import ctypes, os, signal, sys

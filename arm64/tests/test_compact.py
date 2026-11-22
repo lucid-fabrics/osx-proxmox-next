@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline test for lib/compact.sh (R19). A pack whose flock is held for 3 s (the exiting QEMU) and a fake compactor that answers like
+"""Offline test for lib/compact.sh. A pack whose flock is held for 3 s (the exiting QEMU) and a fake compactor that answers like
 qemu-pcache-compact: rc 2 "in use" while the lock is held, else rc 0 "compacted". Run: python3 -I tests/test_compact.py"""
 import fcntl, os, subprocess, sys, tempfile, time
 
@@ -22,14 +22,14 @@ def run(wait, hold):
     os.waitpid(pid, 0)
     return r
 
-# 1. before the fix (no wait): the compactor gives up at once with rc 2, the R18 symptom
+# 1. before the fix (no wait): the compactor gives up at once with rc 2
 r = run(0, 2); assert r.returncode == 2 and "in use" in r.stdout and "(rc=2) waited=0s" in r.stdout, r.stdout
 # 2. with the bounded wait: the lock frees after 2 s, the compactor runs, rc 0, one result line only
 r = run(10, 2); assert r.returncode == 0 and "compacted" in r.stdout and "in use" not in r.stdout, r.stdout
 assert "compact start" in r.stdout and "compacted (rc=0) waited=" in r.stdout
 # 3. a lock that is never released: gives up after the bound, rc 2
 r = run(2, 6); assert r.returncode == 2 and "waited=2s" in r.stdout and "pack in use" in r.stdout, r.stdout
-# 4. S8 bug 4: nothing to do (rc 1) is said in words, still exits 1 (documented: 0 done, 1 nothing to do, 2 in use, 3 error); an error says FAILED
+# 4. nothing to do (rc 1) is said in words, still exits 1 (documented: 0 done, 1 nothing to do, 2 in use, 3 error); an error says FAILED
 for code, word in ((1, "nothing to do, not an error"), (3, "FAILED")):
     open(tool, "w").write("#!/bin/sh\necho x; exit %d\n" % code)
     r = subprocess.run(["sh", SCRIPT, pack, tool], capture_output=True, text=True)

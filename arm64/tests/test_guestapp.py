@@ -1,4 +1,4 @@
-"""lib/guestapp.py (R29, S9 bugs 2 and 3): the detached open, its bounded retry, the window and WebContent checks. No guest: `run` is a stub."""
+"""lib/guestapp.py: the detached open, its bounded retry, the window and WebContent checks. No guest: `run` is a stub."""
 import importlib.util, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -65,7 +65,7 @@ t = Time(); g = Guest(lambda cmd, n: (255, ""))
 r = ga.open_app(SSH, "Safari", verify_s=10, tries=2, run=g, clock=t.clock, sleep=t.sleep)
 check("open-255-forever-is-not-ok", not r["ok"] and r["tries"] == 2 and len(g.cmds) < 60 and t.t - 1000.0 < 200, (r, len(g.cmds), t.t - 1000.0))
 
-# an ssh that hangs (the 90 s of S9 bug 3) is cut at per_call; the process check decides
+# an ssh that hangs (the 90 s case) is cut at per_call; the process check decides
 t = Time()
 g = Guest(lambda cmd, n: "timeout" if "setsid" in cmd else (0, "up"))
 r = ga.open_app(SSH, "Safari", per_call=20, run=g, clock=t.clock, sleep=t.sleep)

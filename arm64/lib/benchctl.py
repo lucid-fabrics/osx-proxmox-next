@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""snapintosh bench (R20): measure the public benchmark numbers with one command, N runs, JSON plus a text table.
+"""snapintosh bench: measure the public benchmark numbers with one command, N runs, JSON plus a text table.
 
 Driven only through the CLI itself (`snapintosh run | snapshot | resume`, run as child processes), ssh and QMP, so it measures
 what a user gets. Per run:
@@ -352,7 +352,7 @@ class Bench:
         return None
 
     def open_safari(self, page):
-        """R29: through lib/guestapp.py like every other open (detached on the guest, verified by the process, retried when ssh fails);
+        """through lib/guestapp.py like every other open (detached on the guest, verified by the process, retried when ssh fails);
         returns an object with poll() like the Popen it replaced"""
         ga = load_guestapp(self.root)
         return ga.OpenJob(self.ssh_base, "Safari", "http://10.0.2.2:%d/%s.html" % (self.a.http_port, page), verify_s=60)
@@ -527,7 +527,7 @@ class Bench:
                 errs.append("resume: no SETTIME line in %d s" % a.settime_limit); return
             res.update(parse_settime(self.read(rlog)))
             # A clock step that did not confirm is a finished step (the guest is running and still loading): record it and go on with
-            # the Safari steps instead of dropping the rest of the run (H3, 3 of 3 resumes on 6 threads under the old 120 s budget).
+            # the Safari steps instead of dropping the rest of the run (3 of 3 resumes on 6 threads under the old 120 s budget).
             if "time_ok" not in res:
                 res["time_ok"] = False
                 res["settime_note"] = settime_note(self.read(rlog))

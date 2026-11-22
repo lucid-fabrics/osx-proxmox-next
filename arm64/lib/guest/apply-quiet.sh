@@ -1,13 +1,13 @@
 #!/bin/sh
-# apply-quiet.sh (P68): the quiet guest profile for any macOS guest golden. Run in the guest as root:  sh apply-quiet.sh [live]
+# apply-quiet.sh: the quiet guest profile for any macOS guest golden. Run in the guest as root:  sh apply-quiet.sh [live]
 # Persistently disables (launchd disabled databases, honoured from the next cold boot) 144 launchd labels in system and gui/501, turns the
 # screensaver, display sleep and Spotlight indexing off. With `live` the labels are also booted out now (use it for a snapshot flow;
-# it frees the CPU at once, P67: drag +23 %, idle 5.3 -> 2.1 cores). Idempotent.
+# it frees the CPU at once, drag +23 %, idle 5.3 -> 2.1 cores). Idempotent.
 # KEEP (env, space separated labels) are never disabled and are enabled again. Default: com.apple.backgroundtaskmanagementd com.apple.kernelmanagerd.
-# P68b finding: com.apple.kernelmanagerd must NOT be disabled either. With it disabled a cold boot has no working window drag (0-1 frames);
+# Finding: com.apple.kernelmanagerd must NOT be disabled either. With it disabled a cold boot has no working window drag (0-1 frames);
 # with it kept the drag is 8.3-8.6 fps. kernelmanager_helper, fontworker, dasd, coreduetd and g7/g8 are fine disabled.
-# P68 finding: com.apple.backgroundtaskmanagementd must NOT be disabled. With it disabled a cold boot comes up to the desktop but sshd resets
-# every connection (kex_exchange_identification). This script enables it again if an older profile (P67) disabled it.
+# Finding: com.apple.backgroundtaskmanagementd must NOT be disabled. With it disabled a cold boot comes up to the desktop but sshd resets
+# every connection (kex_exchange_identification). This script enables it again if an older profile disabled it.
 # Safe for a lab VM only: no iCloud, Siri, Spotlight, software update, backup, analytics, crash reporting, MDM, ML services, dasd,
 # coreduetd, kernelmanagerd, fontworker, screensharing agent.
 KEEP=${KEEP:-com.apple.backgroundtaskmanagementd com.apple.kernelmanagerd}

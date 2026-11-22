@@ -1,4 +1,4 @@
-"""R25 (H3 findings): check-host limits and fixes, a release tree under the build's mount point, the resume clock-step budget, the bench
+"""check-host limits and fixes, a release tree under the build's mount point, the resume clock-step budget, the bench
 treating an unconfirmed clock step as a finished step, and every subcommand's usage line listing the options it accepts.
 Run: python3 -I tests/test_hostgaps.py"""
 import importlib.util, os, re, shutil, stat, subprocess, sys, tempfile
@@ -45,7 +45,7 @@ check("5-threads-fails", re.search(r"\[FAIL\].*5 threads", host(threads=5)) is n
 check("8-threads-warns", re.search(r"\[warn\].*8 threads", host(threads=8)) is not None)
 check("16-threads-ok", re.search(r"\[ok\].*16 threads", host(threads=16)) is not None)
 check("16GiB-host-showing-15-passes", re.search(r"\[warn\].*RAM 15 GiB", out) is not None and not re.search(r"\[FAIL\].*RAM", out), out)
-# R27 (A3 finding 9): an iGPU carve-out or a crashkernel shows 13 to 14 GiB on a 16 GiB machine
+# an iGPU carve-out or a crashkernel shows 13 to 14 GiB on a 16 GiB machine
 check("14GiB-with-unreadable-dmi-warns", re.search(r"\[warn\].*RAM 14 GiB", host(mem_kb=int(14.9 * GIB), SNAPINTOSH_CHECK_DMI_GB="")) is not None)
 out = host(mem_kb=int(13.2 * GIB), SNAPINTOSH_CHECK_DMI_GB="16")
 check("13GiB-of-16-installed-warns", re.search(r"\[warn\].*RAM 13 GiB visible of 16 GiB installed", out) is not None and not re.search(r"\[FAIL\].*RAM", out), out)

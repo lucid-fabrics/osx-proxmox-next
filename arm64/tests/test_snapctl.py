@@ -93,7 +93,7 @@ check("writer-running", sc.writer_running(state))
 p.kill(); p.wait()
 check("writer-gone", not sc.writer_running(state))
 
-# R28: guest clock sampling. A slow round trip says nothing about a 0.5 s limit: it is refused, sampling goes on until the guest is
+# guest clock sampling. A slow round trip says nothing about a 0.5 s limit: it is refused, sampling goes on until the guest is
 # quick, and the answer is the quickest of the good ones. The reader is one long-lived process, not one spawn per sample.
 def fake(seq):
     it = iter(seq)
@@ -160,7 +160,7 @@ def settle(clock, limit=0.5, secs=5, fallback=None):
     return ok, r
 
 
-# the R27 case: the clock is right (-0.005 s) while slow round trips read it +1.2 s off. Nothing is stepped, the answer is OK.
+# the late-clock case: the clock is right (-0.005 s) while slow round trips read it +1.2 s off. Nothing is stepped, the answer is OK.
 c = FakeClock(-0.005, slow=3, rtt_slow=2.4)
 ok, r = settle(c)
 check("settle-slow-readings-do-not-step", ok and c.steps == 0 and r["method"] == "none" and r["attempts"] == 0 and abs(r["diff_s"]) < 0.1, (ok, r, c.steps))
@@ -187,7 +187,7 @@ def make():
 ok = sc.settle_clock(make, {}, 0.5, time.time() + 5, lambda b: None)
 check("settle-restarts-a-dead-session", ok and len(made) == 2, made)
 
-# R29 (S9 bug 1): what a SIGKILLed save leaves in SNAPS goes with the next command; a snapshot a kill left in `.old-*` comes back
+# what a SIGKILLed save leaves in SNAPS goes with the next command; a snapshot a kill left in `.old-*` comes back
 check("leftover-parse-stage", sc.parse_leftover(".stage-soak-soak-90bxpB") == ("stage", "soak", "soak-90bxpB"))
 check("leftover-parse-old-dashes", sc.parse_leftover(".old-a-b-a-b-Ab12Cd") == ("old", "a-b", "a-b-Ab12Cd"))
 check("leftover-parse-rejects", all(sc.parse_leftover(x) is None for x in (".stage-soak", ".stage-soak-other-90bxpB", ".stage--x", ".snapshot", ".old-a-b-123456", "soak")))
@@ -226,7 +226,7 @@ r = subprocess.run([sys.executable, "-I", HERE + "/lib/snapctl.py", "reap", RR, 
 check("reap-cli-no-args-ok", r.returncode == 0, r.stderr)
 check("reap-quiet-when-nothing", r.stdout == "", r.stdout)
 
-# R29 (S9 bug 4): the banner probe tells the guest's sshd saying hello from the login behind it
+# the banner probe tells the guest's sshd saying hello from the login behind it
 import socket, threading
 srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(2)
 threading.Thread(target=lambda: [(lambda c: (c.sendall(b"SSH-2.0-x\r\n"), c.close()))(srv.accept()[0]) for _ in range(2)], daemon=True).start()
@@ -242,7 +242,7 @@ o2 = {}
 sc.banner_probe(port, time.time(), o2, st)
 check("banner-probe-gives-up-when-told-and-nothing-listens", o2 == {})
 
-# R29 (S9 bug 2): the app gate. A stub guestapp answers ready / not-ready / unknown.
+# the app gate. A stub guestapp answers ready / not-ready / unknown.
 class StubGA:
     def __init__(self, states, running=True): self.states, self.running, self.n = list(states), running, 0
     def is_running(self, ssh, app): return self.running
@@ -264,7 +264,7 @@ check("gate-ready-passes", gate(StubGA([("ready", "1 window(s) on screen")]), Tr
 check("gate-not-ready-required-refuses", gate(StubGA([("not-ready", "no Safari window on screen")]), True) == sc.APP_REFUSED == 5)
 check("gate-not-ready-unnamed-only-warns", gate(StubGA([("not-ready", "x")]), False) == 0)
 check("gate-unknown-never-blocks", gate(StubGA([("unknown", "could not ask")]), True) == 0)
-# A4 #2: an answer earlier in the window counts; only a window with no answer at all passes as "unknown"
+# an answer earlier in the window counts; only a window with no answer at all passes as "unknown"
 check("gate-late-unknown-after-not-ready-refuses", gate(StubGA([("not-ready", "x"), ("unknown", "timed out")]), True, appwait="6") == sc.APP_REFUSED)
 check("gate-unnamed-app-not-running-skips", gate(StubGA([("not-ready", "x")], running=False), False) == 0)
 check("gate-off-with-appwait-0", gate(StubGA([("not-ready", "x")]), True, appwait="0") == 0)
@@ -272,7 +272,7 @@ check("gate-needs-ready-to-hold", gate(StubGA([("ready", "a"), ("not-ready", "re
 st = StubGA([("ready", "a"), ("not-ready", "restarted")] * 40)
 check("gate-flapping-never-passes", gate(st, True, appwait="12", stable="8") == sc.APP_REFUSED)
 check("gate-waits-until-it-shows", gate(StubGA([("not-ready", "x"), ("ready", "ok")]), True, appwait="30") == 0)
-# R29: WebKit's error page is told from a page by the picture; the gate then opens the page again
+# WebKit's error page is told from a page by the picture; the gate then opens the page again
 def flat(w, h, rgb, button=False):
     px = bytearray(bytes(rgb) * (w * h))
     if button:

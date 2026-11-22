@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""R21: the end of golden phase 2 on a slow host. (1) the guest shutdown is a foreground command: the backgrounded `nohup shutdown ... &` died with
+"""the end of golden phase 2 on a slow host. (1) the guest shutdown is a foreground command: the backgrounded `nohup shutdown ... &` died with
 the ssh session and the guest never powered off. (2) the wait for QEMU to exit is a condition: it returns when QEMU is gone however long that takes
 (up to the bound) and only then falls back to QMP quit. (3) the stay-awake guard needs no login session. Run: python3 -I tests/test_golden_shutdown.py"""
 import importlib.util, json, os, socket, subprocess, sys, tempfile, threading, time

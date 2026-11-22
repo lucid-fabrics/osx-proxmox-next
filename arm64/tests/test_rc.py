@@ -15,7 +15,7 @@ for i, l in enumerate(lines):
         window = " ".join(x.strip() for x in lines[i:i + 3])
         if "LAUNCH_RC" not in window:
             bad.append("%d: launch without a LAUNCH_RC check" % (i + 1))
-# R23 rules that close whole classes of bug
+# Rules that close whole classes of bug
 text = "\n".join(lines)
 if not re.search(r"^shopt -u patsub_replacement", text, re.M):
     bad.append("patsub_replacement is not switched off: `&` in a replacement is the match under bash 5.2+")

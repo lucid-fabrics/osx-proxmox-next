@@ -1,6 +1,6 @@
 """Whole-CLI tests of run/snapshot/resume with a fake QEMU, qemu-nbd and qemu-img (no Apple files, no real VM).
 
-Closes (R23: signals end the CLI and everything it started, interrupted saves exit 128+sig, pid files never name a victim, `&` in the home, socket path cap): exit codes follow QEMU and the helpers (4, 6), one cleanup trap covers every path (8), a failing helper kills an idle QEMU,
+Closes (signals end the CLI and everything it started, interrupted saves exit 128+sig, pid files never name a victim, `&` in the home, socket path cap): exit codes follow QEMU and the helpers (4, 6), one cleanup trap covers every path (8), a failing helper kills an idle QEMU,
 run dirs are unique (14), umask 077 (9), VNC password by default (10), snapshot names validated (5), a failed save keeps the old one."""
 import glob, json, os, re, shutil, signal, stat, subprocess, sys, tempfile, time
 
@@ -70,7 +70,7 @@ write(T + "/bin/ssh", """#!/bin/bash
 for a in "$@"; do last=$a; done
 [ -z "${FAKE_SSHLOG:-}" ] || printf '%s\\n' "$last" >> "$FAKE_SSHLOG"
 [ "$last" != "date +%s" ] || date +%s
-# R29: an app in the guest. FAKE_APP: ready (a window and an old WebContent), young (a window, WebContent 3 s old), nowin (running, no window)
+# an app in the guest. FAKE_APP: ready (a window and an old WebContent), young (a window, WebContent 3 s old), nowin (running, no window)
 case $last in
   *"pgrep -x Dock"*) echo desk ;;
   *"pgrep -x Safari"*) [ -z "${FAKE_APP:-}" ] || echo up ;;
@@ -232,7 +232,7 @@ r = cli(["resume", ".."] + OPTS)
 check("resume-rejects-dotdot", r.returncode != 0 and "invalid snapshot name" in r.stderr)
 check("names-leave-home-alone", os.path.isfile(HOME + "/vm/golden/root-sshd.qcow2") and not rundirs())
 
-# ---- snapshots against a fake QEMU that serves QMP, so the helpers really run (R23: the old fixtures failed at the QMP connect, before any
+# ---- snapshots against a fake QEMU that serves QMP, so the helpers really run (the old fixtures failed at the QMP connect, before any
 # staging happened, and passed on code that had no staging at all)
 sys.path.insert(0, HERE + "/lib")
 import importlib.util
@@ -319,7 +319,7 @@ r = cli(["resume", "nosuch"] + OPTS, {"FAKE_QEMU": "qmp"})
 check("resume-missing-says-where-to-look", r.returncode != 0 and "SNAPS=" in r.stderr, r.stderr[-300:])
 
 
-# 10. signals (R23). Ctrl-C or SIGTERM to the CLI ends it within seconds with 128+signal, stops everything it started (helper, tail,
+# 10. signals. Ctrl-C or SIGTERM to the CLI ends it within seconds with 128+signal, stops everything it started (helper, tail,
 # QEMU, nbd, ssh) and leaves no half snapshot; the older snapshot of that name is untouched.
 def interrupted(sig, env, until, group=False, name="keep"):
     reset()
@@ -413,16 +413,16 @@ check("stale-pid-of-a-dead-process-is-silent", r.returncode == 0 and r.stderr ==
 
 # 12. `&`, glob characters and spaces in SNAPINTOSH_HOME reach QEMU unchanged (bash 5.2+ patsub_replacement: `&` in a replacement is the match)
 reset()
-H2 = T + "/h&m[a-z]*e x"
-subprocess.run(["cp", "-r", HOME, H2])
+HOME2 = T + "/h&m[a-z]*e x"
+subprocess.run(["cp", "-r", HOME, HOME2])
 args = T + "/args2"
-r = cli(["run", "--gpu", "0", "--cpus", "2", "--ram", "64M", "--secs", "40"], {"FAKE_QEMU": "exit:0", "FAKE_ARGS": args, "SNAPINTOSH_HOME": H2, "KEEP_RUNS": "1"})
-rd = glob.glob(glob.escape(H2) + "/runs/run-*/")
+r = cli(["run", "--gpu", "0", "--cpus", "2", "--ram", "64M", "--secs", "40"], {"FAKE_QEMU": "exit:0", "FAKE_ARGS": args, "SNAPINTOSH_HOME": HOME2, "KEEP_RUNS": "1"})
+rd = glob.glob(glob.escape + "/runs/run-*/")
 a = open(args).read().split("\n") if os.path.exists(args) else []
 ok = bool(rd) and ("file:" + rd[0] + "serial.log") in a and ("unix:" + rd[0] + "qmp.sock,server=on,wait=off") in a and \
      any(x.endswith("file.server.path=" + rd[0] + "nbd.sock") for x in a) and not any("XXXXXX" in x for x in a)
 check("special-chars-in-home-reach-qemu-unchanged", r.returncode == 0 and ok, "rc=%s %s %s" % (r.returncode, [x for x in a if "run" in x][:4], r.stderr[-200:]))
-subprocess.run(["rm", "-rf", H2])
+subprocess.run(["rm", "-rf", HOME2])
 
 # 13. unix socket paths: the name is capped so nbd.sock, qmp.sock and ssh.ctl (plus ssh's 17 byte bind suffix) stay under 108 bytes
 reset()
@@ -444,7 +444,7 @@ envf = T + "/env"
 r = cli(["run"] + OPTS, {"FAKE_QEMU": "exit:0", "FAKE_ENV": envf, "SNAPINTOSH_GUEST_PASSWORD": "sekret-pw"})
 check("guest-password-env-not-inherited", os.path.exists(envf) and "sekret-pw" not in open(envf).read() and "SNAPINTOSH_GUEST_PASSWORD" not in open(envf).read(), r.stderr[-200:])
 
-# 15. R24 (S8 bug 1): the `timeout` wrapper around QEMU is SIGKILLed. QEMU dies with it (PR_SET_PDEATHSIG), it must not live on with the ssh port and the pack lock
+# 15. the `timeout` wrapper around QEMU is SIGKILLed. QEMU dies with it (PR_SET_PDEATHSIG), it must not live on with the ssh port and the pack lock
 def qemu_procs():
     return [x for x in procs("qmp.sock") if b"fakeqmp.py" in open("/proc/%d/cmdline" % x, "rb").read()]
 
@@ -527,7 +527,7 @@ for x in (mine, mine_helper, stale_tail, stale_helper):
 reset()
 
 
-# 15c. R24 (S8 bug 2): stop_tree must catch a child that is being forked at the moment of the signal. A parent forks as fast as it can; after stop_tree
+# 15c. stop_tree must catch a child that is being forked at the moment of the signal. A parent forks as fast as it can; after stop_tree
 # nothing of its tree may be left (the old stop_tree listed the tree first and killed afterwards: the children forked in between survived)
 reset()
 write(T + "/forker.sh", '#!/bin/bash\nwhile :; do ( exec -a "%s-kid" sleep 100 ) & sleep 0.002; done\n' % TOKEN, 0o755)
@@ -565,7 +565,7 @@ except OSError:
 p.communicate()
 check("group-sigterm-during-settime-leaves-nothing", ok and p.returncode not in (0, None) and not left, "ok=%s rc=%s left=%s" % (ok, p.returncode, left))
 
-# R25: a bad SETTIME_TIMEOUT stops `resume` before QEMU starts; the budget the helper and its `timeout` get is the host-scaled one (6 threads: 600 + 30)
+# a bad SETTIME_TIMEOUT stops `resume` before QEMU starts; the budget the helper and its `timeout` get is the host-scaled one (6 threads: 600 + 30)
 reset()
 make_resume_fixture()
 r = cli(["resume", "r1"] + OPTS, {"SETTIME_TIMEOUT": "10m", "FAKE_QEMU": "sleep"})
@@ -591,7 +591,7 @@ for nm, thr, extra, want in (("6-threads", "6", {}, "-k 5 630 "), ("16-threads",
     p.communicate()
     check("settime-hard-limit-%s" % nm, want in got and (" 600 " in got or "40" in got or nm == "16-threads"), got)
 
-# 16. R24 (found by the pack size-cap measurement): the pack is compacted after a Ctrl-C or SIGTERM as well as after a normal exit. The trap used to skip it,
+# 16. (found by the pack size-cap measurement): the pack is compacted after a Ctrl-C or SIGTERM as well as after a normal exit. The trap used to skip it,
 # so a pack that was only ever ended with Ctrl-C was never compacted, grew to its limit and then dropped every new translation for the rest of each boot
 write(PREFIX + "/bin/qemu-pcache-compact", '#!/bin/sh\necho "$1: nothing to do"\nexit 1\n', 0o755)
 CLOG = HOME + "/pcache/compact.log"
@@ -618,7 +618,7 @@ for nm, sig in (("normal-exit", None), ("sigint", signal.SIGINT), ("sigterm", si
     got = wait_for(lambda: os.path.exists(CLOG) and "compact end" in open(CLOG).read(), 10)
     check("pack-compacted-after-%s" % nm, got, open(CLOG).read() if os.path.exists(CLOG) else "no compact.log")
 
-# 15d. A3 fixes. reap_stale kills only what provably belongs to a dead run of this pid namespace; everything else is skipped and said
+# 15d. reap_stale kills only what provably belongs to a dead run of this pid namespace; everything else is skipped and said
 def stale_case(name, cli_pid_text, helper_cmd=None):
     """a run dir with a cli.pid text and a helper naming it; returns (helper, cli result). The helper is killed afterwards."""
     reset()
@@ -717,7 +717,7 @@ except OSError:
 p.communicate()
 check("settime-line-carries-the-helper-exit-status", "helper exit status 124" in line, line[-300:])
 
-# R27 (A3 finding 8): golden phase 1 runs QEMU and helpers in $VM/golden/tmp, not in a run dir. A phase 1 whose snapintosh was SIGKILLed is reaped like
+# golden phase 1 runs QEMU and helpers in $VM/golden/tmp, not in a run dir. A phase 1 whose snapintosh was SIGKILLed is reaped like
 # a dead run (same cli.pid), and a half written root-sshd.qcow2 is set aside so `make-disk golden --again` never builds on it
 reset()
 g1 = HOME + "/vm/golden"; os.makedirs(g1 + "/tmp", exist_ok=True)
@@ -761,7 +761,7 @@ reset()
 
 
 write(HOME + "/vm/golden/root-sshd.qcow2", "golden")   # the golden tests above removed it
-# 16. R29 (S9 bug 1): kill -9 of the CLI during a save. The next command stops what is left AND removes the dead run dir and the staging
+# 16. kill -9 of the CLI during a save. The next command stops what is left AND removes the dead run dir and the staging
 # directory (it holds the guest RAM); the old snapshot is untouched.
 reset()
 old_snapshot()
@@ -805,7 +805,7 @@ left = sorted(os.path.basename(x.rstrip("/")) for x in rundirs())
 check("dead-run-dir-removed-live-keep-nopid-foreign-stay", left == ["alive-bbbbbb", "foreign-eeeeee", "kept-cccccc", "nopid-dddddd"], "%s %s" % (left, r.stderr[-300:]))
 reset()
 
-# 17. R29 (S9 bug 2): a save with an app open checks that its window is on screen. FAKE_APP in the fake ssh above.
+# 17. a save with an app open checks that its window is on screen. FAKE_APP in the fake ssh above.
 def app_save(extra, env, name="keep"):
     reset(); old_snapshot()
     r = cli(["snapshot", name] + QOPTS + extra, dict({"FAKE_QEMU": "qmp", "APPWAIT": "1", "APPSTABLE": "0"}, **env), timeout=90)
