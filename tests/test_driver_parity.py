@@ -153,7 +153,7 @@ def test_a_bash_dry_run_prints_the_python_plan(host):
 
 
 @needs_bash4
-def test_the_bash_refusal_texts_are_the_engine_texts(host):
+def test_the_bash_refusal_texts_are_the_engine_texts(host, other_pid):
     host.config(hostpci0=None)
     assert host.run("driver_status_command 109\n", expect=2).stdout == "REFUSED: " + engine.REFUSE_NO_CARD + "\n"
     out = host.run("driver_update_command 109 --dry-run\n", expect=2).stdout
@@ -164,7 +164,7 @@ def test_the_bash_refusal_texts_are_the_engine_texts(host):
     assert "Refused: " + engine.REFUSE_INSTALLING in host.run(STUB_NULLMOTH + "driver_update_command 109 --dry-run\n", expect=2).stdout
     host.config()
     host.state.mkdir(parents=True, exist_ok=True)
-    (host.state / "109.lock").write_text("1\n")
+    (host.state / "109.lock").write_text("%d\n" % other_pid)
     assert "Refused: " + engine.REFUSE_LOCKED in host.run(STUB_NULLMOTH + "driver_update_command 109 --dry-run\n", expect=2).stdout
     (host.state / "109.lock").unlink()
     (host.dir / "gpu").mkdir(exist_ok=True)

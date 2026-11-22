@@ -9988,7 +9988,8 @@ function driver_lock_pid() {
   local f="${DRIVER_STATE_DIR:-/var/lib/osx-proxmox-next/drivers}/$1.lock" pid
   [ -f "$f" ] || return 0
   pid=$(tr -d '[:space:]' <"$f")
-  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && echo "$pid"
+  # alive when the process answers, or exists but belongs to somebody else (kill -0 fails with EPERM for it)
+  if [[ "$pid" =~ ^[0-9]+$ ]] && { kill -0 "$pid" 2>/dev/null || [ -e "/proc/$pid" ]; }; then echo "$pid"; fi
   return 0
 }
 

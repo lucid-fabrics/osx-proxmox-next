@@ -503,7 +503,8 @@ def test_an_out_of_range_vm_id_is_refused(tmp_path, rec):
         Updater(plan, env_for(DPve(), rec, tmp_path))
 
 
-def test_an_interrupted_update_is_finished_from_where_the_card_came_off(tmp_path, stubs, rec):
+def test_an_interrupted_update_is_finished_from_where_the_card_came_off(tmp_path, stubs, rec, monkeypatch):
+    monkeypatch.setattr(driver_plan, "resolve", lambda kind, choice, get=None: nv_target())     # no network in tests
     # the first run was cut off after the card came off: the state file remembers how the Mac was
     original = {"hostpci0": "0000:01:00,pcie=0", "vga": "none", "args": mac()["args"], "boot": "order=ide0;virtio0"}
     steps = [{"id": i, "title": t, "done": d, "state": st} for (i, t), (_i, d), st in zip(
