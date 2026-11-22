@@ -1,4 +1,4 @@
-"""A4 #5: every number and md5 the README quotes for release-v2 and --pgo comes from the release's own record (docs/bench/r30-release-v2.txt, pins.env).
+"""every number and md5 the README quotes for release-v2 and --pgo comes from the release's own record (docs/bench/r30-release-v2.txt, pins.env).
 The two must agree: a README figure that is not in the record, an md5 that is not in pins.env or the record, or a measured time that differs fails."""
 import glob
 import os
@@ -64,8 +64,8 @@ bad = [h for h in sorted(set(re.findall(r"\b[0-9a-f]{32}\b", readme))) if h not 
 check("every md5 in the README is in pins.env or the bench record", not bad, bad)
 ref = re.search(r"^# Debian 13: qemu-system-aarch64 ([0-9a-f]{32})", pins, re.M)
 check("pins.env gives the release-v2 md5 and the README quotes it", ref is not None and ref.group(1) in readme, ref and ref.group(1))
-check("the release-v2 pin in pins.env is the head the patches are cut from",
-      re.search(r"QEMU_REF=\$\{QEMU_REF:-([0-9a-f]{40})\}", pins).group(1) in open(sorted(glob.glob(os.path.join(HERE, "patches", "qemu", "0008-*.patch")))[0]).readline())
+check("the patched head in pins.env is the commit the last patch is cut from",
+      re.search(r"^QEMU_PATCHED_HEAD=([0-9a-f]{40})", pins, re.M).group(1) in open(sorted(glob.glob(os.path.join(HERE, "patches", "qemu", "0024-*.patch")))[0]).readline())
 ub = re.search(r"^# translation pack is new\. Ubuntu 26\.04 \(gcc [\d.]+\): qemu-system-aarch64 ([0-9a-f]{32})", pins, re.M)
 check("pins.env records an Ubuntu 26.04 release-v2 md5 and the README quotes it as measured",
       ub is not None and ub.group(1) in readme and "has not been measured yet" not in readme, ub and ub.group(1))

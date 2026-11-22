@@ -14,7 +14,7 @@ t vkparse-radv bash -c "python3 -I '$HERE/lib/vkparse.py' VK_EXT_fragment_shader
 t vkparse-anv bash -c "python3 -I '$HERE/lib/vkparse.py' VK_EXT_fragment_shader_interlock VK_EXT_external_memory_host < '$HERE/tests/fixtures/vulkaninfo-anv.txt' | grep -q '0x8086	\$'"
 t vkparse-missing bash -c "python3 -I '$HERE/lib/vkparse.py' VK_EXT_not_a_real_ext < '$HERE/tests/fixtures/vulkaninfo-radv.txt' | grep -q 'VK_EXT_not_a_real_ext'"
 t help "$S" --help
-# R29: `python3 -m unittest` finds every tests/test_*.py (as one case each), and only lib/guestapp.py builds the command that opens an app
+# `python3 -m unittest` finds every tests/test_*.py (as one case each), and only lib/guestapp.py builds the command that opens an app
 t unittest-discovers-every-script bash -c "cd '$HERE' && python3 -c \"import glob, unittest; n = unittest.defaultTestLoader.discover('.').countTestCases(); w = len(glob.glob('tests/test_*.py')); assert n == w and n > 10, (n, w)\""
 t one-open-helper bash -c "cd '$HERE' && ! grep -n 'open -a' lib/benchctl.py lib/goldenctl.py lib/snapctl.py snapintosh | grep -v '^.*#' && grep -q 'open -a' lib/guestapp.py"
 t app-opts-rejected bash -c "! '$S' snapshot x --open 'http://a/b;id' 2>&1 | grep -q 'unknown option'; ! '$S' snapshot x --open 'http://a/b;id' >/dev/null 2>&1; ! '$S' run --app Safari >/dev/null 2>&1"
@@ -25,15 +25,18 @@ t fetch-dry bash -c "SNAPINTOSH_DRY=1 '$S' fetch | grep -q 'UniversalMac_27.0_26
 t fetch-dry-26b131 bash -c "SNAPINTOSH_DRY=1 '$S' fetch --build 26B131 2>&1 | grep -q 'UniversalMac_27.2.1_26B131'"
 t fetch-bad-build bash -c "! SNAPINTOSH_DRY=1 '$S' fetch --build 26X999"
 t pins-sha bash -c ". '$HERE/pins.env'; [ \${#IPSW_26A428_SHA256} -eq 64 ] && [ \${#IPSW_26B131_SHA256} -eq 64 ] && [ \${#QEMU_REF} -eq 40 ] && [ \${#AMBROSIA_REF} -eq 40 ] && [ -z \"\$(echo \$QEMU_REF | tr -d 0-9a-f)\" ]"
-t pins-release-v2 bash -c "grep -q 'QEMU_REF=\${QEMU_REF:-8df7ee62c81bc602b0eec0cd23c1fa11994a7094}' '$HERE/pins.env' && [ \$(ls '$HERE'/patches/qemu/*.patch | wc -l) -eq 8 ] && grep -q c36556f3118e04fca90005ae0f0dfd68 '$HERE/pins.env' && grep -q 'P102_BQLSPIN' '$HERE/patches/qemu/0008'*.patch && grep -q 'P102_BQLSPIN' '$HERE/README.md'"
-t pins-patch-head bash -c ". '$HERE/pins.env'; head -1 '$HERE'/patches/qemu/0008-*.patch | grep -q \"^From \$QEMU_REF \""
-t pins-patch-series bash -c "n=0; for f in '$HERE'/patches/qemu/*.patch; do n=\$((n+1)); case \$(basename \$f) in \$(printf %04d \$n)-*) ;; *) exit 1 ;; esac; done; [ \$n -eq 8 ]"
+t pins-release-v2 bash -c ". '$HERE/pins.env'; [ \"\$QEMU_REF\" = 84f07211cc5b4fc6a371559bf8a5de4fb068e648 ] && [ \"\$QEMU_PATCHED_HEAD\" = 8df7ee62c81bc602b0eec0cd23c1fa11994a7094 ] && [ \$(ls '$HERE'/patches/qemu/*.patch | wc -l) -eq 24 ] && grep -q c36556f3118e04fca90005ae0f0dfd68 '$HERE/pins.env' && grep -q 'P102_BQLSPIN' '$HERE/patches/qemu/0024'*.patch && grep -q 'P102_BQLSPIN' '$HERE/README.md'"
+t pins-patch-head bash -c ". '$HERE/pins.env'; head -1 '$HERE'/patches/qemu/0024-*.patch | grep -q \"^From \$QEMU_PATCHED_HEAD \""
+t pins-patch-series bash -c "n=0; for f in '$HERE'/patches/qemu/*.patch; do n=\$((n+1)); case \$(basename \$f) in \$(printf %04d \$n)-*) ;; *) exit 1 ;; esac; done; [ \$n -eq 24 ]"
 t ambrosia-patches bash -c "[ \$(ls '$HERE'/patches/ambrosia/*.patch | wc -l) -eq 3 ]"
 t build-deps bash -c "'$S' build --deps | grep -q libslirp-dev"
+t build-deps-apt bash -c "'$S' build --deps --apt | grep -qx libslirp-dev && ! '$S' build --deps --apt | grep -q ' '"
 t build-deps-cross bash -c "'$S' build --deps | grep -q aarch64-unknown-none"
 t sshd-interactive-note bash -c "'$S' make-disk sshd-interactive | grep -q ProcessType; sh -n '$HERE/lib/guest/apply-sshd-interactive.sh'"
 t quiet-note bash -c "'$S' make-disk quiet | grep -q apply-quiet.sh"
-t build-needs-repo bash -c "! '$S' build --only qemu 2>&1 | grep -q 'unexpected'; '$S' build --only reims 2>&1 | grep -q 'REIMS_REPO\|M2V_REPO'"
+t install-not-yet bash -c "'$S' install 2>&1 | grep -q 'Mac-free install is not in this beta build yet'; [ \$('$S' install >/dev/null 2>&1; echo \$?) -eq 3 ]"
+t build-needs-repo bash -c "! '$S' build --only qemu 2>&1 | grep -q 'unexpected'; REIMS_REPO=file:///nonexistent M2V_REPO=file:///nonexistent '$S' build --only reims 2>&1 | grep -q 'is not in'"
+t vendor-trees bash -c ". '$HERE/pins.env'; [ -z \"\$REIMS_REPO\" ] && [ -z \"\$M2V_REPO\" ] && [ -f '$HERE/vendor/reims-vgpu/Cargo.toml' ] && [ -f '$HERE/vendor/metal2vulkan/Cargo.toml' ] && grep -q \"\$REIMS_REF\" '$HERE/vendor/README.md' && grep -q \"\$M2V_REF\" '$HERE/vendor/README.md'"
 
 # import: synthetic bundle (random bytes, a real machineid plist)
 B=$T/bundle; mkdir -p "$B"
@@ -48,7 +51,7 @@ echo boot > "$T/avp.bin"
 t import-avp-optional bash -c "'$S' make-disk import '$B' --avpbooter '$T/avp.bin' && [ -f '$T/home/vm/AVPBooter.vmapple2.bin' ]"
 t import-avp-missing-file bash -c "! '$S' make-disk import '$B' --avpbooter '$T/nope.bin'"
 
-# run --dry-run prints the D3 defaults (Ambrosia boot)
+# run --dry-run prints the default settings (Ambrosia boot)
 mkdir -p "$T/home/vm/golden"; : > "$T/home/vm/golden/root-sshd.qcow2"
 t dry-run bash -c "'$S' run --gpu 0 --dry-run"
 "$S" run --gpu 0 --dry-run > "$T/dry" 2>&1
