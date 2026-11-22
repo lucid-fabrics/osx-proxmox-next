@@ -42,7 +42,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/static/img/demo-gpu.gif" alt="Guided GPU passthrough walkthrough" width="720">
+  <img src="docs/static/img/demo-tui.gif" alt="osx-next: your Macs, a new Mac in one screen, and the graphics card setup" width="720">
 </p>
 
 ---

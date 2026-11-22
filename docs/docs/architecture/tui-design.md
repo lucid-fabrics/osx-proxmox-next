@@ -95,3 +95,11 @@ If a BIOS setting has to change, a screen titled "One thing only you can do" lis
 In the second moment the pipeline runs: back up the files, set up the host, restart, check the card is free, attach it to the Mac and start it. The run screen is up the moment you approve, the step that works shows `◐` and a running time, and keys keep working while it runs. A step gets `✓` only when its check passed; a refused step shows `✗` with the reason in a few words and the steps after it stay `·`. The backup step counts only files that existed ("Nothing to back up (2 new files)"). The restart box lists every running VM that the restart shuts down, by name and ID, and each VM that starts with the host and will take the card. It is the confirmation: the focus starts on "Restart now", enter restarts (ignored for the first second, so keys typed ahead cannot restart the host) and no second question follows. After the restart the flow continues without asking again, unless the plan no longer matches what was approved. When another VM is running with the card, the box names it ("VM 103 is using the card"), offers Leave and Check again, and the tool never starts, stops or edits any VM but the Mac it is setting up. On Home the banner says "Restart done" once the host has restarted.
 
 In the third moment you confirm the first boot. AMD cards ask whether it worked and offer troubleshooting if it did not. NVIDIA cards finish with Done. "Put everything back" is available throughout. It asks first and lists what it will do, with the same words as its result: "Remove" for a file the setup created, "Restore" for one it changed, "Take the card off" a Mac, and whether the host needs a restart afterwards.
+
+## Recording the demo
+
+The README demo (`docs/static/img/demo-tui.gif`) is a recording of the real interface running against a fake host, so it needs no Proxmox server. `scripts/demo/run_demo.py` starts `NextApp` with the test fakes answering every host lookup (a Radeon RX 6800 at 03:00, two Macs, a build that advances one phase about every 1.5 s), and it refuses to start any process. `scripts/demo/tui.tape` types the walk through Home, New Mac, Build, the graphics card screens and the restart box. To record it again, install [VHS](https://github.com/charmbracelet/vhs) and run this from the repository root:
+
+```bash
+scripts/record-demo.sh
+```
