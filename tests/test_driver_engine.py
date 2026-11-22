@@ -9,6 +9,7 @@ from contextlib import redirect_stdout
 
 import pytest
 
+from driver_fakes import foreign_lock
 from osx_proxmox_next import driver_engine as e
 
 
@@ -136,7 +137,8 @@ def test_before_facts_per_kind():
 def test_snapshot_names_and_exact_argv():
     when = time.struct_time((2026, 11, 21, 10, 30, 0, 5, 325, 0))
     name = e.snapshot_name(when)
-    assert name == "osx-next-driver-20261121-1030" and e.SNAPSHOT_RE.match(name)
+    assert name == "osx-next-driver-20261121-103000" and e.SNAPSHOT_RE.match(name)   # seconds: a retry in the same minute is a new name
+    assert e.SNAPSHOT_RE.match("osx-next-driver-20261121-1030")                       # names made before still count
     assert e.snapshot_argv(101, name, "NullMoth v2.9") == [
         "qm", "snapshot", "101", name, "--description", "before driver update to NullMoth v2.9"]
     assert e.rollback_argv(101, name) == ["qm", "rollback", "101", name]
@@ -177,35 +179,138 @@ def test_pvesm_status_is_parsed():
     assert e.parse_storage_types("") == {}
 
 
-def test_the_lock_is_held_by_one_live_process(base, other_pid):
+def test_the_lock_is_an_flock_so_a_reused_pid_cannot_hold_it(base, tmp_path):
     assert e.lock_holder(5, base) == 0
-    assert e.acquire_lock(5, base, pid=os.getpid())
-    assert e.lock_holder(5, base) == os.getpid()
-    assert e.acquire_lock(5, base, pid=os.getpid())            # the holder may take it again
-    e.lock_path(5, base).write_text("%d\n" % other_pid)         # another live process
-    assert not e.acquire_lock(5, base, pid=os.getpid())
-    e.lock_path(5, base).write_text("999999999\n")              # a process that is gone leaves a stale lock
-    assert e.lock_holder(5, base) == 0 and e.acquire_lock(5, base, pid=os.getpid())
+    assert e.acquire_lock(5, base)
+    assert e.lock_holder(5, base) == os.getpid() and e.acquire_lock(5, base)       # the holder may take it again
     e.release_lock(5, base)
     e.release_lock(5, base)
-    assert e.lock_holder(5, base) == 0
-    e.lock_path(5, base).parent.mkdir(parents=True, exist_ok=True)
+    assert e.lock_holder(5, base) == 0 and not e.lock_path(5, base).exists()
+    # a lock file that names a live pid but that nobody holds (the host restarted, the pid was reused) is free
+    e.lock_path(5, base).write_text("%d\n" % os.getpid())
+    assert e.lock_holder(5, base) == 0 and e.acquire_lock(5, base)
+    e.release_lock(5, base)
     e.lock_path(5, base).write_text("abc")
     assert e.lock_holder(5, base) == 0
+
+
+def test_a_lock_held_by_another_open_file_refuses_and_is_reported(base):
+    other = foreign_lock(e.lock_path(5, base), pid=4242)
+    assert e.lock_holder(5, base) == 4242 and not e.acquire_lock(5, base)
+    other.seek(0)
+    other.truncate()
+    other.write("garbage")
+    other.flush()
+    assert e.lock_holder(5, base) == 1                                # held, whoever it is
+    other.close()
+    assert e.lock_holder(5, base) == 0 and e.acquire_lock(5, base)
+    e.release_lock(5, base)
+
+
+def test_two_processes_cannot_both_take_the_lock(base):
+    import subprocess
+    import sys
+    code = ("import sys,time; sys.path.insert(0, %r); from osx_proxmox_next import driver_state as s\n"
+            "print(s.acquire_lock(7, %r)); sys.stdout.flush(); time.sleep(30)" % (str(__import__('pathlib').Path(e.__file__).parent.parent), base))
+    child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "True"
+        assert e.lock_holder(7, base) == child.pid
+        assert not e.acquire_lock(7, base)
+    finally:
+        child.kill()
+        child.wait()
+    assert e.acquire_lock(7, base)
+    e.release_lock(7, base)
 
 
 def test_an_unfinished_update_is_seen_only_without_a_runner(base):
     assert e.unfinished(9, base) == {}
     e.write_update(9, {"kind": "amd", "phase": "running", "snapshot": "s"}, base)
     assert e.unfinished(9, base)["kind"] == "amd" and e.read_update(9, base)["vmid"] == 9
-    e.lock_path(9, base).write_text("%d\n" % os.getpid())
+    other = foreign_lock(e.lock_path(9, base))
     assert e.unfinished(9, base) == {}                          # somebody is running it
-    e.release_lock(9, base)
+    other.close()
     e.write_update(9, {"kind": "amd", "phase": "done"}, base)
     assert e.unfinished(9, base) == {}                          # finished, waiting for the first boot question
     e.clear_update(9, base)
     e.clear_update(9, base)
     assert e.read_update(9, base) == {}
+
+
+def test_a_run_goes_on_from_the_first_step_that_is_not_done(base):
+    state = e.new_update("nvidia", "m", "v2.9", "NullMoth v2.9", {}, [], "0000:01:00")
+    assert state["resume_at"] == 0 and all(r["state"] == "pending" for r in state["steps"]) and state["card"] == "0000:01:00"
+    for sid in ("stop", "snapshot", "takeoff"):
+        assert e.begin_step(state, sid)
+        e.end_step(state, sid)
+    assert e.begin_step(state, "stage")
+    e.fail_update(state, "boom")
+    assert state["phase"] == "failed" and [r["state"] for r in state["steps"]][2:5] == ["done", "fail", "pending"]
+    assert e.resume_index(state) == 3
+    state["resume_at"] = e.resume_index(state)
+    assert not e.begin_step(state, "takeoff") and e.begin_step(state, "stage")       # done before the point: skipped
+    assert e.resume_index({"steps": [{"state": "done"}]}) == 1 and e.resume_index({}) == 0
+
+
+def test_what_a_failed_run_left_is_told_from_its_steps(base):
+    def state(kind, **rows):
+        steps = [{"id": i, "state": rows.get(i, "pending")} for i, _t in e.step_titles(kind)]
+        return {"kind": kind, "steps": steps}
+    assert e.failure_text(state("nvidia", stop="done"), False) == "Nothing on the Mac's disks was changed. The Mac is stopped."
+    assert e.failure_text(state("nvidia", stage="fail"), True) == "The driver was only partly staged. The Mac is running."
+    assert "staged inside macOS" in e.failure_text(state("nvidia", stage="done", putback="fail"), False)
+    assert "replaced" in e.failure_text(state("amd", replace="done", start="fail"), False)
+    assert "half changed" in e.failure_text(state("amd", replace="fail"), False)
+
+
+def test_a_snapshot_is_undone_only_while_the_card_setup_is_the_one_it_was_taken_with():
+    assert not e.card_changed("", "anything") and not e.card_changed("0000:01:00", "0000:01:00")
+    assert e.card_changed("0000:01:00", "") and e.card_changed("0000:01:00", "0000:02:00")
+    assert not e.card_changed("0000:01:00", "", interrupted=True)        # the cut off update took the card off itself
+    assert e.card_changed("0000:01:00", "0000:02:00", interrupted=True)
+
+
+def test_the_kind_comes_from_the_graphics_card_on_the_host(tmp_path):
+    def dev(bdf, vendor, pci_class):
+        folder = tmp_path / "bus/pci/devices" / bdf
+        folder.mkdir(parents=True)
+        (folder / "vendor").write_text(vendor + "\n")
+        (folder / "class").write_text(pci_class + "\n")
+    dev("0000:01:00.0", "0x10de", "0x030000")
+    dev("0000:00:14.0", "0x8086", "0x0c0330")           # an Intel USB controller is no card
+    root = str(tmp_path)
+    assert e.live_kind({"hostpci0": "0000:01:00,pcie=0"}, root) == ("nvidia", True)
+    assert e.live_kind({"hostpci0": "0000:00:14.0"}, root) == ("", True)
+    assert e.live_kind({"hostpci0": "0000:00:14.0", "hostpci1": "host=0000:01:00.0"}, root) == ("nvidia", True)
+    assert e.live_kind({"hostpci0": "0000:09:00"}, root) == ("", False)   # not on this host: cannot tell
+    assert e.live_kind({}, root) == ("", False)
+    assert e.resolve_kind("nvidia", "nvidia", True) == ("nvidia", False)
+    assert e.resolve_kind("amd", "nvidia", True) == ("nvidia", True)     # the record is for another card
+    assert e.resolve_kind("", "intel", True) == ("intel", False)
+    assert e.resolve_kind("amd", "", False) == ("amd", False)            # nothing to look at: the record decides
+    assert e.resolve_kind("amd", "", True) == ("", False)                # a device that is no card
+
+
+def test_only_what_is_behind_is_replaced_and_a_newer_kext_is_kept():
+    target = {"Lilu": "1.7.2", "WhateverGreen": "1.7.0"}
+    assert e.replace_names({"Lilu": "1.7.3", "WhateverGreen": "1.6.9"}, target) == ["WhateverGreen"]
+    assert e.replace_names({"Lilu": "1.7.3", "WhateverGreen": "1.7.0"}, target) == []
+    assert e.replace_names({"Lilu": "1.7.2", "WhateverGreen": "1.7.0"}, target, reinstall=True) == ["Lilu", "WhateverGreen"]
+    assert e.replace_names({}, target) == ["Lilu", "WhateverGreen"]
+    assert e.change_lines("amd", {"Lilu": "1.7.3"}, {"Lilu": "1.7.2"}) == ["Lilu: 1.7.3 is newer than 1.7.2, kept"]
+
+
+def test_the_retention_rule_and_snapshot_helpers():
+    assert e.retention_line([]) == ""
+    assert e.retention_line(["a"]) == "The previous driver snapshot a is removed after a successful update."
+    assert e.retention_line(["a", "b"]) == "The previous driver snapshots a, b are removed after a successful update."
+    assert e.before_facts("amd", "s", True, ["osx-next-driver-20261101-0900"])[-1].startswith("The previous driver snapshot ")
+    assert e.snapshot_date("osx-next-driver-20261121-103005") == "2026-11-21 10:30" and e.snapshot_date("x") == ""
+    listing = "`-> osx-next-driver-20261120-0900  2026  x\n `-> mine  2026  y\n  `-> current  You are here!\n"
+    assert e.all_snapshots(listing) == ["osx-next-driver-20261120-0900", "mine"]
+    assert e.newer_than(listing, "osx-next-driver-20261120-0900") == ["mine"] and e.newer_than(listing, "mine") == []
+    assert e.newer_than(listing, "gone") == []
 
 
 def test_the_daily_check_cache(base):
@@ -238,6 +343,8 @@ def test_the_command_line_the_bash_installer_uses(base, monkeypatch, tmp_path):
     code, out = run_main("record", "101")
     assert code == 0 and json.loads(out)["components"][0]["name"] == "NullMoth"
     assert run_main("write", "101", "nvidia", comps, "[]")[0] == 0
+    assert run_main("write", "101", "nvidia", comps, "[]", "osx-next-driver-20261121-1030", "0000:01:00")[0] == 0
+    assert e.read_record(101, base)["snapshot_card"] == "0000:01:00"
     assert run_main("revert", "101")[0] == 0 and run_main("revert", "102")[0] == 1
     assert json.loads(run_main("component", "Lilu", "1.7.2")[1])["tag"] == "1.7.2"
     assert json.loads(run_main("component", "Lilu", "1.7.2", "t", "s", "src")[1])["sha256"] == "s"
@@ -256,11 +363,23 @@ def test_the_command_line_the_bash_installer_uses(base, monkeypatch, tmp_path):
     assert code == 1 and "nfs" in out
     assert run_main("compare", "v2.10", "v2.9")[1] == "1\n"
     assert run_main("text", "UP_TO_DATE")[1] == e.UP_TO_DATE + "\n"
-    assert run_main("lock", "101", str(os.getpid()))[0] == 0 and run_main("lock", "101", "x")[0] == 1
-    assert run_main("unlock", "101")[0] == 0
-    assert run_main("update-write", "101", '{"phase": "running", "kind": "amd"}')[0] == 0
+    assert run_main("update-init", "101", "amd", "Mac", "v1", "the driver", "{}", "[]", "0000:01:00")[0] == 0
+    assert run_main("pending-kind", "101")[1] == "amd\n" and json.loads(run_main("update-get", "101", "card")[1]) == "0000:01:00"
+    assert run_main("update-begin", "101", "stop")[0] == 0 and run_main("update-end", "101", "stop")[0] == 0
+    assert run_main("update-set", "101", "snapshot", '"s"')[0] == 0 and json.loads(run_main("update-get", "101", "snapshot")[1]) == "s"
+    assert run_main("update-set", "101", "original", '{"hostpci0": "0000:01:00"}')[0] == 0
+    assert run_main("update-fail", "101", "boom")[0] == 0 and run_main("update-resume", "101")[0] == 0
+    assert run_main("update-begin", "101", "stop")[0] == 3                  # done before the point it goes on from
+    assert "Nothing on the Mac's disks was changed. The Mac is stopped." in run_main("failure-text", "101", "no")[1]
     assert json.loads(run_main("unfinished", "101")[1])["kind"] == "amd"
-    assert run_main("update-clear", "101")[0] == 0
+    assert run_main("card-changed", "0000:01:00", "0000:02:00", "no")[0] == 0 and run_main("card-changed", "", "x", "no")[0] == 1
+    assert run_main("snapshot-date", "osx-next-driver-20261121-1030")[1] == "2026-11-21 10:30\n"
+    assert run_main("replace-names", '{"Lilu": "1.7.3"}', '{"Lilu": "1.7.2", "WhateverGreen": "1.7.0"}', "no")[1] == "WhateverGreen\n"
+    assert run_main("newer-than", "a", stdin="`-> a x\n `-> b y\n")[1] == "b\n"
+    assert run_main("all-snapshots", stdin="`-> a x\n `-> current  here\n")[1] == "a\n"
+    kind = json.loads(run_main("kind", "amd", stdin="hostpci0: 0000:09:00\n")[1])
+    assert kind == {"kind": "amd", "conflict": False, "readable": False}
+    assert run_main("update-clear", "101")[0] == 0 and run_main("pending-kind", "101")[1] == "\n"
     igpu = tmp_path / "igpu"
     igpu.mkdir()
     monkeypatch.setenv("IGPU_STATE_DIR", str(igpu))

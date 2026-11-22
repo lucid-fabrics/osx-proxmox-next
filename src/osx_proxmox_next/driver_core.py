@@ -1,5 +1,5 @@
 """What every driver update shares: the run environment, the step list that survives a closed terminal, the lock,
-stopping the Mac, the safety snapshot and taking the card off and putting it back."""
+stopping the Mac, the driver snapshot and taking the card off and putting it back."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 from . import driver_engine as engine, driver_snapshot, nullmoth_engine
 from .domain import MAX_VMID, MIN_VMID
 from .driver_plan import DriverPlan
+from .gpu import parse_config
 from .igpu_finish import wait_stopped
 from .infrastructure import ProxmoxAdapter
 from .planner import POST_INSTALL_BOOT_ORDER
@@ -56,6 +57,7 @@ class RunResult:
     snapshot: str = ""
     installed: dict[str, dict] = field(default_factory=dict)   # components to record
     detail: str = ""                                           # what was verified, in plain words
+    kept: set[str] = field(default_factory=set)                # components left as they were (newer than the pin)
 
 
 def stop_mac(env: RunEnv, vmid: int) -> None:
@@ -75,7 +77,10 @@ def stop_mac(env: RunEnv, vmid: int) -> None:
 
 
 class Updater:
-    """One update of one Mac. Its state lives in <vmid>.update.json, so a reopened terminal sees the same steps."""
+    """One update of one Mac. Its state lives in <vmid>.update.json, so a reopened terminal sees the same steps.
+
+    A resumed run goes on from the first step that is not done and trusts no row about the Mac itself: every step
+    that needs the Mac stopped, the card off or the card on looks at the Mac and puts it right first."""
 
     def __init__(self, plan: DriverPlan, env: RunEnv, resume: dict | None = None) -> None:
         if not MIN_VMID <= plan.vmid <= MAX_VMID:
@@ -83,17 +88,13 @@ class Updater:
         self.plan, self.env, self.pve, self.vmid = plan, env, env.pve, plan.vmid
         self.result = RunResult()
         self.resumed = bool(resume)
-        self.state = dict(resume) if resume else self._fresh()
+        self.state = dict(resume) if resume else engine.new_update(
+            plan.kind, plan.name, plan.version_label, plan.step_name(), self._choice(),
+            [{"name": n, "version": v} for n, v in plan.installed.items()], plan.cfg.get("hostpci0", ""))
+        if resume:
+            self.state["resume_at"] = engine.resume_index(self.state)
+            self.state.setdefault("card", (self.state.get("original") or {}).get("hostpci0") or "")
         self.state.update(phase="running", error="", pid=os.getpid())
-
-    def _fresh(self) -> dict:
-        plan = self.plan
-        steps = [{"id": sid, "title": title, "done": done, "state": "pending"}
-                 for (sid, title), (_s, done) in zip(engine.step_titles(plan.kind, plan.step_name()),
-                                                     engine.step_titles(plan.kind, plan.step_name(), done=True))]
-        return {"kind": plan.kind, "name": plan.name, "label": plan.version_label, "steps": steps, "snapshot": "",
-                "original": None, "events": [], "choice": self._choice(),
-                "previous": [{"name": n, "version": v} for n, v in plan.installed.items()]}
 
     def _choice(self) -> dict:
         target = self.plan.target
@@ -111,34 +112,71 @@ class Updater:
         self.persist()
         self.env.on_event(message)
 
-    def _row(self, sid: str) -> dict:
-        return next(r for r in self.state["steps"] if r["id"] == sid)
-
     def begin(self, sid: str) -> bool:
-        """Start a step. False when a resumed run already did it."""
-        row = self._row(sid)
-        if row["state"] == "done" and self.resumed and sid in ("stop", "snapshot", "takeoff"):
+        """Start a step. False when a resumed run finished it before the point it goes on from."""
+        if not engine.begin_step(self.state, sid):
             return False
-        row.update(state="active", started=time.time())
         self.persist()
         self.env.on_step(sid, "active")
         return True
 
     def end(self, sid: str, title: str = "") -> None:
-        row = self._row(sid)
-        row.update(state="done", ended=time.time())
-        if title:
-            row["done"] = title
+        engine.end_step(self.state, sid, "done", title)
         self.persist()
         self.env.on_step(sid, "done")
 
     def fail(self, error: str) -> None:
         for row in self.state["steps"]:
             if row["state"] == "active":
-                row.update(state="fail", ended=time.time())
                 self.env.on_step(row["id"], "fail")
-        self.state.update(phase="failed", error=error)
+        engine.fail_update(self.state, error)
         self.persist()
+
+    # ── what the Mac is now ──────────────────────────────────────────
+
+    def running(self) -> bool:
+        return "stopped" not in self.pve.qm("status", str(self.vmid)).output
+
+    def live_cfg(self) -> dict[str, str]:
+        return parse_config(self.pve.qm("config", str(self.vmid)).output) or dict(self.plan.cfg)
+
+    def need_stopped(self) -> None:
+        """A step that writes the Mac's disks or its card setup needs the Mac stopped, whatever an earlier row says."""
+        if self.running():
+            self.say("The Mac is running. Stopping it first")
+            stop_mac(self.env, self.vmid)
+
+    def need_card_off(self) -> None:
+        """Take the card off when it is on. What the Mac had is remembered the first time, never overwritten."""
+        cfg = self.live_cfg()
+        if "hostpci0" not in cfg:
+            return
+        if not self.state.get("original"):
+            self.state["original"] = {k: cfg.get(k) for k in ("hostpci0", "vga", "args", "boot")}
+            self.persist()
+        res = self.pve.qm("set", str(self.vmid), "--delete", "hostpci0")
+        if not res.ok and "hostpci0" in self.live_cfg():
+            raise DriverError(f"Could not take the card off VM {self.vmid}: {res.output.strip()[-300:]}")
+
+    def staging_cfg(self) -> dict[str, str]:
+        """The Mac's settings as they were before the update, for the staging code that puts them back (a cut-off run
+        may have left the staging settings in place)."""
+        cfg = dict(self.plan.cfg)
+        for key, value in (self.state.get("original") or {}).items():
+            if key == "hostpci0":
+                continue
+            if value is None:
+                cfg.pop(key, None)
+            else:
+                cfg[key] = value
+        return cfg
+
+    def payload_ref(self) -> str:
+        ref = self.state.get("payload_ref", "")
+        if not ref:
+            raise DriverError("This run has no staged driver to check, so it cannot be finished. Undo the driver update "
+                              "or start a fresh update.")
+        return ref
 
     # ── shared steps ─────────────────────────────────────────────────
 
@@ -156,30 +194,28 @@ class Updater:
             self.result.snapshot = name
             self.say(f"Saved the snapshot {name}")
         elif self.env.no_snapshot:
+            self.state["no_snapshot"] = True
             self.say("Going on without a snapshot, as you typed. Nothing can put this Mac back.")
         else:
             raise DriverError(engine.NO_SNAPSHOT_WARNING)
         self.end("snapshot")
 
-    def take_card_off(self, strip: Callable[[str], str] | None = None) -> None:
+    def take_card_off(self) -> None:
         """Remember hostpci0, vga, args and boot as they are, then remove the card so recovery can run on the emulated
-        display. *strip* may also drop leftover args. A resumed run keeps what the first run remembered."""
+        display."""
         if not self.begin("takeoff"):
             return
-        if not self.state.get("original"):
-            cfg = self.plan.cfg
-            self.state["original"] = {k: cfg.get(k) for k in ("hostpci0", "vga", "args", "boot")}
-            self.persist()
-        res = self.pve.qm("set", str(self.vmid), "--delete", "hostpci0")
-        if not res.ok and "hostpci0" in self.pve.qm("config", str(self.vmid)).output:
-            raise DriverError(f"Could not take the card off VM {self.vmid}: {res.output.strip()[-300:]}")
+        self.need_stopped()
+        self.need_card_off()
         self.end("takeoff")
 
     def put_card_back(self, boot: str = "") -> None:
         """hostpci0, the display and the args go back to what the first step remembered; the boot order to *boot*."""
         if not self.begin("putback"):
             return
-        self.restore_card(boot)
+        self.need_stopped()
+        if "hostpci0" not in self.live_cfg():
+            self.restore_card(boot)
         self.end("putback")
 
     def restore_card(self, boot: str = "") -> None:
@@ -194,6 +230,8 @@ class Updater:
         self.pve.qm("set", str(self.vmid), "--boot", order)
 
     def start(self) -> None:
+        if self.running():
+            return
         res = self.pve.qm("start", str(self.vmid))
         if not res.ok:
             raise DriverError(f"Could not start VM {self.vmid}: {res.output.strip()[-300:]}")

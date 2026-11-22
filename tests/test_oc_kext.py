@@ -71,7 +71,7 @@ def test_replace_swaps_the_bundle_and_leaves_the_config_alone(oc, tmp_path):
     before = (oc / "config.plist").read_bytes()
     zip_path, sha = make_zip(tmp_path / "Lilu.zip", {**kext_files("Lilu", "1.7.2"), "Docs/readme": b"x"})
     res = run(oc, "replace", "Lilu.kext", zip_path, sha)
-    assert res.stdout.strip() == "1.7.2" and res.stderr == ""
+    assert res.stdout.strip() == "VERSION 1.7.2" and res.stderr == ""
     assert (oc / "config.plist").read_bytes() == before
     assert not (oc / "Kexts" / "Lilu.kext" / "stale.txt").exists() and not (oc / "Kexts" / "Lilu.kext.tmp").exists()
     assert json.loads(run(oc, "versions", "Lilu.kext").stdout) == {"Lilu.kext": "1.7.2"}
@@ -82,7 +82,7 @@ def test_a_wrapped_kext_is_found_and_a_changed_executable_is_corrected(oc, tmp_p
     config(oc, [{"BundlePath": "WhateverGreen.kext", "ExecutablePath": "Contents/MacOS/WhateverGreen"}])
     zip_path, sha = make_zip(tmp_path / "wg.zip", kext_files("WhateverGreen", "1.7.0", exe="WG", wrap="Release/"))
     res = run(oc, "replace", "WhateverGreen.kext", zip_path, sha)
-    assert res.stdout.strip() == "1.7.0" and "ExecutablePath of WhateverGreen.kext in config.plist was corrected" in res.stderr
+    assert res.stdout.strip() == "VERSION 1.7.0" and "ExecutablePath of WhateverGreen.kext in config.plist was corrected" in res.stderr
     entry = plistlib.loads((oc / "config.plist").read_bytes())["Kernel"]["Add"][0]
     assert entry["ExecutablePath"] == "Contents/MacOS/WG"
     assert b"<array/>" not in (oc / "config.plist").read_bytes()

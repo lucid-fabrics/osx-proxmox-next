@@ -40,7 +40,7 @@ def test_status_shows_installed_latest_and_snapshots(host, capsys):
     assert run("driver-status", "--vmid", "109") == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "VM 109 macos-sequoia: NVIDIA card" and out[1] == "Installed: NullMoth v2.8.1" and out[2] == "Latest:    NullMoth v2.9"
-    assert out[3] == "A newer driver is available." and out[4] == "Safety snapshots: " + NEW_SNAP
+    assert out[3] == "A newer driver is available." and out[4] == "Driver snapshots: " + NEW_SNAP
 
 
 def test_status_for_a_mac_with_no_record_and_one_that_is_up_to_date_or_cut_off(host, capsys):
@@ -56,7 +56,8 @@ def test_status_for_a_mac_with_no_record_and_one_that_is_up_to_date_or_cut_off(h
     host["pve"].snapshots.clear()
     assert run("driver-status", "--vmid", "109") == 0
     out = capsys.readouterr().out
-    assert "Up to date." in out and "Safety snapshots: none" in out and "driver-update --vmid 109 --finish --yes" in out
+    assert "Up to date." in out and "Driver snapshots: none" in out and "driver-update --vmid 109 --finish --yes" in out
+    assert "The driver update stopped before it finished." in out and "driver-undo --vmid 109" in out
 
 
 def test_status_as_json(host, capsys):
@@ -101,7 +102,7 @@ def test_the_nullmoth_risk_must_be_accepted_to_apply(host, capsys):
 def test_an_update_runs_after_confirmation(host, capsys):
     assert run("driver-update", "--vmid", "109", "--yes", "--accept-nullmoth-risk") == 0
     out = capsys.readouterr().out
-    assert "NOTE: n1" in out and "Done. 5 extensions loaded." in out and "Safety snapshot " + NEW_SNAP in out
+    assert "NOTE: n1" in out and "Done. 5 extensions loaded." in out and "Driver snapshot " + NEW_SNAP + " is kept. driver-undo goes back to it." in out
     plan, env = host["ran"][0]
     assert plan.vmid == 109 and env.no_snapshot is False and str(env.iso_dir)
 
@@ -180,12 +181,12 @@ def test_undo_asks_then_rolls_back(host, capsys, monkeypatch):
     seen = []
     monkeypatch.setattr(driver_cli, "put_back", lambda vmid, env: seen.append(vmid) or NEW_SNAP)
     assert run("driver-undo", "--vmid", "109") == 2                     # not a terminal, no --yes
-    assert seen == [] and "goes back to " + NEW_SNAP in capsys.readouterr().out
+    assert seen == [] and f"its disks go back to the snapshot of 2026-11-21 10:30 ({NEW_SNAP})" in capsys.readouterr().out
     assert run("driver-undo", "--vmid", "109", "--yes") == 0
     assert seen == [109] and "VM 109 is back to " + NEW_SNAP in capsys.readouterr().out
     host["pve"].snapshots.clear()
     assert run("driver-undo", "--vmid", "109", "--yes") == 2
-    assert "nothing to put back" in capsys.readouterr().out
+    assert "nothing to undo" in capsys.readouterr().out
 
     host["pve"].snapshots.append(NEW_SNAP)
 
@@ -193,6 +194,33 @@ def test_undo_asks_then_rolls_back(host, capsys, monkeypatch):
         raise driver_core.DriverError("Another driver update is running for this Mac.")
     monkeypatch.setattr(driver_cli, "put_back", refuse)
     assert run("driver-undo", "--vmid", "109", "--yes") == 1
+
+
+def test_status_of_a_mac_whose_update_stopped_with_the_card_off_says_so_plainly(host, capsys):
+    host["pve"] = DPve(cfg=mac(hostpci0=None), snapshots=[NEW_SNAP])
+    engine.write_update(109, {"kind": "nvidia", "phase": "failed", "snapshot": NEW_SNAP})
+    assert run("driver-status", "--vmid", "109") == 0
+    out = capsys.readouterr().out
+    assert "REFUSED" not in out and "NVIDIA card" in out
+    assert "The driver update stopped before it finished. Finish it: osx-next-cli driver-update --vmid 109 --finish --yes" in out
+    assert run("driver-status", "--vmid", "109", "--json") == 0
+    assert json.loads(capsys.readouterr().out)["unfinished"] is True
+
+
+def test_undo_is_refused_before_it_asks_when_the_card_setup_changed(host, capsys):
+    engine.write_record(109, "nvidia", comps(NullMoth="v2.9"), previous=comps(NullMoth="v2.8.1"), snapshot=NEW_SNAP, card="0000:09:00")
+    assert run("driver-undo", "--vmid", "109", "--yes") == 2
+    assert "card setup of this Mac changed" in capsys.readouterr().out
+
+
+def test_a_release_or_macos_that_is_not_one_is_refused(host, capsys):
+    assert run("driver-update", "--vmid", "109", "--dry-run", "--macos", "x;rm") == 2
+    assert "--macos must be one of" in capsys.readouterr().out
+    assert run("driver-update", "--vmid", "109", "--dry-run", "--macos", "sequoia") == 0
+    capsys.readouterr()
+    assert run("driver-update", "--vmid", "109", "--dry-run", "--version", "v2.9; id") == 2
+    assert "--version 'v2.9; id' is not a release tag" in capsys.readouterr().out
+    assert run("driver-update", "--vmid", "109", "--dry-run", "--wex-version", "../x") == 2
 
 
 def test_dispatch_ignores_other_commands():

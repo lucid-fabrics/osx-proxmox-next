@@ -8,12 +8,12 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from . import driver_engine as engine, driver_snapshot, nullmoth
+from . import driver_engine as engine, driver_snapshot, driver_spawn, nullmoth
 from .defaults import DEFAULT_ISO_DIR
-from .domain import MAX_VMID, MIN_VMID
+from .domain import MAX_VMID, MIN_VMID, SUPPORTED_MACOS
 from .driver_core import DriverError, RunEnv
 from .driver_plan import DriverPlan, prepare
-from .driver_run import finish_interrupted, put_back, run_update
+from .driver_run import finish_interrupted, put_back, run_update, undo_target
 from .driver_targets import Choice
 from .services import get_proxmox_adapter
 from .unattended import QmConsole
@@ -22,7 +22,7 @@ __all__ = ["add_parsers", "dispatch", "run_status", "run_undo", "run_update_comm
 
 
 def add_parsers(sub: argparse._SubParsersAction) -> None:
-    status = sub.add_parser("driver-status", help="Show which graphics driver a Mac has, what is newer and its safety snapshots")
+    status = sub.add_parser("driver-status", help="Show which graphics driver a Mac has, what is newer and its driver snapshots")
     status.add_argument("--vmid", type=int, required=True, help="VM ID of the Mac")
     status.add_argument("--json", action="store_true", help="Print the answer as JSON for scripts")
     update = sub.add_parser(
@@ -44,7 +44,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--finish", action="store_true", help="Continue the update that was cut off")
     update.add_argument("--macos", default="", help="When the Mac's description or name does not say which macOS it runs")
     update.add_argument("--iso-dir", default="", help="Folder that caches the downloads")
-    undo = sub.add_parser("driver-undo", help="Put a Mac back to the safety snapshot of its last driver update")
+    undo = sub.add_parser("driver-undo", help="Undo the last driver update: put the Mac back to its driver snapshot")
     undo.add_argument("--vmid", type=int, required=True, help="VM ID of the Mac")
     undo.add_argument("--yes", action="store_true", help="Do not ask for confirmation")
 
@@ -54,6 +54,19 @@ def _bad_vmid(vmid: int) -> bool:
         return False
     print(f"ERROR: VMID must be between {MIN_VMID} and {MAX_VMID}.")
     return True
+
+
+def _bad_args(args: argparse.Namespace) -> bool:
+    """A release name or tag that would end up in a file pattern or a URL must look like one."""
+    if args.macos and args.macos not in SUPPORTED_MACOS:
+        print(f"ERROR: --macos must be one of: {', '.join(SUPPORTED_MACOS)}.")
+        return True
+    for flag, value in (("--version", args.version), ("--wex-version", args.wex_version),
+                        ("--graphics-version", args.graphics_version)):
+        if value and not driver_spawn.TAG.match(value):
+            print(f"ERROR: {flag} {value!r} is not a release tag.")
+            return True
+    return False
 
 
 def _choice(args: argparse.Namespace) -> Choice:
@@ -66,7 +79,7 @@ def status_data(vmid: int, plan: DriverPlan, latest_error: str = "") -> dict:
     return {"vmid": vmid, "name": plan.name, "kind": plan.kind, "refused": plan.refusals,
             "installed": plan.installed if plan.installed_known else None,
             "latest": plan.target.versions() if plan.target else {}, "state": judged["state"],
-            "snapshots": snaps, "unfinished": bool(engine.unfinished(vmid)), "latest_error": latest_error}
+            "snapshots": snaps, "unfinished": plan.interrupted, "latest_error": latest_error}
 
 
 def run_status(args: argparse.Namespace) -> int:
@@ -82,14 +95,15 @@ def run_status(args: argparse.Namespace) -> int:
     if plan.refusals and not plan.kind:
         return 2
     print(f"VM {args.vmid} {plan.name}: {engine.CARD_NAME.get(plan.kind, '?')} card")
+    if plan.interrupted:
+        print("The driver update stopped before it finished. Finish it: osx-next-cli driver-update --vmid %d --finish --yes"
+              " (or undo it: osx-next-cli driver-undo --vmid %d)." % (args.vmid, args.vmid))
     print("Installed: " + (engine.driver_line(plan.kind, plan.installed) if plan.installed_known else "installed version unknown"))
     if plan.target:
         print("Latest:    " + engine.driver_line(plan.kind, plan.target.versions()))
         print({"update": "A newer driver is available.", "current": "Up to date.",
                "unknown": "The installed version is not known."}.get(data["state"], ""))
-    print("Safety snapshots: " + (", ".join(data["snapshots"]) or "none"))
-    if data["unfinished"]:
-        print("An update was cut off. Finish it: osx-next-cli driver-update --vmid %d --finish --yes" % args.vmid)
+    print("Driver snapshots: " + (", ".join(data["snapshots"]) or "none"))
     return 0
 
 
@@ -125,7 +139,7 @@ def _gate(args: argparse.Namespace, plan: DriverPlan, ask: Callable[[str], str])
 
 def run_update_command(args: argparse.Namespace, ask: Callable[[str], str] = input,
                        say: Callable[[str], None] = print) -> int:
-    if _bad_vmid(args.vmid):
+    if _bad_vmid(args.vmid) or _bad_args(args):
         return 2
     if args.finish:
         return _finish(args, say)
@@ -165,23 +179,26 @@ def _report(result, say: Callable[[str], None]) -> int:
         return 1
     say("Done. " + result.detail + ".")
     if result.snapshot:
-        say(f"Safety snapshot {result.snapshot} is kept. driver-undo puts the Mac back to it.")
+        say(f"Driver snapshot {result.snapshot} is kept. driver-undo goes back to it.")
     return 0
 
 
 def run_undo(args: argparse.Namespace, ask: Callable[[str], str] = input) -> int:
     if _bad_vmid(args.vmid):
         return 2
-    snaps = driver_snapshot.list_tool(get_proxmox_adapter(), args.vmid)
-    if not snaps:
-        print(f"ERROR: {engine.REFUSE_NOTHING_TO_UNDO}")
+    env = RunEnv(get_proxmox_adapter(), on_event=lambda m: print(f"  {m}"))
+    try:
+        name = undo_target(args.vmid, env)
+    except DriverError as exc:
+        print(f"ERROR: {exc}")
         return 2
-    print(f"The Mac stops, goes back to {snaps[-1]} and starts again. Everything done since is lost.")
-    if not _confirm("Put it back?", args.yes, ask):
+    print(f"The Mac stops, its disks go back to the snapshot of {engine.snapshot_date(name)} ({name}) and it starts again. "
+          "Everything done in macOS since is lost.")
+    if not _confirm("Undo the driver update?", args.yes, ask):
         print("Nothing was changed.")
         return 2
     try:
-        name = put_back(args.vmid, RunEnv(get_proxmox_adapter(), on_event=lambda m: print(f"  {m}")))
+        put_back(args.vmid, env)
     except DriverError as exc:
         print(f"ERROR: {exc}")
         return 1

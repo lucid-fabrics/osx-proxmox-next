@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import NamedTuple
 from pathlib import Path
 
 from . import driver_engine as engine, gpu, igpu_engine, nullmoth_engine
@@ -34,28 +35,24 @@ class Target:
         return {name: c["version"] for name, c in self.components.items()}
 
 
-VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
+class Detected(NamedTuple):
+    kind: str          # nvidia, intel, amd; '' when the Mac has no graphics card or its kind cannot be told
+    conflict: bool     # the card on the host is of another kind than the Mac's driver record says
+    readable: bool     # a passed-through device could be looked up on this host
 
 
-def detect_kind(vmid: int, cfg: dict[str, str], sysfs_root: Path = Path("/sys")) -> str:
-    """nvidia, intel or amd for a Mac with a card on hostpci: from its driver record, its attach record, and last from
-    the vendor of the passed-through device on this host. '' when the Mac has no card or the kind cannot be told."""
-    held = cfg.get("hostpci0") or next((v for k, v in sorted(cfg.items()) if k.startswith("hostpci")), "")
-    if not held:
-        return ""
+def detect_kind(vmid: int, cfg: dict[str, str], sysfs_root: Path = Path("/sys")) -> Detected:
+    """nvidia, intel or amd for a Mac with a card on hostpci: the vendor of the passed-through device of PCI class 0x03
+    on this host decides. A USB controller or a NIC is no card. The driver record and the attach record must agree
+    with it (else `conflict`); without a readable device they decide."""
+    if not any(k.startswith("hostpci") for k in cfg):
+        return Detected("", False, True)
     record = engine.read_record(vmid)
-    if record.get("kind") in engine.KINDS:
-        return record["kind"]
     attach = gpu.load_record(vmid)
-    if attach is not None and attach.vendor in engine.KINDS:
-        return attach.vendor
-    bdf = held.split(",", 1)[0].replace("host=", "")
-    bdf = bdf if bdf.count(":") == 2 else "0000:" + bdf
-    try:
-        vendor = (sysfs_root / "bus/pci/devices" / (bdf if "." in bdf else bdf + ".0") / "vendor").read_text().strip().lower()
-    except OSError:
-        return ""
-    return VENDORS.get(vendor, "")
+    recorded = record.get("kind") if record.get("kind") in engine.KINDS else (
+        attach.vendor if attach is not None and attach.vendor in engine.KINDS else "")
+    live, readable = engine.live_kind(cfg, str(sysfs_root))
+    return Detected(*engine.resolve_kind(recorded, live, readable), readable)
 
 
 def pinned_amd() -> dict[str, dict]:

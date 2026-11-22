@@ -53,7 +53,7 @@ def refresh_amfipass(u: Updater, amfipass: Path) -> None:
         have = driver_oc.read_versions(u.pve, u.vmid, ["AMFIPass"]).get("AMFIPass", "")
         if have and have == AMFIPASS.version:
             return
-        driver_oc.replace_kexts(u.pve, u.vmid, [("AMFIPass", amfipass, AMFIPASS.sha256)])
+        driver_oc.replace_kexts(u.pve, u.vmid, [("AMFIPass", amfipass, AMFIPASS.sha256)], u.result.notes)
     except driver_oc.OcError as exc:
         raise DriverError(str(exc)) from exc
     u.say(f"Updated AMFIPass on the OpenCore disk to {AMFIPASS.version}")
@@ -69,12 +69,15 @@ def run(u: Updater) -> None:
     u.take_card_off()
     storage = _storage_of(u.plan.cfg)
     if u.begin("stage"):
+        u.need_stopped()          # a resumed run goes on from here: the Mac stopped and the card off, whatever the rows say
+        u.need_card_off()
         job = StageJob(vmid, pve, env.console, storage, u.say, env.clock, env.sleep)
         try:
             payload_ref = _stage(u, job, payload, recovery)
         except FinishError as exc:
             raise DriverError(str(exc)) from exc
-        u.state["payload_ref"] = payload_ref
+        u.state.update(payload_ref=payload_ref, staged=True)      # the driver is inside macOS now, whatever comes next
+        u.persist()
         refresh_amfipass(u, amfipass)
         u.end("stage")
     u.put_card_back()
@@ -84,7 +87,7 @@ def run(u: Updater) -> None:
         u.end("start")
     u.begin("verify")
     result = FinishResult(version=pick["tag"])
-    result.result = _wait_result(pve, vmid, u.state["payload_ref"], FIRSTBOOT_TIMEOUT, u.say, env.clock, env.sleep)
+    result.result = _wait_result(pve, vmid, u.payload_ref(), FIRSTBOOT_TIMEOUT, u.say, env.clock, env.sleep)
     conclude(pve, vmid, payload, result, u.say, env.clock, env.sleep, env.find_ip, env.probe)
     u.result.notes += result.notes
     if not result.verified:
@@ -99,7 +102,7 @@ def _stage(u: Updater, job: StageJob, payload: Path, recovery: Path) -> str:
     if u.resumed:   # a run that was cut off may have left its two disks behind
         for slot in ("sata1", "sata2"):
             _drop_disk(u.pve, u.vmid, slot)
-    payload_ref = stage_recovery(job, payload, recovery, u.plan.cfg)
+    payload_ref = stage_recovery(job, payload, recovery, u.staging_cfg())
     err = u.env.console.restore_picker_timeout() if u.env.console else ""
     if err:
         u.result.notes.append(f"Could not restore the picker's auto-boot ({err}); run post-install afterwards.")

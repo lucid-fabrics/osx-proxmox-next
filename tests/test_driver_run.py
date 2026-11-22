@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from driver_fakes import Clock, Console, DPve, comps, mac
+from driver_fakes import Clock, Console, DPve, comps, foreign_lock, mac
 from osx_proxmox_next import (
     driver_amd, driver_core, driver_engine as engine, driver_intel, driver_nvidia, driver_oc, driver_plan, driver_run,
     driver_snapshot, igpu_engine, igpu_finish,
@@ -70,7 +70,7 @@ def env_for(pve, rec, tmp_path, **kw):
 @pytest.fixture
 def stubs(tmp_path, monkeypatch):
     """The downloads, the payload disk and the recovery staging are the card setup's own code: scripted here."""
-    s = SimpleNamespace(staged=[], guest=[VERIFIED], stage_error=None, wait_first=True, package="installed", applied=[],
+    s = SimpleNamespace(staged=[], at_stage=[], guest=[VERIFIED], stage_error=None, wait_first=True, package="installed", applied=[],
                         attach_ok=True, payload_ok=True)
     (tmp_path / "a.zip").write_bytes(b"x")
     (tmp_path / "rec.img").write_bytes(b"x")
@@ -86,6 +86,7 @@ def stubs(tmp_path, monkeypatch):
         if s.stage_error:
             raise igpu_finish.FinishError(s.stage_error)
         s.staged.append((job.vmid, payload.name, tuple(job.leftover_args), job.tahoe))
+        s.at_stage.append(("hostpci0" in job.pve.cfg, job.pve.status))
         return "local-lvm:vm-9-disk-11"
     monkeypatch.setattr(igpu_finish, "stage_recovery", stage)
     monkeypatch.setattr(driver_intel, "stage_recovery", stage)
@@ -138,7 +139,7 @@ def test_an_nvidia_update_runs_every_step_and_records_the_new_version(tmp_path, 
     assert record["previous"][0]["version"] == "v2.8.1" and record["snapshot"] == NEW_SNAP
     state = engine.read_update(9)
     assert state["phase"] == "done" and engine.unfinished(9) == {} and engine.lock_holder(9) == 0
-    assert "Removed older safety snapshots: " + OLD_SNAP in " ".join(state["events"])
+    assert "Removed the previous driver snapshot: " + OLD_SNAP in " ".join(state["events"])
     assert "5 extensions loaded" in res.detail and "10.0.0.7" in res.detail
     assert pve.status == "running" and not (tmp_path / "nullmoth-payload-9.img").exists()
 
@@ -164,7 +165,10 @@ def test_a_failed_opencore_read_stops_the_update_and_puts_the_card_back(tmp_path
     plan = plan_for("nvidia", pve)
     plan.target = nv_target()
     res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
-    assert not res.ok and "Could not read the OpenCore disk" in res.error and "u puts it back to the snapshot (%s)" % NEW_SNAP in res.error
+    assert not res.ok and "Could not read the OpenCore disk" in res.error
+    assert "The Mac is stopped." in res.error and "Finish continues it (osx-next-cli driver-update --vmid 9 --finish)." in res.error
+    assert "driver-undo goes back to the snapshot of 2026-11-21 10:30 (%s)" % NEW_SNAP in res.error
+    assert engine.read_update(9)["error"] == res.error
     assert ("set", "9", "--hostpci0", "0000:01:00,pcie=0") in pve.calls
     state = engine.read_update(9)
     assert state["phase"] == "failed" and state["steps"][3]["state"] == "fail" and engine.unfinished(9)["phase"] == "failed"
@@ -188,7 +192,8 @@ def test_a_driver_the_guest_did_not_confirm_fails_the_update(tmp_path, stubs, re
     plan.target = nv_target()
     res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
     assert not res.ok and "STOP macOS 14" in res.error and engine.read_record(9) == {}
-    assert pve.status == "running"      # the Mac runs again, on its old driver
+    assert pve.calls_of("start")        # the Mac was started again, on its old driver
+    assert "The driver is staged inside macOS and installs at the next start." in res.error
 
 
 def test_downloads_fail_before_the_mac_is_touched(tmp_path, stubs, rec, monkeypatch):
@@ -285,26 +290,25 @@ def test_snapshot_helpers(tmp_path):
 def test_put_it_back_rolls_back_and_reverts_the_record(tmp_path, rec):
     pve = DPve(status="running", snapshots=[OLD_SNAP, NEW_SNAP])
     engine.write_record(9, "nvidia", comps(NullMoth="v2.9"), previous=comps(NullMoth="v2.8.1"), snapshot=NEW_SNAP)
-    engine.write_update(9, {"kind": "nvidia", "phase": "failed", "snapshot": OLD_SNAP})
+    engine.write_update(9, {"kind": "nvidia", "phase": "failed", "snapshot": NEW_SNAP})
     name = driver_run.put_back(9, env_for(pve, rec, tmp_path))
-    assert name == OLD_SNAP                                            # the run's own snapshot, not just the newest
+    assert name == NEW_SNAP                                            # the run's own snapshot
     calls = calls_after_snapshot(pve)
-    assert calls[0][:2] == ("shutdown", "9") and pve.rollbacks == [OLD_SNAP] and calls[-1] == ("start", "9")
+    assert calls[0][:2] == ("shutdown", "9") and pve.rollbacks == [NEW_SNAP] and calls[-1] == ("start", "9")
     assert engine.read_record(9)["components"][0]["version"] == "v2.8.1" and engine.read_update(9) == {}
-    assert any(e.startswith("Put the Mac back to") for e in rec.events)
+    assert any(e.startswith("Undid the driver update: the Mac is back to") for e in rec.events)
 
 
-def test_put_it_back_uses_the_newest_snapshot_and_names_the_failures(tmp_path, rec, other_pid):
+def test_put_it_back_uses_the_newest_snapshot_and_names_the_failures(tmp_path, rec):
     pve = DPve(snapshots=[OLD_SNAP, NEW_SNAP])
     assert driver_run.put_back(9, env_for(pve, rec, tmp_path)) == NEW_SNAP
-    with pytest.raises(DriverError, match="nothing to put back"):
+    with pytest.raises(DriverError, match="nothing to undo"):
         driver_run.put_back(9, env_for(DPve(), rec, tmp_path))
     assert engine.lock_holder(9) == 0
-    engine.lock_path(9).parent.mkdir(parents=True, exist_ok=True)
-    engine.lock_path(9).write_text("%d\n" % other_pid)                  # another live process
+    other = foreign_lock(engine.lock_path(9))                           # another process runs an update
     with pytest.raises(DriverError, match="Another driver update"):
         driver_run.put_back(9, env_for(DPve(snapshots=[NEW_SNAP]), rec, tmp_path))
-    engine.release_lock(9)
+    other.close()
 
     class NoRollback(DPve):
         def qm(self, *a):
@@ -318,6 +322,9 @@ def test_the_safety_snapshot_can_be_removed_after_a_good_first_boot(tmp_path, re
     pve = DPve(snapshots=[OLD_SNAP, NEW_SNAP])
     assert driver_run.remove_safety_snapshot(9, env_for(pve, rec, tmp_path)) == NEW_SNAP
     assert pve.snapshots == [OLD_SNAP]                                  # only a snapshot of this tool, the newest
+    assert driver_run.remove_safety_snapshot(9, env_for(pve, rec, tmp_path), OLD_SNAP) == OLD_SNAP     # the one the screen named
+    with pytest.raises(DriverError, match="nothing to undo"):
+        driver_run.remove_safety_snapshot(9, env_for(DPve(snapshots=[NEW_SNAP]), rec, tmp_path), OLD_SNAP)
     with pytest.raises(DriverError):
         driver_run.remove_safety_snapshot(9, env_for(DPve(), rec, tmp_path))
     with pytest.raises(DriverError, match="Could not remove"):
@@ -434,14 +441,15 @@ def amd_zips(monkeypatch, tmp_path):
 
 
 def test_an_amd_update_replaces_the_two_kexts_with_no_recovery_and_no_card_removal(tmp_path, amd_zips, rec):
-    pve = DPve(status="running", bash_output="1.7.2\n1.7.0\n", snapshots=[OLD_SNAP])
+    pve = DPve(status="running", bash_output="VERSION 1.7.2\nVERSION 1.7.0\n", snapshots=[OLD_SNAP])
     plan = plan_for("amd", pve, installed={"Lilu": "1.6.8", "WhateverGreen": "1.6.0"})
     plan.target = amd_target()
     res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
     assert res.ok and not [c for c in pve.calls if "hostpci0" in c] and not pve.calls_of("disk")
     assert [s for s in rec.steps if s[1] == "done"] == [(i, "done") for i in ("stop", "snapshot", "replace", "start")]
     script = [r for r in pve.runs if r[0] == "bash"][0][2]
-    assert "replace Lilu.kext" in script and "replace WhateverGreen.kext" in script and script.count("python3 -c") == 2
+    assert "replace Lilu.kext" in script and "replace WhateverGreen.kext" in script and script.count("python3 -I -c") == 2 and "mount -o ro" not in script
+    assert script.startswith("{ qm status 9 | grep -q 'status: stopped'")           # the script itself refuses a running Mac
     assert str(tmp_path / "Lilu.zip") in script and amd_target().components["Lilu"]["sha256"] in script
     assert pve.calls_of("start") == [("start", "9")]
     record = engine.read_record(9)
@@ -450,11 +458,12 @@ def test_an_amd_update_replaces_the_two_kexts_with_no_recovery_and_no_card_remov
 
 
 def test_an_amd_pin_that_the_disk_does_not_report_is_noted(tmp_path, amd_zips, rec):
-    pve = DPve(bash_output="1.7.1\n1.7.0\n")
+    pve = DPve(bash_output="VERSION 1.7.1\nVERSION 1.7.0\nNOTE: WhateverGreen.kext is not listed in config.plist, so it was not added\n")
     plan = plan_for("amd", pve)
     plan.target = amd_target()
     res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
     assert res.ok and any("Lilu reports version 1.7.1, the pin is 1.7.2" in n for n in res.notes)
+    assert any("WhateverGreen.kext is not listed in config.plist" in n for n in res.notes)   # OpenCore will not load it: said
 
 
 def test_amd_failures(tmp_path, rec, monkeypatch):
@@ -478,7 +487,7 @@ def test_amd_failures(tmp_path, rec, monkeypatch):
 
 # ── refusals, the lock and an interrupted run ────────────────────────
 
-def test_run_update_refuses_what_the_plan_refused_and_up_to_date(tmp_path, rec, other_pid):
+def test_run_update_refuses_what_the_plan_refused_and_up_to_date(tmp_path, rec):
     pve = DPve()
     plan = DriverPlan(9, refusals=["no card"])
     with pytest.raises(DriverError, match="no card"):
@@ -487,12 +496,12 @@ def test_run_update_refuses_what_the_plan_refused_and_up_to_date(tmp_path, rec, 
     current.target, current.verdict = amd_target(), "current"
     with pytest.raises(DriverError, match="Up to date"):
         driver_run.run_update(current, env_for(pve, rec, tmp_path))
-    engine.acquire_lock(9, pid=other_pid)
+    other = foreign_lock(engine.lock_path(9))
     held = plan_for("amd", pve)
     held.target = amd_target()
     with pytest.raises(DriverError, match="Another driver update"):
         driver_run.run_update(held, env_for(pve, rec, tmp_path))
-    engine.release_lock(9)
+    other.close()
     assert not pve.calls
 
 
@@ -513,7 +522,7 @@ def test_an_interrupted_update_is_finished_from_where_the_card_came_off(tmp_path
     engine.write_update(9, {"kind": "nvidia", "phase": "running", "snapshot": NEW_SNAP, "original": original, "steps": steps,
                             "choice": {"NullMoth": "v2.9"}, "previous": [{"name": "NullMoth", "version": "v2.8.1"}]})
     engine.lock_path(9).parent.mkdir(parents=True, exist_ok=True)
-    engine.lock_path(9).write_text("999999999\n")                      # its process is gone
+    engine.lock_path(9).write_text("999999999\n")                      # its process is gone: nobody holds the flock
     cut_off = mac(hostpci0=None, vga="std", boot="order=sata1;virtio0;ide0", sata1="local-lvm:vm-9-disk-20,media=disk", sata2="local-lvm:vm-9-disk-21,media=disk")
     pve = DPve(cfg=cut_off, snapshots=[NEW_SNAP], bash_output=['{"AMFIPass.kext": "%s"}' % driver_nvidia.AMFIPASS.version])
     res = driver_run.finish_interrupted(9, env_for(pve, rec, tmp_path, ))
@@ -576,7 +585,7 @@ def test_a_start_that_fails_fails_the_amd_update(tmp_path, amd_zips, rec):
         def qm(self, *a):
             from osx_proxmox_next.infrastructure import CommandResult
             return CommandResult(False, 1, "no memory") if a[0] == "start" else super().qm(*a)
-    pve = NoStart(bash_output="1.7.2\n1.7.0\n")
+    pve = NoStart(bash_output="VERSION 1.7.2\nVERSION 1.7.0\n")
     plan = plan_for("amd", pve)
     plan.target = amd_target()
     assert "Could not start VM 9: no memory" in driver_run.run_update(plan, env_for(pve, rec, tmp_path)).error

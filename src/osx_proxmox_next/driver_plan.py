@@ -31,10 +31,11 @@ class DriverPlan:
     reinstall: bool = False
     refusals: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    snapshot: str = ""                # the name the safety snapshot will have
+    snapshot: str = ""                # the name the driver snapshot will have
     snapshot_ok: bool = True
     snapshot_reason: str = ""
     older_snapshots: list[str] = field(default_factory=list)
+    interrupted: bool = False         # an update was cut off and nobody runs it
     cfg: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -69,9 +70,7 @@ class DriverPlan:
             return out + [engine.UP_TO_DATE]
         out.append("Steps:")
         out += [f"  {n}. {t}" for n, (_i, t) in enumerate(engine.step_titles(self.kind, self.step_name()), 1)]
-        out += engine.before_facts(self.kind, self.snapshot, self.snapshot_ok)
-        if self.older_snapshots:
-            out.append("Older safety snapshots are removed when this one is done: " + ", ".join(self.older_snapshots))
+        out += engine.before_facts(self.kind, self.snapshot, self.snapshot_ok, self.older_snapshots)
         out += ["Warning: " + w for w in self.warnings]
         return out
 
@@ -147,11 +146,8 @@ def prepare(vmid: int, choice: Choice | None = None, pve: ProxmoxAdapter | None 
     plan.cfg = parse_config(info.config_raw)
     plan.name, plan.running = info.name, info.status == "running"
     plan.macos = (choice.macos if choice and choice.macos else detect_macos(plan.cfg)) or ""
-    plan.refusals += cfg_refusals(vmid, plan.cfg, base, resume is not None)
-    plan.kind = resume["kind"] if resume else detect_kind(vmid, plan.cfg)
-    if not plan.kind:
-        plan.refusals.append(engine.REFUSE_UNKNOWN_KIND if any(k.startswith("hostpci") for k in plan.cfg)
-                             else engine.REFUSE_NO_CARD)
+    plan.refusals += cfg_refusals(vmid, plan.cfg, base, _pending(vmid, base, resume) is not None)
+    if not _find_kind(plan, vmid, base, resume):
         return plan
     _kind_checks(plan)
     if not plan.ok:
@@ -167,6 +163,28 @@ def prepare(vmid: int, choice: Choice | None = None, pve: ProxmoxAdapter | None 
     plan.snapshot_ok, plan.snapshot_reason = driver_snapshot.check_support(pve, plan.cfg)
     plan.older_snapshots = driver_snapshot.list_tool(pve, vmid)
     return plan
+
+
+def _pending(vmid: int, base: str | None, resume: dict | None) -> dict | None:
+    """The run that is going or was cut off (not one that waits for the first boot question), else None."""
+    state = resume or engine.read_update(vmid, base)
+    return state if state and state.get("phase") != "done" else None
+
+
+def _find_kind(plan: DriverPlan, vmid: int, base: str | None, resume: dict | None) -> bool:
+    """Which kind of card the plan is for. False, with the refusal added, when it cannot be told."""
+    state = _pending(vmid, base, resume)
+    plan.interrupted = bool(resume) or bool(engine.unfinished(vmid, base))
+    if state:     # a run that was cut off or is running knows its kind: the card may be off the Mac right now
+        plan.kind = state["kind"]
+        return True
+    found = detect_kind(vmid, plan.cfg)
+    plan.kind = found.kind
+    if found.conflict:
+        plan.refusals.append(engine.REFUSE_KIND_CHANGED)
+    elif not plan.kind:
+        plan.refusals.append(engine.REFUSE_NO_CARD if found.readable else engine.REFUSE_UNKNOWN_KIND)
+    return bool(plan.kind) and not found.conflict
 
 
 def _kind_checks(plan: DriverPlan) -> None:

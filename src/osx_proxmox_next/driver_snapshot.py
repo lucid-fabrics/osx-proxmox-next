@@ -1,4 +1,4 @@
-"""The safety snapshot of a Mac before a driver update: save, list, put back, remove. Constant argv lists only."""
+"""The driver snapshot of a Mac before a driver update: save, list, put back, remove. Constant argv lists only."""
 
 from __future__ import annotations
 

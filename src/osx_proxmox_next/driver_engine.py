@@ -5,8 +5,7 @@ The Python package imports this module and the bash installer embeds it verbatim
 diffs the two), so the record format, the plan lines and the refusal texts have one implementation.
 
 One record per Mac: STATE_DIR/<vmid>.json with the kind (nvidia, intel or amd) and the installed components.
-Next to it, while an update runs: <vmid>.lock (the process that runs it) and <vmid>.update.json (what an
-interrupted run needs to finish or to go back).
+The lock and the state of a run in progress live in driver_state.py, which the bash installer embeds next to this file.
 """
 import json
 import os
@@ -15,28 +14,30 @@ import sys
 import time
 from pathlib import Path
 
-STATE_DIR = "/var/lib/osx-proxmox-next/drivers"
+try:
+    from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
+        STATE_DIR, STEPS, acquire_lock, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
+        lock_holder, lock_path, new_update, read_json as _read_json, read_update, release_lock, resume_index, state_dir,
+        step_titles, unfinished, update_path, write_json as _write_json, write_update,
+    )
+except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
+    from driver_state import (  # noqa: F401
+        STATE_DIR, STEPS, acquire_lock, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
+        lock_holder, lock_path, new_update, read_json as _read_json, read_update, release_lock, resume_index, state_dir,
+        step_titles, unfinished, update_path, write_json as _write_json, write_update,
+    )
+
 IGPU_DIR = "/var/lib/osx-proxmox-next/igpu"
 KINDS = ("nvidia", "intel", "amd")
 SNAPSHOT_PREFIX = "osx-next-driver-"
-SNAPSHOT_RE = re.compile(r"^osx-next-driver-\d{8}-\d{4}$")
+SNAPSHOT_RE = re.compile(r"^osx-next-driver-\d{8}-\d{4}(?:\d{2})?$")
 NO_SNAPSHOT_PHRASE = "no snapshot"
 CHECK_MAX_AGE = 24 * 3600
-KEXT_VERSION = re.compile(r"^[0-9][0-9A-Za-z.+-]{0,31}$")
 
 # what each kind installs, in the order the plan lists it
 COMPONENTS = {"nvidia": ("NullMoth",), "intel": ("WhateverXe", "WhateverXe Graphics"), "amd": ("Lilu", "WhateverGreen")}
 CARD_NAME = {"nvidia": "NVIDIA", "intel": "Intel", "amd": "AMD"}
 MINUTES = {"nvidia": "about 10 minutes", "intel": "about 10 minutes", "amd": "about 1 minute"}
-STEPS = {
-    "nvidia": (("stop", "Stop the Mac", "Stopped the Mac"), ("snapshot", "Save a snapshot", "Saved a snapshot"),
-               ("takeoff", "Take the card off", "Took the card off"), ("stage", "Stage {name}", "Staged {name}"),
-               ("putback", "Put the card back", "Put the card back"), ("start", "Start the Mac", "Started the Mac"),
-               ("verify", "Install the driver", "Driver installed")),
-    "amd": (("stop", "Stop the Mac", "Stopped the Mac"), ("snapshot", "Save a snapshot", "Saved a snapshot"),
-            ("replace", "Replace the kexts", "Replaced the kexts"), ("start", "Start the Mac", "Started the Mac")),
-}
-STEPS["intel"] = STEPS["nvidia"]
 
 REFUSE_INSTALLING = "This Mac is still being installed. Let that finish first."
 REFUSE_CARD_SETUP = "A graphics card setup for this Mac is waiting to finish. Finish it first, or put everything back."
@@ -44,23 +45,27 @@ REFUSE_LOCKED = "Another driver update is running for this Mac."
 REFUSE_NO_CARD = "This Mac has no graphics card attached, so there is no driver to update."
 REFUSE_UNKNOWN_KIND = "This tool cannot tell which kind of card this Mac has, so it cannot pick a driver."
 REFUSE_NOT_MAC = "VM %s is not a macOS VM made by this tool."
-REFUSE_NOTHING_TO_UNDO = "There is no safety snapshot from this tool for this Mac, so there is nothing to put back."
+REFUSE_NOTHING_TO_UNDO = "There is no driver snapshot from this tool for this Mac, so there is nothing to undo."
+REFUSE_KIND_CHANGED = "The card in this Mac is not the one its driver record was made for. Set the card up again first."
+REFUSE_CARD_CHANGED = ("The card setup of this Mac changed after the snapshot was taken, so putting the snapshot back would "
+                       "point the Mac at a card the host no longer prepares. Nothing was changed.")
+REFUSE_NEWER_SNAPSHOTS = "Newer snapshots exist (%s). Proxmox cannot roll back past them. Nothing was changed."
+REFUSE_NOT_STOPPED = "The Mac is not stopped, so its OpenCore disk is not touched."
 UP_TO_DATE = "Up to date: nothing to do."
-NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothing can put it back if the update goes wrong. "
+NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothing can undo the update if it goes wrong. "
                        "Type '%s' to go on without one." % NO_SNAPSHOT_PHRASE)
 TEXTS = {"REFUSE_INSTALLING": REFUSE_INSTALLING, "REFUSE_CARD_SETUP": REFUSE_CARD_SETUP, "REFUSE_LOCKED": REFUSE_LOCKED,
          "REFUSE_NO_CARD": REFUSE_NO_CARD, "REFUSE_UNKNOWN_KIND": REFUSE_UNKNOWN_KIND, "REFUSE_NOT_MAC": REFUSE_NOT_MAC,
          "REFUSE_NOTHING_TO_UNDO": REFUSE_NOTHING_TO_UNDO, "UP_TO_DATE": UP_TO_DATE,
-         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING}
+         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
+         "REFUSE_CARD_CHANGED": REFUSE_CARD_CHANGED, "REFUSE_NEWER_SNAPSHOTS": REFUSE_NEWER_SNAPSHOTS,
+         "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED}
+VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
 SNAPSHOT_TYPES = ("zfspool", "lvmthin", "rbd", "cephfs", "btrfs")
 SNAPSHOT_FILE_TYPES = ("dir", "nfs", "cifs", "glusterfs")
 
 
 # ── records ──────────────────────────────────────────────────────────
-
-def state_dir(base=None):
-    return Path(base or os.environ.get("DRIVER_STATE_DIR") or STATE_DIR)
-
 
 def record_path(vmid, base=None):
     return state_dir(base) / ("%s.json" % int(vmid))
@@ -74,22 +79,6 @@ def component(name, version, tag="", sha256="", source="", installed_at=None):
     """One installed component. *source* is latest, chosen or pinned."""
     return {"name": name, "version": str(version), "tag": tag or str(version), "sha256": sha256, "source": source,
             "installed_at": installed_at or now_iso()}
-
-
-def _read_json(path):
-    try:
-        data = json.loads(Path(path).read_text())
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _write_json(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-    tmp.replace(path)
 
 
 def from_igpu_state(vmid, state):
@@ -114,8 +103,9 @@ def read_record(vmid, base=None, igpu_base=None):
     return from_igpu_state(vmid, old) if old else {}
 
 
-def write_record(vmid, kind, components, base=None, previous=None, snapshot=""):
-    """Write the record. *previous* (the components before an update) and *snapshot* let "put it back" restore them."""
+def write_record(vmid, kind, components, base=None, previous=None, snapshot="", card=""):
+    """Write the record. *previous* (the components before an update), *snapshot* and *card* (the hostpci0 the snapshot
+    was taken with) let "undo the driver update" restore the versions and refuse when the card setup changed."""
     if kind not in KINDS:
         raise ValueError("unknown kind %r" % kind)
     data = {"vmid": int(vmid), "kind": kind, "components": list(components), "updated": now_iso()}
@@ -123,6 +113,7 @@ def write_record(vmid, kind, components, base=None, previous=None, snapshot=""):
         data["previous"] = list(previous)
     if snapshot:
         data["snapshot"] = snapshot
+        data["snapshot_card"] = card
     _write_json(record_path(vmid, base), data)
     return data
 
@@ -134,6 +125,7 @@ def revert_record(vmid, base=None):
         return False
     data["components"] = data.pop("previous")
     data.pop("snapshot", None)
+    data.pop("snapshot_card", None)
     data["updated"] = now_iso()
     _write_json(record_path(vmid, base), data)
     return True
@@ -207,31 +199,51 @@ def change_lines(kind, installed, target):
             lines.append("%s: installed version unknown, to %s" % (name, want))
         elif have == want:
             lines.append("%s: %s, reinstalled" % (name, want))
+        elif compare(have, want) > 0:
+            lines.append("%s: %s is newer than %s, kept" % (name, have, want))
         else:
             lines.append("%s: %s to %s" % (name, have, want))
     return lines
 
 
-def step_titles(kind, name="the driver", done=False):
-    """(id, title) for each step of an update, in order. *done* gives the past-tense line the run list shows."""
-    return [(sid, (past if done else now).format(name=name)) for sid, now, past in STEPS[kind]]
+def retention_line(older):
+    """The sentence about the snapshot an update replaces: at most one snapshot of this tool is kept per Mac."""
+    if not older:
+        return ""
+    return "The previous driver snapshot%s %s %s removed after a successful update." % (
+        "s" if len(older) > 1 else "", ", ".join(older), "are" if len(older) > 1 else "is")
 
 
-def before_facts(kind, snapshot, supported=True):
+def replace_names(installed, target, reinstall=False):
+    """The components an AMD update replaces: those that are behind or unknown. A component newer than the pin is never
+    replaced (that would go back); an explicit reinstall of an up to date Mac replaces them all."""
+    todo = [n for n, _h, _w, state in judge(installed, target)["rows"] if state != "current"]
+    return todo or (list(target) if reinstall else [])
+
+
+def before_facts(kind, snapshot, supported=True, older=()):
     """The facts "Before you continue" and the CLI plan state: how long, what comes off, the snapshot."""
     lines = ["The Mac stops for %s." % MINUTES[kind]]
     if kind != "amd":
         lines.append("The card comes off and goes back on.")
     lines.append("If macOS does not shut down within 2 minutes the Mac is stopped by force.")
     lines.append("A snapshot called %s is saved first." % snapshot if supported else NO_SNAPSHOT_WARNING)
-    lines.append("Put it back any time with u (osx-next-cli driver-undo).")
+    lines.append("Afterwards r undoes the driver update (osx-next-cli driver-undo).")
+    if older:
+        lines.append(retention_line(older))
     return lines
 
 
 # ── snapshots ────────────────────────────────────────────────────────
 
 def snapshot_name(when=None):
-    return SNAPSHOT_PREFIX + time.strftime("%Y%m%d-%H%M", when or time.localtime())
+    return SNAPSHOT_PREFIX + time.strftime("%Y%m%d-%H%M%S", when or time.localtime())
+
+
+def snapshot_date(name):
+    """`2026-11-21 10:30` out of osx-next-driver-20261121-1030 (the name says when it was taken)."""
+    m = re.match(r"^osx-next-driver-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})", name or "")
+    return "%s-%s-%s %s:%s" % m.groups() if m else ""
 
 
 def snapshot_description(version):
@@ -259,7 +271,18 @@ def _checked(name):
 
 def tool_snapshots(listing):
     """The snapshots of this tool in `qm listsnapshot` output, oldest first. Snapshots of anyone else are ignored."""
-    return sorted(set(re.findall(r"(?<![\w-])(osx-next-driver-\d{8}-\d{4})(?![\w-])", listing or "")))
+    return sorted(set(re.findall(r"(?<![\w-])(osx-next-driver-\d{8}-\d{4}(?:\d{2})?)(?![\w-])", listing or "")))
+
+
+def all_snapshots(listing):
+    """Every snapshot in `qm listsnapshot` output, oldest first (the line that says "current" is not one)."""
+    return [m for m in re.findall(r"->\s+(\S+)", listing or "") if m != "current"]
+
+
+def newer_than(listing, name):
+    """The snapshots taken after *name*, which a rollback to it would have to get past."""
+    names = all_snapshots(listing)
+    return names[names.index(name) + 1:] if name in names else []
 
 
 def _disk_slots(cfg):
@@ -298,75 +321,35 @@ def parse_storage_types(status_text):
     return out
 
 
-# ── lock and unfinished run ──────────────────────────────────────────
+# ── which card the Mac has ───────────────────────────────────────────
 
-def lock_path(vmid, base=None):
-    return state_dir(base) / ("%s.lock" % int(vmid))
-
-
-def _alive(pid):
-    try:
-        os.kill(int(pid), 0)
-    except PermissionError:
-        return True            # the process exists and belongs to somebody else
-    except (OSError, ValueError):
-        return False
-    return True
-
-
-def lock_holder(vmid, base=None):
-    """The pid that holds the update lock of this Mac, or 0 (none, or a process that is gone)."""
-    try:
-        pid = int(lock_path(vmid, base).read_text().strip())
-    except (OSError, ValueError):
-        return 0
-    return pid if _alive(pid) else 0
+def live_kind(cfg, sysfs_root="/sys"):
+    """(kind, readable): the vendor of the passed-through device of PCI class 0x03 (a graphics card) on this host.
+    readable is False when no passed-through device could be looked up here. A USB controller or a NIC is no card."""
+    seen = False
+    for key, value in sorted(cfg.items()):
+        if not key.startswith("hostpci"):
+            continue
+        bdf = value.split(",", 1)[0].split(";", 1)[0].replace("host=", "")
+        bdf = bdf if bdf.count(":") == 2 else "0000:" + bdf
+        folder = Path(sysfs_root) / "bus/pci/devices" / (bdf if "." in bdf else bdf + ".0")
+        try:
+            pci_class = (folder / "class").read_text().strip().lower()
+            vendor = (folder / "vendor").read_text().strip().lower()
+        except OSError:
+            continue
+        seen = True
+        if pci_class.startswith("0x03"):
+            return VENDORS.get(vendor, ""), True
+    return "", seen
 
 
-def acquire_lock(vmid, base=None, pid=None):
-    """True when this process now holds the lock. False while another live process holds it."""
-    path = lock_path(vmid, base)
-    holder = lock_holder(vmid, base)
-    mine = int(pid or os.getpid())
-    if holder and holder != mine:
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("%d\n" % mine)
-    return True
-
-
-def release_lock(vmid, base=None):
-    try:
-        lock_path(vmid, base).unlink()
-    except OSError:
-        pass
-
-
-def update_path(vmid, base=None):
-    return state_dir(base) / ("%s.update.json" % int(vmid))
-
-
-def read_update(vmid, base=None):
-    """What an unfinished update left: kind, target, snapshot, the settings it changed. {} when none."""
-    return _read_json(update_path(vmid, base))
-
-
-def write_update(vmid, data, base=None):
-    _write_json(update_path(vmid, base), dict(data, vmid=int(vmid), updated=now_iso()))
-
-
-def clear_update(vmid, base=None):
-    try:
-        update_path(vmid, base).unlink()
-    except OSError:
-        pass
-
-
-def unfinished(vmid, base=None):
-    """The unfinished update of this Mac with nobody running it, or {}. A finished one (phase done) is only waiting for
-    the first boot question to be answered."""
-    data = read_update(vmid, base)
-    return data if data and data.get("phase") != "done" and not lock_holder(vmid, base) else {}
+def resolve_kind(recorded, live, readable):
+    """(kind, conflict) from the kind the records say and the card found on the host. The live card wins; a record
+    that names another kind is a conflict. Without a readable device the record decides."""
+    if live:
+        return live, bool(recorded) and recorded != live
+    return ("" if readable else recorded), False
 
 
 # ── the daily check for newer releases (Home marker) ─────────────────
@@ -400,9 +383,9 @@ def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     if cmd == "record" and len(argv) == 3:
         _emit(read_record(argv[2]))
-    elif cmd == "write" and len(argv) in (5, 6):
-        _emit(write_record(argv[2], argv[3], json.loads(argv[4]), previous=json.loads(argv[5]) if len(argv) == 6 else None,
-                           snapshot=""))
+    elif cmd == "write" and len(argv) in (5, 6, 8):
+        _emit(write_record(argv[2], argv[3], json.loads(argv[4]), previous=json.loads(argv[5]) if len(argv) > 5 else None,
+                           snapshot=argv[6] if len(argv) == 8 else "", card=argv[7] if len(argv) == 8 else ""))
     elif cmd == "revert" and len(argv) == 3:
         return 0 if revert_record(argv[2]) else 1
     elif cmd == "component" and len(argv) in (4, 7):
@@ -411,8 +394,9 @@ def main(argv):
         _emit(judge(json.loads(argv[2]), json.loads(argv[3])))
     elif cmd == "changes" and len(argv) == 5:
         sys.stdout.write("\n".join(change_lines(argv[2], json.loads(argv[3]), json.loads(argv[4]))) + "\n")
-    elif cmd == "facts" and len(argv) in (4, 5):
-        sys.stdout.write("\n".join(before_facts(argv[2], argv[3], len(argv) == 4)) + "\n")
+    elif cmd == "facts" and len(argv) >= 4:
+        flag = argv[4] if len(argv) > 4 and argv[4] in ("supported", "unsupported") else ""
+        sys.stdout.write("\n".join(before_facts(argv[2], argv[3], flag != "unsupported", argv[5 if flag else 4:])) + "\n")
     elif cmd == "steps" and len(argv) == 4:
         sys.stdout.write("\n".join("%s %s" % p for p in step_titles(argv[2], argv[3])) + "\n")
     elif cmd == "snapshot-name":
@@ -435,20 +419,69 @@ def main(argv):
         return 0 if record else 1
     elif cmd == "compare" and len(argv) == 4:
         sys.stdout.write("%d\n" % compare(argv[2], argv[3]))
-    elif cmd == "lock" and len(argv) == 4:
-        return 0 if (acquire_lock(argv[2], pid=argv[3]) if argv[3].isdigit() else False) else 1
-    elif cmd == "unlock" and len(argv) == 3:
-        release_lock(argv[2])
     elif cmd == "unfinished" and len(argv) == 3:
         _emit(unfinished(argv[2]))
-    elif cmd == "update-write" and len(argv) == 4:
-        write_update(argv[2], json.loads(argv[3]))
-    elif cmd == "update-clear" and len(argv) == 3:
-        clear_update(argv[2])
+    elif cmd in ("update-init", "update-resume", "update-begin", "update-end", "update-fail", "update-set", "update-clear",
+                 "update-get", "pending-kind", "failure-text", "card-changed", "kind", "replace-names", "snapshot-date",
+                 "newer-than", "all-snapshots"):
+        return run_update_command(cmd, argv[2:])
     else:
         sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|steps|snapshot-name|"
-                         "snapshot-argv|tool-snapshots|snapshot-support|text|from-igpu|compare|lock|unlock|unfinished|update-write|update-clear ...\n")
+                         "snapshot-argv|tool-snapshots|snapshot-support|text|from-igpu|compare|unfinished|update-*|failure-text|kind ...\n")
         return 64
+    return 0
+
+
+def run_update_command(cmd, args):
+    """The commands that keep the state of a run for the bash installer; each reads, changes and writes one file."""
+    if cmd == "snapshot-date":
+        sys.stdout.write(snapshot_date(args[0]) + "\n")
+    elif cmd == "replace-names":
+        sys.stdout.write("\n".join(replace_names(json.loads(args[0]), json.loads(args[1]), args[2] == "yes")) + "\n")
+    elif cmd == "newer-than":
+        sys.stdout.write("\n".join(newer_than(sys.stdin.read(), args[0])) + "\n")
+    elif cmd == "all-snapshots":
+        sys.stdout.write("\n".join(all_snapshots(sys.stdin.read())) + "\n")
+    elif cmd == "kind":
+        cfg = dict(line.split(": ", 1) for line in sys.stdin.read().splitlines() if ": " in line)
+        live, readable = live_kind(cfg, os.environ.get("SYSFS_ROOT") or "/sys")
+        kind, conflict = resolve_kind(args[0], live, readable)
+        _emit({"kind": kind, "conflict": conflict, "readable": readable})
+    elif cmd == "card-changed":
+        return 0 if card_changed(args[0], args[1], args[2] == "yes") else 1
+    elif cmd == "update-clear":
+        clear_update(args[0])
+    else:
+        return update_state_command(cmd, args)
+    return 0
+
+
+def update_state_command(cmd, args):
+    vmid, state = args[0], read_update(args[0])
+    if cmd == "update-get":                       # the value of one key as JSON (null when it is not there)
+        sys.stdout.write(json.dumps(state.get(args[1])) + "\n")
+        return 0
+    if cmd == "pending-kind":                     # the kind of the run that is going or was cut off, else nothing
+        sys.stdout.write((state.get("kind", "") if state.get("phase") != "done" else "") + "\n")
+        return 0
+    if cmd == "update-init":     # kind name label step-name choice-json previous-json card original-json snapshot
+        state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7])
+        state.update(original=json.loads(args[8]) if len(args) > 8 and args[8] else None)
+    elif cmd == "update-resume":
+        state.update(resume_at=resume_index(state), phase="running", error="")
+    elif cmd == "update-begin":                   # exit 3: a resumed run finished this step before the point it goes on from
+        if not begin_step(state, args[1]):
+            return 3
+    elif cmd == "update-end":
+        end_step(state, args[1], args[2] if len(args) > 2 else "done")
+    elif cmd == "update-fail":
+        fail_update(state, args[1])
+    elif cmd == "update-set":                     # key json-value
+        state[args[1]] = json.loads(args[2])
+    elif cmd == "failure-text":
+        sys.stdout.write(failure_text(state, args[1] == "yes") + "\n")
+        return 0
+    write_update(vmid, state)
     return 0
 
 

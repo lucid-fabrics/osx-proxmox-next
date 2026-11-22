@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from driver_fakes import DPve, comps, mac
+from driver_fakes import DPve, comps, foreign_lock, mac
 from osx_proxmox_next import driver_engine as engine, driver_plan, driver_targets, host_setup, igpu_engine, nullmoth_engine
 from osx_proxmox_next.driver_targets import Choice, Target
 
@@ -100,24 +100,62 @@ def test_a_running_amd_mac_is_not_read_and_a_failed_read_is_unknown(target):
     assert not empty.installed_known
 
 
-def test_the_kind_falls_back_to_the_vendor_of_the_device(tmp_path):
+def device(root, bdf, vendor, pci_class="0x030000"):
+    folder = root / "bus/pci/devices" / bdf
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "vendor").write_text(vendor + "\n")
+    (folder / "class").write_text(pci_class + "\n")
+
+
+def test_the_kind_is_the_vendor_of_the_graphics_card_on_the_host(tmp_path):
     for bdf, vendor, kind in (("0000:01:00.0", "0x10de", "nvidia"), ("0000:06:00.0", "0x1002", "amd"), ("0000:00:02.0", "0x8086", "intel")):
-        dev = tmp_path / "bus/pci/devices" / bdf
-        dev.mkdir(parents=True)
-        (dev / "vendor").write_text(vendor + "\n")
-        assert driver_targets.detect_kind(9, {"hostpci0": bdf[:-2] + ",pcie=0"}, tmp_path) == kind
-    assert driver_targets.detect_kind(9, {"hostpci1": "0000:01:00,pcie=0"}, tmp_path) == "nvidia"
-    assert driver_targets.detect_kind(9, {"hostpci0": "0000:09:00"}, tmp_path) == ""
-    (tmp_path / "bus/pci/devices/0000:01:00.0/vendor").write_text("0x1234\n")
-    assert driver_targets.detect_kind(9, {"hostpci0": "host=0000:01:00"}, tmp_path) == ""
-    assert driver_targets.detect_kind(9, {}, tmp_path) == ""
+        device(tmp_path, bdf, vendor)
+        assert driver_targets.detect_kind(9, {"hostpci0": bdf[:-2] + ",pcie=0"}, tmp_path) == (kind, False, True)
+    assert driver_targets.detect_kind(9, {"hostpci1": "0000:01:00,pcie=0"}, tmp_path).kind == "nvidia"
+    assert driver_targets.detect_kind(9, {"hostpci0": "0000:09:00"}, tmp_path) == ("", False, False)   # not on this host
+    device(tmp_path, "0000:01:00.0", "0x1234")
+    assert driver_targets.detect_kind(9, {"hostpci0": "host=0000:01:00"}, tmp_path) == ("", False, True)
+    assert driver_targets.detect_kind(9, {}, tmp_path) == ("", False, True)
+
+
+def test_an_intel_usb_controller_or_nic_is_no_graphics_card(tmp_path, target):
+    device(tmp_path, "0000:00:14.0", "0x8086", "0x0c0330")
+    assert driver_targets.detect_kind(9, {"hostpci0": "0000:00:14.0"}, tmp_path) == ("", False, True)
+    write("intel", WhateverXe="1.2")
+    # with a record that says intel the answer is still "no card": the device on the host decides
+    assert driver_targets.detect_kind(9, {"hostpci0": "0000:00:14.0"}, tmp_path).kind == ""
+
+
+def test_a_card_that_is_not_the_one_the_record_was_made_for_is_refused(tmp_path, monkeypatch, target):
+    device(tmp_path, "0000:01:00.0", "0x1002")
+    write("nvidia", NullMoth="v2.8")                       # the record says NVIDIA, an AMD card is attached now
+    found = driver_targets.detect_kind(9, {"hostpci0": "0000:01:00"}, tmp_path)
+    assert found == ("amd", True, True)
+    monkeypatch.setattr(driver_plan, "detect_kind", lambda vmid, cfg: found)
+    plan = driver_plan.prepare(9, pve=DPve())
+    assert plan.refusals == [engine.REFUSE_KIND_CHANGED] and plan.kind == "amd"
+    attach_record("nvidia")                                 # the attach record counts too when there is no driver record
+    engine.record_path(9).unlink()
+    assert driver_targets.detect_kind(9, {"hostpci0": "0000:01:00"}, tmp_path).conflict
+
+
+def test_an_update_that_stopped_is_planned_for_a_mac_without_its_card(target):
+    write("nvidia", NullMoth="v2.8.1")
+    engine.write_update(9, {"kind": "nvidia", "phase": "failed", "snapshot": "osx-next-driver-20261121-1030", "steps": []})
+    plan = driver_plan.prepare(9, pve=DPve(cfg=mac(hostpci0=None)))
+    assert plan.ok and plan.interrupted and plan.kind == "nvidia" and plan.target is not None
+    done = {"kind": "nvidia", "phase": "done", "steps": []}
+    engine.write_update(9, done)
+    after = driver_plan.prepare(9, pve=DPve(cfg=mac(hostpci0=None)))     # waiting for the first boot question: not cut off
+    assert after.refusals == [engine.REFUSE_NO_CARD] and not after.interrupted
+    engine.clear_update(9)
 
 
 def test_refusals(target, monkeypatch):
     p = driver_plan.prepare(9, pve=DPve(cfg=mac(hostpci0=None)))
     assert p.refusals == [engine.REFUSE_NO_CARD] and not p.ok and p.lines() == ["Refused: " + engine.REFUSE_NO_CARD]
     with monkeypatch.context() as m:
-        m.setattr(driver_plan, "detect_kind", lambda vmid, cfg: "")
+        m.setattr(driver_plan, "detect_kind", lambda vmid, cfg: driver_targets.Detected("", False, False))
         p = driver_plan.prepare(9, pve=DPve())     # a card but nothing says which kind
         assert p.refusals == [engine.REFUSE_UNKNOWN_KIND]
     write("nvidia", NullMoth="v1")
@@ -132,11 +170,9 @@ def test_refusals(target, monkeypatch):
     assert not driver_plan.card_setup_waiting(9)
     monkeypatch.setattr(host_setup, "load_state", lambda root="/": (_ for _ in ()).throw(OSError("x")))
     assert not driver_plan.card_setup_waiting(9)
-    import os
-    engine.lock_path(9).parent.mkdir(parents=True, exist_ok=True)
-    engine.lock_path(9).write_text("%d\n" % os.getpid())
+    other = foreign_lock(engine.lock_path(9))
     assert engine.REFUSE_LOCKED in driver_plan.prepare(9, pve=DPve()).refusals
-    engine.release_lock(9)
+    other.close()
 
 
 def test_a_missing_vm_is_refused():
@@ -174,7 +210,7 @@ def test_storage_that_cannot_snapshot_is_said_and_older_snapshots_are_listed(tar
     assert not plan.snapshot_ok and plan.needs_no_snapshot_phrase and "type lvm" in plan.snapshot_reason
     lines = plan.lines()
     assert engine.NO_SNAPSHOT_WARNING in lines
-    assert "Older safety snapshots are removed when this one is done: osx-next-driver-20261101-0900" in lines
+    assert "The previous driver snapshot osx-next-driver-20261101-0900 is removed after a successful update." in lines
 
 
 def test_the_commands_are_written_out(target):

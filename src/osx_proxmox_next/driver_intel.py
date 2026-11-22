@@ -14,6 +14,7 @@ from .downloader import DownloadError
 from .driver_core import DriverError, Updater
 from .executor import apply_plan
 from .igpu_attach import oc_step
+from .planner import stopped_guard
 from .igpu_finish import (
     FIRSTBOOT_TIMEOUT, FinishError, StageJob, _drop_disk, _read_payload_result, _storage_of, _wait_first_boot,
     stage_recovery, wait_stopped,
@@ -46,12 +47,19 @@ def _assets(u: Updater):
     return assets, payload, recovery
 
 
+def guarded_step(vmid: int, action: str, title: str, *args):
+    """The patcher's OpenCore step with the stopped check inside its own bash, so it never writes a running Mac's disk."""
+    step = oc_step(str(vmid), action, title, *args)
+    step.argv[2] = stopped_guard(str(vmid)) + step.argv[2]
+    return step
+
+
 def _swap_kext(u: Updater, assets) -> None:
     """WhateverXe.kext and AMFIPass.kext on the OpenCore disk, through the patcher's attach."""
     picks = assets.picks
-    step = oc_step(str(u.vmid), "attach", "Replace WhateverXe and AMFIPass on the OpenCore disk",
-                   assets["whateverxe"], assets["amfipass"], picks["whateverxe"]["sha256"],
-                   igpu_engine.PINS["amfipass"][2])
+    step = guarded_step(u.vmid, "attach", "Replace WhateverXe and AMFIPass on the OpenCore disk",
+                        assets["whateverxe"], assets["amfipass"], picks["whateverxe"]["sha256"],
+                        igpu_engine.PINS["amfipass"][2])
     applied = apply_plan([step], execute=True, adapter=u.pve)
     if not applied.ok:
         raise DriverError(f"Replacing WhateverXe on the OpenCore disk failed. Log: {applied.log_path}")
@@ -67,13 +75,16 @@ def run(u: Updater) -> None:
     u.snapshot()
     u.take_card_off()
     if u.begin("stage"):
+        u.need_stopped()          # a resumed run goes on from here: the Mac stopped and the card off, whatever the rows say
+        u.need_card_off()
         if u.resumed:
             for slot in ("sata1", "sata2"):
                 _drop_disk(pve, vmid, slot)
         job = StageJob(vmid, pve, env.console, _storage_of(u.plan.cfg), u.say, env.clock, env.sleep, tahoe,
                        tuple(igpu_engine.vm_settings(0, "")["args_add"]))
         try:
-            u.state["payload_ref"] = stage_recovery(job, payload, recovery, u.plan.cfg)
+            u.state.update(payload_ref=stage_recovery(job, payload, recovery, u.staging_cfg()), staged=True)
+            u.persist()
         except FinishError as exc:
             raise DriverError(str(exc)) from exc
         err = env.console.restore_picker_timeout() if env.console else ""
@@ -87,7 +98,7 @@ def run(u: Updater) -> None:
         u.say("First boot with the card: the guest installs the graphics package and powers off")
         u.end("start")
     u.begin("verify")
-    ref = u.state["payload_ref"]
+    ref = u.payload_ref()
     if not _wait_first_boot(pve, vmid, FIRSTBOOT_TIMEOUT, tahoe, ref, env.clock, env.sleep):
         pve.qm("stop", str(vmid))
         wait_stopped(pve, vmid, 120, env.clock, env.sleep)
@@ -97,7 +108,7 @@ def run(u: Updater) -> None:
     if result != "installed":
         pve.qm("start", str(vmid))
         raise DriverError("The graphics package is not installed: " + (result or "the guest reported nothing") + ".")
-    if not apply_plan([oc_step(str(vmid), "mark", "Note in OpenCore that the graphics package is installed")],
+    if not apply_plan([guarded_step(vmid, "mark", "Note in OpenCore that the graphics package is installed")],
                       execute=True, adapter=pve).ok:
         u.result.notes.append("Could not note the installed package on the OpenCore disk.")
     pve.qm("start", str(vmid))

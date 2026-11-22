@@ -9,7 +9,7 @@ tests/test_driver_parity.py diffs the two). Standard library only.
 versions  Prints a JSON object {bundle: CFBundleShortVersionString, or "" when the kext or the version is missing}.
           Read only.
 replace   Checks the zip against its SHA-256, unpacks the bundle into Kexts/ (found by name, also inside one
-          wrapping folder) in place of the old copy and prints the new version. config.plist is left alone, byte for
+          wrapping folder) in place of the old copy and prints `VERSION <new version>`. config.plist is left alone, byte for
           byte, unless its entry for the bundle names an executable that the new bundle does not have: then only that
           ExecutablePath is corrected. A bundle that config.plist does not list is reported and not added.
 
@@ -146,7 +146,7 @@ def replace(oc_dir, bundle, zip_path, expected):
     note = sync_config(oc_dir, bundle, exe)
     if note:
         sys.stderr.write('NOTE: ' + note + '\n')
-    sys.stdout.write(str(info.get('CFBundleShortVersionString') or '') + '\n')
+    sys.stdout.write('VERSION ' + str(info.get('CFBundleShortVersionString') or '') + '\n')
 
 
 def main(argv):

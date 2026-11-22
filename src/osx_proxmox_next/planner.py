@@ -422,29 +422,38 @@ def activate_volume_snippet(var: str) -> str:
     )
 
 
-def mount_oc_disk_script(vid: str) -> str:
+def stopped_guard(vid: str) -> str:
+    """Bash that fails, saying why, unless ``qm status`` says the VM is stopped. Ends with ``&& `` so it chains."""
+    return (f"{{ qm status {shquote(vid)} | grep -q 'status: stopped' || "
+            "{ echo 'ERROR: the Mac is not stopped, so its OpenCore disk is not touched.'; false; }; } && ")
+
+
+def mount_oc_disk_script(vid: str, ro: bool = False, require_stopped: bool = False) -> str:
     """Return bash that loop-mounts the VM's ide0 (OpenCore) disk at $OC_MNT.
 
-    Ends with ``&& `` so a caller appends its own command. A trap on EXIT
-    unmounts and detaches the loop device, whatever the outcome.
+    Ends with ``&& `` so a caller appends its own command. A trap on EXIT (also reached by INT
+    and TERM) unmounts and detaches the loop device, whatever the outcome. *ro* mounts read only (for
+    reading versions); *require_stopped* makes the script itself refuse unless ``qm status``
+    says the VM is stopped, so no caller can write the disk of a running Mac.
     """
     q = shquote(vid)
     return (
-        f"OC_VOL=$(qm config {q} | sed -n 's/^ide0: \\([^,]*\\).*/\\1/p') && "
+        (stopped_guard(vid) if require_stopped else "")
+        + f"OC_VOL=$(qm config {q} | sed -n 's/^ide0: \\([^,]*\\).*/\\1/p') && "
         "{ [ -n \"$OC_VOL\" ] || { echo 'ERROR: no ide0 (OpenCore) disk found'; false; }; } && "
         "OC_PATH=$(pvesm path \"$OC_VOL\") && "
         + activate_volume_snippet("OC_PATH")
         + "OC_MNT=$(mktemp -d) && export OC_MNT && "
         "OC_LOOP=$(losetup -fP --show \"$OC_PATH\") && "
         "trap 'umount $OC_MNT 2>/dev/null; losetup -d $OC_LOOP 2>/dev/null; "
-        "rmdir $OC_MNT 2>/dev/null' EXIT && "
+        "rmdir $OC_MNT 2>/dev/null' EXIT && trap 'exit 130' INT TERM && "
         # losetup -fP does not guarantee the partition node exists yet, the
         # kernel creates it asynchronously and mount fails with
         # "Can't lookup blockdev" on slower storage
         + _partprobe_retry_snippet("OC_LOOP") + " && "
         "{ [ -b \"${OC_LOOP}p1\" ] || { echo \"ERROR: ${OC_LOOP}p1 never appeared\"; "
         "false; }; } && "
-        "mount \"${OC_LOOP}p1\" $OC_MNT && "
+        + ('mount -o ro "${OC_LOOP}p1" $OC_MNT && ' if ro else 'mount "${OC_LOOP}p1" $OC_MNT && ')
     )
 
 
