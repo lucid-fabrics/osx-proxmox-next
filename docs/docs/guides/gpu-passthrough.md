@@ -129,6 +129,40 @@ Rules it keeps:
 - With Secure Boot on, an unsigned `vendor-reset` module is rejected, so the tool does not install it and prints the key enrollment steps instead.
 - The Radeon VII with `vendor-reset` gets a hard warning that you must confirm by typing: stopping and starting a VM that holds it without rebooting the host has corrupted host storage on Proxmox 9.
 
+## Updating the driver
+
+A Mac that already has a card keeps its driver up to date with one command or one key. What gets updated depends on the card:
+
+| Card | What is updated | How |
+|---|---|---|
+| NVIDIA | NullMoth inside macOS (latest release, or the one you pick) | The Mac stops, the card comes off, recovery stages the new NullMoth, the card goes back and the first boot installs it |
+| Intel iGPU | WhateverXe on the OpenCore disk and the WhateverXe graphics package in macOS | The same staging as the NVIDIA update, with WhateverXe swapped on the OpenCore disk |
+| AMD | Lilu and WhateverGreen on the OpenCore disk, to the versions this release pins | The disk is mounted and the two kexts are replaced. No recovery and no card removal, because macOS has the AMD driver itself |
+
+In the TUI press `g` on the Mac. The Driver block shows `NullMoth v2.8.1` and `v2.9 available`, or `✓ up to date`, or `installed version unknown` for a Mac that was set up before the tool recorded versions. `←` and `→` on the Version row pick another release (the newest ten, latest first). Enter opens "Before you continue" with the facts (how long the Mac stops, that the card comes off and goes back, the snapshot name) and `p` shows every change. One approval, then the update runs by itself in a separate process, so closing the terminal does not stop it. Home marks a Mac whose driver has a newer release with `● driver update` (the newest releases are checked in the background at most once a day, and never while offline).
+
+```bash
+osx-next-cli driver-status --vmid 101              # kind, installed versions (or unknown), latest, safety snapshots (--json for scripts)
+osx-next-cli driver-update --vmid 101 --dry-run    # the plan, nothing changed
+osx-next-cli driver-update --vmid 101              # update to the latest, after a confirmation (--yes skips it)
+osx-next-cli driver-update --vmid 101 --version v2.8.1       # NVIDIA: a NullMoth release
+osx-next-cli driver-update --vmid 101 --wex-version v1.2.0 --graphics-version v0.9.1   # Intel: pick both
+osx-next-cli driver-update --vmid 101 --reinstall  # install the same version again
+osx-next-cli driver-update --vmid 101 --finish     # continue an update that was cut off
+osx-next-cli driver-undo --vmid 101                # put the Mac back to the newest safety snapshot
+osx-proxmox-next.sh driver-status 101              # the standalone installer has the same three commands
+osx-proxmox-next.sh driver-update 101 [version]
+osx-proxmox-next.sh driver-undo 101
+```
+
+NVIDIA updates need `--accept-nullmoth-risk` (the TUI asks you to type the acknowledgement), the same notice as the first setup. When the Mac already has the target version the command says "Up to date" and changes nothing.
+
+**Safety.** Before anything changes the tool saves a snapshot called `osx-next-driver-<YYYYMMDD-HHMM>` with `qm snapshot`. `driver-undo` (or `u` in the TUI) stops the Mac, runs `qm rollback` to it, puts the driver record back to the previous version and starts the Mac. After a successful update and a "Yes" on the first boot question the TUI offers to remove the safety snapshot (the default is Keep). The tool only ever lists, rolls back or removes snapshots it made itself, and keeps just the newest one per Mac: older ones are removed once a newer update succeeded. If the Mac's storage cannot take snapshots (for example thick LVM or a raw disk on a directory storage), the plan says so as a warning and you have to type `no snapshot` (or pass `--no-snapshot`) to go on without one.
+
+The Mac stops with a normal macOS shutdown request. If macOS does not shut down within 2 minutes the Mac is stopped by force, and the plan tells you that before you approve. An update is refused while the Mac is still being installed, while a card setup for it is waiting to finish, and while another update runs for the same Mac (a lock file). Only the Mac being updated is touched. If the terminal closes or the connection drops mid-update, Home and the Graphics card screen show it as unfinished: enter finishes it from where it stopped and `u` puts the Mac back.
+
+**Records.** The tool keeps one record per Mac in `/var/lib/osx-proxmox-next/drivers/<vmid>.json` (the kind, and for each component its name, version, tag, SHA-256, source and install time), written on every setup and every update. A Mac that only has an Intel iGPU record from an older version is read from it. An NVIDIA Mac set up before this feature shows "installed version unknown" until its first update. For an AMD Mac without a record the tool reads the Lilu and WhateverGreen versions from its OpenCore disk (read only, and only while the Mac is stopped).
+
 ## Undo
 
 `osx-next-cli gpu-setup --undo` (a button in the TUI) restores the VM settings exactly as they were before the attach (the original `hostpci0`, `args` and `vga`), the OpenCore config, and every host file from its backup, newest first. It rebuilds the boot configuration and the initramfs when it touched them and says whether a reboot is needed. Running it twice is safe. It also undoes an attach made with `nvidia-attach` (both write the same record in `/var/lib/osx-proxmox-next/gpu-attach-<vmid>.json`), and `nvidia-detach <vmid>` undoes one made by the walkthrough. When no record exists it says *Nothing to undo: no GPU setup record found* (or *Removed an empty setup record; nothing else to undo.* when a setup record with no changes existed) and, if a VM still carries NullMoth settings, points at `nvidia-detach <vmid>`.
