@@ -5,13 +5,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..arm64 import Arm64Config, validate_arm64_config
 from ..defaults import HOST_RAM_RESERVE_MB
 from ..domain import MIN_DISK_GB, MIN_MEMORY_MB, VmConfig, validate_config
 from ..forms import FormValues, build_vm_config_from_values, validate_form_values
 from ..presets import SizePreset
 from ..smbios import SmbiosIdentity, resolve_smbios
 
-__all__ = ["NewMacState", "ROW_ORDER", "default_name", "effective_size", "validate_new_mac"]
+__all__ = ["ARM64_KEY", "NewMacState", "ROW_ORDER", "default_name", "effective_size", "validate_arm64_new_mac",
+           "validate_new_mac"]
+
+ARM64_KEY = "arm64"   # the macOS choice that creates the arm64 (beta) runner instead of an OpenCore Mac
 
 # Top to bottom: the order the screen focuses the first bad row in.
 ROW_ORDER = (
@@ -52,6 +56,10 @@ class NewMacState:
     def __post_init__(self) -> None:
         if not self.name:
             self.name = default_name(self.macos)
+
+    @property
+    def is_arm64(self) -> bool:
+        return self.macos == ARM64_KEY
 
     def set_macos(self, macos: str) -> None:
         """Switch version; a name the user did not edit follows it."""
@@ -136,4 +144,42 @@ def validate_new_mac(
             errors.setdefault(row, issue)
     ordered = {key: errors[key] for key in ROW_ORDER if key in errors}
     ordered.update({k: v for k, v in errors.items() if k not in ordered})
+    return ordered, (config if not ordered else None)
+
+
+_ARM64_ISSUE_ROWS = (
+    (r"^VMID", "vmid"), (r"^VM name", "name"), (r"CPU cores", "cores"), (r"RAM", "memory"), (r"GB disk", "disk"),
+    (r"^Storage", "storage"), (r"^Bridge", "bridge"), (r"^VLAN", "vlan"),
+)
+
+
+def validate_arm64_new_mac(
+    state: NewMacState,
+    presets: dict[str, SizePreset],
+    host_memory_limit_mb: int = 0,
+) -> tuple[dict[str, str], Arm64Config | None]:
+    """(errors by row key in screen order, the Arm64Config when there are none), for the arm64 (beta) choice."""
+    cores, memory_mb, disk = effective_size(state, presets)
+    errors: dict[str, str] = {}
+    if not (cores.isdigit() and memory_mb.isdigit() and disk.isdigit() and state.vmid.strip().isdigit()
+            and (not state.vlan.strip() or state.vlan.strip().isdigit())):
+        for key, value in (("cores", cores), ("memory", memory_mb), ("disk", disk), ("vmid", state.vmid.strip())):
+            if not value.isdigit():
+                errors[key] = f"{key.capitalize()} must be a whole number."
+        if state.vlan.strip() and not state.vlan.strip().isdigit():
+            errors["vlan"] = "VLAN must be a whole number."
+        return errors, None
+    config = Arm64Config(
+        vmid=int(state.vmid), name=state.name.strip(), storage=state.storage.strip(), cores=int(cores),
+        memory_mb=int(memory_mb), disk_gb=int(disk), bridge=state.bridge.strip(), vlan=int(state.vlan or 0),
+    )
+    for issue in validate_arm64_config(config):
+        for pattern, row in _ARM64_ISSUE_ROWS:
+            if re.search(pattern, issue):
+                errors.setdefault(row, issue)
+                break
+    if host_memory_limit_mb and int(memory_mb) > host_memory_limit_mb:
+        errors["memory"] = (f"Memory: this host has only {host_memory_limit_mb // 1024} GB free for a VM "
+                            f"(it keeps {HOST_RAM_RESERVE_MB // 1024} GB for itself). Lower it.")
+    ordered = {key: errors[key] for key in ROW_ORDER if key in errors}
     return ordered, (config if not ordered else None)

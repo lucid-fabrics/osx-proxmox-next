@@ -14,7 +14,7 @@ from textual.widgets import Button, Input, Static
 
 from ..defaults import DEFAULT_STORAGE, detect_cpu_cores, detect_memory_mb
 from ..domain import SUPPORTED_MACOS
-from ..models.wizard_state import NewMacState, effective_size, validate_new_mac
+from ..models.wizard_state import NewMacState, effective_size, validate_arm64_new_mac, validate_new_mac
 from ..presets import PRESET_KEYS, build_presets, preset_fits, preset_label
 from ..services.host_facts import HostFacts
 from ..smbios import SmbiosIdentity, model_for_macos, resolve_smbios
@@ -139,7 +139,8 @@ class NewMacScreen(OsxScreen):
 
     def _presets(self):
         facts = self.facts
-        return build_presets(self.state.macos, self.base_cores, self.base_memory_mb,
+        macos = "tahoe" if self.state.is_arm64 else self.state.macos   # the arm64 runner is sized like the newest Mac
+        return build_presets(macos, self.base_cores, self.base_memory_mb,
                              facts.host_cores, facts.host_memory_mb)
 
     def _free_disk(self) -> int | None:
@@ -173,13 +174,15 @@ class NewMacScreen(OsxScreen):
         q("#custom-box").display = st.size == "custom"
         storage = q("#r-storage", ChoiceRow)
         storage.set_text(f"network {st.bridge.strip() or '?'}")
+        for rid in ("#r-install", "#r-apple", "#r-more"):
+            q(rid).display = not st.is_arm64      # these only apply to an OpenCore Mac
         install = q("#r-install", ChoiceRow)
         install.set_text("BETA" if st.handsoff else "",
                          "Runs by itself up to Setup Assistant" if st.handsoff
                          else "You finish it in the Proxmox console")
         apple = q("#r-apple", ChoiceRow)
         apple.set_text("iMessage, FaceTime and iCloud" if st.apple_services else "no iMessage, FaceTime or iCloud")
-        q("#more-box").display = q("#r-more", ExpandRow).open
+        q("#more-box").display = q("#r-more", ExpandRow).open and not st.is_arm64
         q("#r-vmgenid").display = st.apple_services
         q("#r-mac").display = st.apple_services
         q("#r-identity").display = st.apple_services
@@ -239,6 +242,16 @@ class NewMacScreen(OsxScreen):
 
     def _sync_after(self) -> None:
         st, pal = self.state, self.app.get_css_variables()
+        if st.is_arm64:
+            steps = [("Create the runner VM", f"VM {st.vmid.strip() or '?'}, about 2 min"),
+                     ("The runner builds the beta", "about 10 min, on its own"),
+                     ("Install macOS", "not in this beta build yet")]
+        else:
+            steps = self._opencore_steps()
+        self._paint_after(steps, pal)
+
+    def _opencore_steps(self) -> list[tuple[str, str]]:
+        st = self.state
         steps = [("Check and rehearse" if self.has_class("narrow") else "Check, download, rehearse",
                   "nothing changes yet"),
                  (f"Create VM {st.vmid.strip() or '?'}", "about 1 min")]
@@ -246,6 +259,9 @@ class NewMacScreen(OsxScreen):
             steps.append(("Install macOS, hands-off", "30 to 45 min"))
         else:
             steps.append(("Install macOS yourself", "in the Proxmox console of that VM"))
+        return steps
+
+    def _paint_after(self, steps: list[tuple[str, str]], pal: dict) -> None:
         text = Text()
         for idx, (head, tail) in enumerate(steps, start=1):
             if idx > 1:
@@ -381,8 +397,12 @@ class NewMacScreen(OsxScreen):
     def action_create(self) -> None:
         st = self.state
         presets = self._presets()
-        smbios = self._smbios_for_create()
-        errors, config = validate_new_mac(st, presets, self.facts.vm_memory_limit_mb, smbios)
+        arm_config = None
+        if st.is_arm64:
+            errors, arm_config = validate_arm64_new_mac(st, presets, self.facts.vm_memory_limit_mb)
+            config = None
+        else:
+            errors, config = validate_new_mac(st, presets, self.facts.vm_memory_limit_mb, self._smbios_for_create())
         self.errors = errors
         error_box = self.query_one("#errors", Static)
         for row in self.query(FieldRow):
@@ -402,6 +422,10 @@ class NewMacScreen(OsxScreen):
             self._focus_first_bad(errors)
             return
         error_box.update("")
+        if st.is_arm64:
+            from .arm64_build import Arm64BuildScreen
+            self.app.switch_screen(Arm64BuildScreen(arm_config))
+            return
         assert config is not None
         from .build import BuildScreen
         # the build replaces this screen: Back on the build goes to your Macs, not to a form that is done
