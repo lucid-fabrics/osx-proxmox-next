@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import igpu_engine, igpu_watchdog
+from . import driver_engine, igpu_engine, igpu_watchdog
 from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .executor import apply_plan
@@ -41,7 +41,7 @@ from .rollback import create_snapshot
 from .services import fetch_vm_info, get_proxmox_adapter
 from .unattended import QmConsole, UnattendedError, open_recovery_terminal
 
-__all__ = ["FinishError", "FinishResult", "choose_release", "finish", "wait_stopped"]
+__all__ = ["FinishError", "FinishResult", "StageJob", "choose_release", "finish", "stage_recovery", "wait_stopped"]
 
 STAGE_TIMEOUT = 900          # staging copies ~95 MB and halts
 STAGE_ATTEMPTS = 3           # the typed command is retyped when the script never reports "started"
@@ -240,34 +240,9 @@ def finish(
         from .downloader import download_recovery
         on_event(f"Downloading the {version} recovery image")
         recovery = download_recovery(version, iso)
-    payload_ref = recovery_ref = ""
-    original = {"vga": cfg.get("vga"), "args": cfg.get("args"), "boot": cfg.get("boot")}
-    try:
-        payload_ref = _import_disk(pve, vmid, payload, storage)
-        recovery_ref = _import_disk(pve, vmid, recovery, storage)
-        for argv in (["--sata1", f"{recovery_ref},media=disk"], ["--sata2", f"{payload_ref},media=disk"],
-                     ["--boot", "order=sata1;virtio0;ide0"]):
-            res = pve.qm("set", str(vmid), *argv)
-            if not res.ok:
-                raise FinishError(f"qm set {argv[0]} failed: {res.output.strip()[-300:]}")
-        if cfg.get("vga") not in (None, "std"):
-            pve.qm("set", str(vmid), "--vga", "std")
-        # a -set device.hostpci0 arg left over from an earlier attach would stop QEMU without the device
-        leftover = igpu_engine.strip_args(cfg.get("args", ""), igpu_engine.vm_settings(0, "")["args_add"])
-        if leftover != cfg.get("args", ""):
-            pve.qm("set", str(vmid), "--args", leftover)
-        _stage(vmid, pve, console, payload_ref, on_event, clock, sleep, version == "tahoe")
-    except BaseException:
-        _drop_disk(pve, vmid, "sata2")
-        payload.unlink(missing_ok=True)
-        _put_back(pve, vmid, original)
-        console.restore_picker_timeout()
-        raise
-    finally:
-        _drop_disk(pve, vmid, "sata1")
-        # best effort: the picker must show every volume again whatever happened above
-        apply_plan([oc_step(str(vmid), "unstage", "Show every volume in the OpenCore picker again")],
-                   execute=True, adapter=pve)
+    job = StageJob(vmid, pve, console, storage, on_event, clock, sleep, version == "tahoe",
+                   tuple(igpu_engine.vm_settings(0, "")["args_add"]))
+    payload_ref = stage_recovery(job, payload, recovery, cfg)
     err = console.restore_picker_timeout()
     if err:
         result.notes.append(f"Could not restore the picker's auto-boot ({err}); run post-install afterwards.")
@@ -321,7 +296,10 @@ def finish(
 def _record_state(vmid: int, update: dict, result: FinishResult) -> None:
     """Remember what was installed in this VM (igpu-report and the status output read it)."""
     try:
-        igpu_engine.write_state(vmid, update)
+        data = igpu_engine.write_state(vmid, update)
+        record = driver_engine.from_igpu_state(vmid, data)
+        if record:
+            driver_engine.write_record(vmid, "intel", record["components"])
     except OSError as exc:
         result.notes.append(f"Could not record the installed versions ({exc}); igpu-report will not list them.")
 
@@ -346,6 +324,57 @@ def _put_back(pve: ProxmoxAdapter, vmid: int, original: dict[str, str | None]) -
             pve.qm("set", str(vmid), "--delete", key)
         else:
             pve.qm("set", str(vmid), f"--{key}", value)
+
+
+@dataclass
+class StageJob:
+    """What the recovery staging of one Mac needs: the Mac, how to reach Proxmox and its console, and the pacing."""
+    vmid: int
+    pve: ProxmoxAdapter
+    console: QmConsole
+    storage: str
+    on_event: Callable[[str], None]
+    clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
+    tahoe: bool = False
+    leftover_args: tuple[str, ...] = ()   # -set device.hostpci0 args of an earlier attach: QEMU stops without the device
+
+
+def stage_recovery(job: StageJob, payload: Path, recovery: Path, cfg: dict[str, str]) -> str:
+    """Boot macOS recovery with the emulated display, run the staging script from *payload* and wait for the guest
+    to power off. Both disks are imported and attached (sata2 payload, sata1 recovery); afterwards the recovery
+    disk is gone again and the picker shows every volume. Returns the payload disk's volume id; on a failure the
+    payload disk is dropped, the image deleted and the settings staging changed put back before the error goes on."""
+    pve, vmid = job.pve, job.vmid
+    original = {"vga": cfg.get("vga"), "args": cfg.get("args"), "boot": cfg.get("boot")}
+    payload_ref = ""
+    try:
+        payload_ref = _import_disk(pve, vmid, payload, job.storage)
+        recovery_ref = _import_disk(pve, vmid, recovery, job.storage)
+        for argv in (["--sata1", f"{recovery_ref},media=disk"], ["--sata2", f"{payload_ref},media=disk"],
+                     ["--boot", "order=sata1;virtio0;ide0"]):
+            res = pve.qm("set", str(vmid), *argv)
+            if not res.ok:
+                raise FinishError(f"qm set {argv[0]} failed: {res.output.strip()[-300:]}")
+        if cfg.get("vga") not in (None, "std"):
+            pve.qm("set", str(vmid), "--vga", "std")
+        if job.leftover_args:
+            leftover = igpu_engine.strip_args(cfg.get("args", ""), list(job.leftover_args))
+            if leftover != cfg.get("args", ""):
+                pve.qm("set", str(vmid), "--args", leftover)
+        _stage(vmid, pve, job.console, payload_ref, job.on_event, job.clock, job.sleep, job.tahoe)
+    except BaseException:
+        _drop_disk(pve, vmid, "sata2")
+        payload.unlink(missing_ok=True)
+        _put_back(pve, vmid, original)
+        job.console.restore_picker_timeout()
+        raise
+    finally:
+        _drop_disk(pve, vmid, "sata1")
+        # best effort: the picker must show every volume again whatever happened above
+        apply_plan([oc_step(str(vmid), "unstage", "Show every volume in the OpenCore picker again")],
+                   execute=True, adapter=pve)
+    return payload_ref
 
 
 def _read_payload_result(pve: ProxmoxAdapter, ref: str) -> str:

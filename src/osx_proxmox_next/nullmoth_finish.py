@@ -24,16 +24,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import nullmoth, nullmoth_engine as engine
+from . import driver_engine as engine_rec, nullmoth, nullmoth_engine as engine
 from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .downloader import DownloadError
 from .executor import apply_plan
 from .gpu import parse_config
-from .igpu_attach import oc_step
-from .igpu_finish import (
-    FinishError, _drop_disk, _import_disk, _put_back, _stage, _storage_of, wait_stopped,
-)
+from .igpu_finish import FinishError, StageJob, _drop_disk, _storage_of, stage_recovery, wait_stopped
 from .infrastructure import ProxmoxAdapter
 from .oc_builder import ensure_amfipass
 from .planner import POST_INSTALL_BOOT_ORDER
@@ -244,6 +241,7 @@ def finish(
     result = FinishResult(notes=list(plan.warnings))
     pick, tarball, tar_sha, firmware, fw_sha, notes = _download(choice, iso, say, get, read, fetch)
     result.version, result.notes = pick["tag"], result.notes + notes
+    pick = dict(pick, sha=tar_sha)
     cfg = _check_vm(vmid, pve)  # the downloads took a while: the VM must still be stopped
     storage = _storage_of(cfg)
     snapshot = create_snapshot(vmid, adapter=pve)
@@ -260,30 +258,7 @@ def finish(
         from .downloader import download_recovery
         say(f"Downloading the {version} recovery image")
         recovery = download_recovery(version, iso)
-    payload_ref = ""
-    original = {"vga": cfg.get("vga"), "args": cfg.get("args"), "boot": cfg.get("boot")}
-    try:
-        payload_ref = _import_disk(pve, vmid, payload, storage)
-        recovery_ref = _import_disk(pve, vmid, recovery, storage)
-        for argv in (["--sata1", f"{recovery_ref},media=disk"], ["--sata2", f"{payload_ref},media=disk"],
-                     ["--boot", "order=sata1;virtio0;ide0"]):
-            res = pve.qm("set", str(vmid), *argv)
-            if not res.ok:
-                raise FinishError(f"qm set {argv[0]} failed: {res.output.strip()[-300:]}")
-        if cfg.get("vga") not in (None, "std"):
-            pve.qm("set", str(vmid), "--vga", "std")
-        _stage(vmid, pve, console, payload_ref, say, clock, sleep)
-    except BaseException:
-        _drop_disk(pve, vmid, "sata2")
-        payload.unlink(missing_ok=True)
-        _put_back(pve, vmid, original)
-        console.restore_picker_timeout()
-        raise
-    finally:
-        _drop_disk(pve, vmid, "sata1")
-        # best effort: the picker must show every volume again whatever happened above
-        apply_plan([oc_step(str(vmid), "unstage", "Show every volume in the OpenCore picker again")],
-                   execute=True, adapter=pve)
+    payload_ref = stage_recovery(StageJob(vmid, pve, console, storage, say, clock, sleep), payload, recovery, cfg)
     err = console.restore_picker_timeout()
     if err:
         result.notes.append(f"Could not restore the picker's auto-boot ({err}); run post-install afterwards.")
@@ -293,6 +268,27 @@ def finish(
     except BaseException:
         _cleanup(pve, vmid, payload, clock, sleep)
         raise
+    conclude(pve, vmid, payload, result, on_event, clock, sleep, find_ip, probe)
+    if result.verified:
+        _record_driver(vmid, pick, result)
+    return result
+
+
+def _record_driver(vmid: int, pick: dict, result: FinishResult) -> None:
+    """Remember which NullMoth this Mac has, for driver-status and updates."""
+    try:
+        engine_rec.write_record(vmid, "nvidia", [engine_rec.component(
+            "NullMoth", pick["tag"], pick["tag"], pick.get("sha", ""), pick.get("source", ""))])
+    except OSError as exc:
+        result.notes.append(f"Could not record the installed driver version ({exc}); driver-status will not know it.")
+
+
+def conclude(pve: ProxmoxAdapter, vmid: int, payload: Path, result: FinishResult, on_event: Callable[[str], None],
+             clock: Callable[[], float], sleep: Callable[[float], None],
+             find_ip: Callable[[str], str] = engine.find_guest_ip,
+             probe: Callable[[str, int], bool] = engine.port_open) -> None:
+    """After the first boot: read the guest's last report into *result*, stop the VM, drop the payload disk and start
+    the VM again; when the driver is verified look for the guest's address."""
     last = result.result
     report = engine.parse_result(last)
     if not engine.is_final(last):
@@ -314,4 +310,3 @@ def finish(
     if result.verified:
         on_event("Started the VM again; looking for its address")
         _guest_address(pve, vmid, report["ip"], result, clock, sleep, find_ip, probe)
-    return result

@@ -7,6 +7,8 @@ display choice and the WhateverGreen boot-args for the family.
 
 from __future__ import annotations
 
+import sys
+
 from pathlib import Path
 from shlex import quote as shquote
 
@@ -78,6 +80,11 @@ def build_attach_steps(
         vmid, bdf, current_args, amd_host.AMD_PROFILE, vga_none=vga_none,
         extra_hostpci=amd_host.hostpci_extra(device_id),
     )
+    steps.append(PlanStep(
+        title="Note which Lilu and WhateverGreen the Mac has (for driver updates)",
+        argv=[sys.executable, "-c", "from osx_proxmox_next import driver_oc as d; from osx_proxmox_next.services "
+              f"import get_proxmox_adapter as g; d.record_amd(g(), {int(vmid)})"],
+    ))
     return steps
 
 

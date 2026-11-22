@@ -3,7 +3,8 @@
 
 Run after changing host_setup.py, bios_guide.py, data/gpu/bios_paths.json,
 data/gpu/amd_devices.txt, data/gpu/oc_boot_args.py, data/nullmoth/oc_patch.py, nullmoth_engine.py, data/nullmoth/nm_* or any iGPU
-file (igpu_engine.py, data/gpu/intel_devices.txt, oc_igpu.py, igpu_*.sh, igpu_launchd.plist, igpu_power_watchdog.py, igpu_diag.py, osx-next-power-watchdog@.service):
+file (igpu_engine.py, data/gpu/intel_devices.txt, oc_igpu.py, igpu_*.sh, igpu_launchd.plist, igpu_power_watchdog.py, igpu_diag.py, osx-next-power-watchdog@.service)
+or driver_engine.py or data/gpu/oc_kext.py:
 
     python3 scripts/embed_gpu_engines.py
 
@@ -37,6 +38,8 @@ EMBEDS = (
     ("igpu_power_watchdog.py", "GPU_EMBED_IGPU_WATCHDOG", PKG / "data/gpu/igpu_power_watchdog.py"),
     ("igpu_diag.py", "GPU_EMBED_IGPU_DIAG", PKG / "data/gpu/igpu_diag.py"),
     ("osx-next-power-watchdog@.service", "GPU_EMBED_IGPU_WATCHDOG_UNIT", PKG / "data/gpu/osx-next-power-watchdog@.service"),
+    ("driver_engine.py", "GPU_EMBED_DRIVER_ENGINE", PKG / "driver_engine.py"),
+    ("oc_kext.py", "GPU_EMBED_OC_KEXT", PKG / "data/gpu/oc_kext.py"),
 )
 
 

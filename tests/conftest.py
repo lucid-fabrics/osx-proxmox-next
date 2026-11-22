@@ -55,6 +55,23 @@ def _private_gpu_state_dir(monkeypatch, tmp_path_factory):
     monkeypatch.setattr("osx_proxmox_next.gpu.STATE_DIR", tmp_path_factory.mktemp("gpu-state"))
 
 
+@pytest.fixture(autouse=True)
+def _private_driver_state_dir(monkeypatch, tmp_path_factory):
+    """Driver records, locks and the daily release check never touch the host's /var/lib folder."""
+    monkeypatch.setenv("DRIVER_STATE_DIR", str(tmp_path_factory.mktemp("driver-state")))
+    monkeypatch.setenv("IGPU_STATE_DIR", str(tmp_path_factory.mktemp("igpu-state")))
+
+
+@pytest.fixture
+def other_pid():
+    """The pid of a live process that is not the test: what another running update looks like."""
+    import subprocess
+    proc = subprocess.Popen(["sleep", "30"])
+    yield proc.pid
+    proc.kill()
+    proc.wait()
+
+
 GITHUB_FAKE = {
     "b00t0x/WhateverXe": [
         ("0.9.0", False, "WhateverXe-0.9.0-RELEASE.zip", "2026-11-01T00:00:00Z", "9" * 64),
