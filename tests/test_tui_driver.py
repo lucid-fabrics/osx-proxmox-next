@@ -5,7 +5,7 @@ import json
 import time
 
 import pytest
-from textual.widgets import Input
+from textual.widgets import Input, Static
 
 import tui_fakes as F
 from driver_fakes import DPve, comps
@@ -62,8 +62,8 @@ def host(monkeypatch):
             view = DriverView(plan(installed=view.plan.installed, target=target, verdict=verdict), view.releases)
         return view
     monkeypatch.setattr(drv, "load_view", load)
-    monkeypatch.setattr(driver_spawn, "spawn_update", lambda vmid, choice, finish=False, accept_risk=False, no_snapshot=False:
-                        state["spawned"].append((vmid, choice, finish, accept_risk, no_snapshot)) or "/var/log/x")
+    monkeypatch.setattr(driver_spawn, "spawn_update", lambda vmid, choice, finish=False, accept_risk=False, no_snapshot=False, snapshot="":
+                        state["spawned"].append((vmid, choice, finish, accept_risk, no_snapshot, snapshot)) or "/var/log/x")
     monkeypatch.setattr(drv, "put_back", lambda vmid, env: state["put_back"].append(vmid) or NEW_SNAP)
     monkeypatch.setattr(drv, "remove_safety_snapshot", lambda vmid, env, name="": state["removed"].append((vmid, name)) or NEW_SNAP)
 
@@ -187,10 +187,12 @@ async def test_p_shows_every_change_and_x_the_commands(host):
         await pilot.press("p")
         await F.settle_screen(pilot, app, ChangesDialog)
         body = F.text_of(app.screen.query_one("#changes-text"))
-        assert "Update the NVIDIA driver of macos-sequoia (VM 101)" in body and "  4. Stage NullMoth v2.9" in body
+        assert "Update the NVIDIA driver of macos-sequoia (VM 101)" in body and "  3. Stage NullMoth v2.9" in body
         await pilot.press("x")
         await pilot.pause(0.1)
-        assert "qm shutdown 101 --timeout 120" in F.text_of(app.screen.query_one("#changes-text"))
+        commands = F.text_of(app.screen.query_one("#changes-text"))
+        assert "qm snapshot 101 " in commands and "qm shutdown" not in commands          # the Mac is stopped: nothing to shut down
+        assert "--sata1 " in commands and "--sata2 " in commands and "AMFIPass.kext" in commands and "(r, driver-undo)" in commands
         await pilot.press("escape")
         await F.settle_screen(pilot, app, DriverScreen)
 
@@ -211,8 +213,9 @@ async def test_enter_asks_once_and_the_approved_update_runs_detached(host):
         await pilot.pause(0.1)
         await pilot.press("enter")
         await F.settle(pilot, lambda: host["spawned"] and screen.mode == "run", what="the update to be started")
-        vmid, choice, finish, risk, nosnap = host["spawned"][0]
+        vmid, choice, finish, risk, nosnap, snapshot = host["spawned"][0]
         assert (vmid, choice.nullmoth, finish, risk, nosnap) == (101, "", False, True, False)
+        assert snapshot == NEW_SNAP                  # the run takes the name the plan and the confirmation showed
 
 
 @F.tui
@@ -453,42 +456,82 @@ async def test_an_undo_that_the_checks_refuse_is_said_and_asks_nothing(host):
 
 
 @F.tui
-async def test_u_keeps_its_meaning_from_the_card_setup_put_everything_back(host):
+async def test_u_is_not_on_the_driver_screen_because_it_acts_host_wide(host):
+    gpu.record_path(101).parent.mkdir(parents=True, exist_ok=True)
+    gpu.record_path(101).write_text(json.dumps({"vmid": 101, "bdf": "0000:01:00", "vendor": "nvidia"}))
+    host["view"] = DriverView(plan(installed={"NullMoth": "v2.8.1"}, older_snapshots=[NEW_SNAP]), releases())
+    assert "u" not in [b.key for b in DriverScreen.BINDINGS] and not hasattr(DriverScreen, "action_undo_card")
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await open_driver(pilot, app)
-        assert "Put everything back" not in footer(app)          # no record of a card setup: nothing to put back
+        assert "Put everything back" not in footer(app) and "Undo driver update" in footer(app)   # even with a card setup record
+        pushed = []
+        app.push_screen = lambda target, *a, **k: pushed.append(target)
         await pilot.press("u")
         await pilot.pause(0.2)
-        assert isinstance(app.screen, DriverScreen)
-        gpu.record_path(101).parent.mkdir(parents=True, exist_ok=True)
-        gpu.record_path(101).write_text(json.dumps({"vmid": 101, "bdf": "0000:01:00", "vendor": "nvidia"}))
-        screen.refresh_footer()
-        await pilot.pause(0.1)
-        assert "Put everything back" in footer(app) and "Undo driver update" not in footer(app)
-        pushed = []
-        app.push_screen = lambda target, *a, **k: pushed.append(target)      # the card setup's own screen has its own tests
-        await pilot.press("u")
-        await pilot.pause(0.1)
-        assert pushed and isinstance(pushed[0], GpuScreen) and pushed[0].vmid == 101 and pushed[0].start_undo
-        before = len(host["views"])
-        screen.on_screen_resume()                                  # back from it: the Mac may have no card now
-        await F.settle(pilot, lambda: len(host["views"]) > before and not screen.working)
+        assert pushed == [] and isinstance(app.screen, DriverScreen) and screen.mode == "attached"
+
+
+def hold_put_back(monkeypatch, outcome, steps=("stop",)):
+    """Replace put_back by one that reports *steps* as done, then waits for the test before it ends with *outcome*."""
+    import threading
+    gate = threading.Event()
+
+    def put_back(vmid, env):
+        for sid in steps:
+            env.on_step(sid, "active")
+            env.on_step(sid, "done")
+        env.on_step("release", "active")
+        gate.wait(10)
+        if isinstance(outcome, Exception):
+            env.on_step("release", "fail")
+            raise outcome
+        return NEW_SNAP
+    monkeypatch.setattr(drv, "put_back", put_back)
+    return gate
+
+
+async def confirm_undo(pilot, screen):
+    await pilot.press("r")
+    await F.settle(pilot, lambda: type(screen.app.screen).__name__ == "ChoiceDialog")
+    await pilot.press("tab", "enter")
 
 
 @F.tui
-async def test_a_put_back_that_fails_is_shown_and_the_screen_reloads(host, monkeypatch):
-    def fail(vmid, env):
-        raise DriverError("Another driver update is running for this Mac.")
-    monkeypatch.setattr(drv, "put_back", fail)
+async def test_the_undo_shows_its_steps_from_the_first_second(host, monkeypatch):
+    gate = hold_put_back(monkeypatch, None)
     host["view"] = DriverView(plan(installed={"NullMoth": "v2.8.1"}, older_snapshots=[NEW_SNAP]), releases())
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await open_driver(pilot, app)
-        await pilot.press("r")
-        await F.settle(pilot, lambda: type(app.screen).__name__ == "ChoiceDialog")
-        await pilot.press("tab", "enter")
-        await F.settle(pilot, lambda: len(host["views"]) >= 2 and screen.mode == "attached" and not screen.working)
+        await confirm_undo(pilot, screen)
+        await F.settle(pilot, lambda: screen.mode == "undo" and "◐ Release the disks" in text(app, "#g-timeline"), what="the undo steps")
+        line = text(app, "#g-timeline")
+        assert "✓ Stopped the Mac" in line and "· Put the snapshot back" in line and "· Start the Mac" in line     # like the update
+        assert "Undoing the driver update of macos-sequoia" in text(app, "#g-run-title") and "Keep this screen open" in text(app, "#g-box-text")
+        await pilot.press("escape")                                   # leaving mid-undo waits
+        await pilot.pause(0.1)
+        assert screen.mode == "undo"
+        gate.set()
+        await F.settle(pilot, lambda: screen.mode == "attached" and not screen.working, what="the screen to come back")
+
+
+@F.tui
+async def test_a_put_back_that_fails_shows_an_error_screen_and_enter_goes_back(host, monkeypatch):
+    gate = hold_put_back(monkeypatch, DriverError("Device maps still hold the disks of VM 101 (x). Remove them with: dmsetup remove x"))
+    host["view"] = DriverView(plan(installed={"NullMoth": "v2.8.1"}, older_snapshots=[NEW_SNAP]), releases())
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await open_driver(pilot, app)
+        await confirm_undo(pilot, screen)
+        gate.set()
+        await F.settle(pilot, lambda: screen.undo_error and "The undo did not finish" in text(app, "#g-box-title"), what="the error screen")
+        assert "dmsetup remove x" in text(app, "#g-box-text") and "✗ Release the disks" in text(app, "#g-timeline")
+        assert "Enter" not in footer(app) and "Back" in footer(app) and screen.query_one("#g-box").has_class("fail")
+        before = len(host["views"])
+        await pilot.press("enter")
+        await F.settle(pilot, lambda: len(host["views"]) > before and screen.mode == "attached" and not screen.working)
+        assert not screen.undo_error
 
 
 @F.tui
@@ -570,7 +613,7 @@ async def test_home_marks_a_mac_with_a_newer_driver(host):
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen) and app.screen.loaded)
         await F.settle(pilot, lambda: "update" in F.text_of(app.screen.cards()[0].query_one(".card-status")))
         marked = F.text_of(app.screen.cards()[0].query_one(".card-status"))
-        assert marked.startswith("○ stopped") and "● update" in marked and len(marked) <= 26     # one cell of room before the border
+        assert marked.startswith("○ stopped") and "● driver update" in marked and len(marked) <= 27     # the card's text is 27 cells wide
         assert "update" not in F.text_of(app.screen.cards()[1].query_one(".card-status"))
         await pilot.press("v")
         await F.settle(pilot, lambda: app.screen.cards() and app.screen.cards()[0].compact)
@@ -656,3 +699,189 @@ async def test_the_driver_and_status_rows_stay_on_one_line(host, size):
         for row in ("#d-driver", "#d-driver-2", "#d-status"):
             assert screen.query_one(row).size.height == 1, (row, size, text(app, row))
         assert "WhateverXe 1.2.0" in text(app, "#d-driver") and "WhateverXe Graphics 0.9.1" in text(app, "#d-driver-2")
+
+
+# ── fix wave 2: the keyboard after a TUI-launched update, state text that follows state, Intel's second row ──
+
+def stale_focus(screen):
+    """What the Textual race leaves after a TUI-launched update: the focus on the version row that the run view removed."""
+    from osx_proxmox_next.widgets.rows import Option
+    screen.focused = ChoiceRow("Version", [Option("a", "a")], "a")
+
+
+async def launch(pilot, app, host):
+    screen = await open_driver(pilot, app)
+    await pilot.press("enter")
+    await F.settle_screen(pilot, app, BeforeDialog)
+    app.screen.query_one("#g-ack", Input).value = ACK_PHRASE
+    await pilot.pause(0.1)
+    await pilot.press("enter")
+    await F.settle(pilot, lambda: host["spawned"] and screen.mode == "run", what="the update to be started")
+    return screen
+
+
+@F.tui
+async def test_the_keys_work_after_an_update_the_tui_started(host):
+    """r, y, n, esc and p all did nothing after a TUI-launched update (the mouse still worked): the focus sat on the
+    removed version row, and a key goes to the focused widget first, which is no longer on the screen."""
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await launch(pilot, app, host)
+        stale_focus(screen)
+        await F.settle(pilot, lambda: screen.focused is None, what="the focus to be taken off the removed row")
+        await pilot.press("p")                                      # the running screen
+        await F.settle_screen(pilot, app, ChangesDialog)
+        await pilot.press("escape")
+        await F.settle_screen(pilot, app, DriverScreen)
+        write_state(phase="failed", states=("done", "done", "done", "fail", "pending", "pending", "pending"), error="Staging failed.")
+        await F.settle(pilot, lambda: "The update did not finish" in text(app, "#g-box-title"), what="the failure screen")
+        stale_focus(screen)
+        await F.settle(pilot, lambda: screen.focused is None)
+        await pilot.press("r")                                      # the failure screen: undo is offered
+        await F.settle(pilot, lambda: type(app.screen).__name__ == "ChoiceDialog")
+        await pilot.press("escape")
+        await F.settle_screen(pilot, app, DriverScreen)
+        write_state(phase="done", states=("done",) * 7)
+        await F.settle(pilot, lambda: screen.mode == "first_boot", what="the first boot question")
+        stale_focus(screen)
+        await F.settle(pilot, lambda: screen.focused is None)
+        await pilot.press("n")
+        await F.settle(pilot, lambda: screen.helping)
+        await pilot.press("enter")
+        await F.settle(pilot, lambda: not screen.helping)
+        await pilot.press("y")
+        await F.settle(pilot, lambda: type(app.screen).__name__ == "ChoiceDialog")
+        await pilot.press("enter")
+        await F.settle_screen(pilot, app, HomeScreen)
+
+
+@F.tui
+async def test_a_mode_change_never_leaves_the_focus_on_a_widget_it_removed(host):
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await launch(pilot, app, host)
+        stale_focus(screen)
+        await screen._show(Static("x"), mode="run")                 # every mode change heals it
+        assert screen.focused is None
+
+
+@F.tui
+async def test_the_failure_screen_says_the_update_stopped_and_the_run_screen_says_it_keeps_going(host):
+    write_state(phase="running")
+    assert engine.acquire_lock(101)
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await open_driver(pilot, app)
+        assert "Safe to leave: the update keeps running." in text(app, "#g-run-note")
+        engine.release_lock(101)
+        await F.settle(pilot, lambda: screen.error, what="the run to be seen as stopped")
+        await F.settle(pilot, lambda: "The update stopped. Nothing is running." in text(app, "#g-run-note"), what="the note to follow")
+        assert "keeps running" not in text(app, "#g-run-note") and screen.query_one("#g-box").has_class("fail")
+
+
+@F.tui
+async def test_a_finish_that_just_started_is_not_shown_as_failed_by_the_state_the_last_run_left(host):
+    write_state(phase="running", error="")                          # a run that was killed: it says running, nobody holds the lock
+    host["view"] = DriverView(plan(installed={"NullMoth": "v2.8.1"}, interrupted=True), releases())
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await open_driver(pilot, app)
+        await pilot.press("enter")                                  # Finish
+        await F.settle(pilot, lambda: host["spawned"] and screen.mode == "run")
+        await pilot.pause(1.3)                                      # ticks while the spawned process has not taken its lock yet
+        assert not screen.error and "did not finish" not in text(app, "#g-box-title") and "Updating the NVIDIA driver" in text(app, "#g-run-title")
+        assert "Safe to leave" in text(app, "#g-run-note")
+        assert engine.acquire_lock(101)                              # the process is up: it holds the lock and writes its state
+        write_state(phase="running")
+        await pilot.pause(1.3)
+        assert not screen.error and "Updating the driver" in text(app, "#g-box-title")
+        engine.release_lock(101)
+        screen.spawned_at = time.time() - 1000                      # it stopped long after it started: now it is a failure
+        await F.settle(pilot, lambda: screen.error, what="the stop to be noticed")
+        assert "did not finish" in text(app, "#g-box-title")
+
+
+@F.tui
+async def test_the_run_title_has_no_double_space_before_the_state_is_written(host):
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await open_driver(pilot, app)
+        screen._spawn(Choice())
+        await F.settle(pilot, lambda: screen.mode == "run")
+        title = text(app, "#g-run-title")
+        assert title == "Updating the NVIDIA driver of macos-sequoia" and "  " not in title      # the plan knows the kind
+        screen.view = None
+        assert screen._run_head({}) == "Updating the driver of macos-sequoia" and "  " not in screen._run_head({})
+
+
+def intel_view(**kw):
+    target = Target("intel", {"WhateverXe": {"version": "0.8.3", "tag": "v0.8.3", "sha256": "", "source": "latest"},
+                              "WhateverXe Graphics": {"version": "0.4.4", "tag": "v0.4.4", "sha256": "", "source": "latest"}})
+    gfx = [{"tag": "v0.4.4", "prerelease": False, "published": "2026-11-18"}, {"tag": "v0.4.3", "prerelease": False, "published": "2026-11-10"}]
+    wex = [{"tag": "v0.8.3", "prerelease": False, "published": "2026-11-18"}, {"tag": "v0.8.0", "prerelease": False, "published": "2026-10-01"}]
+    return DriverView(plan("intel", {"WhateverXe": "0.8.0", "WhateverXe Graphics": "0.4.1"}, target, **kw), wex, gfx)
+
+
+@F.tui
+async def test_an_intel_mac_picks_the_graphics_package_release_on_a_second_row(host):
+    host["view"] = intel_view()
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await open_driver(pilot, app)
+        rows = list(screen.query(ChoiceRow))
+        assert [r.id for r in rows] == ["d-version", "d-graphics"] and rows[0].label == "Version" and rows[1].label == "Package"
+        assert [o.value for o in rows[1].options] == ["v0.4.4", "v0.4.3"] and rows[1].value == "v0.4.4"
+        assert rows[0].has_focus and "Row" in footer(app)
+        await pilot.press("down")
+        await F.settle(pilot, lambda: rows[1].has_focus)
+        await pilot.press("right")                                  # v0.4.3
+        await F.settle(pilot, lambda: screen.choice.graphics == "v0.4.3" and not screen.working)
+        assert screen.choice.wex == "" and host["views"][-1].graphics == "v0.4.3"
+        await pilot.press("up")
+        await F.settle(pilot, lambda: screen.query_one("#d-version").has_focus)
+        await pilot.press("right")
+        await F.settle(pilot, lambda: screen.choice.wex == "v0.8.0" and screen.choice.graphics == "v0.4.3" and not screen.working)
+        await pilot.press("enter")
+        await F.settle_screen(pilot, app, BeforeDialog)
+        await pilot.press("escape")
+        await F.settle_screen(pilot, app, DriverScreen)
+        screen._approved({})
+        await F.settle(pilot, lambda: host["spawned"])
+        choice = host["spawned"][0][1]
+        assert (choice.wex, choice.graphics, choice.nullmoth) == ("v0.8.0", "v0.4.3", "")
+
+
+def test_load_view_reads_the_graphics_releases_for_an_intel_mac(monkeypatch):
+    monkeypatch.setattr(drv, "prepare", lambda *a, **k: plan("intel", target=amd_target()))
+    monkeypatch.setattr(drv.igpu_engine, "list_releases", lambda kind: [{"tag": kind + "-1", "prerelease": False}])
+    view = drv.load_view(101)
+    assert [r["tag"] for r in view.releases] == ["whateverxe-1"] and [r["tag"] for r in view.graphics] == ["graphics-1"]
+    assert drv.load_view(101, releases=False).graphics == []
+
+
+@F.tui
+async def test_a_finish_that_was_refused_before_it_wrote_anything_is_not_shown_with_the_old_error(host):
+    write_state(phase="failed", error="OLD ERROR from the last run")
+    host["view"] = DriverView(plan(installed={"NullMoth": "v2.8.1"}, interrupted=True), releases())
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await open_driver(pilot, app)
+        await pilot.press("enter")
+        await F.settle(pilot, lambda: host["spawned"] and screen.mode == "run")
+        import os
+        os.utime(engine.update_path(101), (time.time() - 2000, time.time() - 2000))     # the old run's file, never touched since
+        screen.spawned_at = time.time() - 1000          # the spawned run exited at once
+        await F.settle(pilot, lambda: screen.error, what="the missing start to be noticed")
+        assert "did not start" in screen.error and "OLD ERROR" not in text(app, "#g-box-text")
+
+
+@F.tui
+async def test_an_undo_that_dies_of_an_unexpected_error_shows_the_error_screen(host, monkeypatch):
+    gate = hold_put_back(monkeypatch, OSError("disk full"))
+    host["view"] = DriverView(plan(installed={"NullMoth": "v2.8.1"}, older_snapshots=[NEW_SNAP]), releases())
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await open_driver(pilot, app)
+        await confirm_undo(pilot, screen)
+        gate.set()
+        await F.settle(pilot, lambda: screen.undo_error == "disk full" and not screen.working)

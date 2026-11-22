@@ -36,7 +36,7 @@ COMPACT_BELOW = 64
 HOME_REFRESH_SECONDS = 10
 THUMB_REFRESH_SECONDS = 5
 DRIVER_MARK = "\u25cf driver update"          # list view
-DRIVER_MARK_CARD = "\u25cf update"            # a card is narrow: one cell of room is kept before the border
+DRIVER_MARK_CARD = DRIVER_MARK                # the card has room for the full words ("stopped" is the longest status)
 DRIVER_STOPPED = "\u25cf driver update stopped"
 CHECK_EVERY = 3600                              # the driver check runs when a day has passed, looked at hourly
 

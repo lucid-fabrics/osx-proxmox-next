@@ -2,7 +2,8 @@
 
 One approval, then the update runs by itself in a detached process (`osx-next-cli driver-update`) and this screen
 reads its steps from the update state file, so a reopened terminal shows the same run. r undoes the driver update
-(back to its snapshot); u keeps its meaning from the card setup: put the card setup back."""
+(back to its snapshot). It acts on the driver only: undoing the card setup lives in the Graphics card flow and the
+Mac's own view, because that undo takes the card off every Mac that has it."""
 
 from __future__ import annotations
 
@@ -23,7 +24,6 @@ from ..driver_core import DriverError, RunEnv
 from ..driver_plan import DriverPlan, commands, prepare
 from ..driver_run import put_back, remove_safety_snapshot, undo_target
 from ..driver_targets import Choice
-from ..gpu import load_record
 from ..gpu_flow import Before
 from ..nullmoth import NOTICE_BODY, NOTICE_TITLE
 from ..services import get_proxmox_adapter
@@ -47,22 +47,26 @@ DRIVER_LABEL = 10
 
 @dataclass
 class DriverView:
-    """What the attached state shows: the plan for the latest release and the releases the picker offers."""
+    """What the attached state shows: the plan for the latest release and the releases the pickers offer."""
     plan: DriverPlan
-    releases: list[dict] = field(default_factory=list)   # newest first, at most MAX_RELEASES
+    releases: list[dict] = field(default_factory=list)   # newest first, at most MAX_RELEASES (NullMoth or WhateverXe)
+    graphics: list[dict] = field(default_factory=list)   # Intel: the releases of the graphics package
 
 
 def load_view(vmid: int, choice: Choice | None = None, releases: bool = True) -> DriverView:
     """Worker work: the plan (Proxmox, GitHub) and the picker's releases. A release list that cannot be read is empty."""
     plan = prepare(vmid, choice, reinstall=True)
     found: list[dict] = []
+    graphics: list[dict] = []
     if releases and plan.kind in ("nvidia", "intel"):
         try:
             found = (nullmoth_finish.versions() if plan.kind == "nvidia"
                      else igpu_engine.list_releases("whateverxe"))[:MAX_RELEASES]
+            if plan.kind == "intel":
+                graphics = igpu_engine.list_releases("graphics")[:MAX_RELEASES]
         except Exception:  # noqa: BLE001 - the picker is a courtesy: the plan for the latest release stands
             log.debug("release list failed", exc_info=True)
-    return DriverView(plan, found)
+    return DriverView(plan, found, graphics)
 
 
 def build_before(plan: DriverPlan) -> Before:
@@ -88,13 +92,15 @@ class DriverScreen(OsxScreen):
         Binding("enter", "primary", "Update driver"),
         Binding("p", "changes", "See every change"),
         Binding("r", "undo_driver", "Undo driver update"),
-        Binding("u", "undo_card", "Put everything back"),
+        Binding("up", "row(-1)", "Move", show=False),
+        Binding("down", "row(1)", "Move", show=False),
         Binding("y", "yes", "Yes, all good"),
         Binding("n", "no", "No, help me"),
         Binding("escape", "back", "Leave"),
     ]
     HELP_TITLE = "Graphics card"
     HELP_EXTRA = [("←  →  h  l", "Pick another release")]
+    AUTO_FOCUS = ""      # focus is set by _focus_row only: Textual's auto focus on resume can land on a row a mode change is removing
 
     def __init__(self, vmid: int, name: str = "") -> None:
         super().__init__()
@@ -108,7 +114,8 @@ class DriverScreen(OsxScreen):
         self.helping = False
         self.error = ""
         self._label = "Update driver"
-        self._after_card = False
+        self.undo_state: dict = {}
+        self.undo_error = ""
 
     # ── layout ───────────────────────────────────────────────────────
 
@@ -131,7 +138,16 @@ class DriverScreen(OsxScreen):
             return
         await body.remove_children()
         await body.mount(*widgets)
+        self._heal_focus()
         self.refresh_footer()
+
+    def _heal_focus(self) -> None:
+        """Keys go to the focused widget, and only a widget that is still on the screen passes them to the screen's
+        bindings. Focus left on a widget that a mode change removed (the version row, after a TUI-launched update)
+        leaves every key dead while the mouse still works: it is taken off, so the keys reach the screen again."""
+        focused = self.focused
+        if focused is not None and (not focused.is_attached or focused.screen is not self):
+            self.set_focus(None)
 
     def busy(self) -> bool:
         return self.working
@@ -167,7 +183,7 @@ class DriverScreen(OsxScreen):
             view.releases = self.view.releases
         self.view = view
         self.mac = view.plan.name or self.mac
-        if self.mode in ("run", "first_boot"):
+        if self.mode in ("run", "first_boot", "undo"):
             return
         state = engine.read_update(self.vmid)
         if state.get("phase") == "done":
@@ -238,6 +254,9 @@ class DriverScreen(OsxScreen):
         picker = None if pending else self._picker(plan)
         if picker is not None:
             rows.append(picker)
+            second = self._graphics_picker(plan)
+            if second is not None:
+                rows.append(second)
         elif plan.kind == "amd" and not pending and not plan.refusals:
             rows.append(Static(Text(" " + "Version".ljust(DRIVER_LABEL) + "the versions this release pins",
                                     style=pal["muted"]), id="d-pinned"))
@@ -277,16 +296,37 @@ class DriverScreen(OsxScreen):
         found = self.view.releases if self.view else []
         if not found or plan.kind not in ("nvidia", "intel") or plan.refusals:
             return None
+        picked = (self.choice.nullmoth if plan.kind == "nvidia" else self.choice.wex)
+        return self._release_row("Version", found, picked, "d-version")      # Intel: the WhateverXe release
+
+    def _graphics_picker(self, plan: DriverPlan) -> ChoiceRow | None:
+        """Intel: the graphics package has its own release, picked on a second row."""
+        found = self.view.graphics if self.view else []
+        if not found or plan.kind != "intel" or plan.refusals:
+            return None
+        return self._release_row("Package", found, self.choice.graphics, "d-graphics")
+
+    @staticmethod
+    def _release_row(label: str, found: list[dict], picked: str, row_id: str) -> ChoiceRow:
         newest = next((r["tag"] for r in found if not r["prerelease"]), found[0]["tag"])
         options = [Option(r["tag"], r["tag"] + (" (latest)" if r["tag"] == newest else "")
                           + (" (pre-release)" if r["prerelease"] else "")) for r in found]
-        picked = (self.choice.nullmoth if plan.kind == "nvidia" else self.choice.wex) or newest
-        return ChoiceRow("Version", options, picked if picked in [o.value for o in options] else newest,
-                         label_width=DRIVER_LABEL, id="d-version", hint_lines=0)
+        picked = picked or newest
+        return ChoiceRow(label, options, picked if picked in [o.value for o in options] else newest,
+                         label_width=DRIVER_LABEL, id=row_id, hint_lines=0)
 
     def _focus_row(self) -> None:
-        for row in self.query(ChoiceRow):
-            row.focus()
+        rows = list(self.query(ChoiceRow))
+        if rows:
+            rows[0].focus()
+
+    def action_row(self, delta: int) -> None:
+        """Up and down move between the release rows (Intel has two)."""
+        rows = [r for r in self.query(ChoiceRow) if r.display]
+        if self.mode != "attached" or len(rows) < 2:
+            return
+        idx = rows.index(self.focused) if self.focused in rows else 0
+        rows[max(0, min(len(rows) - 1, idx + delta))].focus()
 
     def _facts(self) -> None:
         pal = self.app.get_css_variables()
@@ -300,10 +340,13 @@ class DriverScreen(OsxScreen):
 
     def on_choice_row_changed(self, event: ChoiceRow.Changed) -> None:
         self.touched = True
+        c = self.choice
         if self.plan.kind == "nvidia":
-            self.choice = Choice(nullmoth=event.value, macos=self.choice.macos)
+            self.choice = Choice(nullmoth=event.value, macos=c.macos)
+        elif event.row.id == "d-graphics":
+            self.choice = Choice(wex=c.wex, graphics=event.value, macos=c.macos)
         else:
-            self.choice = Choice(wex=event.value, macos=self.choice.macos)
+            self.choice = Choice(wex=event.value, graphics=c.graphics, macos=c.macos)
         self.load(keep_picker=True)
 
     # ── enter ────────────────────────────────────────────────────────
@@ -319,12 +362,10 @@ class DriverScreen(OsxScreen):
             return "Finish"
         return "Reinstall" if self.plan.verdict == "current" else "Update driver"
 
-    def _card_record(self) -> bool:
-        """The card setup of this Mac left a record: u can put it back, as in the Mac's own view."""
-        return load_record(self.vmid) is not None
-
     def footer_items(self) -> list[tuple]:
         undo = [("r", "Undo driver update", "screen.undo_driver")] if self._has_snapshot() else []
+        if self.mode == "undo":
+            return [("enter", "Back", "screen.primary"), ("esc", "Back", "screen.back")] if self.undo_error else [("?", "Help", "app.help")]
         if self.mode == "first_boot":
             if self.helping:
                 return [("enter", "Back", "screen.primary"), ("esc", "Back", "screen.back")]
@@ -335,12 +376,12 @@ class DriverScreen(OsxScreen):
             items.append(("enter", self._label, "screen.primary"))
         if self.mode == "attached" and self.query("ChoiceRow"):
             items.append(("←→", "Version", None))
+            if len(self.query("ChoiceRow")) > 1:
+                items.append(("↑↓", "Row", None))
         if self.mode in ("attached", "run") and self.view and not self.view.plan.refusals:
             items.append(("p", "See every change", "screen.changes"))
         if self.mode in ("attached", "run"):
             items += undo
-            if self._card_record():
-                items.append(("u", "Put everything back", "screen.undo_card"))
         items += [("esc", "Back", "screen.back"), ("?", "Help", "app.help")]
         return items
 
@@ -350,6 +391,10 @@ class DriverScreen(OsxScreen):
         if self.mode == "first_boot":
             if self.helping:
                 self.run_worker(self._show_first_boot(), exclusive=True, group="drv-mode")
+            return
+        if self.mode == "undo":
+            if self.undo_error:
+                self._leave_undo()
             return
         if self.mode == "run":
             if self.error:
@@ -375,14 +420,17 @@ class DriverScreen(OsxScreen):
     def _approved(self, result: dict | None) -> None:
         if result is None:
             return
+        intel = self.plan.kind == "intel"
         self._spawn(Choice(self.choice.nullmoth if self.plan.kind == "nvidia" else "",
-                           self.choice.wex if self.plan.kind == "intel" else "", "", self.choice.macos),
-                    accept_risk=bool(result.get("ack")), no_snapshot=bool(result.get("typed")))
+                           self.choice.wex if intel else "", self.choice.graphics if intel else "", self.choice.macos),
+                    accept_risk=bool(result.get("ack")), no_snapshot=bool(result.get("typed")), snapshot=self.plan.snapshot)
 
-    def _spawn(self, choice: Choice, finish: bool = False, accept_risk: bool = False, no_snapshot: bool = False) -> None:
+    def _spawn(self, choice: Choice, finish: bool = False, accept_risk: bool = False, no_snapshot: bool = False,
+               snapshot: str = "") -> None:
+        """Start the run. *snapshot* is the name the plan and the confirmation showed: the run uses exactly that one."""
         self.error = ""
         try:
-            driver_spawn.spawn_update(self.vmid, choice, finish, accept_risk, no_snapshot)
+            driver_spawn.spawn_update(self.vmid, choice, finish, accept_risk, no_snapshot, snapshot)
         except (OSError, ValueError) as exc:
             self.app.notify(f"Could not start the update: {exc}", severity="error")
             return
@@ -434,29 +482,59 @@ class DriverScreen(OsxScreen):
             out.append(" " * max(1, TIMELINE_WIDTH - 2 - len(title) - len(tail)) + tail, style=pal["muted"])
         return out
 
+    def _starting(self) -> bool:
+        """A run was started a moment ago and has not written anything yet: the state file is what the last run left, and
+        nobody holds the lock. The file's own time says whose it is."""
+        if not self.spawned_at or time.time() - self.spawned_at >= START_GRACE or engine.lock_holder(self.vmid):
+            return False
+        try:
+            return engine.update_path(self.vmid).stat().st_mtime < self.spawned_at
+        except OSError:
+            return True
+
+    def _older_than_spawn(self) -> bool:
+        try:
+            return engine.update_path(self.vmid).stat().st_mtime < self.spawned_at
+        except OSError:
+            return True
+
+    def _failed(self, state: dict) -> bool:
+        return bool(self.error) or (state.get("phase") == "failed" and not self._starting())
+
     def _run_box(self, state: dict) -> tuple[str, list[str]]:
-        phase = state.get("phase", "")
-        if self.error or phase == "failed":
+        if self._failed(state):
             ways = "enter finishes it." + (" r undoes the driver update." if self._has_snapshot() else "")
             return "The update did not finish", [self.error or state.get("error", ""), "", ways]
+        if self._starting():
+            return "Updating the driver", ["Starting..."]
         recent = [e[9:] for e in state.get("events", [])][-6:]
         return "Updating the driver", recent or ["Starting..."]
+
+    def _run_note(self, state: dict) -> str:
+        return "The update stopped. Nothing is running." if self._failed(state) else "Safe to leave: the update keeps running."
+
+    def _run_head(self, state: dict) -> str:
+        kind = state.get("kind") or (self.view.plan.kind if self.view else "")
+        return " ".join(p for p in ("Updating the", engine.CARD_NAME.get(kind, ""), "driver of", self.mac or "the Mac") if p)
 
     async def _show_run(self) -> None:
         state = self._state()
         pal = self.app.get_css_variables()
         title, lines = self._run_box(state)
-        head = f"Updating the {engine.CARD_NAME.get(state.get('kind', ''), '')} driver of {self.mac or 'the Mac'}"
         box = Vertical(Static(Text(title, style="bold"), id="g-box-title"),
                        ReadScroll(Static(Text("\n".join(lines)), id="g-box-text"), id="g-box-scroll"),
-                       id="g-box", classes="fail" if self.error or state.get("phase") == "failed" else "")
-        await self._show(Static(Text(head, style="bold"), id="g-run-title"),
+                       id="g-box", classes="fail" if self._failed(state) else "")
+        await self._show(Static(Text(self._run_head(state), style="bold"), id="g-run-title"),
                          Horizontal(Static(self.timeline(state), id="g-timeline"), box, id="g-run-cols"),
-                         Static(Text("Safe to leave: the update keeps running.", style=pal["muted"]), id="g-run-note"),
+                         Static(Text(self._run_note(state), style=pal["muted"]), id="g-run-note"),
                          mode="run")
 
     def tick(self) -> None:
         """Once a second: the run view follows the state file; a finished run asks the first boot question."""
+        self._heal_focus()
+        if self.mode == "undo":
+            self.paint_undo()
+            return
         if self.mode != "run":
             return
         state = self._state()
@@ -464,9 +542,14 @@ class DriverScreen(OsxScreen):
         if state.get("phase") == "done":
             self.run_worker(self._show_first_boot(), exclusive=True, group="drv-mode")
             return
-        if not state and not alive and self.spawned_at and time.time() - self.spawned_at > START_GRACE:
+        stale = bool(self.spawned_at) and time.time() - self.spawned_at > START_GRACE
+        if alive:
+            self.error = ""
+        elif not state and stale:
             self.error = "The update did not start. See " + driver_spawn.log_path(self.vmid)
-        elif state and not alive and state.get("phase") == "running":
+        elif state and stale and self._older_than_spawn():
+            self.error = "The update did not start. See " + driver_spawn.log_path(self.vmid)
+        elif state.get("phase") == "running" and not self._starting():
             self.error = "The update stopped before it finished."
         self.paint_run(state)
 
@@ -476,6 +559,8 @@ class DriverScreen(OsxScreen):
             title, lines = self._run_box(state)
             self.query_one("#g-box-title", Static).update(Text(title, style="bold"))
             self.query_one("#g-box-text", Static).update(Text("\n".join(lines)))
+            self.query_one("#g-box").set_class(self._failed(state), "fail")
+            self.query_one("#g-run-note", Static).update(Text(self._run_note(state), style=self.app.get_css_variables()["muted"]))
         except NoMatches:
             pass
 
@@ -569,43 +654,79 @@ class DriverScreen(OsxScreen):
             "Everything you did in macOS since then is lost."], confirm="Undo driver update", danger=True), answer)
 
     def _put_back(self) -> None:
+        """The undo runs in a worker; its screen (the steps, ✓ and ◐ like the update) is up from the first second."""
         self.working = True
+        self.undo_error = ""
+        self.undo_state = {"steps": [{"id": sid, "title": t, "done": d, "state": "pending"}
+                                     for (sid, t), (_i, d) in zip(engine.undo_titles(), engine.undo_titles(done=True))]}
+
+        def step(sid: str, state: str) -> None:
+            self.app.call_from_thread(self._undo_step, sid, state)
 
         def work() -> None:
             try:
-                name = put_back(self.vmid, RunEnv(get_proxmox_adapter()))
-                self.app.call_from_thread(self._put_back_done, f"Undid the driver update: the Mac is back to {name}.", False)
-            except DriverError as exc:
-                self.app.call_from_thread(self._put_back_done, str(exc), True)
+                name = put_back(self.vmid, RunEnv(get_proxmox_adapter(), on_step=step))
+                self.app.call_from_thread(self._put_back_done, f"Undid the driver update: the Mac is back to {name}.")
+            except Exception as exc:  # noqa: BLE001 - whatever ends the undo is shown on its error screen, never a spinner
+                self.app.call_from_thread(self._undo_failed, str(exc))
 
-        self.run_worker(work, thread=True, exit_on_error=False, group="drv-undo")
+        async def start() -> None:
+            await self._show_undo()          # the steps are on screen before the first one starts
+            self.run_worker(work, thread=True, exit_on_error=False, group="drv-undo")
 
-    def _put_back_done(self, text: str, failed: bool) -> None:
+        self.run_worker(start(), exclusive=True, group="drv-mode")
+
+    def _undo_step(self, sid: str, state: str) -> None:
+        for row in self.undo_state.get("steps", []):
+            if row["id"] == sid:
+                row["state"] = state
+                if state == "active":
+                    row["started"] = time.time()
+                else:
+                    row["ended"] = time.time()
+        self.paint_undo()
+
+    async def _show_undo(self) -> None:
+        pal = self.app.get_css_variables()
+        failed = bool(self.undo_error)
+        title = "The undo did not finish" if failed else "Going back to the driver snapshot"
+        lines = [self.undo_error, "", "enter goes back."] if failed else [
+            "The Mac stops, its disks go back to the snapshot and it starts again.", "This takes a few minutes. Keep this screen open."]
+        box = Vertical(Static(Text(title, style="bold"), id="g-box-title"),
+                       ReadScroll(Static(Text("\n".join(lines)), id="g-box-text"), id="g-box-scroll"),
+                       id="g-box", classes="fail" if failed else "")
+        await self._show(Static(Text(f"Undoing the driver update of {self.mac or 'the Mac'}", style="bold"), id="g-run-title"),
+                         Horizontal(Static(self.timeline(self.undo_state), id="g-timeline"), box, id="g-run-cols"),
+                         Static(Text("The Mac stays as it is until you go back." if failed else "", style=pal["muted"]), id="g-run-note"),
+                         mode="undo")
+
+    def paint_undo(self) -> None:
+        try:
+            self.query_one("#g-timeline", Static).update(self.timeline(self.undo_state))
+        except NoMatches:
+            pass
+
+    def _undo_failed(self, text: str) -> None:
         self.working = False
-        self.app.notify(text, severity="error" if failed else "information")
+        self.undo_error = text
+        self.run_worker(self._show_undo(), exclusive=True, group="drv-mode")
+
+    def _leave_undo(self) -> None:
+        self.undo_error = ""
         self.mode = "loading"
         self.load()
 
-    def action_undo_card(self) -> None:
-        """u keeps its meaning from the card setup: the Mac's own undo of everything the card setup did."""
-        if self.working or self.mode not in ("attached", "run"):
-            return
-        if not self._card_record():
-            self.app.notify("The card setup of this Mac has nothing to put back.", severity="warning")
-            return
-        from .gpu import GpuScreen
-        self._after_card = True
-        self.app.push_screen(GpuScreen(vmid=self.vmid, undo=True))
-
-    def on_screen_resume(self) -> None:
-        if self._after_card:     # back from the card setup's undo: the Mac may have no card now
-            self._after_card = False
-            self.mode = "loading"
-            self.load()
+    def _put_back_done(self, text: str) -> None:
+        self.working = False
+        self.app.notify(text)
+        self._leave_undo()
 
     def action_back(self) -> None:
         if self.mode == "first_boot" and self.helping:
             self.action_primary()
+            return
+        if self.mode == "undo" and self.undo_error:
+            self._leave_undo()
             return
         if self.working:
             self.app.notify("Wait for this step to finish.")
