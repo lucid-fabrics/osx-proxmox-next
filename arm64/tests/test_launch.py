@@ -4,6 +4,10 @@ Closes (signals end the CLI and everything it started, interrupted saves exit 12
 run dirs are unique (14), umask 077 (9), VNC password by default (10), snapshot names validated (5), a failed save keeps the old one."""
 import glob, json, os, re, shutil, signal, stat, subprocess, sys, tempfile, time
 
+# A job started with `&` from a non-interactive shell (a CI step, a tool's background run) has SIGINT ignored, and every child inherits
+# that: the CLI would then ignore the Ctrl-C these tests send it. Resetting it here makes the tests the same in the foreground and in
+# the background. (The CLI itself still ignores SIGINT when started that way, which is how shells treat background jobs.)
+signal.signal(signal.SIGINT, signal.SIG_DFL)
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(HERE, "snapintosh")
 T = tempfile.mkdtemp(prefix="snl-")
@@ -417,7 +421,7 @@ HOME2 = T + "/h&m[a-z]*e x"
 subprocess.run(["cp", "-r", HOME, HOME2])
 args = T + "/args2"
 r = cli(["run", "--gpu", "0", "--cpus", "2", "--ram", "64M", "--secs", "40"], {"FAKE_QEMU": "exit:0", "FAKE_ARGS": args, "SNAPINTOSH_HOME": HOME2, "KEEP_RUNS": "1"})
-rd = glob.glob(glob.escape + "/runs/run-*/")
+rd = glob.glob(glob.escape(HOME2) + "/runs/run-*/")
 a = open(args).read().split("\n") if os.path.exists(args) else []
 ok = bool(rd) and ("file:" + rd[0] + "serial.log") in a and ("unix:" + rd[0] + "qmp.sock,server=on,wait=off") in a and \
      any(x.endswith("file.server.path=" + rd[0] + "nbd.sock") for x in a) and not any("XXXXXX" in x for x in a)
