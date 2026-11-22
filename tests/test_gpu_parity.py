@@ -99,7 +99,7 @@ def test_embedded_engines_are_usable_standalone(bash, tmp_path):
                                        "igpu_firstboot.sh", "igpu_stage.sh", "igpu_launchd.plist",
                                        "igpu_power_watchdog.py", "igpu_diag.py", "osx-next-power-watchdog@.service",
                                        "nullmoth_engine.py", "nm_stage.sh", "nm_firstboot.sh", "nm_launchd.plist",
-                                       "driver_engine.py", "oc_kext.py"}
+                                       "driver_engine.py", "driver_state.py", "oc_kext.py"}
     assert out.returncode == 64
 
 
