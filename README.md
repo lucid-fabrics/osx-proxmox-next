@@ -770,6 +770,28 @@ osx-next-cli download --macos <version> --force
 
 In the TUI, switch the **Download** row under **More** on the New Mac screen to **On**. Note this only refreshes the image for new installs; it does not modify the EFI of a VM you already created.
 
+### Can you run macOS in a virtual machine on Proxmox?
+
+Yes. osx-proxmox-next creates a macOS VM on Proxmox VE 9 in one command: it builds the OpenCore bootloader, downloads the official Apple recovery image, generates a SMBIOS identity, and boots the installer. macOS Monterey 12, Ventura 13, Sonoma 14, Sequoia 15, and Tahoe 26 are supported.
+
+### Does macOS work on AMD CPUs under Proxmox?
+
+Yes. AMD hosts are auto-detected and run with Cascadelake-Server CPU emulation. Intel hosts (including 12th gen+ hybrid and Xeon) get the correct CPU mode automatically. No configuration needed.
+
+### How long does it take to install macOS on Proxmox?
+
+About 5 minutes of setup in the TUI, then the macOS installer runs unattended. Download time depends on your connection (recovery image is ~0.9 GB, downloaded once and cached).
+
+### Is GPU passthrough supported?
+
+Yes. `osx-next-cli gpu-setup` walks you through it, including the BIOS and the host setup. See [GPU Passthrough](#-gpu-passthrough).
+
+### Is running macOS in a VM legal?
+
+This project is for testing, lab use, and learning. Apple's license terms govern where macOS may run; you are responsible for compliance in your region.
+
+More: [full FAQ in the docs](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/faq).
+
 ---
 
 ## 🔮 Roadmap
@@ -812,26 +834,6 @@ This project is free and open source. Sponsors keep it alive and shape what gets
 - ❤️ 1 donor $10 BMC Jul 15
 
 _Want to join them? [Sponsor on GitHub](https://github.com/sponsors/lucid-fabrics)_
----
-
-## ❓ FAQ
-
-**Can you run macOS in a virtual machine on Proxmox?**
-Yes. osx-proxmox-next creates a macOS VM on Proxmox VE 9 in one command: it builds the OpenCore bootloader, downloads the official Apple recovery image, generates a SMBIOS identity, and boots the installer. macOS Monterey 12, Ventura 13, Sonoma 14, Sequoia 15, and Tahoe 26 are supported.
-
-**Does macOS work on AMD CPUs under Proxmox?**
-Yes. AMD hosts are auto-detected and run with Cascadelake-Server CPU emulation. Intel hosts (including 12th gen+ hybrid and Xeon) get the correct CPU mode automatically. No configuration needed.
-
-**How long does it take to install macOS on Proxmox?**
-About 5 minutes of setup in the TUI, then the macOS installer runs unattended. Download time depends on your connection (recovery image is ~0.9 GB, downloaded once and cached).
-
-**Is GPU passthrough supported?**
-Yes. `osx-next-cli gpu-setup` walks you through it, including the BIOS and the host setup. See [GPU Passthrough](#-gpu-passthrough).
-
-**Is running macOS in a VM legal?**
-This project is for testing, lab use, and learning. Apple's license terms govern where macOS may run; you are responsible for compliance in your region.
-
-More: [full FAQ in the docs](https://lucid-fabrics.github.io/osx-proxmox-next/docs/guides/faq).
 
 ---
 
