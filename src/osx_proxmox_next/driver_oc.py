@@ -7,6 +7,8 @@ from importlib import resources
 from pathlib import Path
 from shlex import quote as shquote
 
+from . import driver_disks
+from .gpu import parse_config
 from .infrastructure import ProxmoxAdapter
 from .planner import mount_oc_disk_script
 
@@ -42,9 +44,22 @@ def kext_script(vid: str, calls: list[list[str]]) -> str:
             + body + " && sync\n")
 
 
+def _run(pve: ProxmoxAdapter, vmid: int, calls: list[list[str]]):
+    """Run the kext script. Whatever it did (it also refuses on a running Mac), the Mac's volumes carry no partition map
+    of this tool afterwards: a map left on a volume blocks the next rollback or removal."""
+    try:
+        return pve.run(["bash", "-c", kext_script(str(vmid), calls)])
+    finally:
+        try:
+            cfg = parse_config(pve.qm("config", str(vmid)).output)
+            driver_disks.release_maps(pve, vmid, driver_disks.volume_paths(pve, driver_disks.disk_refs(cfg)))
+        except (driver_disks.MapsHeld, OSError, ValueError):     # reported by the step that needs the volume free
+            pass
+
+
 def read_versions(pve: ProxmoxAdapter, vmid: int, names: list[str]) -> dict[str, str]:
     """{name: version} of the kexts on the Mac's OpenCore disk, '' for one that is missing. The Mac must be stopped."""
-    res = pve.run(["bash", "-c", kext_script(str(vmid), [["versions", *[bundle_of(n) for n in names]]])])
+    res = _run(pve, vmid, [["versions", *[bundle_of(n) for n in names]]])
     line = next((l for l in reversed(res.output.splitlines()) if l.startswith("{")), "")
     if not res.ok or not line:
         raise OcError("Could not read the OpenCore disk: " + res.output.strip()[-300:])
@@ -60,7 +75,7 @@ def replace_kexts(pve: ProxmoxAdapter, vmid: int, items: list[tuple[str, Path, s
     """Replace each kext of *items* ((name, zip, sha256)) on the OpenCore disk. Returns {name: new version}. A NOTE of
     the replacer (a bundle that config.plist does not list is not loaded by OpenCore) is added to *notes*."""
     calls = [["replace", bundle_of(name), str(zip_path), sha] for name, zip_path, sha in items]
-    res = pve.run(["bash", "-c", kext_script(str(vmid), calls)])
+    res = _run(pve, vmid, calls)
     if not res.ok:
         raise OcError("Replacing the kexts failed: " + res.output.strip()[-300:])
     lines = [l.strip() for l in res.output.splitlines()]

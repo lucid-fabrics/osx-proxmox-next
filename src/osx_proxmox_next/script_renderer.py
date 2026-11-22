@@ -49,12 +49,18 @@ BOOT_ARGS_BASE = "keepsyms=1 debug=0x100 revblock=pci"
 
 
 def _partprobe_retry_snippet(loop_var: str) -> str:
-    """Return bash snippet that retries partprobe up to 10 times for slow storage."""
+    """Return bash that retries partprobe up to 10 times on the loop device in $loop_var (slow storage).
+
+    One brace group that starts with a check that the variable is set: a plain `partprobe $X; for ...` ends the && chain
+    it sits in, so after an earlier failure (a refused guard, losetup that gave nothing) it ran with an empty $X, and
+    `partprobe` without a device re-reads EVERY disk, which makes partition maps on the logical volumes of running
+    VMs. Nothing may touch a device before it is known which one. Ends true: the caller checks for the partition."""
+    v = f'"${loop_var}"'
     return (
-        f"partprobe ${loop_var} 2>/dev/null; "
-        f"for _i in $(seq 1 10); do ls ${{{loop_var}}}p* &>/dev/null && break; "
-        f"sleep 1; partprobe ${loop_var} 2>/dev/null; "
-        f"blockdev --rereadpt ${loop_var} 2>/dev/null; done"
+        f"{{ [ -n {v} ] && {{ partprobe {v} 2>/dev/null; "
+        f'for _i in $(seq 1 10); do ls "${{{loop_var}}}"p* &>/dev/null && break; '
+        f"sleep 1; partprobe {v} 2>/dev/null; "
+        f"blockdev --rereadpt {v} 2>/dev/null; done; true; }}; }}"
     )
 
 

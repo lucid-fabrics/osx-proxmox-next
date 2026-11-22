@@ -342,9 +342,11 @@ def _iso_build_script(tree: Path, iso_tmp: Path) -> str:
         f"sgdisk -Z {qi} >/dev/null && "
         f"sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {qi} >/dev/null && "
         f"ILOOP=$(losetup -fP --show {qi}) && "
-        "partprobe $ILOOP 2>/dev/null; "
+        # a bare partprobe re-reads every disk of the host (partition maps on the logical volumes of running VMs), so
+        # it only runs once the loop device is known
+        "{ [ -n \"$ILOOP\" ] && { partprobe \"$ILOOP\" 2>/dev/null; "
         "for _i in $(seq 1 10); do [ -b \"${ILOOP}p1\" ] && break; sleep 1; "
-        "partprobe $ILOOP 2>/dev/null; done; "
+        "partprobe \"$ILOOP\" 2>/dev/null; done; true; }; }; "
         "[ -b \"${ILOOP}p1\" ] && "
         "mkfs.fat -F 32 -n OPENCORE ${ILOOP}p1 >/dev/null && "
         "mount ${ILOOP}p1 $IMNT && "
