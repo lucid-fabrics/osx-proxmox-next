@@ -7,6 +7,8 @@ Mac's own view, because that undo takes the card off every Mac that has it."""
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import logging
 import time
 from dataclasses import dataclass, field
@@ -29,7 +31,7 @@ from ..nullmoth import NOTICE_BODY, NOTICE_TITLE
 from ..services import get_proxmox_adapter
 from ..widgets.lines import Line, Lines
 from ..widgets.rows import ChoiceRow, Option
-from .base import Choice as Pick, ChoiceDialog, ConfirmDialog, OsxScreen
+from .base import COMMON_HELP, Choice as Pick, ChoiceDialog, ConfirmDialog, OsxScreen
 from .gpu import ChangesDialog
 from .gpu_before import BeforeDialog
 from .gpu_boot import NO_SIGNAL_HELP, QUESTION, reflow_help
@@ -116,6 +118,30 @@ class DriverScreen(OsxScreen):
         self._label = "Update driver"
         self.undo_state: dict = {}
         self.undo_error = ""
+        self._was_failed = False        # the footer follows a run that stopped: it then offers Finish
+
+    def help_entries(self) -> list[tuple[str, str]]:
+        """The keys that work on the screen as it is now: y and n only at the first boot question, enter as what it does
+        in this state, r only when there is a snapshot to go back to."""
+        out: list[tuple[str, str]] = []
+        if self.mode == "first_boot":
+            out += [("enter", "Back")] if self.helping else [("y", "Yes, all good"), ("n", "No, help me")]
+        elif self.mode == "undo":
+            out += [("enter", "Back")] if self.undo_error else []
+        else:
+            if self.mode == "run" and self._failed(self._state()):
+                out.append(("enter", "Finish"))
+            elif self.mode == "attached" and self.view and self._can_go(self.plan.interrupted):
+                out.append(("enter", self._label))
+            if self.mode == "attached" and self.query("ChoiceRow"):
+                out += list(self.HELP_EXTRA)
+            if self.mode in ("attached", "run") and self.view and not self.view.plan.refusals:
+                out.append(("p", "See every change"))
+        if self.mode != "undo" and self._has_snapshot():
+            out.append(("r", "Undo driver update"))
+        out.append(("esc", "Leave"))
+        shown = {k for k, _d in out}
+        return out + [(k, d) for k, d in COMMON_HELP if k not in shown]
 
     # ── layout ───────────────────────────────────────────────────────
 
@@ -207,8 +233,11 @@ class DriverScreen(OsxScreen):
         if not plan.installed_known:
             return [Static(self._row("Driver", Text("installed version unknown", style=pal["muted"])), id="d-driver")]
         parts = [f"{n} {plan.installed[n]}" for n in engine.COMPONENTS[plan.kind] if plan.installed.get(n)]
-        return [Static(self._row("Driver" if i == 0 else "", Text(part, style="bold")), id="d-driver" if i == 0 else f"d-driver-{i + 1}")
-                for i, part in enumerate(parts)]
+        rows: list[Widget] = [Static(self._row("Driver" if i == 0 else "", Text(part, style="bold")), id="d-driver" if i == 0 else f"d-driver-{i + 1}")
+                              for i, part in enumerate(parts)]
+        if plan.from_record:      # the disk of a running Mac is not read: say whose word this is
+            rows.append(Static(self._row("", Text(engine.FROM_RECORD, style=pal["muted"])), id="d-source"))
+        return rows
 
     def _row(self, label: str, value: Text) -> Text:
         """One line of the Driver block: the label, then the value, cut with an ellipsis when it would not fit."""
@@ -222,6 +251,8 @@ class DriverScreen(OsxScreen):
         pal = self.app.get_css_variables()
         plan = self.plan
         rows = plan.judged()["rows"] if plan.target is not None else []
+        if plan.interrupted:       # a stopped update has one state: stopped. Whether a newer driver exists is not its news
+            return Text("update stopped", style=pal["warning"], no_wrap=True)
         if plan.verdict == "current":
             return Text("✓ up to date", style=pal["success"], no_wrap=True)
         if len(rows) != 1:      # a pair: the plan (p) lists each one
@@ -262,8 +293,8 @@ class DriverScreen(OsxScreen):
                                     style=pal["muted"]), id="d-pinned"))
         if pending:
             rows.append(Static(Text("\n! " + self._pending_text(), style=pal["warning"]), id="d-unfinished"))
-        side = Vertical(Static(Text("What happens", style=pal["muted"]), classes="side-title"), Lines(id="d-facts"),
-                        id="g-side")
+        side = Vertical(Static(Text("What Finish does" if pending else "What happens", style=pal["muted"]), classes="side-title"),
+                        Lines(id="d-facts"), id="g-side")
         form = Vertical(*rows, Static(self._safe_text(), id="g-safe"), id="g-form")
         self._label = self._enter_label(pending)
         can_go = self._can_go(pending)
@@ -281,6 +312,8 @@ class DriverScreen(OsxScreen):
         if snaps:
             return Text.assemble(("✓ ", pal["success"]), f"Driver snapshot of {engine.snapshot_date(snaps[-1])}. ",
                                  ("r", "bold " + pal["accent"]), " undoes the driver update.")
+        if self.plan.interrupted:
+            return Text.assemble(("! ", pal["warning"]), "This update has no driver snapshot, so it cannot be undone.")
         return Text.assemble(("✓ ", pal["success"]), "A snapshot is saved first, so the update can be undone.")
 
     def _note_text(self, can_go: bool, has_picker: bool, pending: bool = False) -> str:
@@ -333,9 +366,13 @@ class DriverScreen(OsxScreen):
         plan = self.plan
         if plan.refusals:
             return
-        rows = [Line(Text.assemble(("✓ " if plan.snapshot_ok else "! ", pal["success"] if plan.snapshot_ok else pal["warning"]),
-                                   engine.before_facts(plan.kind, plan.snapshot, plan.snapshot_ok)[idx]), wrap=True, hang=2)
-                for idx in range(len(engine.before_facts(plan.kind, plan.snapshot, plan.snapshot_ok)))]
+        if plan.interrupted:         # what Finish does: no new snapshot, no "saved first"
+            facts = engine.finish_facts(plan.kind, self._state().get("snapshot", "") or (plan.older_snapshots or [""])[-1])
+            rows = [Line(Text.assemble(("✓ ", pal["success"]), fact), wrap=True, hang=2) for fact in facts]
+        else:
+            facts = engine.before_facts(plan.kind, plan.snapshot, plan.snapshot_ok)
+            rows = [Line(Text.assemble(("✓ " if plan.snapshot_ok else "! ", pal["success"] if plan.snapshot_ok else pal["warning"]), fact),
+                         wrap=True, hang=2) for fact in facts]
         self.query_one("#d-facts", Lines).set_lines(rows)
 
     def on_choice_row_changed(self, event: ChoiceRow.Changed) -> None:
@@ -372,6 +409,8 @@ class DriverScreen(OsxScreen):
             return [("y", "Yes, all good", "screen.yes"), ("n", "No, help me", "screen.no"), *undo,
                     ("esc", "Your Macs", "screen.back")]
         items: list[tuple] = []
+        if self.mode == "run" and self._failed(self._state()):
+            items.append(("enter", "Finish", "screen.primary"))
         if self.mode == "attached" and self.view and self._can_go(self.plan.interrupted):
             items.append(("enter", self._label, "screen.primary"))
         if self.mode == "attached" and self.query("ChoiceRow"):
@@ -397,7 +436,7 @@ class DriverScreen(OsxScreen):
                 self._leave_undo()
             return
         if self.mode == "run":
-            if self.error:
+            if self._failed(self._state()):       # the box says "enter finishes it": it does, whatever made it fail
                 self._finish_run()
             return
         if self.mode != "attached" or self.view is None:
@@ -451,6 +490,9 @@ class DriverScreen(OsxScreen):
         if self.view is None or self.view.plan.refusals:
             return
         plan = self.plan
+        state = self._state()
+        if self.mode == "run" and self._failed(state) and not plan.interrupted:       # the plan was made before the run stopped
+            plan = dataclasses.replace(plan, interrupted=True, resume=state)
         plain = "\n".join(plan.lines())
         self.app.push_screen(ChangesDialog(plain, plain + "\n\nCommands:\n" + "\n".join("  " + c for c in commands(plan))))
 
@@ -458,6 +500,15 @@ class DriverScreen(OsxScreen):
 
     def _state(self) -> dict:
         return engine.read_update(self.vmid)
+
+    def _shown(self, state: dict) -> dict:
+        """The state the run screen draws. A Finish that was just started has not written its own state yet: the file is
+        the stopped run's, whose clocks and failed row are not this run's, so it is drawn as a fresh list (what the earlier
+        run finished stays done, with no time; the rest waits)."""
+        if state and self._starting():
+            state = copy.deepcopy(state)
+            engine.reset_for_resume(state)
+        return state
 
     def timeline(self, state: dict) -> Text:
         pal = self.app.get_css_variables()
@@ -468,7 +519,8 @@ class DriverScreen(OsxScreen):
             title, tail = row.get("title", ""), ""
             if row["state"] == "done":
                 out.append("✓ ", style=pal["success"])
-                title, tail, tone = row.get("done", title), clock(row.get("ended", now) - row.get("started", now)), pal["muted"]
+                title, tone = row.get("done", title), pal["muted"]
+                tail = "" if row.get("carried") else clock(row.get("ended", now) - row.get("started", now))
             elif row["state"] == "active":
                 out.append("◐ ", style=pal["accent"])
                 tone, tail = "bold", clock(now - row.get("started", now))
@@ -519,13 +571,14 @@ class DriverScreen(OsxScreen):
 
     async def _show_run(self) -> None:
         state = self._state()
+        self._was_failed = self._failed(state)
         pal = self.app.get_css_variables()
         title, lines = self._run_box(state)
         box = Vertical(Static(Text(title, style="bold"), id="g-box-title"),
                        ReadScroll(Static(Text("\n".join(lines)), id="g-box-text"), id="g-box-scroll"),
                        id="g-box", classes="fail" if self._failed(state) else "")
         await self._show(Static(Text(self._run_head(state), style="bold"), id="g-run-title"),
-                         Horizontal(Static(self.timeline(state), id="g-timeline"), box, id="g-run-cols"),
+                         Horizontal(Static(self.timeline(self._shown(state)), id="g-timeline"), box, id="g-run-cols"),
                          Static(Text(self._run_note(state), style=pal["muted"]), id="g-run-note"),
                          mode="run")
 
@@ -555,14 +608,18 @@ class DriverScreen(OsxScreen):
 
     def paint_run(self, state: dict) -> None:
         try:
-            self.query_one("#g-timeline", Static).update(self.timeline(state))
+            self.query_one("#g-timeline", Static).update(self.timeline(self._shown(state)))
             title, lines = self._run_box(state)
             self.query_one("#g-box-title", Static).update(Text(title, style="bold"))
             self.query_one("#g-box-text", Static).update(Text("\n".join(lines)))
             self.query_one("#g-box").set_class(self._failed(state), "fail")
             self.query_one("#g-run-note", Static).update(Text(self._run_note(state), style=self.app.get_css_variables()["muted"]))
         except NoMatches:
-            pass
+            return
+        failed = self._failed(state)
+        if failed != self._was_failed:
+            self._was_failed = failed
+            self.refresh_footer()
 
     # ── first boot ───────────────────────────────────────────────────
 
