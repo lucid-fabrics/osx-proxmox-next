@@ -162,6 +162,13 @@ def test_the_setup_script_survives_a_run_without_home(tmp_path):
     assert (tmp_path / "snapintosh.home").read_text().strip() == "/root"
 
 
+def test_the_runner_gets_a_swap_file_before_the_build_when_it_has_none():
+    script = render_setup_script(cfg())
+    assert "fallocate -l 4G /swapfile" in script and "chmod 600 /swapfile" in script and "swapon --show" in script
+    assert script.index("say adding-swap") < script.index("say building")
+    assert "|| echo" in script.split("say adding-swap")[1].split("say installing-packages")[0], "a failing swap file must not stop the build"
+
+
 def test_the_setup_script_is_valid_bash():
     import subprocess
     check = subprocess.run(["bash", "-n"], input=render_setup_script(cfg()), text=True, capture_output=True)

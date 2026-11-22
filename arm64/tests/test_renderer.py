@@ -42,7 +42,7 @@ def make_tar(path, extra=None):
 # a cargo that only leaves the dist tree the build checks for; the other tools are present and do nothing
 for tool in ("rustc", "clang", "ld.lld", "lld-link", "make", "cmake", "rustup"):
     write(T + "/bin/" + tool, "#!/bin/sh\nexit 0\n", 0o755)
-write(T + "/bin/cargo", '#!/bin/sh\nmkdir -p "$CARGO_TARGET_DIR/dist-vulkan/lib/pkgconfig"; : > "$CARGO_TARGET_DIR/dist-vulkan/lib/pkgconfig/reims-vgpu.pc"\n', 0o755)
+write(T + "/bin/cargo", '#!/bin/sh\nmkdir -p "$CARGO_TARGET_DIR/dist-vulkan/lib/pkgconfig"; echo "$CARGO_BUILD_JOBS" > "$CARGO_TARGET_DIR/jobs"; : > "$CARGO_TARGET_DIR/dist-vulkan/lib/pkgconfig/reims-vgpu.pc"\n', 0o755)
 
 
 def build(home, **env):
@@ -118,6 +118,21 @@ subprocess.run(["git", "clone", "-q", repo, repo2], check=True, env=g)
 rc, out = build(h8, REIMS_REPO="file://" + repo2, REIMS_REF=full, M2V_REPO="file://" + repo2, M2V_REF=full)
 origin = subprocess.run(["git", "-C", h8 + "/src/reims-vgpu", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
 check("clone-pin-repoints-origin", rc == 0 and origin == "file://" + repo2, origin + out)
+
+# 7. cargo gets one job per 2.5 GB of RAM (an 8 GB runner was OOM-killed with six), at most one per thread, and the environment wins
+def jobs_for(**env):
+    h = tempfile.mkdtemp(prefix="jobs-", dir=T)
+    rc, out = build(h, RENDERER_URL="file://" + good, RENDERER_SHA256=want, **env)
+    p = h + "/build/reims-target/jobs"
+    return rc, (open(p).read().strip() if os.path.exists(p) else out)
+
+
+r8 = jobs_for(SNAPINTOSH_CHECK_MEM_KB=str(8137000))
+check("8gib-runner-gets-3-jobs", r8 == (0, "3"), r8)
+check("tiny-host-gets-1-job", jobs_for(SNAPINTOSH_CHECK_MEM_KB=str(1000000)) == (0, "1"))
+nproc = os.cpu_count() or 1
+check("big-host-is-capped-at-the-threads", jobs_for(SNAPINTOSH_CHECK_MEM_KB=str(2621440 * (nproc + 50))) == (0, str(nproc)))
+check("cargo-build-jobs-from-the-environment-wins", jobs_for(SNAPINTOSH_CHECK_MEM_KB=str(8137000), CARGO_BUILD_JOBS="5") == (0, "5"))
 
 print("%d failed" % len(fails) if fails else "all passed")
 sys.exit(1 if fails else 0)

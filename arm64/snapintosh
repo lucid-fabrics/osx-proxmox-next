@@ -689,6 +689,19 @@ move them out of $REPRO_MNT (a home, CARGO_HOME or RUSTUP_HOME under $REPRO_MNT 
 SNAPINTOSH_NO_REPRO=1 (the Rust half then depends on the directory, so the binary md5 differs from the reference)"
 }
 
+# cargo_jobs: the largest crate (metal2vulkan-runtime) takes up to 3.5 GB in rustc. As many parallel jobs as threads on a host with
+# less than about 3 GB per thread gets one of them killed by the kernel (an 8 GB runner with 6 cores did). One job per 2.5 GB of RAM,
+# at most one per thread. CARGO_BUILD_JOBS in the environment wins. The result does not depend on the job count.
+cargo_jobs() {
+  [ -z "${CARGO_BUILD_JOBS:-}" ] || return 0
+  local kb jobs
+  kb=${SNAPINTOSH_CHECK_MEM_KB:-$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)}
+  jobs=$((kb / 2621440)); [ "$jobs" -ge 1 ] || jobs=1
+  [ "$jobs" -le "$(nproc)" ] || jobs=$(nproc)
+  export CARGO_BUILD_JOBS=$jobs
+  info "cargo runs $jobs job(s) at a time (about 2.5 GB of RAM each; CARGO_BUILD_JOBS changes it)"
+}
+
 build_reims() {
   if repro_ns_ok; then repro_mnt_check; fi   # first: a hidden path used to fail the build after 53 s
   mkdir -p "$SRC" "$BUILD"
@@ -697,6 +710,7 @@ build_reims() {
   preflight_build cargo rustc clang ld.lld lld-link make cmake || return 1
   info "building reims-vgpu dist (vulkan) with metal2vulkan; first run downloads nightly-2026-11-03 and crates"
   repro_flags
+  cargo_jobs
   # Cargo hashes the absolute path of a path dependency that lies outside the workspace (metal2vulkan beside reims-vgpu) into the
   # crate ids, and so into every Rust symbol name. No flag maps that away, so a build in another directory differs. When
   # unprivileged user namespaces work, run cargo in a private mount namespace where $HOME_DIR is bound at the fixed path /mnt
