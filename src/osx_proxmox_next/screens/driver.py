@@ -321,6 +321,8 @@ class DriverScreen(OsxScreen):
             return Text.assemble(("✓ ", pal["success"]), f"Driver snapshot of {engine.snapshot_date(snaps[-1])}. ",
                                  ("r", "bold " + pal["accent"]), " undoes the driver update.")
         if self.plan.interrupted:
+            if self.plan.resume and self.plan.snapshot_pending() and self.plan.snapshot_ok:    # the Finish still saves one
+                return Text.assemble(("✓ ", pal["success"]), "A snapshot is saved first, so the update can be undone.")
             return Text.assemble(("! ", pal["warning"]), "This update has no driver snapshot, so it cannot be undone.")
         if not can_go:
             return Text("")
@@ -377,7 +379,7 @@ class DriverScreen(OsxScreen):
         if plan.refusals or not self.query("#d-facts"):
             return
         if plan.interrupted:         # what Finish does: no new snapshot, no "saved first"
-            facts = engine.finish_facts(plan.kind, self._state().get("snapshot", ""))
+            facts = plan.finish_lines() if plan.resume else engine.finish_facts(plan.kind, self._state().get("snapshot", ""))
             rows = [Line(Text.assemble(("✓ ", pal["success"]), fact), wrap=True, hang=2) for fact in facts]
         else:
             facts = engine.before_facts(plan.kind, plan.snapshot, plan.snapshot_ok)
@@ -492,7 +494,8 @@ class DriverScreen(OsxScreen):
         state = engine.read_update(self.vmid)
         tags = state.get("choice", {})
         self._spawn(Choice(tags.get("NullMoth", ""), tags.get("WhateverXe", ""), tags.get("WhateverXe Graphics", "")),
-                    finish=True, accept_risk=state.get("kind") == "nvidia", no_snapshot=bool(state.get("no_snapshot")))
+                    finish=True, accept_risk=state.get("kind") == "nvidia", no_snapshot=bool(state.get("no_snapshot")),
+                    snapshot=self.plan.snapshot if self.plan.resume and self.plan.snapshot_pending() else "")
 
     # ── p: see every change ──────────────────────────────────────────
 

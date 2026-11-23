@@ -14,7 +14,7 @@ from .defaults import DEFAULT_ISO_DIR
 from .domain import MAX_VMID, MIN_VMID, SUPPORTED_MACOS
 from .driver_core import DriverError, RunEnv
 from .driver_plan import DriverPlan, prepare
-from .driver_run import finish_interrupted, put_back, run_update, undo_target
+from .driver_run import finish_interrupted, finish_plan, put_back, run_update, undo_target
 from .driver_targets import Choice
 from .services import get_proxmox_adapter
 from .unattended import QmConsole
@@ -50,6 +50,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     undo = sub.add_parser("driver-undo", help="Undo the last driver update: put the Mac back to its driver snapshot")
     undo.add_argument("--vmid", type=int, required=True, help="VM ID of the Mac")
     undo.add_argument("--yes", action="store_true", help="Do not ask for confirmation")
+    undo.add_argument("--dry-run", action="store_true", dest="dry_run", help="Say what the undo would do, change nothing")
 
 
 def _term_is_interrupt() -> None:
@@ -201,8 +202,17 @@ def run_update_command(args: argparse.Namespace, ask: Callable[[str], str] = inp
 
 def _finish(args: argparse.Namespace, say: Callable[[str], None]) -> int:
     _term_is_interrupt()
+    name = getattr(args, "snapshot_name", "")
     try:
-        return _report(finish_interrupted(args.vmid, _env(args, say)), say)
+        if args.dry_run:        # the plan of the Finish, then stop: nothing is stopped, staged, snapshotted or recorded
+            plan, _state = finish_plan(args.vmid, _env(args, say), name)
+            for line in plan.lines():
+                print(line)
+            if not plan.ok:
+                return 2
+            print("DRY RUN - nothing is changed.")
+            return 0
+        return _report(finish_interrupted(args.vmid, _env(args, say), name), say)
     except DriverError as exc:
         print(f"ERROR: {exc}")
         return 2
@@ -232,6 +242,9 @@ def run_undo(args: argparse.Namespace, ask: Callable[[str], str] = input) -> int
         return 2
     print(f"The Mac stops, its disks go back to the snapshot of {engine.snapshot_date(name)} ({name}) and it starts again. "
           "Everything done in macOS since is lost.")
+    if getattr(args, "dry_run", False):
+        print("DRY RUN - nothing is changed.")
+        return 0
     if not _confirm("Undo the driver update?", args.yes, ask):
         print("Nothing was changed.")
         return 2

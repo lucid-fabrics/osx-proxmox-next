@@ -8574,14 +8574,30 @@ def todo_steps(kind, name, running, state):
             or (sid not in done and (not listed or sid in listed))]
 
 
-def finish_facts(kind, snapshot="", undo=""):
-    """What "Finish" does, for a run that stopped. It saves no new snapshot: the one of the run stays."""
+def snapshot_pending(todo):
+    """True when the steps a Finish still has to do include the snapshot: the run was cut off before it."""
+    return any(sid == "snapshot" for sid, _title in todo)
+
+
+def finish_facts(kind, snapshot="", undo="", pending=None, supported=True):
+    """What "Finish" does, for a run that stopped. *pending* is the name of the snapshot the Finish will save, or None
+    when the run already got past that step (then the snapshot of the run stays and no new one is saved). The lines
+    come from the same step list the run follows, so they never promise what the run does not do."""
     lines = ["The Mac is stopped first when it runs."]
     if kind != "amd":
         lines.append("The card is taken off when a step needs it, and put back.")
-    lines.append("No new snapshot is saved: %s from before the update stays." % (snapshot or "the snapshot")
-                 if snapshot else "No new snapshot is saved: this update ran without one.")
-    lines.append(undo_line(undo))
+    if pending is not None:
+        if not supported:
+            lines.append(NO_SNAPSHOT_WARNING)
+        else:
+            lines.append("A snapshot called %s is saved first." % pending)
+        lines.append(undo_line(undo))
+    elif snapshot:
+        lines.append("No new snapshot is saved: %s from before the update stays." % snapshot)
+        lines.append(undo_line(undo))
+    else:
+        lines.append("No new snapshot is saved: this update ran without one.")
+        lines.append("Nothing can put this Mac back: this update has no driver snapshot.")
     return lines
 
 
@@ -8778,8 +8794,10 @@ def main(argv):
     elif cmd == "todo-steps" and len(argv) in (5, 6):
         sys.stdout.write("\n".join("%s %s" % p for p in todo_steps(argv[3], argv[4], argv[5:] != ["stopped"], read_update(argv[2]))) + "\n")
     elif cmd == "finish-facts" and len(argv) >= 3:
+        pending = argv[5] if len(argv) > 5 and argv[5] else None     # the snapshot the Finish will save, when it still has to
         sys.stdout.write("\n".join(finish_facts(argv[2], argv[3] if len(argv) > 3 else "",
-                                                 argv[4] if len(argv) > 4 else "")) + "\n")
+                                                 argv[4] if len(argv) > 4 else "", pending,
+                                                 not (len(argv) > 6 and argv[6] == "unsupported"))) + "\n")
     elif cmd == "steps" and len(argv) in (4, 5):
         sys.stdout.write("\n".join("%s %s" % p for p in plan_steps(argv[2], argv[3], argv[4:] != ["stopped"])) + "\n")
     elif cmd == "fingerprint":
@@ -10797,8 +10815,13 @@ function driver_print_plan() {
   first=$(driver_step_name "$kind" "$target")
   echo "Steps:"
   if [ "$finishing" == yes ]; then
-    while read -r _ line; do n=$((n + 1)); echo "  ${n}. ${line}"; done < <(driver_engine todo-steps "$vmid" "$kind" "$first" $([ "$running" == yes ] || echo stopped) | sed '/^$/d')
-    driver_engine finish-facts "$kind" "$(driver_engine update-get "$vmid" snapshot | gpu_json 'd or ""')" "$undo"
+    local todo pending=""
+    todo=$(driver_engine todo-steps "$vmid" "$kind" "$first" $([ "$running" == yes ] || echo stopped) | sed '/^$/d')
+    while read -r _ line; do n=$((n + 1)); echo "  ${n}. ${line}"; done <<<"$todo"
+    # the Finish saves a snapshot when the cut-off run never got to that step: the lines follow the same list of steps
+    ! grep -q '^snapshot ' <<<"$todo" || pending="$snap"
+    driver_engine finish-facts "$kind" "$(driver_engine update-get "$vmid" snapshot | gpu_json 'd or ""')" "$undo" "$pending" \
+      $([ "$snap_ok" == yes ] && echo supported || echo unsupported)
   else
     while read -r _ line; do n=$((n + 1)); echo "  ${n}. ${line}"; done < <(driver_engine steps "$kind" "$first" $([ "$running" == yes ] || echo stopped))
     older=$(driver_snapshots "$vmid" | paste -sd' ' -)
@@ -11375,12 +11398,21 @@ function driver_undo_read_disk() {
 
 # `osx-proxmox-next.sh driver-undo <vmid> [--yes]`
 function driver_undo_command() {
-  local vmid="${1:-}" yes=no reply was_running=no slot rc=0 why="" failed
-  [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh driver-undo <vmid> [--yes]"; return 1; }
-  [ "${2:-}" != "--yes" ] || yes=yes
+  local vmid="${1:-}" yes=no dry=no reply was_running=no slot rc=0 why="" failed
+  [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh driver-undo <vmid> [--yes] [--dry-run]"; return 1; }
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes|-y) yes=yes ;;
+      --dry-run) dry=yes ;;
+      *) msg_error "Unknown option: $1"; return 1 ;;
+    esac
+    shift
+  done
   qm config "$vmid" >/dev/null 2>&1 || { msg_error "VM $vmid not found."; return 1; }
   driver_undo_target "$vmid" || return 2
   echo "The Mac stops, its disks go back to the snapshot of $(driver_engine snapshot-date "$DRIVER_UNDO_NAME") ($DRIVER_UNDO_NAME) and it starts again. Everything done in macOS since is lost."
+  [ "$dry" != yes ] || { echo "DRY RUN - nothing is changed."; return 0; }
   if [ "$yes" != yes ]; then
     [ -t 0 ] || { echo "Nothing was changed."; return 2; }
     read -r -p "Undo the driver update? [y/N] " reply
