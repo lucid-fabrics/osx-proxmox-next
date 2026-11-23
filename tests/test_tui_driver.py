@@ -112,7 +112,7 @@ async def test_g_on_a_mac_with_a_card_opens_the_driver_block_with_the_update(hos
         assert "Update driver" in items and "Version" in items and "See every change" in items
         assert "Undo driver update" not in items and "Put everything back" not in items     # nothing to undo before an update ran
         assert "A snapshot is saved first, so the update can be undone." in text(app, "#g-safe") and " u " not in text(app, "#g-safe")
-        assert screen.crumb() == "macos-sequoia › Graphics card BETA"
+        assert screen.crumb() == "macos-sequoia › Graphics card"       # the update itself is not beta
 
 
 @F.tui
@@ -139,7 +139,22 @@ async def test_an_amd_mac_that_is_up_to_date_has_nothing_to_update(host):
         await pilot.press("enter")
         await pilot.pause(0.1)
         assert isinstance(app.screen, DriverScreen)
-        assert "The Mac stops for about 1 minute." in F.text_of(screen.query_one("#d-facts"))
+        assert not screen.query("#g-side") and not screen.query("#d-facts")     # nothing to do: no "What happens" panel
+        assert "saved first" not in text(app, "#g-safe") and "A snapshot called" not in F.text_of(screen)
+
+
+@F.tui
+async def test_an_up_to_date_screen_shows_no_panel_and_no_new_snapshot_name(host):
+    host["view"] = DriverView(plan(installed={"NullMoth": "v2.9"}, verdict="current", older_snapshots=[NEW_SNAP]), releases())
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await open_driver(pilot, app)
+        assert not screen.query("#g-side") and "What happens" not in F.text_of(screen)
+        assert "osx-next-driver-" not in F.text_of(screen)                  # no name of a snapshot that nobody would save
+        assert "Driver snapshot of 2026-11-21 10:30" in text(app, "#g-safe")    # the one that exists is told by its date
+        await pilot.press("right")                                          # picking another release makes an update to show again
+        await F.settle(pilot, lambda: screen.touched and not screen.working and screen.query("#g-side"))
+        assert "What happens" in F.text_of(screen.query_one("#g-side .side-title"))
 
 
 @F.tui
@@ -421,8 +436,11 @@ async def test_r_undoes_the_driver_update_after_a_confirmation_with_cancel_focus
         await pilot.press("r")
         await F.settle(pilot, lambda: type(app.screen).__name__ == "ChoiceDialog")
         said = " ".join(" ".join(F.text_of(w).split()) for w in app.screen.query("Static"))
-        assert "its disks go back to the snapshot of 2026-11-21 10:30" in said and "Everything you did in macOS since then is lost." in said
-        assert app.screen.query_one("#choice-" + "no").has_focus if app.screen.query("#choice-no") else True
+        assert "its disks go back to the snapshot of 2026-11-21 10:30" in said and drv.UNDO_LOSS_LINE in said
+        assert app.screen.query_one("#choice-no").has_focus
+        keys = app.screen.query_one(KeyBar).render().plain
+        assert "enter Cancel" in keys and "tab, then enter Undo driver update" in keys     # the footer names the key that confirms
+        assert "Changes made in macOS since the update are lost" in said and "Enter keeps the Mac as it is" in said
         await pilot.press("escape")                             # cancel is the default: nothing happens
         await F.settle_screen(pilot, app, DriverScreen)
         assert host["put_back"] == []
@@ -885,3 +903,26 @@ async def test_an_undo_that_dies_of_an_unexpected_error_shows_the_error_screen(h
         await confirm_undo(pilot, screen)
         gate.set()
         await F.settle(pilot, lambda: screen.undo_error == "disk full" and not screen.working)
+
+
+def intel_target():
+    return Target("intel", {"WhateverXe": {"version": "0.8.3", "tag": "v0.8.3", "sha256": "", "source": "latest"},
+                            "WhateverXe Graphics": {"version": "0.4.4", "tag": "v0.4.4", "sha256": "", "source": "latest"}})
+
+
+@F.tui
+async def test_the_dialogs_default_follows_the_risk_cancel_for_the_undo_update_for_the_update(host):
+    host["view"] = DriverView(plan("intel", {"WhateverXe": "0.8.0"}, intel_target(), older_snapshots=[NEW_SNAP]), [])
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        await open_driver(pilot, app)
+        await pilot.press("r")                                      # the undo loses what was done in the Mac: Cancel is the default
+        await F.settle(pilot, lambda: type(app.screen).__name__ == "ChoiceDialog")
+        assert app.screen.focus_value == "no" and app.screen.query_one("#choice-no").has_focus
+        await pilot.press("enter")
+        await F.settle_screen(pilot, app, DriverScreen)
+        assert host["put_back"] == []                               # enter did not undo anything
+        await pilot.press("enter")                                  # the update loses nothing: Update is the default
+        await F.settle(pilot, lambda: isinstance(app.screen, BeforeDialog))
+        assert app.screen.query_one("#before-go").has_focus
+        assert "enter Update driver" in app.screen.query_one("#before-keys").render().plain

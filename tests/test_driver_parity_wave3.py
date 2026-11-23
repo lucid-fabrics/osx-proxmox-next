@@ -204,3 +204,44 @@ def test_bash_forgets_a_disk_it_deleted_and_never_removes_one_by_a_reused_id(hos
     host.run("driver_drop_unused 109\n")
     cfg = (host.qm_dir / "config").read_text()
     assert "unused1" not in cfg and f"unused2: {MINE}0" in cfg                      # exact id, not a prefix or a pattern
+
+
+# ── the cosmetic fixes: plan words, one verdict, versions after an undo ──
+
+@needs_bash4
+def test_the_bash_plan_says_kept_for_a_component_already_at_the_target_in_the_python_words(host):
+    installed = {"WhateverXe": "0.8.2", "WhateverXe Graphics": "0.4.4"}
+    snippet = ("nullmoth_detect_macos() { echo sequoia; }\nDRIVER_VERSIONS='{\"WhateverXe\": \"0.8.3\", \"WhateverXe Graphics\": \"0.4.4\"}'\n"
+               "DRIVER_TARGET=$(cat <<'J'\n" + json.dumps(INTEL) + "\nJ\n)\n"
+               "driver_print_plan 109 macos-sequoia intel '" + json.dumps(installed) + "' \"$DRIVER_TARGET\" " + SNAP + " yes no sequoia\n")
+    out = host.run(snippet).stdout.splitlines()
+    assert out == py_lines("intel", installed, INTEL, SNAP)
+    assert "  WhateverXe Graphics: already 0.4.4, installed again with the update" in out and not any("reinstalled" in l for l in out)
+
+
+@needs_bash4
+def test_bash_status_of_an_unfinished_update_has_no_up_to_date_line(host):
+    write_record(host, "nvidia", NullMoth="v2.9")
+    host.config(hostpci0=None)
+    engine.write_update(109, {"kind": "nvidia", "phase": "failed", "snapshot": SNAP, "steps": []}, str(host.state))
+    out = host.run(STUB_NULLMOTH + "driver_status_command 109\n").stdout
+    assert "The driver update stopped before it finished." in out and "Up to date." not in out
+    engine.clear_update(109, str(host.state))
+    host.config()
+    assert "Up to date." in host.run(STUB_NULLMOTH + "driver_status_command 109\n").stdout
+
+
+@needs_bash4
+def test_bash_undo_reads_the_rolled_back_disk_so_the_versions_are_not_from_the_last_update(host):
+    write_record(host, "intel", WhateverXe="0.8.3", WhateverXe_Graphics="0.4.4")
+    rec = json.loads((host.state / "109.json").read_text())
+    rec["previous"] = comps(WhateverXe="0.8.2", WhateverXe_Graphics="0.4.3")
+    (host.state / "109.json").write_text(json.dumps(rec))
+    (host.qm_dir / "snaps").write_text(SNAP + "\n")
+    disk = 'driver_oc_kext() { echo \'{"WhateverXe.kext": "0.8.0"}\'; }\n'
+    host.run(disk + "driver_undo_command 109 --yes\n")
+    record = engine.read_record(109, str(host.state))
+    assert record["disk_read"] is True and engine.installed_versions(record) == {"WhateverXe": "0.8.0", "WhateverXe Graphics": "0.4.3"}
+    (host.qm_dir / "status").write_text("running\n")                         # the Mac runs again: the record is the disk's word
+    out = host.run('driver_oc_kext() { echo "{}"; }\n' + STUB_NULLMOTH + "driver_status_command 109\n").stdout
+    assert "Installed: WhateverXe 0.8.0 and WhateverXe Graphics 0.4.3\n" in out and "from the last update" not in out

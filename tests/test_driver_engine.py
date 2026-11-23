@@ -113,6 +113,30 @@ def test_change_lines_say_what_changes():
     assert e.change_lines("nvidia", {"NullMoth": "v2.9"}, {"NullMoth": "v2.9"}) == ["NullMoth: v2.9, reinstalled"]
 
 
+def test_a_component_at_the_target_next_to_one_that_is_behind_is_kept_not_reinstalled():
+    amd = e.change_lines("amd", {"Lilu": "1.7.2", "WhateverGreen": "1.6.0"}, {"Lilu": "1.7.2", "WhateverGreen": "1.7.0"})
+    assert amd == ["Lilu: already 1.7.2, kept", "WhateverGreen: 1.6.0 to 1.7.0"]
+    intel = e.change_lines("intel", {"WhateverXe": "0.8.2", "WhateverXe Graphics": "0.4.4"},
+                           {"WhateverXe": "0.8.3", "WhateverXe Graphics": "0.4.4"})
+    assert intel == ["WhateverXe: 0.8.2 to 0.8.3", "WhateverXe Graphics: already 0.4.4, installed again with the update"]
+    kext = e.change_lines("intel", {"WhateverXe": "0.8.3", "WhateverXe Graphics": "0.4.3"}, {"WhateverXe": "0.8.3", "WhateverXe Graphics": "0.4.4"})
+    assert kext == ["WhateverXe: already 0.8.3, installed again with the update", "WhateverXe Graphics: 0.4.3 to 0.4.4"]
+    assert not any("reinstalled" in line for line in amd + intel)         # the package goes in again, but it is not called a reinstall
+
+
+def test_the_disk_read_after_an_undo_replaces_the_versions_and_flags_the_record(tmp_path):
+    base = str(tmp_path)
+    e.write_record(9, "intel", [e.component("WhateverXe", "0.8.3"), e.component("WhateverXe Graphics", "0.4.4")], base,
+                   previous=[e.component("WhateverXe", "0.8.0")], snapshot="s")
+    assert e.revert_record(9, base) and "disk_read" not in e.read_record(9, base)
+    assert e.mark_disk_read(9, {"WhateverXe": "0.8.0", "Missing": ""}, base)
+    rec = e.read_record(9, base)
+    assert rec["disk_read"] is True and e.installed_versions(rec) == {"WhateverXe": "0.8.0"}
+    assert not e.mark_disk_read(9, {}, base) and not e.mark_disk_read(77, {"WhateverXe": "1"}, base)
+    e.write_record(9, "intel", [e.component("WhateverXe", "0.8.3")], base)       # a new update writes a new record: the flag is gone
+    assert "disk_read" not in e.read_record(9, base)
+
+
 def test_steps_per_kind_and_tense():
     assert [t for _i, t in e.step_titles("nvidia", "NullMoth v2.9")] == [
         "Stop the Mac", "Save a snapshot", "Take the card off", "Stage NullMoth v2.9", "Put the card back", "Start the Mac",

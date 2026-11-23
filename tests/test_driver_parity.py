@@ -19,7 +19,7 @@ from osx_proxmox_next.driver_targets import Target
 REPO = Path(__file__).resolve().parent.parent
 BASH = (REPO / "scripts/bash/osx-proxmox-next.sh").read_text()
 BLOCK = BASH[BASH.index("# ── Vendor-neutral GPU helpers begin ──"):BASH.index("# ── GPU walkthrough end ──")]
-DRIVER = BASH[BASH.index("# ── Driver update (BETA) begin ──"):BASH.index("# ── Driver update (BETA) end ──")]
+DRIVER = BASH[BASH.index("# ── Driver update begin ──"):BASH.index("# ── Driver update end ──")]
 STUBS = ("BOLD='';CL='';CROSS='';INFO='';YW='';RD='';GN='';BFR='';CM='';TAB='';HOLD='';"
          "msg_ok(){ echo \"OK: $1\"; }; msg_error(){ echo \"ERR: $1\"; }; msg_info(){ echo \"INFO: $1\"; };\n")
 BASH_MAJOR = int(subprocess.run(["bash", "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True).stdout.strip() or 0)

@@ -421,3 +421,16 @@ def test_the_disk_counter_adds_reads_and_writes_of_every_disk(monkeypatch):
         def qm(self, *a):
             return CommandResult(True, 0, "status: running")
     assert igpu_finish.disk_ops(Q(), 9) is None
+
+
+def test_versions_an_undo_read_from_the_disk_are_not_called_from_the_last_update(tmp_path, monkeypatch):
+    monkeypatch.setenv("DRIVER_STATE_DIR", str(tmp_path))
+    engine.write_record(9, "intel", comps(WhateverXe="0.8.0"), base=str(tmp_path))
+    engine.mark_disk_read(9, {"WhateverXe": "0.8.0"}, str(tmp_path))
+    where = {}
+    have, known = driver_plan.installed_versions(DPve(status="running"), 9, "intel", True, None, where)
+    assert known and have == {"WhateverXe": "0.8.0"} and where["record"] is False       # the Mac runs again: the disk was read before
+    engine.write_record(9, "intel", comps(WhateverXe="0.8.0"), base=str(tmp_path))     # a record nobody read from the disk
+    where = {}
+    driver_plan.installed_versions(DPve(status="running"), 9, "intel", True, None, where)
+    assert where["record"] is True

@@ -301,6 +301,30 @@ def test_put_it_back_rolls_back_and_reverts_the_record(tmp_path, rec):
     assert any(e.startswith("Undid the driver update: the Mac is back to") for e in rec.events)
 
 
+def test_put_it_back_reads_the_rolled_back_disk_and_shows_its_versions_after_the_mac_runs_again(tmp_path, rec):
+    engine.write_record(9, "intel", comps(WhateverXe="0.8.3", WhateverXe_Graphics="0.4.4"),
+                        previous=comps(WhateverXe="0.8.2", WhateverXe_Graphics="0.4.3"), snapshot=NEW_SNAP, fingerprint="f" * 24)
+    pve = DPve(status="running", snapshots=[NEW_SNAP], bash_output='{"WhateverXe.kext": "0.8.0"}')
+    driver_run.put_back(9, env_for(pve, rec, tmp_path))
+    record = engine.read_record(9)
+    assert pve.bash_status == ["stopped"]                              # the disk was read while the Mac was stopped
+    assert engine.installed_versions(record) == {"WhateverXe": "0.8.0", "WhateverXe Graphics": "0.4.3"} and record["disk_read"] is True
+    where = {}
+    driver_plan.installed_versions(DPve(status="running"), 9, "intel", True, None, where)
+    assert where["record"] is False                                    # no "(from the last update)" beside what the disk said
+
+
+def test_put_it_back_keeps_the_record_when_the_disk_cannot_be_read(tmp_path, rec):
+    engine.write_record(9, "intel", comps(WhateverXe="0.8.3"), previous=comps(WhateverXe="0.8.2"), snapshot=NEW_SNAP)
+    driver_run.put_back(9, env_for(DPve(snapshots=[NEW_SNAP], bash_ok=False, bash_output="mount failed"), rec, tmp_path))
+    record = engine.read_record(9)
+    assert engine.installed_versions(record) == {"WhateverXe": "0.8.2"} and "disk_read" not in record
+    engine.write_record(9, "nvidia", comps(NullMoth="v2.9"), previous=comps(NullMoth="v2.8.1"), snapshot=NEW_SNAP)
+    pve = DPve(snapshots=[NEW_SNAP])
+    driver_run.put_back(9, env_for(pve, rec, tmp_path))
+    assert pve.bash_status == [] and "disk_read" not in engine.read_record(9)      # NVIDIA has nothing on the OpenCore disk to read
+
+
 def test_put_it_back_uses_the_newest_snapshot_and_names_the_failures(tmp_path, rec):
     pve = DPve(snapshots=[OLD_SNAP, NEW_SNAP])
     assert driver_run.put_back(9, env_for(pve, rec, tmp_path)) == NEW_SNAP

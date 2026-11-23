@@ -207,8 +207,9 @@ class ChoiceDialog(Readable, ModalScreen[str]):
     BINDINGS = [Binding("escape", "cancel", "Cancel"), *READ_BINDINGS]
 
     def __init__(self, title: str, lines: list[str], choices: list[Choice], focus: str = "",
-                 danger: bool = False, mono: bool = False) -> None:
+                 danger: bool = False, mono: bool = False, keys: list[tuple[str, str]] | None = None) -> None:
         super().__init__()
+        self.keys = keys
         self.title_text = title
         self.lines = lines
         self.choices = choices
@@ -228,7 +229,8 @@ class ChoiceDialog(Readable, ModalScreen[str]):
             with Horizontal(classes="dialog-buttons"):
                 for choice in self.choices:
                     yield Button(choice.label, id=f"choice-{choice.value}", classes=choice.kind, name=choice.value)
-        yield KeyBar([("tab", "Next", None), ("enter", "Choose", None), ("esc", "Cancel", "screen.cancel")])
+        keys = [(k, d, None) for k, d in self.keys] if self.keys else [("tab", "Next", None), ("enter", "Choose", None)]
+        yield KeyBar([*keys, ("esc", "Cancel", "screen.cancel")])
 
     def read_room(self) -> int:
         return box_room(self.app.size.height, self.query_one("#choice-box"))
@@ -246,10 +248,12 @@ class ChoiceDialog(Readable, ModalScreen[str]):
 
 
 def ConfirmDialog(title: str, lines: list[str], confirm: str = "Confirm", danger: bool = False,
-                  mono: bool = False) -> ChoiceDialog:
+                  mono: bool = False, enter: str = "", confirm_key: str = "") -> ChoiceDialog:
     """Cancel (focused) and a confirm button. Dismisses with "yes" or "".
 
-    Cancel has the initial focus so a stray enter never confirms."""
+    Cancel has the initial focus so a stray enter never confirms. *enter* and *confirm_key* make the footer say what enter
+    does ("Cancel") and which keys confirm ("tab, then enter") instead of the generic "enter Choose"."""
     kind = "danger" if danger else "primary"
+    keys = [("enter", enter), (confirm_key, confirm)] if enter and confirm_key else None
     return ChoiceDialog(title, lines, [Choice("no", "Cancel"), Choice("yes", confirm, kind)],
-                        focus="no", danger=danger, mono=mono)
+                        focus="no", danger=danger, mono=mono, keys=keys)
