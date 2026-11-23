@@ -47,7 +47,8 @@ def first_run(stubs, rec, tmp_path, pve):
 
 
 def bash_runs(pve):
-    return [r for r in pve.runs if r[0] == "bash"]
+    """The scripts that touched the OpenCore disk, less the version marker a verified driver leaves there."""
+    return [r for r in pve.runs if r[0] == "bash" and "mark NullMoth" not in r[2]]
 
 
 def finish(pve, rec, tmp_path):

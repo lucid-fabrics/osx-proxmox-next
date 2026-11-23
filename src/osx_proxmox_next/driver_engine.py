@@ -340,8 +340,10 @@ def before_facts(kind, snapshot, supported=True, older=(), undo=""):
 
 def todo_steps(kind, name, running, state):
     """The steps a Finish still has to do: the plan's steps without the ones the stopped run finished."""
-    done = {r["id"] for r in (state or {}).get("steps", []) if r.get("state") == "done"}
-    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done]
+    rows = (state or {}).get("steps", [])
+    done = {r["id"] for r in rows if r.get("state") == "done"}
+    listed = {r["id"] for r in rows}      # the run lists its own steps: a run that found the Mac stopped has no "Stop the Mac"
+    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done and (not listed or sid in listed)]
 
 
 def finish_facts(kind, snapshot="", undo=""):

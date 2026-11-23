@@ -61,17 +61,6 @@ def refresh_amfipass(u: Updater, amfipass: Path) -> None:
                                       "sha256": AMFIPASS.sha256, "source": "pinned"}
 
 
-def note_version(u: Updater, tag: str) -> None:
-    """Leave the NullMoth version on the OpenCore disk: it rolls back with the disk, so after a manual `qm rollback` the
-    version of the Mac is read from the disk instead of a record that belongs to other disks. A courtesy: it never fails
-    the update."""
-    try:
-        driver_oc.write_marker(u.pve, u.vmid, "NullMoth", tag)
-    except driver_oc.OcError as exc:
-        u.result.notes.append(f"Could not note the NullMoth version on the OpenCore disk ({exc}); after a manual rollback "
-                              "the installed version will not be known.")
-
-
 def run(u: Updater) -> None:
     env, pve, vmid = u.env, u.pve, u.vmid
     pick, payload, recovery, amfipass, _tarball = _assets(u)
@@ -91,7 +80,6 @@ def run(u: Updater) -> None:
         u.state.update(payload_ref=payload_ref, staged=True)      # the driver is inside macOS now, whatever comes next
         u.persist()
         refresh_amfipass(u, amfipass)
-        note_version(u, pick["tag"])
         u.end("stage")
     u.put_card_back()
     if u.begin("start"):

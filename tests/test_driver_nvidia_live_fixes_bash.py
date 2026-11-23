@@ -76,3 +76,13 @@ def test_bash_reads_the_version_of_a_rolled_back_mac_from_its_opencore_disk(host
     nothing = 'driver_oc_kext() { echo \'{"NullMoth": ""}\'; }\n'
     status = host.run(nothing + STUB_NULLMOTH + "driver_status_command 109\n").stdout
     assert f"Installed: installed version unknown ({engine.STALE_RECORD})" in status
+
+
+def test_the_bash_marker_is_written_only_after_the_first_boot_verified_the_driver():
+    """The marker beats the record, so it waits for the guest's report (the Mac is stopped between the report and the restart)."""
+    from test_driver_parity import BASH
+    first_boot = BASH[BASH.index("function nullmoth_first_boot()"):BASH.index("function nullmoth_print_findings()")]
+    stage = BASH[BASH.index("function nullmoth_stage()"):BASH.index("function nullmoth_cleanup()")]
+    assert "mark NullMoth" not in stage
+    mark = first_boot.index("mark NullMoth")
+    assert first_boot.index('if [ "$state" == "verified" ]') < mark < first_boot.index('qm start "$vmid" >/dev/null 2>&1 || true')

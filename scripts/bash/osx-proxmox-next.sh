@@ -1811,9 +1811,6 @@ function nullmoth_stage() {
     restore_picker_timeout "$vmid" || true
     return 1
   fi
-  # the Mac is stopped: the version goes on its OpenCore disk, where a manual rollback still finds it
-  driver_oc_kext "$vmid" mark NullMoth "$NM_TAG" >/dev/null 2>&1 \
-    || msg_info "Could not note the NullMoth version on the OpenCore disk; after a manual rollback the installed version will not be known"
   restore_picker_timeout "$vmid" || msg_info "Could not restore the picker's auto-boot; run post-install afterwards"
 }
 
@@ -1907,6 +1904,10 @@ function nullmoth_first_boot() {
   rm -f "$NM_PAYLOAD_FILE"
   state=$(gpu_json 'd["state"]' <<<"$parsed"); detail=$(gpu_json 'd["detail"]' <<<"$parsed")
   kexts=$(gpu_json 'd["kexts"]' <<<"$parsed"); display=$(gpu_json 'd["display"]' <<<"$parsed"); ip=$(gpu_json 'd["ip"]' <<<"$parsed")
+  if [ "$state" == "verified" ]; then      # the Mac is stopped: the verified version goes on its OpenCore disk, where a manual rollback still finds it
+    driver_oc_kext "$vmid" mark NullMoth "$NM_TAG" >/dev/null 2>&1 \
+      || msg_info "Could not note the NullMoth version on the OpenCore disk; after a manual rollback the installed version will not be known"
+  fi
   qm start "$vmid" >/dev/null 2>&1 || true
   if [ "$state" != "verified" ]; then
     echo -e "${INFO}${YW}The NullMoth driver is not confirmed in VM ${vmid}: ${detail:-${NM_RESULT:-the guest reported nothing}}.${CL}"
@@ -8564,8 +8565,10 @@ def before_facts(kind, snapshot, supported=True, older=(), undo=""):
 
 def todo_steps(kind, name, running, state):
     """The steps a Finish still has to do: the plan's steps without the ones the stopped run finished."""
-    done = {r["id"] for r in (state or {}).get("steps", []) if r.get("state") == "done"}
-    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done]
+    rows = (state or {}).get("steps", [])
+    done = {r["id"] for r in rows if r.get("state") == "done"}
+    listed = {r["id"] for r in rows}      # the run lists its own steps: a run that found the Mac stopped has no "Stop the Mac"
+    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done and (not listed or sid in listed)]
 
 
 def finish_facts(kind, snapshot="", undo=""):

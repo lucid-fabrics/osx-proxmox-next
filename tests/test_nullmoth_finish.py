@@ -363,3 +363,12 @@ def test_the_nullmoth_version_is_left_on_the_opencore_disk_before_the_first_boot
     monkeypatch.setattr(nf.driver_oc, "write_marker", broken)
     res, _pve = go(env)
     assert res.verified and any("Could not note the NullMoth version on the OpenCore disk (mount failed)" in n for n in res.notes)
+
+
+def test_a_driver_that_is_not_confirmed_leaves_no_version_on_the_opencore_disk(env, monkeypatch):
+    """The marker beats the record, so it is only written once the guest reported the driver installed."""
+    marks = []
+    monkeypatch.setattr(nf.driver_oc, "write_marker", lambda pve, vmid, name, version: marks.append(version))
+    env.guest = deque(["failed: the driver installer stopped: STOP macOS 14"])
+    res, _pve = go(env)
+    assert not res.verified and marks == []

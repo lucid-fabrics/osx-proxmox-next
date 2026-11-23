@@ -263,11 +263,6 @@ def finish(
     err = console.restore_picker_timeout()
     if err:
         result.notes.append(f"Could not restore the picker's auto-boot ({err}); run post-install afterwards.")
-    try:       # the Mac is stopped: the version goes on its OpenCore disk, where a manual rollback still finds it
-        driver_oc.write_marker(pve, vmid, "NullMoth", pick["tag"])
-    except driver_oc.OcError as exc:
-        result.notes.append(f"Could not note the NullMoth version on the OpenCore disk ({exc}); after a manual rollback "
-                            "the installed version will not be known.")
 
     try:
         _attach_and_boot(vmid, gpu, amfipass, macos, pve, payload_ref, result, on_event, clock, sleep, sysfs_root)
@@ -314,6 +309,12 @@ def conclude(pve: ProxmoxAdapter, vmid: int, payload: Path, result: FinishResult
     result.verified = report["state"] == "verified"
     result.kexts, result.display = int(report["kexts"] or 0), report["display"]
     result.detail = report["detail"] if report["state"] == "failed" else ""
+    if result.verified and result.version:
+        try:       # the Mac is stopped: the verified version goes on its OpenCore disk, where a manual rollback still finds it
+            driver_oc.write_marker(pve, vmid, "NullMoth", result.version)
+        except driver_oc.OcError as exc:
+            result.notes.append(f"Could not note the NullMoth version on the OpenCore disk ({exc}); after a manual rollback "
+                                "the installed version will not be known.")
     pve.qm("start", str(vmid))
     if result.verified:
         on_event("Started the VM again; looking for its address")

@@ -154,7 +154,7 @@ def test_amfipass_on_the_opencore_disk_is_replaced_only_when_it_differs(tmp_path
     assert res.ok
     scripts = [r[2] for r in pve.runs if r[0] == "bash"]
     assert len(scripts) == 3 and "versions AMFIPass.kext" in scripts[0] and "replace AMFIPass.kext" in scripts[1]
-    assert "mark NullMoth v2.9" in scripts[2]       # the version goes on the OpenCore disk, where a manual rollback finds it
+    assert "mark NullMoth v2.9" in scripts[2]       # once the driver is verified its version goes on the OpenCore disk, where a manual rollback finds it
     assert engine.installed_versions(engine.read_record(9))["AMFIPass"] == driver_nvidia.AMFIPASS.version
     pve2 = DPve(bash_output=['{"AMFIPass.kext": "%s"}' % driver_nvidia.AMFIPASS.version])
     plan2 = plan_for("nvidia", pve2)
