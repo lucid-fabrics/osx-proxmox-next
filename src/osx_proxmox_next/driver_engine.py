@@ -349,14 +349,30 @@ def todo_steps(kind, name, running, state):
             or (sid not in done and (not listed or sid in listed))]
 
 
-def finish_facts(kind, snapshot="", undo=""):
-    """What "Finish" does, for a run that stopped. It saves no new snapshot: the one of the run stays."""
+def snapshot_pending(todo):
+    """True when the steps a Finish still has to do include the snapshot: the run was cut off before it."""
+    return any(sid == "snapshot" for sid, _title in todo)
+
+
+def finish_facts(kind, snapshot="", undo="", pending=None, supported=True):
+    """What "Finish" does, for a run that stopped. *pending* is the name of the snapshot the Finish will save, or None
+    when the run already got past that step (then the snapshot of the run stays and no new one is saved). The lines
+    come from the same step list the run follows, so they never promise what the run does not do."""
     lines = ["The Mac is stopped first when it runs."]
     if kind != "amd":
         lines.append("The card is taken off when a step needs it, and put back.")
-    lines.append("No new snapshot is saved: %s from before the update stays." % (snapshot or "the snapshot")
-                 if snapshot else "No new snapshot is saved: this update ran without one.")
-    lines.append(undo_line(undo))
+    if pending is not None:
+        if not supported:
+            lines.append(NO_SNAPSHOT_WARNING)
+        else:
+            lines.append("A snapshot called %s is saved first." % pending)
+        lines.append(undo_line(undo))
+    elif snapshot:
+        lines.append("No new snapshot is saved: %s from before the update stays." % snapshot)
+        lines.append(undo_line(undo))
+    else:
+        lines.append("No new snapshot is saved: this update ran without one.")
+        lines.append("Nothing can put this Mac back: this update has no driver snapshot.")
     return lines
 
 
@@ -553,8 +569,10 @@ def main(argv):
     elif cmd == "todo-steps" and len(argv) in (5, 6):
         sys.stdout.write("\n".join("%s %s" % p for p in todo_steps(argv[3], argv[4], argv[5:] != ["stopped"], read_update(argv[2]))) + "\n")
     elif cmd == "finish-facts" and len(argv) >= 3:
+        pending = argv[5] if len(argv) > 5 and argv[5] else None     # the snapshot the Finish will save, when it still has to
         sys.stdout.write("\n".join(finish_facts(argv[2], argv[3] if len(argv) > 3 else "",
-                                                 argv[4] if len(argv) > 4 else "")) + "\n")
+                                                 argv[4] if len(argv) > 4 else "", pending,
+                                                 not (len(argv) > 6 and argv[6] == "unsupported"))) + "\n")
     elif cmd == "steps" and len(argv) in (4, 5):
         sys.stdout.write("\n".join("%s %s" % p for p in plan_steps(argv[2], argv[3], argv[4:] != ["stopped"])) + "\n")
     elif cmd == "fingerprint":

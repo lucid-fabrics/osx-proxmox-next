@@ -77,13 +77,26 @@ class DriverPlan:
             return out + [engine.UP_TO_DATE]
         out.append("Steps:")
         if finishing:
-            out += [f"  {n}. {t}" for n, (_i, t) in enumerate(engine.todo_steps(self.kind, self.step_name(), self.running, self.resume), 1)]
-            out += engine.finish_facts(self.kind, self.resume.get("snapshot", ""), self.undo)
+            out += [f"  {n}. {t}" for n, (_i, t) in enumerate(self.todo(), 1)]
+            out += self.finish_lines()
         else:
             out += [f"  {n}. {t}" for n, (_i, t) in enumerate(engine.plan_steps(self.kind, self.step_name(), self.running), 1)]
             out += engine.before_facts(self.kind, self.snapshot, self.snapshot_ok, self.older_snapshots, self.undo)
         out += ["Warning: " + w for w in self.warnings]
         return out
+
+    def todo(self) -> list[tuple[str, str]]:
+        """The steps a Finish still has to do: the list the run itself follows."""
+        return engine.todo_steps(self.kind, self.step_name(), self.running, self.resume)
+
+    def snapshot_pending(self) -> bool:
+        """The stopped run never got to its snapshot step, so the Finish saves one."""
+        return engine.snapshot_pending(self.todo())
+
+    def finish_lines(self) -> list[str]:
+        """What a Finish does, from the steps it still has to do (the snapshot and undo lines follow the run)."""
+        return engine.finish_facts(self.kind, self.resume.get("snapshot", ""), self.undo,
+                                   self.snapshot if self.snapshot_pending() else None, self.snapshot_ok)
 
     @property
     def finishing(self) -> bool:
