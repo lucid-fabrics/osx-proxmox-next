@@ -80,7 +80,7 @@ def test_fatal_is_captured():
 
     assert tracker.fatal == "disk image failed"
     assert tracker.phase == "stopped"
-    assert messages == ["Stela stopped: disk image failed"]
+    assert messages == []      # the driver reports it, once
 
 
 def test_stopped_is_captured():
@@ -90,7 +90,7 @@ def test_stopped_is_captured():
 
     assert tracker.fatal == "waiting for input"
     assert tracker.phase == "stopped"
-    assert messages == ["Stela stopped: waiting for input"]
+    assert messages == []
 
 
 def test_installer_start_and_completion_via_restart():
@@ -224,10 +224,9 @@ def test_installer_stages_are_not_reported_after_the_installer_is_done():
 
 def test_the_real_fatal_line_keeps_its_reason_and_only_the_first_one_counts():
     tracker = StelaTracker()
-    assert tracker.feed(REAL_FATAL) == ["Stela stopped: Installing macOS needs a network for Apple's signing server. "
-                                        "No supported network adapter."]
+    assert tracker.feed(REAL_FATAL) == []
     assert tracker.feed("STELA STOPPED code=0x11; power off to continue") == []
-    assert tracker.fatal.startswith("Installing macOS needs a network")
+    assert tracker.fatal == "Installing macOS needs a network for Apple's signing server. No supported network adapter."
 
 
 def test_a_fatal_line_with_no_reason_keeps_the_line_itself():

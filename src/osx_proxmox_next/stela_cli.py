@@ -23,10 +23,10 @@ from .stela import (
     validate_stela_config,
 )
 from .stela_gpus import list_host_gpus
-from .stela_install import PveHost, default_log_path, run_install
-from .stela_planner import build_stela_destroy_plan, build_stela_plan
+from .stela_install import NEEDS_GPU, PveHost, default_log_path, run_install
+from .stela_planner import build_stela_destroy_plan, build_stela_finish_plan, build_stela_plan
 
-__all__ = ["add_parser", "install_vm", "run"]
+__all__ = ["add_parser", "finish_vm", "install_vm", "run"]
 
 
 def add_parser(sub: argparse._SubParsersAction) -> None:
@@ -50,6 +50,10 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
         else:
             cmd.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
     actions.add_parser("gpus", help="List the host GPUs that can be passed to the VM")
+    fin = actions.add_parser("finish", help="Add a GPU to a VM whose install finished without one, and boot it")
+    fin.add_argument("--vmid", type=int, required=True)
+    fin.add_argument("--gpu-pci", required=True, help="The host GPU to pass, e.g. 0000:0a:00 (see `stela gpus`)")
+    fin.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
     rm = actions.add_parser("uninstall", help="Destroy the VM and what it left on the host")
     rm.add_argument("--vmid", type=int, required=True)
     rm.add_argument("--execute", action="store_true", help="Actually run (default is dry run)")
@@ -79,33 +83,59 @@ def _print_plan(steps: list, as_json: bool) -> None:
         print(f"{idx:>2}. {step.title}\n    {detail}")
 
 
-def install_vm(config: StelaConfig, emit: Callable[[str], None] = print) -> bool:
-    """The whole install, from nothing to Setup Assistant: the plan, then the keys and the serial log."""
-    steps = build_stela_plan(config)
+def _stamped(emit: Callable[[str], None]) -> Callable[[str], None]:
     began = time.monotonic()
 
     def say(line: str) -> None:    # every line is stamped with the seconds since the start
         emit(f"[{int(time.monotonic() - began):>5}s] {line}")
 
+    return say
+
+
+def _watch(vmid: int, say: Callable[[str], None], config: StelaConfig, resume: bool) -> bool:
+    """Watch the started VM until Setup Assistant; stop the VM and say how to go on when it cannot."""
+    log = default_log_path(vmid)
+    say(f"Serial log: {log}")
+    with PveHost(config, log) as host:
+        outcome = run_install(host, say, resume=resume)
+    if not outcome.ok:
+        subprocess.run(["qm", "stop", str(vmid)], capture_output=True, timeout=120, check=False)
+        if outcome.message != NEEDS_GPU:
+            say(f"The VM {vmid} is stopped. Remove it with: osx-next-cli stela uninstall --vmid {vmid} --execute")
+        return False
+    say(outcome.message)
+    say("Phase times (s from the VM start): " + ", ".join(f"{k} {v}" for k, v in outcome.seconds.items()))
+    return True
+
+
+def _run_plan(steps: list[PlanStep], say: Callable[[str], None]) -> bool:
     def on_step(idx: int, total: int, step: PlanStep, result: StepResult | None) -> None:
         if result is None:
             say(f"[{idx}/{total}] {step.title}")
         elif not result.ok:
             say(f"FAILED: {step.title}\n{result.output}")
 
-    if not apply_plan(steps, execute=True, on_step=on_step).ok:
+    return apply_plan(steps, execute=True, on_step=on_step).ok
+
+
+def finish_vm(vmid: int, gpu_pci: str, emit: Callable[[str], None] = print) -> bool:
+    """A VM whose install finished without a GPU: add the card, boot it, and watch it to Setup Assistant."""
+    say = _stamped(emit)
+    if not _run_plan(build_stela_finish_plan(vmid, gpu_pci), say):
         return False
-    log = default_log_path(config.vmid)
-    say(f"Serial log: {log}")
-    with PveHost(config, log) as host:
-        outcome = run_install(host, say)
-    if not outcome.ok:
-        subprocess.run(["qm", "stop", str(config.vmid)], capture_output=True, timeout=120, check=False)
-        say(f"The VM {config.vmid} is stopped. Remove it with: osx-next-cli stela uninstall --vmid {config.vmid} --execute")
+    config = StelaConfig(vmid=vmid, name="finish", storage="x", gpu_pci=gpu_pci)
+    return _watch(vmid, say, config, resume=True)
+
+
+def install_vm(config: StelaConfig, emit: Callable[[str], None] = print) -> bool:
+    """The whole install, from nothing to Setup Assistant: the plan, then the keys and the serial log."""
+    say = _stamped(emit)
+    if not config.gpu_pci:
+        say("NOTE: no GPU is passed to this VM. The install runs, but macOS cannot start without one; "
+            "add one afterwards with `osx-next-cli stela finish`.")
+    if not _run_plan(build_stela_plan(config), say):
         return False
-    say(outcome.message)
-    say("Phase times (s from the VM start): " + ", ".join(f"{k} {v}" for k, v in outcome.seconds.items()))
-    return True
+    return _watch(config.vmid, say, config, resume=False)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -119,6 +149,16 @@ def run(args: argparse.Namespace) -> int:
             return 2
         ok, _ = _run_steps(build_stela_destroy_plan(args.vmid), args.execute)
         return 0 if ok else 1
+    if args.stela_cmd == "finish":
+        try:
+            steps = build_stela_finish_plan(args.vmid, args.gpu_pci)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 2
+        if not args.execute:
+            ok, _ = _run_steps(steps, False)
+            return 0 if ok else 1
+        return 0 if finish_vm(args.vmid, args.gpu_pci) else 1
     config = _config(args)
     issues = validate_stela_config(config)
     if issues:

@@ -20,7 +20,7 @@ from typing import Protocol
 from .stela import StelaConfig, mac_for, tap_for
 from .stela_progress import StelaTracker, is_guest_dhcp
 
-__all__ = ["InstallResult", "Limits", "PveHost", "StelaHost", "run_install"]
+__all__ = ["InstallResult", "Limits", "NEEDS_GPU", "PveHost", "StelaHost", "default_log_path", "run_install"]
 
 # Stela's menu, as the live run found it (screens read with a screendump): Install macOS, the disk, the free space,
 # the size for macOS, then on the confirm screen Tab from Back over to Install, and Install.
@@ -52,13 +52,21 @@ class StelaHost(Protocol):
     def sleep(self, seconds: float) -> None: ...
 
 
-def run_install(host: StelaHost, say: Callable[[str], None], limits: Limits = Limits()) -> InstallResult:
-    """Run until the install is done or cannot go on. The caller stops the VM on a failure."""
-    tracker = StelaTracker()
+NEEDS_GPU = ("macOS is installed on the VM's disk, but Stela cannot start it without a GPU. Pass a host GPU to the VM "
+             "with: osx-next-cli stela finish --vmid <id> --gpu-pci <card>")
+
+
+def run_install(host: StelaHost, say: Callable[[str], None], limits: Limits = Limits(),
+                resume: bool = False) -> InstallResult:
+    """Run until the install is done or cannot go on. The caller stops the VM on a failure.
+
+    With `resume` the macOS install is already on the disk: no menu keys, the run only waits for the installed
+    macOS to boot to Setup Assistant."""
+    tracker = StelaTracker(installer_started=resume, installer_done=resume, install_chosen=resume, menu_ready=resume)
     start = host.now()
     seconds: dict[str, float] = {}
     keys_at = 0.0
-    keys_sent = False
+    keys_sent = resume
     last_line_at = start
     macos_seen = 0
     macos_start_t = 0.0
@@ -81,8 +89,10 @@ def run_install(host: StelaHost, say: Callable[[str], None], limits: Limits = Li
             for message in tracker.feed(line):
                 say(message)
         if tracker.fatal:
+            if tracker.installer_done and "without a GPU" in tracker.fatal:
+                return fail(NEEDS_GPU)
             return fail(f"Stela stopped: {tracker.fatal}")
-        if tracker.menu_ready:
+        if tracker.menu_ready and not resume:
             mark("menu")
         if not keys_sent and tracker.menu_ready:
             host.sleep(limits.settle_s)
@@ -93,12 +103,13 @@ def run_install(host: StelaHost, say: Callable[[str], None], limits: Limits = Li
             last_line_at = keys_at      # the lines that came in meanwhile are still to be read
             say("Sent the menu keys")
         if tracker.install_chosen:
-            mark("install chosen")
+            if not resume:
+                mark("install chosen")
         elif keys_sent and host.now() - keys_at > limits.chosen_timeout_s:
             return fail("The menu keys had no effect: Stela never reported that the install was chosen.")
-        if tracker.installer_started:
+        if tracker.installer_started and not resume:
             mark("installer started")
-        if tracker.installer_done:
+        if tracker.installer_done and not resume:
             mark("installer done")
         if tracker.macos_started > macos_seen:
             macos_seen = tracker.macos_started
@@ -106,6 +117,8 @@ def run_install(host: StelaHost, say: Callable[[str], None], limits: Limits = Li
             mark("macos first start")
         if macos_seen and not tracker.restarted_since_macos_start:
             requests = [t for t in host.dhcp_times() if t >= macos_start_t]
+            if requests:
+                seconds.setdefault("guest dhcp", round(requests[0] - start, 1))
             if requests and host.now() - requests[0] >= limits.dhcp_grace_s:
                 mark("setup assistant")
                 say("macOS is up: it asked the network for an address (Setup Assistant)")

@@ -224,6 +224,8 @@ def validate_stela_new_mac(
             errors[key] = f"{key.capitalize()} must be a whole number."
     if errors:
         return {key: errors[key] for key in ROW_ORDER if key in errors}, None
+    if not state.gpu_pci:
+        errors["gpu"] = "GPU: macOS cannot start without a GPU, so pick one of this host's cards to pass to the VM."
     config = StelaConfig(
         vmid=int(vmid), name=state.name.strip(), storage=state.storage.strip(), cores=int(cores),
         memory_mb=int(memory_mb), disk_gb=int(disk), bridge=state.bridge.strip(), gpu_pci=state.gpu_pci)

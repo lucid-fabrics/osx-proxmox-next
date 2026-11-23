@@ -89,7 +89,7 @@ class FakeHost:
 def wire(monkeypatch, plan_ok=True, outcome=None):
     stops, said = [], []
     monkeypatch.setattr(stela_cli, "PveHost", FakeHost)
-    monkeypatch.setattr(stela_cli, "run_install", lambda host, say: outcome or InstallResult(True, "done", {"menu": 1.0}))
+    monkeypatch.setattr(stela_cli, "run_install", lambda host, say, resume=False: outcome or InstallResult(True, "done", {"menu": 1.0}))
 
     def fake_apply(steps, execute=False, adapter=None, on_step=None):
         for idx, step in enumerate(steps, start=1):
@@ -109,9 +109,10 @@ CONFIG = StelaConfig(vmid=478, name="macos27-stela", storage="local-lvm")
 def test_the_install_runs_the_plan_then_the_driver_and_reports_the_phase_times(monkeypatch):
     stops, _ = wire(monkeypatch)
     lines: list[str] = []
-    assert stela_cli.install_vm(CONFIG, lines.append) is True
+    assert stela_cli.install_vm(StelaConfig(vmid=478, name="macos27-stela", storage="local-lvm", gpu_pci="0a:00"),
+                                lines.append) is True
     assert stops == []
-    assert lines[0].endswith("[1/6] Check snippet storage") and lines[0].startswith("[    0s]")
+    assert lines[0].endswith("[1/7] Check snippet storage") and lines[0].startswith("[    0s]")
     assert any("Phase times" in line and "menu 1.0" in line for line in lines)
 
 
@@ -144,3 +145,59 @@ def test_the_default_download_folder_is_the_pinned_release(monkeypatch, capsys):
     assert run_cli([*BASE, "--json"]) == 0
     argv = next(s["argv"] for s in json.loads(capsys.readouterr().out) if s["title"] == "Download and check Stela")
     assert argv[4] == STELA_RELEASE_URL
+
+
+# ── finish: add a GPU to an installed VM and boot it ─────────────────────────────────────────────────────
+
+FINISH = ["stela", "finish", "--vmid", "478", "--gpu-pci", "0000:0a:00"]
+
+
+def test_finish_dry_run_lists_the_steps(capsys, tmp_path):
+    assert run_cli(FINISH) == 0
+    assert "ok   Pass the GPU to the VM" in capsys.readouterr().out
+    log = next((tmp_path / "generated" / "logs").glob("apply-*.log")).read_text()
+    assert "[DRY-RUN] Pass the GPU to the VM: qm set 478 --vga none --hostpci0 0000:0a:00,pcie=1,x-vga=1" in log
+
+
+def test_finish_refuses_a_bad_gpu_address(capsys):
+    assert run_cli(["stela", "finish", "--vmid", "478", "--gpu-pci", "0a;00"]) == 2
+    assert "ERROR: Invalid finish request" in capsys.readouterr().out
+
+
+def test_finish_dry_run_failure_exits_1(monkeypatch, capsys):
+    result = ApplyResult(False, [StepResult("Stop the VM", "qm stop", False, 1, "boom")], log_path=None)
+    monkeypatch.setattr(stela_cli, "apply_plan", lambda steps, execute=False: result)
+    assert run_cli(FINISH) == 1
+
+
+def test_finish_execute_runs_the_plan_then_watches_in_resume_mode(monkeypatch, capsys):
+    resumes = []
+    wire(monkeypatch)
+    monkeypatch.setattr(stela_cli, "run_install", lambda host, say, resume=False: resumes.append(resume) or InstallResult(True, "up", {}))
+    assert run_cli([*FINISH, "--execute"]) == 0
+    assert resumes == [True] and "Phase times" in capsys.readouterr().out
+
+
+def test_finish_stops_when_a_plan_step_fails(monkeypatch):
+    wire(monkeypatch, plan_ok=False)
+    lines: list[str] = []
+    assert stela_cli.finish_vm(478, "0000:0a:00", lines.append) is False
+    assert not any("Serial log" in line for line in lines)
+
+
+def test_a_vm_without_a_gpu_is_told_so_before_it_starts(monkeypatch):
+    wire(monkeypatch)
+    lines: list[str] = []
+    stela_cli.install_vm(CONFIG, lines.append)
+    assert "NOTE: no GPU is passed" in lines[0]
+    lines.clear()
+    stela_cli.install_vm(StelaConfig(vmid=478, name="macos27-stela", storage="local-lvm", gpu_pci="0a:00"), lines.append)
+    assert not any("NOTE" in line for line in lines)
+
+
+def test_the_no_gpu_outcome_does_not_suggest_removing_the_vm(monkeypatch):
+    from osx_proxmox_next.stela_install import NEEDS_GPU
+    wire(monkeypatch, outcome=InstallResult(False, NEEDS_GPU, {}))
+    lines: list[str] = []
+    assert stela_cli.install_vm(CONFIG, lines.append) is False
+    assert not any("uninstall" in line for line in lines)

@@ -9,7 +9,7 @@ import pytest
 
 from osx_proxmox_next import stela_install
 from osx_proxmox_next.stela import StelaConfig
-from osx_proxmox_next.stela_install import MENU_KEYS, Limits, PveHost, default_log_path, run_install
+from osx_proxmox_next.stela_install import MENU_KEYS, NEEDS_GPU, Limits, PveHost, default_log_path, run_install
 
 MENU = ["STELA UEFI MOUNT version=0.5.0", "HOLD No disk is chosen for macOS yet: choose Install macOS first."]
 CHOSEN = ["CHOICE 2 (Install macOS)"]
@@ -51,9 +51,9 @@ class FakeHost:
         self.clock += seconds
 
 
-def run(host, limits=Limits()):
+def run(host, limits=Limits(), resume=False):
     said: list[str] = []
-    return run_install(host, said.append, limits), said
+    return run_install(host, said.append, limits, resume), said
 
 
 def test_a_full_install_sends_the_menu_keys_once_and_ends_at_setup_assistant():
@@ -62,7 +62,8 @@ def test_a_full_install_sends_the_menu_keys_once_and_ends_at_setup_assistant():
     assert result.ok and "Setup Assistant" in result.message
     assert [k for _, k in host.keys] == list(MENU_KEYS) == ["ret", "ret", "ret", "ret", "tab", "ret"]
     assert list(result.seconds) == ["menu", "install chosen", "installer started", "installer done",
-                                    "macos first start", "setup assistant"]
+                                    "macos first start", "guest dhcp", "setup assistant"]
+    assert result.seconds["guest dhcp"] < result.seconds["setup assistant"]
     assert "Stela's menu is up" in said and "Installer: format media" in said
     assert any("Starting the installed macOS (boot 1)" in line for line in said)
 
@@ -87,6 +88,28 @@ def test_a_restart_after_the_dhcp_request_means_it_was_not_the_last_boot():
     assert result.ok
     assert host.polls >= 16                             # decided on the later boot, not on the early request
     assert any("restarted the PC again" in line for line in said)
+
+
+def test_no_gpu_after_the_install_says_macos_is_on_the_disk_and_how_to_add_a_card():
+    gpu_fatal = "STELA FATAL macOS cannot run without a GPU: no GPU started; the lines above say why"
+    host = FakeHost([MENU, CHOSEN, INSTALL, RESTART, MACOS, [gpu_fatal]])
+    result, said = run(host)
+    assert not result.ok and result.message == NEEDS_GPU
+    assert "stela finish --vmid <id> --gpu-pci" in said[-1]
+
+
+def test_the_same_fatal_before_the_install_is_just_a_stela_stop():
+    host = FakeHost([MENU, ["STELA FATAL macOS cannot run without a GPU: no GPU started"]])
+    result, _ = run(host)
+    assert not result.ok and result.message.startswith("Stela stopped: macOS cannot run")
+
+
+def test_resume_sends_no_keys_and_ends_when_the_installed_macos_asks_for_an_address():
+    host = FakeHost([["STELA UEFI MOUNT version=0.5.0", "CHOICE 1 (macOS)"], MACOS, [], []], dhcp_on=[2])
+    result, said = run(host, Limits(dhcp_grace_s=1.0), resume=True)
+    assert result.ok and host.keys == []
+    assert list(result.seconds) == ["macos first start", "guest dhcp", "setup assistant"]
+    assert not any("menu" in line.lower() for line in said)
 
 
 def test_a_stela_fatal_line_ends_it_with_the_reason():

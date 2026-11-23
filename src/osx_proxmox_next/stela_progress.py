@@ -53,7 +53,6 @@ class StelaTracker:
         if fatal and not self.fatal:
             self.fatal = (fatal.group("rest").strip() or line)[:300]
             self.phase = "stopped"
-            out.append(f"Stela stopped: {self.fatal}")
         if _RESTART_RE.match(line):
             self.last_restart_line = self.lines_seen
             if self.installer_started and not self.installer_done:

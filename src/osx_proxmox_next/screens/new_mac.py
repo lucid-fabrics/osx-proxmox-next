@@ -188,6 +188,7 @@ class NewMacScreen(OsxScreen):
         for rid in ("#r-install", "#r-apple", "#r-more"):
             q(rid).display = not st.is_beta       # these only apply to an OpenCore Mac
         q("#r-gpu").display = st.is_stela         # only the Stela VM can take a GPU
+        q("#r-gpu", ChoiceRow).set_text("", "macOS starts only on a passed-through GPU" if st.is_stela else "")
         install = q("#r-install", ChoiceRow)
         install.set_text("BETA" if st.handsoff else "",
                          "Runs by itself up to Setup Assistant" if st.handsoff

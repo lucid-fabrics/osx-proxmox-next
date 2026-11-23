@@ -20,7 +20,8 @@ from .stela import (
 )
 
 __all__ = [
-    "SNIPPET_DIR", "STICK_DIR", "STICK_GB", "build_stela_destroy_plan", "build_stela_plan", "hook_path", "hook_script",
+    "SNIPPET_DIR", "STICK_DIR", "STICK_GB", "build_stela_destroy_plan", "build_stela_finish_plan", "build_stela_plan",
+    "hook_path", "hook_script",
     "stela_qemu_args", "stela_vm_options", "stela_binary", "stick_path",
 ]
 
@@ -165,6 +166,20 @@ def build_stela_plan(config: StelaConfig) -> list[PlanStep]:
                               argv=["qm", "set", vmid, "--hostpci0", f"{config.gpu_pci},pcie=1,x-vga=1"], risk="warn"))
     steps.append(PlanStep(title="Start the VM", argv=["qm", "start", vmid]))
     return steps
+
+
+def build_stela_finish_plan(vmid: int, gpu_pci: str) -> list[PlanStep]:
+    """For a VM whose install finished without a GPU: add the card, drop the emulated display, start it again."""
+    config = StelaConfig(vmid=vmid, name="finish", storage="x", gpu_pci=gpu_pci)
+    issues = [i for i in validate_stela_config(config) if i.startswith(("VMID", "GPU"))]
+    if issues or not gpu_pci:
+        raise ValueError(f"Invalid finish request: {'; '.join(issues or ['a GPU address is required.'])}")
+    vid = str(vmid)
+    return [_sh("Check the VM was made by this wizard", _CHECK_TAG, vid, STELA_VM_TAG),
+            PlanStep(title="Stop the VM", argv=["qm", "stop", vid], risk="warn"),
+            PlanStep(title="Pass the GPU to the VM", argv=[
+                "qm", "set", vid, "--vga", "none", "--hostpci0", f"{gpu_pci},pcie=1,x-vga=1"], risk="warn"),
+            PlanStep(title="Start the VM", argv=["qm", "start", vid])]
 
 
 def build_stela_destroy_plan(vmid: int) -> list[PlanStep]:

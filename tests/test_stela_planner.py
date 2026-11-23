@@ -17,6 +17,7 @@ from osx_proxmox_next.stela_planner import (
     STICK_DIR,
     STICK_GB,
     build_stela_destroy_plan,
+    build_stela_finish_plan,
     build_stela_plan,
     hook_path,
     hook_script,
@@ -168,3 +169,18 @@ def test_the_destroy_plan_checks_the_tag_purges_and_removes_every_file_and_the_t
 def test_the_destroy_plan_refuses_a_bad_vmid():
     with pytest.raises(ValueError, match="VMID"):
         build_stela_destroy_plan(1)
+
+
+def test_the_finish_plan_checks_the_tag_stops_adds_the_gpu_with_no_display_and_starts():
+    steps = build_stela_finish_plan(478, "0000:0a:00")
+    assert [s.title for s in steps] == [
+        "Check the VM was made by this wizard", "Stop the VM", "Pass the GPU to the VM", "Start the VM"]
+    assert steps[0].argv[-2:] == ["478", STELA_VM_TAG]
+    assert steps[2].argv == ["qm", "set", "478", "--vga", "none", "--hostpci0", "0000:0a:00,pcie=1,x-vga=1"]
+    assert steps[2].risk == "warn" and steps[3].argv == ["qm", "start", "478"]
+
+
+@pytest.mark.parametrize("vmid,gpu", [(5, "0a:00"), (478, "0a;00"), (478, "")])
+def test_the_finish_plan_refuses_a_bad_vmid_or_gpu(vmid, gpu):
+    with pytest.raises(ValueError, match="Invalid finish request"):
+        build_stela_finish_plan(vmid, gpu)

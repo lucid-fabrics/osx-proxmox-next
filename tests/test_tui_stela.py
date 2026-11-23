@@ -36,16 +36,16 @@ def test_state_knows_the_stela_choice_and_it_is_a_beta_like_arm64():
 
 
 def test_a_good_form_makes_a_stela_config_from_the_preset():
-    errors, config = validate_stela_new_mac(state(), presets())
+    errors, config = validate_stela_new_mac(state(gpu_pci="0000:0a:00"), presets())
     assert errors == {}
     assert (config.vmid, config.name, config.storage, config.bridge, config.gpu_pci) == (
-        478, "macos-stela", "local-lvm", "vmbr0", "")
+        478, "macos-stela", "local-lvm", "vmbr0", "0000:0a:00")
     assert (config.cores, config.memory_mb, config.disk_gb) == (8, 16384, 160)
 
 
-def test_the_chosen_gpu_goes_into_the_config():
-    _, config = validate_stela_new_mac(state(gpu_pci="0000:0a:00"), presets())
-    assert config.gpu_pci == "0000:0a:00"
+def test_no_gpu_is_an_error_because_macos_cannot_start_without_one():
+    errors, config = validate_stela_new_mac(state(), presets())
+    assert config is None and list(errors) == ["gpu"] and "cannot start without a GPU" in errors["gpu"]
 
 
 def test_too_small_values_are_errors_in_screen_order():
@@ -134,15 +134,22 @@ async def test_enter_installs_through_its_own_build_screen(monkeypatch):
         return True
 
     monkeypatch.setattr("osx_proxmox_next.screens.stela_build.install_vm", fake_install)
+    monkeypatch.setattr("osx_proxmox_next.screens.new_mac.list_host_gpus", lambda: [GPU])
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
-        await open_stela(pilot, app)
+        screen = await open_stela(pilot, app)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, NewMacScreen) and "cannot start without a GPU" in F.text_of(screen.query_one("#errors"))
+        screen.query_one("#r-gpu", ChoiceRow).focus()
+        await pilot.press("right")
+        await pilot.pause(0.1)
         await pilot.press("enter")
         await F.settle(pilot, lambda: isinstance(app.screen, StelaBuildScreen) and app.screen.finished,
                        what="the Stela build to finish")
         build = app.screen
         assert not any(isinstance(s, NewMacScreen) for s in app.screen_stack)
-        assert seen[0].vmid == 105 and seen[0].name == "macos-stela" and build.ok
+        assert seen[0].vmid == 105 and seen[0].name == "macos-stela" and seen[0].gpu_pci == "0000:0a:00" and build.ok
         assert build.crumb() == "macos-stela"
         log = "\n".join(line.text for line in build.query_one("#stela-log").lines)
         assert "[1/6] Check snippet storage" in log and "is at Setup Assistant" in log
