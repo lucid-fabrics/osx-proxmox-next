@@ -76,7 +76,15 @@ inside() {
   # stela-soc-data overflows rustc's default compiler-thread stack (SIGSEGV); rustc itself suggests this size.
   export RUST_MIN_STACK=33554432
   step "cargo xtask dist: fetches Linux, Mesa, LLVM, libdrm and xnu at their pins, then builds"
-  cargo xtask dist
+  # The pinned sources come from other people's servers (gitlab.freedesktop.org answered 503 once): the fetch is
+  # resumable, so a failed attempt is simply tried again.
+  local attempt
+  for attempt in 1 2 3 4; do
+    cargo xtask dist && break
+    [[ $attempt -lt 4 ]] || { echo "cargo xtask dist failed 4 times" >&2; exit 1; }
+    echo "cargo xtask dist failed (attempt $attempt): trying again in 60 s" >&2
+    sleep 60
+  done
 
   step "collect"
   install -m 0755 target/release/stela "$out/stela"
