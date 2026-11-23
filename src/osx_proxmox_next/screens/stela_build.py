@@ -45,7 +45,10 @@ class StelaBuildScreen(OsxScreen):
         self.query_one("#stela-log", RichLog).write(line)
 
     def _say(self, line: str) -> None:
-        self.app.call_from_thread(self._write, line)
+        try:
+            self.app.call_from_thread(self._write, line)
+        except Exception:  # noqa: BLE001 - the screen was left (Esc): the line has nowhere to go
+            log.info("stela build line dropped: %s", line)
 
     def _run(self) -> None:
         try:

@@ -70,6 +70,14 @@ confirm=$(awk -v b="$size" 'BEGIN { printf "%.1fGB", b / 1000000000 }')
 "$bin" create "$loop" --installer online --macos latest --wifi none --confirm-disk "$confirm" --yes
 """
 
+_CHECK_FREE = """\
+set -euo pipefail
+if qm status "$1" >/dev/null 2>&1; then
+  echo "VM $1 already exists: pick another VMID, or remove it first with: osx-next-cli stela uninstall --vmid $1 --execute" >&2
+  exit 1
+fi
+"""
+
 _WRITE_EXEC = 'set -euo pipefail\nprintf "%s" "$1" > "$2"\nchmod 755 "$2"\n'
 
 _CHECK_TAG = """\
@@ -154,6 +162,7 @@ def build_stela_plan(config: StelaConfig) -> list[PlanStep]:
         raise ValueError(f"Invalid Stela config: {'; '.join(issues)}")
     vmid = str(config.vmid)
     steps = [
+        _sh("Check the VMID is free", _CHECK_FREE, vmid),
         _sh("Check snippet storage", _CHECK_SNIPPETS, _SNIPPET_STORAGE),
         _sh("Download and check Stela", _FETCH_STELA, config.stela_url, STELA_ASSET, config.stela_sha256,
             _STELA_DIR, stela_binary()),

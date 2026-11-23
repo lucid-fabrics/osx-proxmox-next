@@ -20,11 +20,15 @@ from typing import Protocol
 from .stela import StelaConfig, mac_for, tap_for
 from .stela_progress import StelaTracker, is_guest_dhcp
 
-__all__ = ["InstallResult", "Limits", "NEEDS_GPU", "PveHost", "StelaHost", "default_log_path", "run_install"]
+__all__ = ["SendKeyError", "InstallResult", "Limits", "NEEDS_GPU", "PveHost", "StelaHost", "default_log_path", "run_install"]
 
 # Stela's menu, as the live run found it (screens read with a screendump): Install macOS, the disk, the free space,
 # the size for macOS, then on the confirm screen Tab from Back over to Install, and Install.
 MENU_KEYS = ("ret", "ret", "ret", "ret", "tab", "ret")
+
+
+class SendKeyError(RuntimeError):
+    """`qm sendkey` failed or timed out."""
 
 
 @dataclass(frozen=True)
@@ -169,6 +173,7 @@ class PveHost:
                     sock.connect(self.serial_path)
                 except OSError:
                     sock.close()
+                    self._socks.remove(sock)
                     self._stop.wait(1.0)
                     continue
                 pending = b""
@@ -220,7 +225,10 @@ class PveHost:
         return out
 
     def sendkey(self, key: str) -> None:
-        subprocess.run(["qm", "sendkey", self.vmid, key], check=True, capture_output=True, timeout=30)
+        try:
+            subprocess.run(["qm", "sendkey", self.vmid, key], check=True, capture_output=True, timeout=30)
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise SendKeyError(f"qm sendkey {key} failed: {exc}") from exc
 
     def dhcp_times(self) -> list[float]:
         return list(self._dhcp)

@@ -239,3 +239,12 @@ def test_the_default_log_path_is_per_vm_under_generated_logs(tmp_path, monkeypat
 @pytest.mark.parametrize("key", MENU_KEYS)
 def test_every_menu_key_is_a_qm_key_name(key):
     assert key in ("ret", "tab")
+
+
+def test_a_failed_sendkey_is_a_clear_error(monkeypatch, tmp_path):
+    def broken(*a, **kw):
+        raise stela_install.subprocess.CalledProcessError(1, "qm")
+
+    monkeypatch.setattr(stela_install.subprocess, "run", broken)
+    with pytest.raises(stela_install.SendKeyError, match="qm sendkey tab failed"):
+        PveHost(config(), tmp_path / "s.log").sendkey("tab")

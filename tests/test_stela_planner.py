@@ -51,7 +51,7 @@ def test_the_pinned_release_is_the_one_the_live_run_checked():
 def test_the_plan_checks_downloads_makes_the_stick_then_the_vm_and_starts_it_last():
     steps = build_stela_plan(cfg())
     assert [s.title for s in steps] == [
-        "Check snippet storage", "Download and check Stela", "Make the boot stick", "Write the VM's hook script",
+        "Check the VMID is free", "Check snippet storage", "Download and check Stela", "Make the boot stick", "Write the VM's hook script",
         "Create the VM", "Start the VM"]
     assert steps[-1].argv == ["qm", "start", "478"]
 
@@ -184,3 +184,84 @@ def test_the_finish_plan_checks_the_tag_stops_adds_the_gpu_with_no_display_and_s
 def test_the_finish_plan_refuses_a_bad_vmid_or_gpu(vmid, gpu):
     with pytest.raises(ValueError, match="Invalid finish request"):
         build_stela_finish_plan(vmid, gpu)
+
+
+# ── the scripts themselves, run against fakes ─────────────────────────────────────────────────────────────
+
+import hashlib
+import os
+import subprocess
+import tarfile
+
+
+def run_script(step, env_dir, *, bash_args=None):
+    argv = bash_args or step.argv
+    return subprocess.run(argv, capture_output=True, text=True, env={"PATH": f"{env_dir}:{os.environ['PATH']}"})
+
+
+def fake_curl(tmp_path, sums_text, tarball: bytes):
+    """A curl that serves SHA256SUMS and the tarball from memory, so no network is touched."""
+    (tmp_path / "SUMS").write_text(sums_text)
+    (tmp_path / "TAR").write_bytes(tarball)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    curl = bindir / "curl"
+    curl.write_text("#!/bin/bash\nout=\"\"\nwhile [ $# -gt 0 ]; do case $1 in -o) out=$2; shift;; http*) url=$1;; esac; shift; done\n"
+                    f"case $url in */SHA256SUMS) cp {tmp_path}/SUMS $out;; *) cp {tmp_path}/TAR $out;; esac\n")
+    curl.chmod(0o755)
+    return bindir
+
+
+def make_tarball(tmp_path):
+    root = tmp_path / "src" / "stela-v0.5.0-linux-x86_64"
+    root.mkdir(parents=True)
+    (root / "stela").write_text("#!/bin/sh\n")
+    (root / "stela").chmod(0o755)
+    tar = tmp_path / "t.tar.gz"
+    with tarfile.open(tar, "w:gz") as t:
+        t.add(root, arcname="stela-v0.5.0-linux-x86_64")
+    return tar.read_bytes()
+
+
+def download_argv(tmp_path, sha, listed):
+    data = make_tarball(tmp_path)
+    real = hashlib.sha256(data).hexdigest()
+    bindir = fake_curl(tmp_path, f"{listed or real}  {STELA_ASSET}\n", data)
+    step = by_title(build_stela_plan(cfg(stela_sha256=sha or real)), "Download and check Stela")
+    argv = list(step.argv)
+    argv[7] = str(tmp_path / "dl")                        # the folder it works in
+    argv[8] = str(tmp_path / "dl" / "x" / "stela-v0.5.0-linux-x86_64" / "stela")
+    return bindir, argv, real
+
+
+def test_the_download_script_accepts_the_pinned_tarball_and_unpacks_it(tmp_path):
+    bindir, argv, real = download_argv(tmp_path, None, None)
+    result = run_script(None, bindir, bash_args=argv)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "dl" / "x" / "stela-v0.5.0-linux-x86_64" / "stela").exists()
+
+
+def test_the_download_script_refuses_a_release_whose_sums_list_another_checksum(tmp_path):
+    bindir, argv, real = download_argv(tmp_path, None, "f" * 64)
+    result = run_script(None, bindir, bash_args=argv)
+    assert result.returncode == 1 and "refusing it" in result.stderr
+    assert not (tmp_path / "dl" / "x").exists()
+
+
+def test_the_download_script_refuses_a_tarball_that_does_not_hash_to_the_pin(tmp_path):
+    bindir, argv, real = download_argv(tmp_path, "e" * 64, "e" * 64)     # the sums agree with the pin, the file does not
+    result = run_script(None, bindir, bash_args=argv)
+    assert result.returncode != 0 and not (tmp_path / "dl" / "x").exists()
+
+
+def test_the_free_vmid_check_refuses_an_existing_vm(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    qm = bindir / "qm"
+    qm.write_text("#!/bin/bash\nexit 0\n")
+    qm.chmod(0o755)
+    step = by_title(build_stela_plan(cfg()), "Check the VMID is free")
+    result = run_script(step, bindir)
+    assert result.returncode == 1 and "already exists" in result.stderr
+    qm.write_text("#!/bin/bash\nexit 2\n")
+    assert run_script(step, bindir).returncode == 0

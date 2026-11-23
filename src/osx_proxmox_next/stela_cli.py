@@ -23,7 +23,7 @@ from .stela import (
     validate_stela_config,
 )
 from .stela_gpus import list_host_gpus
-from .stela_install import NEEDS_GPU, PveHost, default_log_path, run_install
+from .stela_install import NEEDS_GPU, InstallResult, PveHost, SendKeyError, default_log_path, run_install
 from .stela_planner import build_stela_destroy_plan, build_stela_finish_plan, build_stela_plan
 
 __all__ = ["add_parser", "finish_vm", "install_vm", "run"]
@@ -97,7 +97,11 @@ def _watch(vmid: int, say: Callable[[str], None], config: StelaConfig, resume: b
     log = default_log_path(vmid)
     say(f"Serial log: {log}")
     with PveHost(config, log) as host:
-        outcome = run_install(host, say, resume=resume)
+        try:
+            outcome = run_install(host, say, resume=resume)
+        except SendKeyError as exc:      # a key could not be sent: a failure like any other, the VM is stopped below
+            outcome = InstallResult(False, str(exc), {})
+            say(outcome.message)
     if not outcome.ok:
         subprocess.run(["qm", "stop", str(vmid)], capture_output=True, timeout=120, check=False)
         if outcome.message != NEEDS_GPU:

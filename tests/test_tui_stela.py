@@ -130,7 +130,7 @@ async def test_enter_installs_through_its_own_build_screen(monkeypatch):
 
     def fake_install(config, emit):
         seen.append(config)
-        emit("[    0s] [1/6] Check snippet storage")
+        emit("[    0s] [1/8] Check snippet storage")
         return True
 
     monkeypatch.setattr("osx_proxmox_next.screens.stela_build.install_vm", fake_install)
@@ -152,7 +152,7 @@ async def test_enter_installs_through_its_own_build_screen(monkeypatch):
         assert seen[0].vmid == 105 and seen[0].name == "macos-stela" and seen[0].gpu_pci == "0000:0a:00" and build.ok
         assert build.crumb() == "macos-stela"
         log = "\n".join(line.text for line in build.query_one("#stela-log").lines)
-        assert "[1/6] Check snippet storage" in log and "is at Setup Assistant" in log
+        assert "[1/8] Check snippet storage" in log and "is at Setup Assistant" in log
         await pilot.press("escape")
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen))
 

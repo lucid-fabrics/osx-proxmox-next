@@ -27,8 +27,8 @@ def test_the_command_is_registered():
 def test_plan_prints_every_step_without_running_anything(capsys):
     assert run_cli(BASE) == 0
     out = capsys.readouterr().out
-    assert " 1. Check snippet storage\n    bash script (1 arguments)" in out
-    assert " 5. Create the VM\n    qm create 478 --name macos27-stela" in out
+    assert " 2. Check snippet storage\n    bash script (1 arguments)" in out
+    assert " 6. Create the VM\n    qm create 478 --name macos27-stela" in out
     assert "qm start 478" in out
 
 
@@ -95,7 +95,7 @@ def wire(monkeypatch, plan_ok=True, outcome=None):
         for idx, step in enumerate(steps, start=1):
             on_step(idx, len(steps), step, None)
         if not plan_ok:
-            on_step(2, len(steps), steps[1], StepResult(steps[1].title, "x", False, 1, "curl: (22) 404"))
+            on_step(3, len(steps), steps[2], StepResult(steps[2].title, "x", False, 1, "curl: (22) 404"))
         return ApplyResult(plan_ok, [], log_path=None)
 
     monkeypatch.setattr(stela_cli, "apply_plan", fake_apply)
@@ -112,7 +112,7 @@ def test_the_install_runs_the_plan_then_the_driver_and_reports_the_phase_times(m
     assert stela_cli.install_vm(StelaConfig(vmid=478, name="macos27-stela", storage="local-lvm", gpu_pci="0a:00"),
                                 lines.append) is True
     assert stops == []
-    assert lines[0].endswith("[1/7] Check snippet storage") and lines[0].startswith("[    0s]")
+    assert lines[0].endswith("[1/8] Check the VMID is free") and lines[0].startswith("[    0s]")
     assert any("Phase times" in line and "menu 1.0" in line for line in lines)
 
 
@@ -201,3 +201,16 @@ def test_the_no_gpu_outcome_does_not_suggest_removing_the_vm(monkeypatch):
     lines: list[str] = []
     assert stela_cli.install_vm(CONFIG, lines.append) is False
     assert not any("uninstall" in line for line in lines)
+
+
+def test_a_key_that_cannot_be_sent_stops_the_vm_like_any_failure(monkeypatch):
+    from osx_proxmox_next.stela_install import SendKeyError
+    stops, _ = wire(monkeypatch)
+
+    def boom(host, say, resume=False):
+        raise SendKeyError("qm sendkey ret failed: timeout")
+
+    monkeypatch.setattr(stela_cli, "run_install", boom)
+    lines: list[str] = []
+    assert stela_cli.install_vm(CONFIG, lines.append) is False
+    assert stops == [["qm", "stop", "478"]] and any("qm sendkey ret failed" in line for line in lines)
