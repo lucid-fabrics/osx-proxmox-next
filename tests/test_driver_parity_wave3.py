@@ -245,3 +245,38 @@ def test_bash_undo_reads_the_rolled_back_disk_so_the_versions_are_not_from_the_l
     (host.qm_dir / "status").write_text("running\n")                         # the Mac runs again: the record is the disk's word
     out = host.run('driver_oc_kext() { echo "{}"; }\n' + STUB_NULLMOTH + "driver_status_command 109\n").stdout
     assert "Installed: WhateverXe 0.8.0 and WhateverXe Graphics 0.4.3\n" in out and "from the last update" not in out
+
+
+# ── a Mac that runs now is stopped first, whatever the run recorded ──
+
+def _amd_without_stop(host):
+    rows = [(i, t, d) for (i, t), (_i, d) in zip(engine.step_titles("amd"), engine.step_titles("amd", done=True)) if i != "stop"]
+    steps = [{"id": i, "title": t, "done": d, "state": st} for (i, t, d), st in zip(rows, ["done", "fail", "pending"])]
+    state = {"kind": "amd", "phase": "failed", "snapshot": SNAP, "steps": steps}
+    engine.write_update(109, state, str(host.state))
+    return state
+
+
+@needs_bash4
+def test_bash_finish_of_a_run_recorded_without_a_stop_row_lists_and_does_the_stop_when_the_mac_runs(host):
+    write_record(host, "amd", Lilu="1.6.8", WhateverGreen="1.6.0")
+    state = _amd_without_stop(host)
+    target = '{"Lilu": {"version": "1.7.2"}, "WhateverGreen": {"version": "1.7.0"}}'
+    plan = ("DRIVER_VERSIONS='{\"Lilu\": \"1.7.2\", \"WhateverGreen\": \"1.7.0\"}'\n"
+            f"driver_print_plan 109 mac amd '{{\"Lilu\": \"1.6.8\"}}' '{target}' osx-next-driver-NEW yes yes sequoia yes\n")
+    assert "  1. Stop the Mac" in host.run(plan).stdout
+    assert "Stop the Mac" not in host.run(plan.replace("yes sequoia yes", "no sequoia yes")).stdout
+    (host.qm_dir / "status").write_text("running\n")
+    host.run('DRIVER_VMID=109\ndriver_engine update-resume 109 running\ndriver_step_stop 109\n')
+    rows = engine.read_update(109, str(host.state))["steps"]
+    assert [r["id"] for r in rows][:2] == ["snapshot", "stop"] and rows[1]["state"] == "done"
+    assert any(c.startswith(("shutdown 109", "stop 109")) for c in host.calls())      # the running Mac was stopped first
+    assert [r["id"] for r in state["steps"]] == ["snapshot", "replace", "start"]       # the run was recorded without the row
+
+
+@needs_bash4
+def test_bash_finish_of_a_run_recorded_without_a_stop_row_adds_none_for_a_stopped_mac(host):
+    write_record(host, "amd", Lilu="1.6.8", WhateverGreen="1.6.0")
+    _amd_without_stop(host)
+    host.run('DRIVER_VMID=109\ndriver_engine update-resume 109\ndriver_step_stop 109\n')
+    assert all(r["id"] != "stop" for r in engine.read_update(109, str(host.state))["steps"])

@@ -271,3 +271,54 @@ def test_after_an_update_only_the_previous_driver_snapshot_goes(tmp_path, stubs,
 def test_a_new_snapshot_name_has_seconds_so_a_retry_in_the_same_minute_is_a_new_one():
     assert len(engine.snapshot_name().split("-")[-1]) == 6
     assert not Choice().macos
+
+
+# ── a Mac that runs now is stopped first, whatever the run recorded ──
+
+def without_stop(kind="amd", states=("done", "fail", "pending")):
+    """The state file of a run planned for a stopped Mac: its list has no "Stop the Mac" row."""
+    rows = [(i, t, d) for (i, t), (_i, d) in zip(engine.step_titles(kind), engine.step_titles(kind, done=True)) if i != "stop"]
+    steps = [{"id": i, "title": t, "done": d, "state": st} for (i, t, d), st in zip(rows, states)]
+    engine.write_update(9, {"kind": kind, "phase": "failed", "snapshot": NEW_SNAP, "steps": steps, "card": "", "choice": {}, "previous": []})
+
+
+def test_finish_of_a_run_recorded_without_a_stop_row_stops_the_mac_that_runs_now(tmp_path, amd_zips, rec):
+    without_stop()
+    pve = DPve(status="running", bash_output="VERSION 1.7.2\nVERSION 1.7.0\n", snapshots=[NEW_SNAP])
+    plan = plan_for("amd", pve, installed={"Lilu": "1.6.8", "WhateverGreen": "1.6.0"}, resume=engine.read_update(9), interrupted=True)
+    plan.target = amd_target()
+    assert plan.lines().count("  1. Stop the Mac") == 1 and any(c.startswith("qm shutdown 9") for c in driver_plan.commands(plan))
+    res = finish(pve, rec, tmp_path)
+    assert res.ok, (res.error, engine.read_update(9).get("events"), pve.calls)
+    assert pve.bash_status == ["stopped"]                                       # the OpenCore disk was written with the Mac stopped
+    assert [c[0] for c in pve.calls if c[0] in ("shutdown", "start")] == ["shutdown", "start"]
+
+
+def test_finish_of_a_run_recorded_without_a_stop_row_lists_none_for_a_stopped_mac(tmp_path, amd_zips, rec):
+    without_stop()
+    pve = DPve(status="stopped", bash_output="VERSION 1.7.2\nVERSION 1.7.0\n", snapshots=[NEW_SNAP])
+    plan = plan_for("amd", pve, installed={"Lilu": "1.6.8", "WhateverGreen": "1.6.0"}, resume=engine.read_update(9), interrupted=True)
+    plan.target = amd_target()
+    assert "Stop the Mac" not in "\n".join(plan.lines()) and not any(c.startswith("qm shutdown") for c in driver_plan.commands(plan))
+    assert finish(pve, rec, tmp_path).ok
+    assert not [c for c in pve.calls if c[0] == "shutdown"]
+    assert all(r["id"] != "stop" for r in engine.read_update(9).get("steps", []))
+
+
+def test_the_stop_row_of_a_resumed_run_goes_in_front_of_the_first_step_to_do():
+    state = {"kind": "amd", "steps": [{"id": "snapshot", "title": "s", "done": "s", "state": "done"},
+                                      {"id": "replace", "title": "r", "done": "r", "state": "fail"}]}
+    engine.reset_for_resume(state, running=True)
+    assert [r["id"] for r in state["steps"]] == ["snapshot", "stop", "replace"] and state["resume_at"] == 1
+    engine.reset_for_resume(state, running=True)                                # never a second row
+    assert [r["id"] for r in state["steps"]].count("stop") == 1
+
+
+def test_a_finished_stop_of_a_mac_that_was_started_again_is_done_again_before_the_next_step():
+    steps = [{"id": "stop", "title": "s", "done": "s", "state": "done"}, {"id": "snapshot", "title": "n", "done": "n", "state": "fail"}]
+    state = {"kind": "amd", "steps": [dict(r) for r in steps]}
+    engine.reset_for_resume(state, running=True)
+    assert [(r["id"], r["state"]) for r in state["steps"]] == [("stop", "pending"), ("snapshot", "pending")]
+    again = {"kind": "amd", "steps": [dict(r) for r in steps]}
+    engine.reset_for_resume(again, running=False)                               # a stopped Mac keeps the finished stop
+    assert again["steps"][0]["state"] == "done" and again["resume_at"] == 1

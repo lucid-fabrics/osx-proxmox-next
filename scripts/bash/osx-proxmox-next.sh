@@ -8243,13 +8243,13 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -8568,7 +8568,10 @@ def todo_steps(kind, name, running, state):
     rows = (state or {}).get("steps", [])
     done = {r["id"] for r in rows if r.get("state") == "done"}
     listed = {r["id"] for r in rows}      # the run lists its own steps: a run that found the Mac stopped has no "Stop the Mac"
-    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done and (not listed or sid in listed)]
+    # a Mac that runs now is stopped first, whatever the run recorded, while a step that changes its disks is to do
+    return [(sid, title) for sid, title in plan_steps(kind, name, running)
+            if (sid == "stop" and running and changes_disks(state or {}))
+            or (sid not in done and (not listed or sid in listed))]
 
 
 def finish_facts(kind, snapshot="", undo=""):
@@ -8862,8 +8865,8 @@ def update_state_command(cmd, args):
         state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7],
                            running=args[9:] != ["stopped"])      # the 9th is the original, the 10th "stopped" for a Mac that is
         state.update(original=json.loads(args[8]) if len(args) > 8 and args[8] else None)
-    elif cmd == "update-resume":
-        reset_for_resume(state)
+    elif cmd == "update-resume":                  # the 2nd is "running" for a Mac that runs now: it gets its stop row
+        reset_for_resume(state, args[1:] == ["running"])
         state.update(phase="running", error="")
     elif cmd in ("update-add-disk", "update-forget-disk"):
         if not state:                 # no run is going or cut off for this Mac: there is nothing to write a disk into
@@ -9082,9 +9085,28 @@ def resume_index(state):
     return next((i for i, r in enumerate(state.get("steps", [])) if r["state"] != "done"), len(state.get("steps", [])))
 
 
-def reset_for_resume(state):
+CHANGES_DISKS = ("snapshot", "takeoff", "stage", "putback", "replace")     # the steps that need the Mac stopped
+
+
+def changes_disks(state):
+    """True while a step that changes the card or the disks is still to do: a run that only waits for the driver to
+    install at the first boot has nothing to stop the Mac for."""
+    return any(r["id"] in CHANGES_DISKS and r["state"] != "done" for r in state.get("steps", []))
+
+
+def reset_for_resume(state, running=False):
     """A run that goes on from where it stopped starts its own list: the steps the earlier run finished stay done (and
-    carry no time of this run), the others are pending again with no time, so nothing of the old run's clock shows."""
+    carry no time of this run), the others are pending again with no time, so nothing of the old run's clock shows.
+    A Mac that runs now gets its "Stop the Mac" row even when the run was recorded without one (it was stopped at plan
+    time or stopped by the run and started since), while a step that changes the card or the disks is still to do: the row goes in front of
+    the first step still to do."""
+    row = _row(state, "stop")
+    if running and changes_disks(state) and (row is None or row["state"] == "done"):
+        if row is not None:      # a stop that finished before the Mac was started again does not count: it goes in front of what is left
+            state["steps"].remove(row)
+        now = dict(step_titles(state["kind"]))["stop"]
+        past = dict(step_titles(state["kind"], done=True))["stop"]
+        state["steps"].insert(resume_index(state), {"id": "stop", "title": now, "done": past, "state": "pending"})
     resume_at = resume_index(state)
     for idx, row in enumerate(state.get("steps", [])):
         row.pop("started", None)
@@ -10883,7 +10905,10 @@ for k in ("hostpci0", "vga", "args", "boot"):
   done <<<"$orig"
 }
 
-function driver_step_stop() { driver_begin stop || return 0; driver_stop_mac "$1" || return 1; driver_end stop; }
+function driver_step_stop() {
+  if driver_begin stop; then driver_stop_mac "$1" || return 1; driver_end stop; return 0; fi
+  driver_need_stopped "$1"       # a row this run does not list or finished before: a Mac that runs now is stopped all the same
+}
 
 function driver_step_snapshot() {
   driver_begin snapshot || return 0
@@ -11284,7 +11309,7 @@ function driver_apply_run() {
   DRIVER_VMID="$vmid"; DRIVER_SNAPSHOT=""; DRIVER_WANT_SNAPSHOT=""; DRIVER_EXTRA="{}"
   [ "$snap_ok" != yes ] || DRIVER_WANT_SNAPSHOT="$snap"
   if [ "$resume" == yes ]; then
-    driver_engine update-resume "$vmid"
+    driver_engine update-resume "$vmid" $(driver_is_stopped "$vmid" || echo running)
     DRIVER_SNAPSHOT=$(driver_state_get snapshot)
     driver_drop_unused "$vmid" || true     # a disk a device map still holds is told with its command, not a reason to stop
   else

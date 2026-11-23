@@ -18,13 +18,13 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -343,7 +343,10 @@ def todo_steps(kind, name, running, state):
     rows = (state or {}).get("steps", [])
     done = {r["id"] for r in rows if r.get("state") == "done"}
     listed = {r["id"] for r in rows}      # the run lists its own steps: a run that found the Mac stopped has no "Stop the Mac"
-    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done and (not listed or sid in listed)]
+    # a Mac that runs now is stopped first, whatever the run recorded, while a step that changes its disks is to do
+    return [(sid, title) for sid, title in plan_steps(kind, name, running)
+            if (sid == "stop" and running and changes_disks(state or {}))
+            or (sid not in done and (not listed or sid in listed))]
 
 
 def finish_facts(kind, snapshot="", undo=""):
@@ -637,8 +640,8 @@ def update_state_command(cmd, args):
         state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7],
                            running=args[9:] != ["stopped"])      # the 9th is the original, the 10th "stopped" for a Mac that is
         state.update(original=json.loads(args[8]) if len(args) > 8 and args[8] else None)
-    elif cmd == "update-resume":
-        reset_for_resume(state)
+    elif cmd == "update-resume":                  # the 2nd is "running" for a Mac that runs now: it gets its stop row
+        reset_for_resume(state, args[1:] == ["running"])
         state.update(phase="running", error="")
     elif cmd in ("update-add-disk", "update-forget-disk"):
         if not state:                 # no run is going or cut off for this Mac: there is nothing to write a disk into

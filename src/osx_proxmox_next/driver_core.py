@@ -93,7 +93,7 @@ class Updater:
             plan.kind, plan.name, plan.version_label, plan.step_name(), self._choice(),
             [{"name": n, "version": v} for n, v in plan.installed.items()], plan.cfg.get("hostpci0", ""), plan.running)
         if resume:
-            engine.reset_for_resume(self.state)
+            engine.reset_for_resume(self.state, self.running())
             self.state.setdefault("card", (self.state.get("original") or {}).get("hostpci0") or "")
         self.state.update(phase="running", error="", pid=os.getpid())
 

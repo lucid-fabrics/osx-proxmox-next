@@ -129,8 +129,13 @@ def test_the_finish_plan_lists_only_the_steps_the_stopped_run_had(target):
     """A run that found the Mac stopped has no "Stop the Mac" row, so a Finish never lists one that cannot tick."""
     state = driver_state.new_update("nvidia", "m", "v3.0", "NullMoth v3.0", {}, [], "", running=False)
     state["steps"][0].update(state="done")
-    todo = engine.todo_steps("nvidia", "NullMoth v3.0", True, state)      # the Mac runs now: the plan alone would list a stop
+    todo = engine.todo_steps("nvidia", "NullMoth v3.0", False, state)
     assert [sid for sid, _t in todo] == ["takeoff", "stage", "putback", "start", "verify"]
+    # the Mac runs now: it is stopped first before the card or the disks change, whatever the run recorded
+    assert [sid for sid, _t in engine.todo_steps("nvidia", "NullMoth v3.0", True, state)] == ["stop", "takeoff", "stage", "putback", "start", "verify"]
     old = {"steps": [{"id": "stop", "state": "done"}, {"id": "snapshot", "state": "fail"}]}
-    assert [sid for sid, _t in engine.todo_steps("nvidia", "x", True, old)] == ["snapshot"]
+    assert [sid for sid, _t in engine.todo_steps("nvidia", "x", True, old)] == ["stop", "snapshot"]
+    assert [sid for sid, _t in engine.todo_steps("nvidia", "x", False, old)] == ["snapshot"]
+    waiting = {"steps": [{"id": "putback", "state": "done"}, {"id": "start", "state": "done"}, {"id": "verify", "state": "pending"}]}
+    assert [sid for sid, _t in engine.todo_steps("nvidia", "x", True, waiting)] == ["verify"]      # only waiting for the first boot
     assert [sid for sid, _t in engine.todo_steps("nvidia", "x", False, {})] == [sid for sid, _t in engine.plan_steps("nvidia", "x", False)]

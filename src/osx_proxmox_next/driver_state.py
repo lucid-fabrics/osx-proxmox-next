@@ -189,9 +189,28 @@ def resume_index(state):
     return next((i for i, r in enumerate(state.get("steps", [])) if r["state"] != "done"), len(state.get("steps", [])))
 
 
-def reset_for_resume(state):
+CHANGES_DISKS = ("snapshot", "takeoff", "stage", "putback", "replace")     # the steps that need the Mac stopped
+
+
+def changes_disks(state):
+    """True while a step that changes the card or the disks is still to do: a run that only waits for the driver to
+    install at the first boot has nothing to stop the Mac for."""
+    return any(r["id"] in CHANGES_DISKS and r["state"] != "done" for r in state.get("steps", []))
+
+
+def reset_for_resume(state, running=False):
     """A run that goes on from where it stopped starts its own list: the steps the earlier run finished stay done (and
-    carry no time of this run), the others are pending again with no time, so nothing of the old run's clock shows."""
+    carry no time of this run), the others are pending again with no time, so nothing of the old run's clock shows.
+    A Mac that runs now gets its "Stop the Mac" row even when the run was recorded without one (it was stopped at plan
+    time or stopped by the run and started since), while a step that changes the card or the disks is still to do: the row goes in front of
+    the first step still to do."""
+    row = _row(state, "stop")
+    if running and changes_disks(state) and (row is None or row["state"] == "done"):
+        if row is not None:      # a stop that finished before the Mac was started again does not count: it goes in front of what is left
+            state["steps"].remove(row)
+        now = dict(step_titles(state["kind"]))["stop"]
+        past = dict(step_titles(state["kind"], done=True))["stop"]
+        state["steps"].insert(resume_index(state), {"id": "stop", "title": now, "done": past, "state": "pending"})
     resume_at = resume_index(state)
     for idx, row in enumerate(state.get("steps", [])):
         row.pop("started", None)
