@@ -1,17 +1,19 @@
 """Plans for the macOS 27 arm64 via Stela (beta) VM: plain `qm` and shell steps, nothing spliced into a shell.
 
-Stela is downloaded as one pinned release tarball and run; none of its source is part of this project. The VM is a normal
+Stela is built from one pinned commit that is fetched at run time (see stela.py); none of its source is part of this
+project. The VM is a normal
 Proxmox VM (OVMF, q35). Its boot stick is a raw image file, handed to the guest as a USB mass-storage device."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from .domain import PlanStep
 from .planner import build_destroy_plan
 from .stela import (
     MAX_VMID,
     MIN_VMID,
-    STELA_ASSET,
-    STELA_TAG,
+    STELA_FORKS,
     STELA_VM_TAG,
     StelaConfig,
     mac_for,
@@ -21,8 +23,8 @@ from .stela import (
 
 __all__ = [
     "SNIPPET_DIR", "STICK_DIR", "STICK_GB", "build_stela_destroy_plan", "build_stela_finish_plan", "build_stela_plan",
-    "hook_path", "hook_script",
-    "stela_qemu_args", "stela_vm_options", "stela_binary", "stick_path",
+    "BUILD_SCRIPT", "BUILD_TIMEOUT", "hook_path", "hook_script",
+    "stela_qemu_args", "stela_vm_options", "stela_binary", "stela_dir", "stick_path",
 ]
 
 SNIPPET_DIR = "/var/lib/vz/snippets"
@@ -34,27 +36,6 @@ _CHECK_SNIPPETS = """\
 set -euo pipefail
 pvesm status --content snippets | awk 'NR > 1 { print $1 }' | grep -qx "$1" \\
   || { echo "storage $1 does not allow snippets: enable the Snippets content type on it, then run again" >&2; exit 1; }
-"""
-
-# The release's SHA256SUMS must list the pinned checksum for the tarball, and the tarball must hash to it: a
-# moved tag or a swapped asset fails one of the two.
-_FETCH_STELA = """\
-set -euo pipefail
-base=$1; asset=$2; want=$3; dir=$4
-mkdir -p "$dir"; cd "$dir"
-curl -fsSL --retry 3 -o SHA256SUMS "$base/SHA256SUMS"
-listed=$(awk -v n="$asset" '$2 == n { print $1 }' SHA256SUMS)
-[ "$listed" = "$want" ] || { echo "the release SHA256SUMS lists '$listed' for $asset, not the pinned $want: refusing it" >&2; exit 1; }
-if [ -s "$asset" ] && ! echo "$want  $asset" | sha256sum -c --status -; then rm -f "$asset"; fi
-if [ ! -s "$asset" ]; then
-  rm -f "$asset.part"
-  curl -fL --retry 3 -o "$asset.part" "$base/$asset"
-  mv "$asset.part" "$asset"
-fi
-echo "$want  $asset" | sha256sum -c -
-rm -rf x; mkdir x
-tar -xzf "$asset" -C x --no-same-owner
-[ -x "$5" ] || { echo "the tarball has no $5" >&2; exit 1; }
 """
 
 # Stela writes the stick through a loop device: it wants the device size spelled as it prints it (decimal GB).
@@ -87,11 +68,17 @@ printf '%s\\n' "$tags" | grep -qx -- "$2" \\
   || { echo "VM $1 does not carry the $2 tag, so it was not made by this wizard: refusing to touch it" >&2; exit 1; }
 """
 
-_STELA_DIR = f"{STICK_DIR}/stela-{STELA_TAG}"
+BUILD_SCRIPT = str(Path(__file__).parent / "data" / "stela" / "build-stela.sh")
+BUILD_TIMEOUT = 6 * 3600     # the first build compiles Mesa and LLVM: about an hour on 32 cores, longer on fewer
 
 
-def stela_binary() -> str:
-    return f"{_STELA_DIR}/x/stela-{STELA_TAG}-linux-x86_64/stela"
+def stela_dir(commit: str) -> str:
+    """Where the build of one commit is cached: the stela binary, its stela.efi, BUILD-INFO and build.log."""
+    return f"{STICK_DIR}/stela-{commit[:12]}"
+
+
+def stela_binary(commit: str) -> str:
+    return f"{stela_dir(commit)}/stela"
 
 
 def stick_path(vmid: int) -> str:
@@ -164,9 +151,11 @@ def build_stela_plan(config: StelaConfig) -> list[PlanStep]:
     steps = [
         _sh("Check the VMID is free", _CHECK_FREE, vmid),
         _sh("Check snippet storage", _CHECK_SNIPPETS, _SNIPPET_STORAGE),
-        _sh("Download and check Stela", _FETCH_STELA, config.stela_url, STELA_ASSET, config.stela_sha256,
-            _STELA_DIR, stela_binary()),
-        _sh("Make the boot stick", _MAKE_STICK, stela_binary(), stick_path(config.vmid), str(STICK_GB)),
+        PlanStep(title="Fetch and build Stela", timeout=BUILD_TIMEOUT, argv=[
+            "bash", BUILD_SCRIPT, "host", config.stela_commit, stela_dir(config.stela_commit), config.storage,
+            config.bridge, *([config.stela_url] if config.stela_url else []), *STELA_FORKS]),
+        _sh("Make the boot stick", _MAKE_STICK, stela_binary(config.stela_commit), stick_path(config.vmid),
+            str(STICK_GB)),
         _sh("Write the VM's hook script", _WRITE_EXEC, hook_script(config.vmid, config.bridge), hook_path(config.vmid)),
         PlanStep(title="Create the VM", argv=["qm", "create", vmid, *stela_vm_options(config)]),
     ]

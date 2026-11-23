@@ -18,7 +18,6 @@ from .stela import (
     MAX_VMID,
     MIN_VMID,
     STELA_LABEL,
-    STELA_RELEASE_URL,
     StelaConfig,
     validate_stela_config,
 )
@@ -30,7 +29,7 @@ __all__ = ["add_parser", "finish_vm", "install_vm", "run"]
 
 
 def add_parser(sub: argparse._SubParsersAction) -> None:
-    stela = sub.add_parser("stela", help=f"{STELA_LABEL}: install macOS 27 with no Mac, using a downloaded Stela release")
+    stela = sub.add_parser("stela", help=f"{STELA_LABEL}: install macOS 27 with no Mac, building Stela from a pinned commit")
     actions = stela.add_subparsers(dest="stela_cmd", required=True)
     for name, text in (("plan", "Show the steps without running them"), ("apply", "Create the VM and run the install")):
         cmd = actions.add_parser(name, help=text)
@@ -42,8 +41,8 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
         cmd.add_argument("--disk", type=int, default=DEFAULT_DISK_GB, help="Disk in GB")
         cmd.add_argument("--bridge", default="vmbr0")
         cmd.add_argument("--gpu-pci", default="", help="Pass this host GPU to the VM, e.g. 0000:0a:00 (default none; see `stela gpus`)")
-        cmd.add_argument("--stela-url", default=STELA_RELEASE_URL,
-                         help="Folder with the Stela tarball and its SHA256SUMS (a mirror; the pinned sha256 is still required)")
+        cmd.add_argument("--stela-url", default="",
+                         help="A git URL tried before the built-in forks (a mirror); it must serve the pinned commit, which is the check")
         cmd.add_argument("--vga", default="std", choices=["std", "none"], help="Emulated display when no GPU is passed")
         if name == "plan":
             cmd.add_argument("--json", action="store_true", help="Print the plan as JSON")
@@ -79,7 +78,7 @@ def _print_plan(steps: list, as_json: bool) -> None:
         print(json.dumps([{"title": s.title, "argv": s.argv, "risk": s.risk} for s in steps], indent=2))
         return
     for idx, step in enumerate(steps, start=1):
-        detail = step.command if step.argv[0] != "bash" else f"bash script ({len(step.argv) - 4} arguments)"
+        detail = step.command if step.argv[:2] != ["bash", "-c"] else f"bash script ({len(step.argv) - 4} arguments)"
         print(f"{idx:>2}. {step.title}\n    {detail}")
 
 

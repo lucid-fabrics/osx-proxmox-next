@@ -8,7 +8,7 @@ import pytest
 from osx_proxmox_next import stela_cli
 from osx_proxmox_next.cli import build_parser, run_cli
 from osx_proxmox_next.executor import ApplyResult, StepResult
-from osx_proxmox_next.stela import STELA_RELEASE_URL, StelaConfig
+from osx_proxmox_next.stela import STELA_COMMIT, STELA_FORKS, StelaConfig
 from osx_proxmox_next.stela_gpus import HostGpu
 from osx_proxmox_next.stela_install import InstallResult
 
@@ -95,7 +95,7 @@ def wire(monkeypatch, plan_ok=True, outcome=None):
         for idx, step in enumerate(steps, start=1):
             on_step(idx, len(steps), step, None)
         if not plan_ok:
-            on_step(3, len(steps), steps[2], StepResult(steps[2].title, "x", False, 1, "curl: (22) 404"))
+            on_step(3, len(steps), steps[2], StepResult(steps[2].title, "x", False, 1, "no fork serves the commit"))
         return ApplyResult(plan_ok, [], log_path=None)
 
     monkeypatch.setattr(stela_cli, "apply_plan", fake_apply)
@@ -120,7 +120,7 @@ def test_a_failed_plan_step_stops_before_the_driver_and_shows_its_output(monkeyp
     wire(monkeypatch, plan_ok=False)
     lines: list[str] = []
     assert stela_cli.install_vm(CONFIG, lines.append) is False
-    assert any("FAILED: Download and check Stela\ncurl: (22) 404" in line for line in lines)
+    assert any("FAILED: Fetch and build Stela\nno fork serves the commit" in line for line in lines)
     assert not any("Serial log" in line for line in lines)
 
 
@@ -141,10 +141,16 @@ def test_apply_execute_returns_the_install_result(monkeypatch, capsys):
     assert run_cli(args) == 1
 
 
-def test_the_default_download_folder_is_the_pinned_release(monkeypatch, capsys):
+def test_the_default_build_uses_the_pinned_commit_and_the_built_in_forks(monkeypatch, capsys):
     assert run_cli([*BASE, "--json"]) == 0
-    argv = next(s["argv"] for s in json.loads(capsys.readouterr().out) if s["title"] == "Download and check Stela")
-    assert argv[4] == STELA_RELEASE_URL
+    argv = next(s["argv"] for s in json.loads(capsys.readouterr().out) if s["title"] == "Fetch and build Stela")
+    assert argv[3] == STELA_COMMIT and argv[7:] == list(STELA_FORKS)
+
+
+def test_stela_url_adds_a_mirror_before_the_forks(monkeypatch, capsys):
+    assert run_cli([*BASE, "--stela-url", "http://127.0.0.1:9418/Stela.git", "--json"]) == 0
+    argv = next(s["argv"] for s in json.loads(capsys.readouterr().out) if s["title"] == "Fetch and build Stela")
+    assert argv[7] == "http://127.0.0.1:9418/Stela.git" and argv[8:] == list(STELA_FORKS)
 
 
 # ── finish: add a GPU to an installed VM and boot it ─────────────────────────────────────────────────────

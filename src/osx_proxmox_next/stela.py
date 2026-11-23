@@ -1,9 +1,11 @@
 """The macOS 27 arm64 via Stela (beta) target: what the user chooses and the rules every value must pass.
 
-Stela (https://github.com/tylertms/Stela) installs macOS on a PC with no Mac. This project never vendors or copies its
-source: at install time it downloads one pinned release tarball, checks it against a pinned sha256 and against the
-release's own SHA256SUMS, and runs the `stela` binary inside. Every value below ends up in a `qm` argument, a shell
-argument or the VM's hook script, so each is restricted to a small character set before any plan is built."""
+Stela installs macOS on a PC with no Mac. Its author withdrew the upstream repository (tylertms/Stela) on 2026-11-22
+and removed the releases, so this project builds Stela from source. It never vendors or copies that source: at install
+time it fetches one pinned commit, by its sha, from an ordered list of forks (any fork that serves the sha is as good as
+any other, because git checks the object hash), builds it in a throwaway Debian 13 container on the host and caches the
+result. Every value below ends up in a `qm` argument, a shell argument or the VM's hook script, so each is restricted to
+a small character set before any plan is built."""
 
 from __future__ import annotations
 
@@ -12,16 +14,21 @@ from dataclasses import dataclass
 
 __all__ = [
     "DEFAULT_CORES", "DEFAULT_DISK_GB", "DEFAULT_MEMORY_MB", "MAX_VMID", "MIN_CORES", "MIN_DISK_GB", "MIN_MEMORY_MB",
-    "MIN_VMID", "STELA_ASSET", "STELA_LABEL", "STELA_RELEASE_URL", "STELA_SHA256", "STELA_TAG", "STELA_VM_TAG",
-    "StelaConfig", "mac_for", "tap_for", "validate_stela_config",
+    "MIN_VMID", "STELA_COMMIT", "STELA_FORKS", "STELA_LABEL", "STELA_TAG", "STELA_VM_TAG", "StelaConfig", "mac_for",
+    "tap_for", "validate_stela_config",
 ]
 
 STELA_LABEL = "macOS 27 arm64 via Stela (beta)"
 STELA_VM_TAG = "osx-next-stela"          # the Proxmox tag the VM carries
 STELA_TAG = "v0.5.0"
-STELA_ASSET = f"stela-{STELA_TAG}-linux-x86_64.tar.gz"
-STELA_RELEASE_URL = f"https://github.com/tylertms/Stela/releases/download/{STELA_TAG}"
-STELA_SHA256 = "6236ddffb39e52ffd6ea71ec3a763788e75497493f4de19ad9e8a35a3722ed6a"   # of STELA_ASSET, checked twice
+# The commit the tag v0.5.0 names. Four forks serve it by sha (InSnh-Gd also keeps the tag); the object hash is the check.
+STELA_COMMIT = "cd732c12f6c4d0fdfb5fffba2f68c09f2bbf21fc"
+STELA_FORKS = (
+    "https://github.com/InSnh-Gd/Stela.git",
+    "https://github.com/xiloe85/Stela.git",
+    "https://github.com/AnthoDingo/Stela.git",
+    "https://github.com/rschulzgit/Stela.git",
+)
 
 MIN_VMID = 100
 MAX_VMID = 999999
@@ -37,7 +44,7 @@ _STORAGE_RE = re.compile(r"[a-zA-Z0-9_\-]+")
 _BRIDGE_RE = re.compile(r"vmbr[0-9]+")
 _PCI_RE = re.compile(r"([0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}(\.[0-7])?")   # no function = every function of the card
 _VGA_VALUES = ("none", "std")
-_URL_RE = re.compile(r"https?://[A-Za-z0-9._\-]+(:[0-9]{1,5})?(/[A-Za-z0-9._\-]+)*")
+_URL_RE = re.compile(r"(https?|git)://[A-Za-z0-9._\-]+(:[0-9]{1,5})?(/[A-Za-z0-9._\-]+)*")
 
 
 @dataclass
@@ -51,8 +58,8 @@ class StelaConfig:
     bridge: str = "vmbr0"
     gpu_pci: str = ""        # a free host GPU to pass to the VM (all its functions when no .N); empty = no GPU
     vga: str = "std"         # the emulated display when there is no GPU: std | none (ignored with a GPU)
-    stela_sha256: str = STELA_SHA256
-    stela_url: str = STELA_RELEASE_URL    # folder that holds the tarball and its SHA256SUMS: a mirror is fine, the pin still decides
+    stela_commit: str = STELA_COMMIT
+    stela_url: str = ""      # a git URL tried before STELA_FORKS (a mirror); it must serve stela_commit, the sha decides
 
 
 def mac_for(vmid: int) -> str:
@@ -85,8 +92,8 @@ def validate_stela_config(config: StelaConfig) -> list[str]:
         issues.append("GPU address must look like 0a:00 or 0000:0a:00.0.")
     if config.vga not in _VGA_VALUES:
         issues.append("Display must be none or std.")
-    if not _URL_RE.fullmatch(config.stela_url):
-        issues.append("The Stela download folder must be an http(s) URL with a plain path.")
-    if not re.fullmatch(r"[0-9a-f]{64}", config.stela_sha256):
-        issues.append("The Stela checksum must be 64 lowercase hex characters.")
+    if config.stela_url and not _URL_RE.fullmatch(config.stela_url):
+        issues.append("The Stela mirror must be an http(s) or git URL with a plain path.")
+    if not re.fullmatch(r"[0-9a-f]{40}", config.stela_commit):
+        issues.append("The Stela commit must be 40 lowercase hex characters.")
     return issues
