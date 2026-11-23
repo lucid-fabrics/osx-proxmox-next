@@ -134,8 +134,9 @@ def run_status(args: argparse.Namespace) -> int:
                            if plan.installed_known else "installed version unknown"))
     if plan.target:
         print("Latest:    " + engine.driver_line(plan.kind, plan.target.versions()))
-        print({"update": "A newer driver is available.", "current": "Up to date.",
-               "unknown": "The installed version is not known."}.get(data["state"], ""))
+        if not plan.interrupted:       # a stopped update has one verdict: the unfinished line above and its next step
+            print({"update": "A newer driver is available.", "current": "Up to date.",
+                   "unknown": "The installed version is not known."}.get(data["state"], ""))
     print("Driver snapshots: " + (", ".join(data["snapshots"]) or "none"))
     return 0
 

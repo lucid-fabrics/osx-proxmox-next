@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from . import driver_amd, driver_disks, driver_engine as engine, driver_intel, driver_nvidia, driver_snapshot
+from . import driver_amd, driver_disks, driver_oc, driver_engine as engine, driver_intel, driver_nvidia, driver_snapshot
 from .driver_core import DriverError, RunEnv, RunResult, Updater, stop_mac
-from .driver_plan import DriverPlan, prepare
+from .driver_plan import DISK_COMPONENTS, DriverPlan, prepare
 from .driver_targets import Choice
 from .gpu import parse_config
 from .igpu_finish import FinishError, _drop_disk
@@ -180,6 +180,21 @@ def _step(env: RunEnv, sid: str, state: str, titles: dict[str, tuple[str, str]])
         env.on_event(titles[sid][1] if state == "done" else titles[sid][0] + " failed")
 
 
+def _read_disk_after_undo(vmid: int, env: RunEnv) -> None:
+    """The Mac is stopped and rolled back: the versions on its OpenCore disk are the truth, and the record takes them (flagged
+    as read from the disk) so the screens do not say "from the last update" once the Mac runs again. A disk that cannot be
+    read leaves the record as it is: it is a courtesy."""
+    kind = engine.read_record(vmid, env.base).get("kind", "")
+    names = DISK_COMPONENTS.get(kind)
+    if not names:
+        return
+    try:
+        found = driver_oc.read_versions(env.pve, vmid, list(names))
+    except Exception:  # noqa: BLE001 - a courtesy after the rollback: whatever goes wrong here must not fail the undo
+        return
+    engine.mark_disk_read(vmid, found, env.base)
+
+
 def put_back(vmid: int, env: RunEnv) -> str:
     """Undo the driver update: the Mac's disks go back to the newest driver snapshot of this tool and the record goes
     back to the previous version. Reports each step through env.on_step (stop, release, rollback, start). Returns the
@@ -208,6 +223,7 @@ def put_back(vmid: int, env: RunEnv) -> str:
         _remove_used_snapshot(env, vmid, name)
         engine.revert_record(vmid, env.base)
         engine.stamp_record(vmid, driver_disks.fingerprint(env.pve, parse_config(env.pve.qm("config", str(vmid)).output)), env.base)
+        _read_disk_after_undo(vmid, env)
         engine.clear_update(vmid, env.base)
         _step(env, "rollback", "done", titles)
         current = "start"

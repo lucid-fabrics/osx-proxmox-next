@@ -45,6 +45,7 @@ __all__ = ["DriverScreen", "DriverView", "build_before", "load_view"]
 MAX_RELEASES = 10
 START_GRACE = 120      # seconds a spawned update gets to write its first state before it counts as failed
 DRIVER_LABEL = 10
+UNDO_LOSS_LINE = "Changes made in macOS since the update are lost. Enter keeps the Mac as it is."
 
 
 @dataclass
@@ -146,7 +147,7 @@ class DriverScreen(OsxScreen):
     # ── layout ───────────────────────────────────────────────────────
 
     def crumb(self) -> str:
-        return f"{self.mac or 'VM %d' % self.vmid} › Graphics card BETA"
+        return f"{self.mac or 'VM %d' % self.vmid} › Graphics card"
 
     def compose_body(self) -> ComposeResult:
         yield Vertical(id="gpu")
@@ -293,20 +294,22 @@ class DriverScreen(OsxScreen):
                                     style=pal["muted"]), id="d-pinned"))
         if pending:
             rows.append(Static(Text("\n! " + self._pending_text(), style=pal["warning"]), id="d-unfinished"))
-        side = Vertical(Static(Text("What Finish does" if pending else "What happens", style=pal["muted"]), classes="side-title"),
-                        Lines(id="d-facts"), id="g-side")
-        form = Vertical(*rows, Static(self._safe_text(), id="g-safe"), id="g-form")
-        self._label = self._enter_label(pending)
         can_go = self._can_go(pending)
+        # a screen shows only what applies now: with nothing to do there is no "What happens" panel and no new snapshot name
+        side = Vertical(Static(Text("What Finish does" if pending else "What happens", style=pal["muted"]), classes="side-title"),
+                        Lines(id="d-facts"), id="g-side") if can_go else None
+        form = Vertical(*rows, Static(self._safe_text(can_go), id="g-safe"), id="g-form")
+        self._label = self._enter_label(pending)
         action = Horizontal(Static(Text(self._note_text(can_go, picker is not None, pending), style=pal["muted"]), id="g-note"),
                             *([Button(self._label, id="d-go", classes="primary")] if can_go else []), id="g-action")
-        await self._show(Static(title, id="g-title"), Horizontal(form, side, id="g-cols"), Static("", id="g-result"),
+        await self._show(Static(title, id="g-title"), Horizontal(*([form, side] if side else [form]), id="g-cols"), Static("", id="g-result"),
                          action, mode="attached")
         self._facts()
         self._focus_row()
 
-    def _safe_text(self) -> Text:
-        """The snapshot line: before any update it says one is saved first; after one, what r does."""
+    def _safe_text(self, can_go: bool = True) -> Text:
+        """The snapshot line: before any update it says one is saved first (only when an update can start); after one,
+        what r does."""
         pal = self.app.get_css_variables()
         snaps = self.plan.older_snapshots if self.view else []
         if snaps:
@@ -314,6 +317,8 @@ class DriverScreen(OsxScreen):
                                  ("r", "bold " + pal["accent"]), " undoes the driver update.")
         if self.plan.interrupted:
             return Text.assemble(("! ", pal["warning"]), "This update has no driver snapshot, so it cannot be undone.")
+        if not can_go:
+            return Text("")
         return Text.assemble(("✓ ", pal["success"]), "A snapshot is saved first, so the update can be undone.")
 
     def _note_text(self, can_go: bool, has_picker: bool, pending: bool = False) -> str:
@@ -364,7 +369,7 @@ class DriverScreen(OsxScreen):
     def _facts(self) -> None:
         pal = self.app.get_css_variables()
         plan = self.plan
-        if plan.refusals:
+        if plan.refusals or not self.query("#d-facts"):
             return
         if plan.interrupted:         # what Finish does: no new snapshot, no "saved first"
             facts = engine.finish_facts(plan.kind, self._state().get("snapshot", ""))
@@ -706,9 +711,11 @@ class DriverScreen(OsxScreen):
             if result == "yes":
                 self._put_back()
 
+        # Cancel keeps the focus (enter cancels): the undo rolls the disk back, so a stray enter must not confirm it
         self.app.push_screen(ConfirmDialog("Undo the driver update?", [
             f"The Mac stops, its disks go back to the snapshot of {engine.snapshot_date(name)} and it starts again.",
-            "Everything you did in macOS since then is lost."], confirm="Undo driver update", danger=True), answer)
+            UNDO_LOSS_LINE], confirm="Undo driver update", danger=True, enter="Cancel", confirm_key="tab, then enter"),
+            answer)
 
     def _put_back(self) -> None:
         """The undo runs in a worker; its screen (the steps, ✓ and ◐ like the update) is up from the first second."""

@@ -169,7 +169,9 @@ def installed_versions(pve: ProxmoxAdapter, vmid: int, kind: str, running: bool,
                 have = {}       # the disk disagrees: what the record says about the other parts is stale too
             have.update(found)
     if source is not None:
-        source["record"] = bool(have) and kind in DISK_COMPONENTS and not found
+        # an undo read the disk while the Mac was stopped and flagged the record (a record of other disks was dropped above)
+        read_by_undo = bool(record.get("disk_read"))
+        source["record"] = bool(have) and kind in DISK_COMPONENTS and not found and not read_by_undo
     return have, bool(have)
 
 

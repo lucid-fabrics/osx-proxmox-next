@@ -139,7 +139,24 @@ def revert_record(vmid, base=None):
     data["components"] = data.pop("previous")
     data.pop("snapshot", None)
     data.pop("snapshot_card", None)
+    data.pop("disk_read", None)
     data["updated"] = now_iso()
+    _write_json(record_path(vmid, base), data)
+    return True
+
+
+def mark_disk_read(vmid, found, base=None):
+    """After an undo the Mac's OpenCore disk was read (the Mac was stopped): *found* ({name: version}) replaces what the
+    record says of those components and the record is flagged, so the screens do not call the versions "from the last
+    update" once the Mac runs again. False, changing nothing, when there is no record or nothing was read."""
+    found = {n: v for n, v in (found or {}).items() if v}
+    data = _read_json(record_path(vmid, base))
+    if not data or not found:
+        return False
+    parts = [c for c in data.get("components", []) if c.get("name") not in found]
+    parts += [component(n, v, v, "", "disk") for n, v in found.items()]
+    data["components"] = parts
+    data["disk_read"] = True
     _write_json(record_path(vmid, base), data)
     return True
 
@@ -261,14 +278,20 @@ def driver_line(kind, installed):
 # ── plan lines ───────────────────────────────────────────────────────
 
 def change_lines(kind, installed, target):
-    """One line per component: what changes, in plain words."""
+    """One line per component: what changes, in plain words. A component that already has the target version is
+    "reinstalled" only when nothing else is behind (the whole driver goes in again); next to one that is behind it is
+    "already X, kept", except on Intel, where the kext and the graphics package always go in together."""
     lines = []
+    all_current = judge(installed, target)["state"] == "current"
     for name, want in target.items():
         have = installed.get(name, "")
         if not have:
             lines.append("%s: installed version unknown, to %s" % (name, want))
-        elif have == want:
+        elif have == want and all_current:
             lines.append("%s: %s, reinstalled" % (name, want))
+        elif have == want:
+            lines.append("%s: already %s, %s" % (name, want, "installed again with the update"
+                                                  if kind == "intel" else "kept"))
         elif compare(have, want) > 0:
             lines.append("%s: %s is newer than %s, kept" % (name, have, want))
         else:
@@ -506,6 +529,8 @@ def main(argv):
                            fingerprint=argv[9] if len(argv) > 9 else ""))
     elif cmd == "revert" and len(argv) == 3:
         return 0 if revert_record(argv[2]) else 1
+    elif cmd == "disk-read" and len(argv) == 4:
+        return 0 if mark_disk_read(argv[2], json.loads(argv[3])) else 1
     elif cmd == "component" and len(argv) in (4, 7):
         _emit(component(argv[2], argv[3], *(argv[4:7] if len(argv) == 7 else ())))
     elif cmd == "judge" and len(argv) == 4:

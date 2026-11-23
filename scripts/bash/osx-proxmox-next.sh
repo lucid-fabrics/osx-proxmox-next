@@ -8359,7 +8359,24 @@ def revert_record(vmid, base=None):
     data["components"] = data.pop("previous")
     data.pop("snapshot", None)
     data.pop("snapshot_card", None)
+    data.pop("disk_read", None)
     data["updated"] = now_iso()
+    _write_json(record_path(vmid, base), data)
+    return True
+
+
+def mark_disk_read(vmid, found, base=None):
+    """After an undo the Mac's OpenCore disk was read (the Mac was stopped): *found* ({name: version}) replaces what the
+    record says of those components and the record is flagged, so the screens do not call the versions "from the last
+    update" once the Mac runs again. False, changing nothing, when there is no record or nothing was read."""
+    found = {n: v for n, v in (found or {}).items() if v}
+    data = _read_json(record_path(vmid, base))
+    if not data or not found:
+        return False
+    parts = [c for c in data.get("components", []) if c.get("name") not in found]
+    parts += [component(n, v, v, "", "disk") for n, v in found.items()]
+    data["components"] = parts
+    data["disk_read"] = True
     _write_json(record_path(vmid, base), data)
     return True
 
@@ -8481,14 +8498,20 @@ def driver_line(kind, installed):
 # ── plan lines ───────────────────────────────────────────────────────
 
 def change_lines(kind, installed, target):
-    """One line per component: what changes, in plain words."""
+    """One line per component: what changes, in plain words. A component that already has the target version is
+    "reinstalled" only when nothing else is behind (the whole driver goes in again); next to one that is behind it is
+    "already X, kept", except on Intel, where the kext and the graphics package always go in together."""
     lines = []
+    all_current = judge(installed, target)["state"] == "current"
     for name, want in target.items():
         have = installed.get(name, "")
         if not have:
             lines.append("%s: installed version unknown, to %s" % (name, want))
-        elif have == want:
+        elif have == want and all_current:
             lines.append("%s: %s, reinstalled" % (name, want))
+        elif have == want:
+            lines.append("%s: already %s, %s" % (name, want, "installed again with the update"
+                                                  if kind == "intel" else "kept"))
         elif compare(have, want) > 0:
             lines.append("%s: %s is newer than %s, kept" % (name, have, want))
         else:
@@ -8726,6 +8749,8 @@ def main(argv):
                            fingerprint=argv[9] if len(argv) > 9 else ""))
     elif cmd == "revert" and len(argv) == 3:
         return 0 if revert_record(argv[2]) else 1
+    elif cmd == "disk-read" and len(argv) == 4:
+        return 0 if mark_disk_read(argv[2], json.loads(argv[3])) else 1
     elif cmd == "component" and len(argv) in (4, 7):
         _emit(component(argv[2], argv[3], *(argv[4:7] if len(argv) == 7 else ())))
     elif cmd == "judge" and len(argv) == 4:
@@ -10374,7 +10399,7 @@ function igpu_check_command() {
   return 2
 }
 
-# ── Driver update (BETA) begin ──
+# ── Driver update begin ──
 # `osx-proxmox-next.sh driver-status|driver-update|driver-undo <vmid>`: update the graphics driver of a Mac that has a
 # card attached (NullMoth for NVIDIA, WhateverXe and its graphics package for Intel, Lilu and WhateverGreen for AMD).
 # Mirrors driver_cli.py. The record file, the plan lines, the refusal texts and the state of a run come from
@@ -10565,7 +10590,9 @@ print(json.dumps({c["name"]: c["version"] for c in d.get("components", []) if c[
   fi
   [ -n "$disk" ] || disk="{}"
   # whose word the versions are: the record's when the disk was not read (Intel and AMD only; NVIDIA has only the record)
-  { [ "$disk" == "{}" ] && [ -n "$names" ] && [ "$json" != "{}" ] && echo record || echo disk; } >"${TEMP_DIR:-/tmp}/osx-next-driver-src-$vmid" 2>/dev/null || true
+  # (an undo read the disk while the Mac was stopped and flagged the record: that is the disk's word)
+  { [ "$disk" == "{}" ] && [ -n "$names" ] && [ "$json" != "{}" ] \
+    && [ "$(driver_engine record "$vmid" | gpu_json 'bool(d.get("disk_read"))')" != True ] && echo record || echo disk; } >"${TEMP_DIR:-/tmp}/osx-next-driver-src-$vmid" 2>/dev/null || true
   python3 -c 'import json,re,sys
 have, found = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 def key(t):
@@ -11068,11 +11095,13 @@ function driver_status_command() {
   else echo "Installed: installed version unknown"; fi
   if [ "$have_latest" == yes ]; then
     echo "Latest:    $(python3 -c 'import json,sys; names={"nvidia": ["NullMoth"], "intel": ["WhateverXe", "WhateverXe Graphics"], "amd": ["Lilu", "WhateverGreen"]}[sys.argv[2]]; d=json.loads(sys.argv[1]); print(" and ".join("%s %s" % (n, d[n]) for n in names if d.get(n)))' "$latest" "$kind")"
-    case "$verdict" in
-      update) echo "A newer driver is available." ;;
-      current) echo "Up to date." ;;
-      unknown) echo "The installed version is not known." ;;
-    esac
+    if [ "$interrupted" != yes ]; then     # a stopped update has one verdict: the unfinished line above and its next step
+      case "$verdict" in
+        update) echo "A newer driver is available." ;;
+        current) echo "Up to date." ;;
+        unknown) echo "The installed version is not known." ;;
+      esac
+    fi
   fi
   echo "Driver snapshots: ${snaps:-none}"
 }
@@ -11221,6 +11250,17 @@ function driver_undo_target() {
   if driver_engine card-changed "$saved" "$current" "$interrupted"; then echo "ERROR: $(driver_text REFUSE_CARD_CHANGED)"; return 2; fi
 }
 
+# After an undo the Mac is stopped and rolled back: the kexts on its OpenCore disk are the truth, and the record takes them
+# (flagged as read from the disk). A disk that cannot be read leaves the record as it is. $1 vmid
+function driver_undo_read_disk() {
+  local vmid="$1" kind names found
+  kind=$(driver_engine record "$vmid" | gpu_json 'd.get("kind", "")') || return 0
+  case "$kind" in amd) names="Lilu.kext WhateverGreen.kext" ;; intel) names="WhateverXe.kext" ;; *) return 0 ;; esac
+  # shellcheck disable=SC2086
+  found=$(driver_oc_kext "$vmid" versions $names 2>/dev/null | gpu_json 'json.dumps({k[:-5]: v for k, v in d.items() if v})') || return 0
+  [ -z "$found" ] || driver_engine disk-read "$vmid" "$found" >/dev/null 2>&1 || true
+}
+
 # `osx-proxmox-next.sh driver-undo <vmid> [--yes]`
 function driver_undo_command() {
   local vmid="${1:-}" yes=no reply was_running=no slot rc=0 why="" failed
@@ -11271,13 +11311,14 @@ function driver_undo_command() {
   else echo "  Could not remove the driver snapshot $DRIVER_UNDO_NAME. Remove it with: qm delsnapshot $vmid $DRIVER_UNDO_NAME"; fi
   driver_engine revert "$vmid" || true
   driver_engine stamp "$vmid" "$(driver_fingerprint "$vmid")" || true
+  driver_undo_read_disk "$vmid"
   driver_engine update-clear "$vmid"
   echo "  Put the snapshot back"
   qm start "$vmid" >/dev/null 2>&1 || echo "It did not start: start it from the Proxmox console."
   driver_lock_release "$vmid"
   echo "Done. VM $vmid is back to $DRIVER_UNDO_NAME."
 }
-# ── Driver update (BETA) end ──
+# ── Driver update end ──
 
 # ── The walkthrough ──
 

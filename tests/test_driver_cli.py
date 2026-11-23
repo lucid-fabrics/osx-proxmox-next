@@ -56,7 +56,8 @@ def test_status_for_a_mac_with_no_record_and_one_that_is_up_to_date_or_cut_off(h
     host["pve"].snapshots.clear()
     assert run("driver-status", "--vmid", "109") == 0
     out = capsys.readouterr().out
-    assert "Up to date." in out and "Driver snapshots: none" in out and "driver-update --vmid 109 --finish --yes" in out
+    assert "Driver snapshots: none" in out and "driver-update --vmid 109 --finish --yes" in out
+    assert "Up to date." not in out                      # one verdict: the unfinished update and its next step
     assert "The driver update stopped before it finished." in out and "driver-undo --vmid 109" in out
 
 
@@ -328,3 +329,10 @@ def test_the_home_marker_stays_after_an_undo_before_any_check_ran():
     assert driver_check.has_update(109)
     engine.write_record(109, "nvidia", comps(NullMoth="v2.9"), latest={"NullMoth": "v2.9"})
     assert not driver_check.has_update(109)
+
+
+def test_status_of_an_up_to_date_mac_that_finished_says_up_to_date(host, capsys):
+    engine.write_record(109, "nvidia", comps(NullMoth="v2.9"))
+    assert run("driver-status", "--vmid", "109") == 0
+    out = capsys.readouterr().out
+    assert "Up to date." in out and "stopped before it finished" not in out
