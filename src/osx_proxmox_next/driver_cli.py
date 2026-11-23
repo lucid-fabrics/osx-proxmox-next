@@ -131,7 +131,7 @@ def run_status(args: argparse.Namespace) -> int:
         print("The driver update stopped before it finished. Finish it: osx-next-cli driver-update --vmid %d --finish --yes"
               " (or undo it: osx-next-cli driver-undo --vmid %d)." % (args.vmid, args.vmid))
     print("Installed: " + (engine.driver_line(plan.kind, plan.installed) + (" " + engine.FROM_RECORD if plan.from_record else "")
-                           if plan.installed_known else "installed version unknown"))
+                           if plan.installed_known else "installed version unknown" + (f" ({plan.unknown_why})" if plan.unknown_why else "")))
     if plan.target:
         print("Latest:    " + engine.driver_line(plan.kind, plan.target.versions()))
         if not plan.interrupted:       # a stopped update has one verdict: the unfinished line above and its next step

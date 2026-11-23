@@ -2,6 +2,8 @@
 
 Usage: oc_kext.py <EFI/OC directory> versions <Name.kext>...
        oc_kext.py <EFI/OC directory> replace <Name.kext> <zip> <sha256>
+       oc_kext.py <EFI/OC directory> marker <Name>
+       oc_kext.py <EFI/OC directory> mark <Name> <version>
 
 The Python CLI/TUI and the standalone bash installer run this exact text (the bash script embeds it verbatim;
 tests/test_driver_parity.py diffs the two). Standard library only.
@@ -12,6 +14,9 @@ replace   Checks the zip against its SHA-256, unpacks the bundle into Kexts/ (fo
           wrapping folder) in place of the old copy and prints `VERSION <new version>`. config.plist is left alone, byte for
           byte, unless its entry for the bundle names an executable that the new bundle does not have: then only that
           ExecutablePath is corrected. A bundle that config.plist does not list is reported and not added.
+marker    Prints {Name: version, or "" when none was written}: the version a driver without a kext of its own (NullMoth)
+          left on this disk. The file rolls back with the disk, so it tells the version of the Mac as it is now. Read only.
+mark      Writes that file (EFI/OC/osx-next-<Name>.version) after a driver was staged.
 
 Exit codes: 0 ok, 2 refused (nothing changed), 64 usage.
 """
@@ -19,6 +24,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import sys
 import zipfile
@@ -57,6 +63,30 @@ def versions(oc_dir, bundles):
             refuse('%r is not a kext name' % bundle, 64)
         out[bundle] = str(bundle_info(kexts, bundle).get('CFBundleShortVersionString') or '')
     sys.stdout.write(json.dumps(out, sort_keys=True) + '\n')
+
+
+def marker_path(oc_dir, name):
+    if not re.fullmatch(r'[A-Za-z0-9]{1,32}', name):
+        refuse('%r is not a driver name' % name, 64)
+    return os.path.join(oc_dir, 'osx-next-%s.version' % name)
+
+
+def marker(oc_dir, name):
+    try:
+        with open(marker_path(oc_dir, name), encoding='utf-8') as f:
+            text = f.read().strip()
+    except OSError:
+        text = ''
+    sys.stdout.write(json.dumps({name: text if re.fullmatch(r'[A-Za-z0-9._+-]{1,40}', text) else ''}) + '\n')
+
+
+def mark(oc_dir, name, version):
+    if not re.fullmatch(r'[A-Za-z0-9._+-]{1,40}', version):
+        refuse('%r is not a version' % version, 64)
+    path = marker_path(oc_dir, name)
+    with open(path + '.tmp', 'w', encoding='utf-8') as f:
+        f.write(version + '\n')
+    os.replace(path + '.tmp', path)
 
 
 def find_bundle(names, bundle):
@@ -152,6 +182,10 @@ def replace(oc_dir, bundle, zip_path, expected):
 def main(argv):
     if len(argv) >= 4 and argv[2] == 'versions':
         versions(argv[1], argv[3:])
+    elif len(argv) == 4 and argv[2] == 'marker':
+        marker(argv[1], argv[3])
+    elif len(argv) == 5 and argv[2] == 'mark':
+        mark(argv[1], argv[3], argv[4])
     elif len(argv) == 6 and argv[2] == 'replace':
         replace(argv[1], argv[3], argv[4], argv[5])
     else:

@@ -56,9 +56,11 @@ class DriverView:
     graphics: list[dict] = field(default_factory=list)   # Intel: the releases of the graphics package
 
 
-def load_view(vmid: int, choice: Choice | None = None, releases: bool = True) -> DriverView:
-    """Worker work: the plan (Proxmox, GitHub) and the picker's releases. A release list that cannot be read is empty."""
-    plan = prepare(vmid, choice, reinstall=True)
+def load_view(vmid: int, choice: Choice | None = None, releases: bool = True, reinstall: bool = False) -> DriverView:
+    """Worker work: the plan (Proxmox, GitHub) and the picker's releases. A release list that cannot be read is empty.
+    *reinstall* is for a plan the user asked for by moving the version row: a Mac that is up to date has nothing to do
+    until then, so its screen has no "What happens" panel and no button."""
+    plan = prepare(vmid, choice, reinstall=reinstall)
     found: list[dict] = []
     graphics: list[dict] = []
     if releases and plan.kind in ("nvidia", "intel"):
@@ -188,7 +190,7 @@ class DriverScreen(OsxScreen):
 
         def work() -> None:
             try:
-                view = load_view(self.vmid, choice, releases=not keep_picker or self.view is None)
+                view = load_view(self.vmid, choice, releases=not keep_picker or self.view is None, reinstall=keep_picker)
             except Exception as exc:  # noqa: BLE001
                 log.exception("driver view failed")
                 self.app.call_from_thread(self._load_failed, str(exc))
@@ -232,7 +234,10 @@ class DriverScreen(OsxScreen):
         plan = self.plan
         pal = self.app.get_css_variables()
         if not plan.installed_known:
-            return [Static(self._row("Driver", Text("installed version unknown", style=pal["muted"])), id="d-driver")]
+            rows = [Static(self._row("Driver", Text("installed version unknown", style=pal["muted"])), id="d-driver")]
+            if plan.unknown_why:      # a version that cannot be read says why, in words that wrap
+                rows.append(Static(Text(" " + " " * DRIVER_LABEL + plan.unknown_why[:1].upper() + plan.unknown_why[1:] + ".", style=pal["muted"]), id="d-why"))
+            return rows
         parts = [f"{n} {plan.installed[n]}" for n in engine.COMPONENTS[plan.kind] if plan.installed.get(n)]
         rows: list[Widget] = [Static(self._row("Driver" if i == 0 else "", Text(part, style="bold")), id="d-driver" if i == 0 else f"d-driver-{i + 1}")
                               for i, part in enumerate(parts)]

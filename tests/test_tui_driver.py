@@ -53,8 +53,9 @@ def host(monkeypatch):
     state = {"view": DriverView(plan(installed={"NullMoth": "v2.8.1"}), releases()), "spawned": [], "views": [], "put_back": [], "removed": [],
              "undo": NEW_SNAP}
 
-    def load(vmid, choice=None, releases=True):
+    def load(vmid, choice=None, releases=True, reinstall=False):
         state["views"].append(choice)
+        state.setdefault("reinstalls", []).append(reinstall)
         view = state["view"]
         if choice is not None and choice.nullmoth:
             target = nv_target(choice.nullmoth)
@@ -567,7 +568,7 @@ async def test_a_refused_mac_shows_why_and_cannot_be_updated(host):
 
 @F.tui
 async def test_a_mac_that_cannot_be_read_says_so_and_leaving_works(host, monkeypatch):
-    def broken(vmid, choice=None, releases=True):
+    def broken(vmid, choice=None, releases=True, reinstall=False):
         raise RuntimeError("qm not found")
     monkeypatch.setattr(drv, "load_view", broken)
     app = NextApp()
@@ -926,3 +927,24 @@ async def test_the_dialogs_default_follows_the_risk_cancel_for_the_undo_update_f
         await F.settle(pilot, lambda: isinstance(app.screen, BeforeDialog))
         assert app.screen.query_one("#before-go").has_focus
         assert "enter Update driver" in app.screen.query_one("#before-keys").render().plain
+
+
+def test_the_first_plan_of_the_screen_is_not_a_reinstall_and_a_picked_release_is(monkeypatch):
+    """Live 2026-11-23, NVIDIA RTX 3060 Ti on v3.0: the up to date screen still showed "What happens" and a Reinstall
+    button because the first plan was always made as a reinstall (the fake plans of the screen tests hid it)."""
+    seen = []
+    monkeypatch.setattr(drv, "prepare", lambda vmid, choice, pve=None, reinstall=False: seen.append(reinstall) or plan())
+    drv.load_view(101)
+    drv.load_view(101, reinstall=True)
+    assert seen == [False, True]
+
+
+@F.tui
+async def test_a_rolled_back_mac_with_no_readable_version_says_why(host):
+    """Live 2026-11-23 (NVIDIA, VM 984): "installed version unknown" after a manual rollback, with no reason."""
+    host["view"] = DriverView(plan(installed={}, verdict="unknown", unknown_why=engine.STALE_RECORD), releases())
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        await open_driver(pilot, app)
+        assert "installed version unknown" in text(app, "#d-driver")
+        assert "rolled back since its last driver update" in text(app, "#d-why")

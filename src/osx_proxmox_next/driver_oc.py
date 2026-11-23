@@ -12,7 +12,7 @@ from .gpu import parse_config
 from .infrastructure import ProxmoxAdapter
 from .planner import mount_oc_disk_script
 
-__all__ = ["OcError", "bundle_of", "kext_script", "read_versions", "record_amd", "replace_kexts"]
+__all__ = ["OcError", "bundle_of", "kext_script", "read_marker", "read_versions", "record_amd", "replace_kexts", "write_marker"]
 
 _SRC_VAR = "OC_KEXT_PY"
 _EOF = "OC_KEXT_PY_EOF"
@@ -39,7 +39,7 @@ def kext_script(vid: str, calls: list[list[str]]) -> str:
     assert _EOF not in source
     body = " && ".join('python3 -I -c "$%s" "$OC_MNT/EFI/OC" %s' % (_SRC_VAR, " ".join(shquote(a) for a in call))
                        for call in calls)
-    return (mount_oc_disk_script(vid, ro=not any(c[0] == "replace" for c in calls), require_stopped=True)
+    return (mount_oc_disk_script(vid, ro=all(c[0] in ("versions", "marker") for c in calls), require_stopped=True)
             + f"{_SRC_VAR}=$(cat <<'{_EOF}'\n{source}{'' if source.endswith(chr(10)) else chr(10)}{_EOF}\n) && "
             + body + " && sync\n")
 
@@ -68,6 +68,26 @@ def read_versions(pve: ProxmoxAdapter, vmid: int, names: list[str]) -> dict[str,
     except ValueError as exc:
         raise OcError("Unreadable answer from the OpenCore disk.") from exc
     return {n: str(found.get(bundle_of(n), "")) for n in names}
+
+
+def read_marker(pve: ProxmoxAdapter, vmid: int, name: str) -> str:
+    """The version a driver without a kext of its own (NullMoth) left on the Mac's OpenCore disk, '' when none. The Mac must
+    be stopped. The marker rolls back with the disk, so after a manual `qm rollback` it still tells the version the Mac has."""
+    res = _run(pve, vmid, [["marker", name]])
+    line = next((l for l in reversed(res.output.splitlines()) if l.startswith("{")), "")
+    if not res.ok or not line:
+        raise OcError("Could not read the OpenCore disk: " + res.output.strip()[-300:])
+    try:
+        return str(json.loads(line).get(name, ""))
+    except ValueError as exc:
+        raise OcError("Unreadable answer from the OpenCore disk.") from exc
+
+
+def write_marker(pve: ProxmoxAdapter, vmid: int, name: str, version: str) -> None:
+    """Leave *version* of the driver *name* on the Mac's OpenCore disk (the Mac must be stopped)."""
+    res = _run(pve, vmid, [["mark", name, version]])
+    if not res.ok:
+        raise OcError("Could not note the driver version on the OpenCore disk: " + res.output.strip()[-300:])
 
 
 def replace_kexts(pve: ProxmoxAdapter, vmid: int, items: list[tuple[str, Path, str]],

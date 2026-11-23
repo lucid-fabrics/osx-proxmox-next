@@ -18,13 +18,13 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -57,6 +57,7 @@ REFUSE_MAPS_HELD = ("Device maps still hold the disks of VM %s (%s), so they can
 FIRST_BOOT_STUCK = 600      # seconds without disk I/O in the first boot, with no result, before the Mac counts as stuck
 INTEL_BOOT_NOTE = ("The update ends with a first boot of macOS with the iGPU. If this Mac already stops at startup with "
                    "the iGPU (a kernel panic), the update cannot finish: fix that first.")
+STALE_RECORD = "the Mac was rolled back since its last driver update, so the version that update recorded is not its own"
 FROM_RECORD = "(from the last update)"      # shown after versions that the record gave because the Mac's disk could not be read
 UP_TO_DATE = "Up to date: nothing to do."
 NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothing can undo the update if it goes wrong. "
@@ -64,7 +65,7 @@ NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothin
 TEXTS = {"REFUSE_INSTALLING": REFUSE_INSTALLING, "REFUSE_CARD_SETUP": REFUSE_CARD_SETUP, "REFUSE_LOCKED": REFUSE_LOCKED,
          "REFUSE_NO_CARD": REFUSE_NO_CARD, "REFUSE_UNKNOWN_KIND": REFUSE_UNKNOWN_KIND, "REFUSE_NOT_MAC": REFUSE_NOT_MAC,
          "REFUSE_NOTHING_TO_UNDO": REFUSE_NOTHING_TO_UNDO, "UP_TO_DATE": UP_TO_DATE,
-         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
+         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD, "STALE_RECORD": STALE_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
          "REFUSE_CARD_CHANGED": REFUSE_CARD_CHANGED, "REFUSE_NEWER_SNAPSHOTS": REFUSE_NEWER_SNAPSHOTS,
          "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED, "REFUSE_MAPS_HELD": REFUSE_MAPS_HELD}
 VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
@@ -277,21 +278,22 @@ def driver_line(kind, installed):
 
 # ── plan lines ───────────────────────────────────────────────────────
 
-def change_lines(kind, installed, target):
+def change_lines(kind, installed, target, reinstall=True):
     """One line per component: what changes, in plain words. A component that already has the target version is
-    "reinstalled" only when nothing else is behind (the whole driver goes in again); next to one that is behind it is
-    "already X, kept", except on Intel, where the kext and the graphics package always go in together."""
+    "reinstalled" only when the user asked for a reinstall and nothing else is behind (the whole driver goes in again);
+    otherwise it is "already X, kept" (on Intel next to one that is behind the kext and the graphics package go in
+    together). A plan that will change nothing never says "reinstalled"."""
     lines = []
     all_current = judge(installed, target)["state"] == "current"
     for name, want in target.items():
         have = installed.get(name, "")
         if not have:
             lines.append("%s: installed version unknown, to %s" % (name, want))
-        elif have == want and all_current:
+        elif have == want and all_current and reinstall:
             lines.append("%s: %s, reinstalled" % (name, want))
         elif have == want:
             lines.append("%s: already %s, %s" % (name, want, "installed again with the update"
-                                                  if kind == "intel" else "kept"))
+                                                  if kind == "intel" and not all_current else "kept"))
         elif compare(have, want) > 0:
             lines.append("%s: %s is newer than %s, kept" % (name, have, want))
         else:
@@ -338,8 +340,13 @@ def before_facts(kind, snapshot, supported=True, older=(), undo=""):
 
 def todo_steps(kind, name, running, state):
     """The steps a Finish still has to do: the plan's steps without the ones the stopped run finished."""
-    done = {r["id"] for r in (state or {}).get("steps", []) if r.get("state") == "done"}
-    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done]
+    rows = (state or {}).get("steps", [])
+    done = {r["id"] for r in rows if r.get("state") == "done"}
+    listed = {r["id"] for r in rows}      # the run lists its own steps: a run that found the Mac stopped has no "Stop the Mac"
+    # a Mac that runs now is stopped first, whatever the run recorded, while a step that changes its disks is to do
+    return [(sid, title) for sid, title in plan_steps(kind, name, running)
+            if (sid == "stop" and running and changes_disks(state or {}))
+            or (sid not in done and (not listed or sid in listed))]
 
 
 def finish_facts(kind, snapshot="", undo=""):
@@ -535,8 +542,8 @@ def main(argv):
         _emit(component(argv[2], argv[3], *(argv[4:7] if len(argv) == 7 else ())))
     elif cmd == "judge" and len(argv) == 4:
         _emit(judge(json.loads(argv[2]), json.loads(argv[3])))
-    elif cmd == "changes" and len(argv) == 5:
-        sys.stdout.write("\n".join(change_lines(argv[2], json.loads(argv[3]), json.loads(argv[4]))) + "\n")
+    elif cmd == "changes" and len(argv) in (5, 6):
+        sys.stdout.write("\n".join(change_lines(argv[2], json.loads(argv[3]), json.loads(argv[4]), argv[5:] == ["reinstall"])) + "\n")
     elif cmd == "facts" and len(argv) >= 4:
         flag = argv[4] if len(argv) > 4 and argv[4] in ("supported", "unsupported") else ""
         rest = list(argv[5 if flag else 4:])
@@ -630,10 +637,11 @@ def update_state_command(cmd, args):
         sys.stdout.write((state.get("kind", "") if state.get("phase") != "done" else "") + "\n")
         return 0
     if cmd == "update-init":     # kind name label step-name choice-json previous-json card original-json snapshot
-        state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7])
+        state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7],
+                           running=args[9:] != ["stopped"])      # the 9th is the original, the 10th "stopped" for a Mac that is
         state.update(original=json.loads(args[8]) if len(args) > 8 and args[8] else None)
-    elif cmd == "update-resume":
-        reset_for_resume(state)
+    elif cmd == "update-resume":                  # the 2nd is "running" for a Mac that runs now: it gets its stop row
+        reset_for_resume(state, args[1:] == ["running"])
         state.update(phase="running", error="")
     elif cmd in ("update-add-disk", "update-forget-disk"):
         if not state:                 # no run is going or cut off for this Mac: there is nothing to write a disk into

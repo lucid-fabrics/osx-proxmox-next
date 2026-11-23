@@ -168,16 +168,20 @@ def unfinished(vmid, base=None):
     return data if data and data.get("phase") != "done" and not lock_holder(vmid, base) else {}
 
 
-def new_update(kind, name, label, step_name, choice, previous, card=""):
-    """The state of a run that has not started: every step pending. *card* is the hostpci0 the Mac has now."""
+def new_update(kind, name, label, step_name, choice, previous, card="", running=True):
+    """The state of a run that has not started: every step pending. *card* is the hostpci0 the Mac has now. The run lists
+    the steps its plan listed (plan_steps): no "Stop the Mac" row for a Mac that is stopped already."""
+    shown = {sid for sid, _t in plan_steps(kind, step_name, running)}
     steps = [{"id": sid, "title": title, "done": done, "state": "pending"}
-             for (sid, title), (_s, done) in zip(step_titles(kind, step_name), step_titles(kind, step_name, done=True))]
+             for (sid, title), (_s, done) in zip(step_titles(kind, step_name), step_titles(kind, step_name, done=True))
+             if sid in shown]
     return {"kind": kind, "name": name, "label": label, "steps": steps, "snapshot": "", "original": None, "events": [],
             "choice": choice, "previous": previous, "card": card, "resume_at": 0, "phase": "running", "error": ""}
 
 
 def _row(state, sid):
-    return next(r for r in state["steps"] if r["id"] == sid)
+    """The row of a step, None for a step this run does not list (the stop of a Mac that was stopped already)."""
+    return next((r for r in state["steps"] if r["id"] == sid), None)
 
 
 def resume_index(state):
@@ -185,9 +189,28 @@ def resume_index(state):
     return next((i for i, r in enumerate(state.get("steps", [])) if r["state"] != "done"), len(state.get("steps", [])))
 
 
-def reset_for_resume(state):
+CHANGES_DISKS = ("snapshot", "takeoff", "stage", "putback", "replace")     # the steps that need the Mac stopped
+
+
+def changes_disks(state):
+    """True while a step that changes the card or the disks is still to do: a run that only waits for the driver to
+    install at the first boot has nothing to stop the Mac for."""
+    return any(r["id"] in CHANGES_DISKS and r["state"] != "done" for r in state.get("steps", []))
+
+
+def reset_for_resume(state, running=False):
     """A run that goes on from where it stopped starts its own list: the steps the earlier run finished stay done (and
-    carry no time of this run), the others are pending again with no time, so nothing of the old run's clock shows."""
+    carry no time of this run), the others are pending again with no time, so nothing of the old run's clock shows.
+    A Mac that runs now gets its "Stop the Mac" row even when the run was recorded without one (it was stopped at plan
+    time or stopped by the run and started since), while a step that changes the card or the disks is still to do: the row goes in front of
+    the first step still to do."""
+    row = _row(state, "stop")
+    if running and changes_disks(state) and (row is None or row["state"] == "done"):
+        if row is not None:      # a stop that finished before the Mac was started again does not count: it goes in front of what is left
+            state["steps"].remove(row)
+        now = dict(step_titles(state["kind"]))["stop"]
+        past = dict(step_titles(state["kind"], done=True))["stop"]
+        state["steps"].insert(resume_index(state), {"id": "stop", "title": now, "done": past, "state": "pending"})
     resume_at = resume_index(state)
     for idx, row in enumerate(state.get("steps", [])):
         row.pop("started", None)
@@ -219,6 +242,8 @@ def forget_disk(state, ref):
 def begin_step(state, sid):
     """Start a step. False, changing nothing, for a step that a resumed run finished before the point it goes on from."""
     row = _row(state, sid)
+    if row is None:
+        return False
     if row["state"] == "done" and state["steps"].index(row) < state.get("resume_at", 0):
         return False
     row.update(state="active", started=time.time())
@@ -228,6 +253,8 @@ def begin_step(state, sid):
 
 def end_step(state, sid, st="done", title=""):
     row = _row(state, sid)
+    if row is None:
+        return
     row.update(state=st, ended=time.time())
     if title:
         row["done"] = title
@@ -239,6 +266,22 @@ def fail_update(state, error):
         if row["state"] == "active":
             row.update(state="fail", ended=time.time())
     state.update(phase="failed", error=error)
+
+
+def join_text(*parts):
+    """Sentences put one after the other: each part that does not end in a full stop (or a question or exclamation mark)
+    gets ". " before the next one, so a Proxmox error and our text never run together."""
+    out = ""
+    for part in parts:
+        part = (part or "").strip()
+        if not part:
+            continue
+        if out and out[-1] == ":":
+            out = out[:-1]
+        if out and out[-1] not in ".!?":
+            out += "."
+        out += (" " if out else "") + part
+    return out
 
 
 def failure_text(state, running):
