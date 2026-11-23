@@ -262,6 +262,18 @@ The New Mac screen has one more choice at the end of the macOS list: **27 arm64 
 
 Everything under `arm64/` is GPL-2.0-or-later (see `arm64/LICENSE`); the rest of the project stays Apache-2.0. Details, host needs and bug reporting: [the beta guide](docs/docs/guides/arm64-macos27-beta.md).
 
+## 🧪 macOS 27 arm64 via Stela (beta)
+
+The New Mac screen has a second arm64 choice: **27 arm64 via Stela (beta)**. It installs macOS 27 on a Proxmox VM (OVMF, q35) with no Mac anywhere, using [Stela](https://github.com/tylertms/Stela), a translation layer that runs Apple Silicon macOS on x86-64 PCs.
+
+- At install time the wizard downloads the pinned Stela release (v0.5.0, linux-x86_64 tarball), refuses it unless the sha256 is `6236ddffb39e52ffd6ea71ec3a763788e75497493f4de19ad9e8a35a3722ed6a` and the release's own `SHA256SUMS` lists the same value, then runs `stela create` to write the boot stick (a 32 GB sparse image file that the VM sees as a USB drive).
+- It creates the VM, types Stela's menu keys with `qm sendkey`, watches the serial log for progress and fatal lines, and finishes when macOS boots to Setup Assistant. You need no input and no Mac. Expect about an hour, most of it the online macOS download.
+- A GPU is needed to boot the result: the wizard lists the host's graphics cards and passes the one you pick (all its functions) to the VM. The installer itself runs on the standard emulated display, so a VM made without a GPU still finishes the install, but Stela then stops with "macOS cannot run without a GPU"; add a card later with `osx-next-cli stela finish --vmid <id> --gpu-pci <card>` and it boots.
+- Stela only drives a PCIe network card, so the VM gets its own e1000e behind a PCIe root port on a tap device that a Proxmox hook script creates and removes. The disk is SATA, the console is serial plus the Proxmox display.
+- From the command line: `osx-next-cli stela plan --vmid 478 --name macos27-stela --storage local-lvm`, then `osx-next-cli stela apply --execute ...` with the same options. `osx-next-cli stela gpus` lists the cards, `stela finish` adds one to an installed VM; `osx-next-cli stela uninstall --vmid 478 --execute` removes the VM, the stick and the tap.
+
+**Licensing.** Stela is not part of this repository and none of its source is copied or vendored here: the wizard only downloads the release tarball and runs the program inside it. Stela's own code is GPL-2.0-or-later (the `stela` binary is distributed as GPL-3.0-or-later, `stela.efi` as GPL-2.0-only because it contains Linux code), and it bundles parts under the Apple Public Source License 2.0 (APSL-2.0) and Apache-2.0. Its licence texts are in the tarball (`LICENSE`, `LICENSES/`). The macOS installer itself is downloaded from Apple by Stela, and Apple's licence terms for macOS apply to what you install.
+
 ## ⌨️ CLI Usage
 
 For scripting or headless use, the CLI bypasses the TUI entirely:
