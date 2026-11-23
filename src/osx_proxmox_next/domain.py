@@ -54,6 +54,7 @@ class PlanStep:
     title: str
     argv: list[str]
     risk: str = "safe"
+    timeout: int | None = None      # seconds this step may run; None = the adapter's default
 
     @property
     def command(self) -> str:

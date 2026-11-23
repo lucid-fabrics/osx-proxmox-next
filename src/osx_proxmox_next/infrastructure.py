@@ -42,7 +42,8 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 class ProxmoxAdapter:
-    def run(self, argv: list[str]) -> CommandResult:
+    def run(self, argv: list[str], timeout: int | None = None) -> CommandResult:
+        limit = timeout or _SUBPROCESS_TIMEOUT
         try:
             # Detached from the terminal: a `qm shutdown` that shares it ends up hanging the tty up, and the TUI
             # that owns it dies with "Input/output error" (seen live). Nothing here ever reads a prompt.
@@ -53,11 +54,11 @@ class ProxmoxAdapter:
         except FileNotFoundError:
             return CommandResult(ok=False, returncode=_EXIT_CODE_NOT_FOUND, output=f"Command not found: {argv[0]}")
         try:
-            stdout, stderr = proc.communicate(timeout=_SUBPROCESS_TIMEOUT)
+            stdout, stderr = proc.communicate(timeout=limit)
         except subprocess.TimeoutExpired:
             _kill_group(proc)
             stdout, stderr = proc.communicate()
-            output = f"Command timed out after {_SUBPROCESS_TIMEOUT}s: {' '.join(argv)}\n{stdout or ''}{stderr or ''}"
+            output = f"Command timed out after {limit}s: {' '.join(argv)}\n{stdout or ''}{stderr or ''}"
             return CommandResult(ok=False, returncode=_EXIT_CODE_TIMEOUT, output=output.strip())
         except BaseException:
             _kill_group(proc)

@@ -62,7 +62,7 @@ def apply_plan(
                     on_step(idx, total, step, result)
                 continue
 
-            cmd_result = runtime.run(step.argv)
+            cmd_result = runtime.run(step.argv, timeout=step.timeout) if step.timeout else runtime.run(step.argv)
             handle.write(f"## {step.title}\n$ {step.command}\n{cmd_result.output}\n")
             result = StepResult(
                 title=step.title,

@@ -156,3 +156,18 @@ def test_apply_plan_empty_plan():
     assert result.ok is True
     assert result.results == []
     assert result.log_path.exists()
+
+
+def test_a_step_with_a_timeout_passes_it_to_the_adapter_and_others_do_not(tmp_path, monkeypatch):
+    from osx_proxmox_next.infrastructure import CommandResult
+    monkeypatch.chdir(tmp_path)
+    seen = []
+
+    class Adapter:
+        def run(self, argv, **kw):
+            seen.append((argv, kw))
+            return CommandResult(True, 0, "ok")
+
+    steps = [PlanStep("Long", ["a"], timeout=7200), PlanStep("Short", ["b"])]
+    assert apply_plan(steps, execute=True, adapter=Adapter()).ok
+    assert seen == [(["a"], {"timeout": 7200}), (["b"], {})]

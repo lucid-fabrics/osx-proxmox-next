@@ -204,3 +204,9 @@ def test_a_normal_command_still_returns_its_output_and_exit_code():
     bad = ProxmoxAdapter().run(["sh", "-c", "echo boom >&2; exit 3"])
     assert (bad.ok, bad.returncode, bad.output) == (False, 3, "boom")
     assert ProxmoxAdapter().run(["no-such-binary-xyz"]).returncode == 127
+
+
+def test_a_step_timeout_replaces_the_default_limit(monkeypatch):
+    monkeypatch.setattr(infrastructure, "_SUBPROCESS_TIMEOUT", 1)
+    assert ProxmoxAdapter().run(["bash", "-c", "sleep 2; echo late"], timeout=30).output == "late"
+    assert ProxmoxAdapter().run(["bash", "-c", "sleep 5"]).returncode == 124
