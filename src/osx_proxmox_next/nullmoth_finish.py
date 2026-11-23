@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import driver_disks, driver_engine as engine_rec, nullmoth, nullmoth_engine as engine
+from . import driver_disks, driver_engine as engine_rec, driver_oc, nullmoth, nullmoth_engine as engine
 from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .downloader import DownloadError
@@ -258,10 +258,16 @@ def finish(
         from .downloader import download_recovery
         say(f"Downloading the {version} recovery image")
         recovery = download_recovery(version, iso)
-    payload_ref = stage_recovery(StageJob(vmid, pve, console, storage, say, clock, sleep), payload, recovery, cfg)
+    payload_ref = stage_recovery(StageJob(vmid, pve, console, storage, lambda m: say(m.replace("graphics package", "NullMoth driver")), clock, sleep),
+                                  payload, recovery, cfg)
     err = console.restore_picker_timeout()
     if err:
         result.notes.append(f"Could not restore the picker's auto-boot ({err}); run post-install afterwards.")
+    try:       # the Mac is stopped: the version goes on its OpenCore disk, where a manual rollback still finds it
+        driver_oc.write_marker(pve, vmid, "NullMoth", pick["tag"])
+    except driver_oc.OcError as exc:
+        result.notes.append(f"Could not note the NullMoth version on the OpenCore disk ({exc}); after a manual rollback "
+                            "the installed version will not be known.")
 
     try:
         _attach_and_boot(vmid, gpu, amfipass, macos, pve, payload_ref, result, on_event, clock, sleep, sysfs_root)

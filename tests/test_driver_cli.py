@@ -43,6 +43,14 @@ def test_status_shows_installed_latest_and_snapshots(host, capsys):
     assert out[3] == "A newer driver is available." and out[4] == "Driver snapshots: " + NEW_SNAP
 
 
+def test_status_says_why_the_version_of_a_rolled_back_mac_is_unknown(host, capsys, monkeypatch):
+    """Live 2026-11-23 (NVIDIA, VM 984): "installed version unknown" after a manual qm rollback, with no reason."""
+    engine.write_record(109, "nvidia", comps(NullMoth="v3.0"), fingerprint="before")
+    monkeypatch.setattr(driver_plan.driver_disks, "fingerprint", lambda pve, cfg: "after")
+    assert run("driver-status", "--vmid", "109") == 0
+    assert f"Installed: installed version unknown ({engine.STALE_RECORD})" in capsys.readouterr().out
+
+
 def test_status_for_a_mac_with_no_record_and_one_that_is_up_to_date_or_cut_off(host, capsys):
     engine.record_path(109).unlink()
     from osx_proxmox_next import gpu

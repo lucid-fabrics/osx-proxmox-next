@@ -349,3 +349,17 @@ def test_the_payload_image_goes_to_a_folder_that_proxmox_does_not_list(env, tmp_
     res = nf.finish(9, "0000:01:00.0", "latest", console=Console(), pve=pve, iso_dir=env.tmp, on_event=lambda m: None,
                     clock=clock.monotonic, sleep=clock.sleep, find_ip=lambda m: "", probe=lambda i, p: True)
     assert res.verified and (env.tmp / "nullmoth").is_dir()
+
+
+def test_the_nullmoth_version_is_left_on_the_opencore_disk_before_the_first_boot(env, monkeypatch):
+    """Live 2026-11-23 (NVIDIA RTX 3060 Ti): after a manual rollback the version was unknown; the marker rolls back with the disk."""
+    marks = []
+    monkeypatch.setattr(nf.driver_oc, "write_marker", lambda pve, vmid, name, version: marks.append((vmid, name, version, pve.status)))
+    res, _pve = go(env)
+    assert marks == [(9, "NullMoth", "v2.9", "stopped")] and res.verified          # written while the Mac is stopped, before it starts
+
+    def broken(pve, vmid, name, version):
+        raise nf.driver_oc.OcError("mount failed")
+    monkeypatch.setattr(nf.driver_oc, "write_marker", broken)
+    res, _pve = go(env)
+    assert res.verified and any("Could not note the NullMoth version on the OpenCore disk (mount failed)" in n for n in res.notes)

@@ -1774,6 +1774,7 @@ function nullmoth_payload_result() { nullmoth_engine result "$(pve_vol_path "$1"
 # Download and verify the driver, build the payload disk, boot recovery and stage it inside macOS.
 # $1 vmid $2 release (latest or a tag) $3 macos. Sets NM_TAG, NM_PAYLOAD_REF, NM_PAYLOAD_FILE. Mirrors the first half of nullmoth_finish.finish.
 function nullmoth_stage() {
+  local IGPU_STAGE_WHAT="the NullMoth driver"      # the shared staging says what it stages
   local vmid="$1" choice="$2" ver="$3" cfg storage dir info tarball sha fwinfo fw="" fwsha="" recovery_src rec_ref rc=0 orig_vga orig_args orig_boot
   dir="${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/iso}/nullmoth"
   info=$(nullmoth_engine fetch "$choice" "$dir") || { msg_error "Could not download or verify the NullMoth release"; return 1; }
@@ -1810,6 +1811,9 @@ function nullmoth_stage() {
     restore_picker_timeout "$vmid" || true
     return 1
   fi
+  # the Mac is stopped: the version goes on its OpenCore disk, where a manual rollback still finds it
+  driver_oc_kext "$vmid" mark NullMoth "$NM_TAG" >/dev/null 2>&1 \
+    || msg_info "Could not note the NullMoth version on the OpenCore disk; after a manual rollback the installed version will not be known"
   restore_picker_timeout "$vmid" || msg_info "Could not restore the picker's auto-boot; run post-install afterwards"
 }
 
@@ -8238,13 +8242,13 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -8277,6 +8281,7 @@ REFUSE_MAPS_HELD = ("Device maps still hold the disks of VM %s (%s), so they can
 FIRST_BOOT_STUCK = 600      # seconds without disk I/O in the first boot, with no result, before the Mac counts as stuck
 INTEL_BOOT_NOTE = ("The update ends with a first boot of macOS with the iGPU. If this Mac already stops at startup with "
                    "the iGPU (a kernel panic), the update cannot finish: fix that first.")
+STALE_RECORD = "the Mac was rolled back since its last driver update, so the version that update recorded is not its own"
 FROM_RECORD = "(from the last update)"      # shown after versions that the record gave because the Mac's disk could not be read
 UP_TO_DATE = "Up to date: nothing to do."
 NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothing can undo the update if it goes wrong. "
@@ -8284,7 +8289,7 @@ NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothin
 TEXTS = {"REFUSE_INSTALLING": REFUSE_INSTALLING, "REFUSE_CARD_SETUP": REFUSE_CARD_SETUP, "REFUSE_LOCKED": REFUSE_LOCKED,
          "REFUSE_NO_CARD": REFUSE_NO_CARD, "REFUSE_UNKNOWN_KIND": REFUSE_UNKNOWN_KIND, "REFUSE_NOT_MAC": REFUSE_NOT_MAC,
          "REFUSE_NOTHING_TO_UNDO": REFUSE_NOTHING_TO_UNDO, "UP_TO_DATE": UP_TO_DATE,
-         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
+         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD, "STALE_RECORD": STALE_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
          "REFUSE_CARD_CHANGED": REFUSE_CARD_CHANGED, "REFUSE_NEWER_SNAPSHOTS": REFUSE_NEWER_SNAPSHOTS,
          "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED, "REFUSE_MAPS_HELD": REFUSE_MAPS_HELD}
 VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
@@ -8497,21 +8502,22 @@ def driver_line(kind, installed):
 
 # ── plan lines ───────────────────────────────────────────────────────
 
-def change_lines(kind, installed, target):
+def change_lines(kind, installed, target, reinstall=True):
     """One line per component: what changes, in plain words. A component that already has the target version is
-    "reinstalled" only when nothing else is behind (the whole driver goes in again); next to one that is behind it is
-    "already X, kept", except on Intel, where the kext and the graphics package always go in together."""
+    "reinstalled" only when the user asked for a reinstall and nothing else is behind (the whole driver goes in again);
+    otherwise it is "already X, kept" (on Intel next to one that is behind the kext and the graphics package go in
+    together). A plan that will change nothing never says "reinstalled"."""
     lines = []
     all_current = judge(installed, target)["state"] == "current"
     for name, want in target.items():
         have = installed.get(name, "")
         if not have:
             lines.append("%s: installed version unknown, to %s" % (name, want))
-        elif have == want and all_current:
+        elif have == want and all_current and reinstall:
             lines.append("%s: %s, reinstalled" % (name, want))
         elif have == want:
             lines.append("%s: already %s, %s" % (name, want, "installed again with the update"
-                                                  if kind == "intel" else "kept"))
+                                                  if kind == "intel" and not all_current else "kept"))
         elif compare(have, want) > 0:
             lines.append("%s: %s is newer than %s, kept" % (name, have, want))
         else:
@@ -8755,8 +8761,8 @@ def main(argv):
         _emit(component(argv[2], argv[3], *(argv[4:7] if len(argv) == 7 else ())))
     elif cmd == "judge" and len(argv) == 4:
         _emit(judge(json.loads(argv[2]), json.loads(argv[3])))
-    elif cmd == "changes" and len(argv) == 5:
-        sys.stdout.write("\n".join(change_lines(argv[2], json.loads(argv[3]), json.loads(argv[4]))) + "\n")
+    elif cmd == "changes" and len(argv) in (5, 6):
+        sys.stdout.write("\n".join(change_lines(argv[2], json.loads(argv[3]), json.loads(argv[4]), argv[5:] == ["reinstall"])) + "\n")
     elif cmd == "facts" and len(argv) >= 4:
         flag = argv[4] if len(argv) > 4 and argv[4] in ("supported", "unsupported") else ""
         rest = list(argv[5 if flag else 4:])
@@ -8850,7 +8856,8 @@ def update_state_command(cmd, args):
         sys.stdout.write((state.get("kind", "") if state.get("phase") != "done" else "") + "\n")
         return 0
     if cmd == "update-init":     # kind name label step-name choice-json previous-json card original-json snapshot
-        state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7])
+        state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7],
+                           running=args[9:] != ["stopped"])      # the 9th is the original, the 10th "stopped" for a Mac that is
         state.update(original=json.loads(args[8]) if len(args) > 8 and args[8] else None)
     elif cmd == "update-resume":
         reset_for_resume(state)
@@ -9051,16 +9058,20 @@ def unfinished(vmid, base=None):
     return data if data and data.get("phase") != "done" and not lock_holder(vmid, base) else {}
 
 
-def new_update(kind, name, label, step_name, choice, previous, card=""):
-    """The state of a run that has not started: every step pending. *card* is the hostpci0 the Mac has now."""
+def new_update(kind, name, label, step_name, choice, previous, card="", running=True):
+    """The state of a run that has not started: every step pending. *card* is the hostpci0 the Mac has now. The run lists
+    the steps its plan listed (plan_steps): no "Stop the Mac" row for a Mac that is stopped already."""
+    shown = {sid for sid, _t in plan_steps(kind, step_name, running)}
     steps = [{"id": sid, "title": title, "done": done, "state": "pending"}
-             for (sid, title), (_s, done) in zip(step_titles(kind, step_name), step_titles(kind, step_name, done=True))]
+             for (sid, title), (_s, done) in zip(step_titles(kind, step_name), step_titles(kind, step_name, done=True))
+             if sid in shown]
     return {"kind": kind, "name": name, "label": label, "steps": steps, "snapshot": "", "original": None, "events": [],
             "choice": choice, "previous": previous, "card": card, "resume_at": 0, "phase": "running", "error": ""}
 
 
 def _row(state, sid):
-    return next(r for r in state["steps"] if r["id"] == sid)
+    """The row of a step, None for a step this run does not list (the stop of a Mac that was stopped already)."""
+    return next((r for r in state["steps"] if r["id"] == sid), None)
 
 
 def resume_index(state):
@@ -9102,6 +9113,8 @@ def forget_disk(state, ref):
 def begin_step(state, sid):
     """Start a step. False, changing nothing, for a step that a resumed run finished before the point it goes on from."""
     row = _row(state, sid)
+    if row is None:
+        return False
     if row["state"] == "done" and state["steps"].index(row) < state.get("resume_at", 0):
         return False
     row.update(state="active", started=time.time())
@@ -9111,6 +9124,8 @@ def begin_step(state, sid):
 
 def end_step(state, sid, st="done", title=""):
     row = _row(state, sid)
+    if row is None:
+        return
     row.update(state=st, ended=time.time())
     if title:
         row["done"] = title
@@ -9122,6 +9137,22 @@ def fail_update(state, error):
         if row["state"] == "active":
             row.update(state="fail", ended=time.time())
     state.update(phase="failed", error=error)
+
+
+def join_text(*parts):
+    """Sentences put one after the other: each part that does not end in a full stop (or a question or exclamation mark)
+    gets ". " before the next one, so a Proxmox error and our text never run together."""
+    out = ""
+    for part in parts:
+        part = (part or "").strip()
+        if not part:
+            continue
+        if out and out[-1] == ":":
+            out = out[:-1]
+        if out and out[-1] not in ".!?":
+            out += "."
+        out += (" " if out else "") + part
+    return out
 
 
 def failure_text(state, running):
@@ -9154,6 +9185,8 @@ IFS= read -r -d '' GPU_EMBED_OC_KEXT <<'GPU_EMBED_OC_KEXT_EOF' || true
 
 Usage: oc_kext.py <EFI/OC directory> versions <Name.kext>...
        oc_kext.py <EFI/OC directory> replace <Name.kext> <zip> <sha256>
+       oc_kext.py <EFI/OC directory> marker <Name>
+       oc_kext.py <EFI/OC directory> mark <Name> <version>
 
 The Python CLI/TUI and the standalone bash installer run this exact text (the bash script embeds it verbatim;
 tests/test_driver_parity.py diffs the two). Standard library only.
@@ -9164,6 +9197,9 @@ replace   Checks the zip against its SHA-256, unpacks the bundle into Kexts/ (fo
           wrapping folder) in place of the old copy and prints `VERSION <new version>`. config.plist is left alone, byte for
           byte, unless its entry for the bundle names an executable that the new bundle does not have: then only that
           ExecutablePath is corrected. A bundle that config.plist does not list is reported and not added.
+marker    Prints {Name: version, or "" when none was written}: the version a driver without a kext of its own (NullMoth)
+          left on this disk. The file rolls back with the disk, so it tells the version of the Mac as it is now. Read only.
+mark      Writes that file (EFI/OC/osx-next-<Name>.version) after a driver was staged.
 
 Exit codes: 0 ok, 2 refused (nothing changed), 64 usage.
 """
@@ -9171,6 +9207,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import sys
 import zipfile
@@ -9209,6 +9246,30 @@ def versions(oc_dir, bundles):
             refuse('%r is not a kext name' % bundle, 64)
         out[bundle] = str(bundle_info(kexts, bundle).get('CFBundleShortVersionString') or '')
     sys.stdout.write(json.dumps(out, sort_keys=True) + '\n')
+
+
+def marker_path(oc_dir, name):
+    if not re.fullmatch(r'[A-Za-z0-9]{1,32}', name):
+        refuse('%r is not a driver name' % name, 64)
+    return os.path.join(oc_dir, 'osx-next-%s.version' % name)
+
+
+def marker(oc_dir, name):
+    try:
+        with open(marker_path(oc_dir, name), encoding='utf-8') as f:
+            text = f.read().strip()
+    except OSError:
+        text = ''
+    sys.stdout.write(json.dumps({name: text if re.fullmatch(r'[A-Za-z0-9._+-]{1,40}', text) else ''}) + '\n')
+
+
+def mark(oc_dir, name, version):
+    if not re.fullmatch(r'[A-Za-z0-9._+-]{1,40}', version):
+        refuse('%r is not a version' % version, 64)
+    path = marker_path(oc_dir, name)
+    with open(path + '.tmp', 'w', encoding='utf-8') as f:
+        f.write(version + '\n')
+    os.replace(path + '.tmp', path)
 
 
 def find_bundle(names, bundle):
@@ -9304,6 +9365,10 @@ def replace(oc_dir, bundle, zip_path, expected):
 def main(argv):
     if len(argv) >= 4 and argv[2] == 'versions':
         versions(argv[1], argv[3:])
+    elif len(argv) == 4 and argv[2] == 'marker':
+        marker(argv[1], argv[3])
+    elif len(argv) == 5 and argv[2] == 'mark':
+        mark(argv[1], argv[3], argv[4])
     elif len(argv) == 6 and argv[2] == 'replace':
         replace(argv[1], argv[3], argv[4], argv[5])
     else:
@@ -10053,12 +10118,12 @@ function igpu_wait_staged() {
 # Boot the staging recovery, run the script from the payload disk, wait for the guest to power off.
 # $1 vmid $2 payload volume $3 macos (Tahoe gets an extra note on failure). Mirrors igpu_finish._stage.
 function igpu_stage() {
-  local vmid="$1" payload_ref="$2" ver="${3:-}" path staged tahoe_note=""
+  local vmid="$1" payload_ref="$2" ver="${3:-}" path staged tahoe_note="" what="${IGPU_STAGE_WHAT:-the graphics package}"
   [ "$ver" != "tahoe" ] || tahoe_note=" ${IGPU_TAHOE_STAGE_NOTE}"
   igpu_oc_patch "$vmid" stage || { msg_error "Could not patch the OpenCore disk (picker)"; return 1; }
   qm start "$vmid" >/dev/null || { msg_error "Could not start VM $vmid"; return 1; }
   unattended_open_recovery_terminal "$vmid" || return 1
-  msg_info "Staging the graphics package inside macOS (offline)"
+  msg_info "Staging ${what} inside macOS (offline)"
   local attempt began typing started=no shot=""
   for ((attempt = 1; attempt <= IGPU_STAGE_ATTEMPTS; attempt++)); do
     began=$(date +%s)
@@ -10094,7 +10159,7 @@ function igpu_stage() {
   path=$(pve_vol_path "$payload_ref") || return 1
   staged=$(igpu_engine result "$path")
   [ "$staged" == "staged" ] || { msg_error "Staging failed: ${staged:-the script left no result}. Is the macOS disk encrypted (FileVault)?"; return 1; }
-  msg_ok "Staged the graphics package"
+  msg_ok "Staged ${what}"
 }
 
 # After the final boot: look from the host at the iGPU's ring tails (igpu_engine accel-check) and only then say
@@ -10427,6 +10492,16 @@ function driver_oc_kext() {
   return "$rc"
 }
 
+# The JSON line of a read call (`versions`, `marker`) on the OpenCore disk. A disk that cannot be read gives `{}` (and rc 1), so
+# the parser after the pipe never meets an empty answer and never prints a traceback. $1 vmid, then the arguments of oc_kext.py
+function driver_oc_json() {
+  local out line
+  out=$(driver_oc_kext "$@" 2>/dev/null) || { echo "{}"; return 1; }
+  line=$(grep '^{' <<<"$out" | tail -1) || true
+  [ -n "$line" ] || { echo "{}"; return 1; }
+  printf '%s\n' "$line"
+}
+
 # The call itself. Refuses unless the Mac is stopped (checked here, so no caller can skip it), mounts read only for
 # `versions`, and unmounts whatever ends the subshell (also Ctrl-C and TERM). The loop device exists before anything else
 # touches a device: partprobe only ever runs on it.
@@ -10438,6 +10513,7 @@ function driver_oc_kext_run() {
   vol=$(qm config "$vmid" 2>/dev/null | sed -n 's/^ide0: \([^,]*\).*/\1/p')
   [ -n "$vol" ] || { echo "ERROR: no ide0 (OpenCore) disk found" >&2; return 1; }
   path=$(pve_vol_path "$vol") || return 1
+  driver_release_disks "$vmid" >/dev/null 2>&1 || true     # a loop device or map an earlier step left on the disk would hide its partition
   (
     local loop="" mnt rc _i opt=""
     mnt=$(mktemp -d)
@@ -10451,7 +10527,7 @@ function driver_oc_kext_run() {
       [ -b "${loop}p1" ] && break
       sleep 1
     done
-    [ "${1:-}" != versions ] || opt="-o ro"
+    case "${1:-}" in versions|marker) opt="-o ro" ;; esac
     [ -b "${loop}p1" ] && mount $opt "${loop}p1" "$mnt" 2>/dev/null || exit 1
     python3 -I - "$mnt/EFI/OC" "$@" <<<"$GPU_EMBED_OC_KEXT"
     rc=$?
@@ -10576,23 +10652,28 @@ function driver_pick_kind() {
 # OpenCore disk is not either. "{}" when nothing is known. $1 vmid $2 kind $3 running yes|no
 function driver_installed() {
   local vmid="$1" kind="$2" json disk="{}" names=""
+  local stale=no
   json=$(driver_engine record "$vmid" | python3 -c 'import json,sys
 d = json.load(sys.stdin)
 names = {"nvidia": ["NullMoth"], "intel": ["WhateverXe", "WhateverXe Graphics"], "amd": ["Lilu", "WhateverGreen"]}[sys.argv[1]] + ["AMFIPass"]
 print(json.dumps({c["name"]: c["version"] for c in d.get("components", []) if c["name"] in names}))' "$kind")
   if [ "$json" != "{}" ]; then
-    driver_engine trusted "$vmid" "$(driver_fingerprint "$vmid")" || json="{}"
+    driver_engine trusted "$vmid" "$(driver_fingerprint "$vmid")" || { json="{}"; stale=yes; }
   fi
   case "$kind" in amd) names="Lilu.kext WhateverGreen.kext" ;; intel) names="WhateverXe.kext" ;; esac
   if [ -n "$names" ] && [ "$3" != yes ]; then
     # shellcheck disable=SC2086
-    disk=$(driver_oc_kext "$vmid" versions $names 2>/dev/null | gpu_json 'json.dumps({k[:-5]: v for k, v in d.items() if v})') || disk="{}"
+    disk=$(driver_oc_json "$vmid" versions $names | gpu_json 'json.dumps({k[:-5]: v for k, v in d.items() if v})') || disk="{}"
+  elif [ "$kind" == nvidia ] && [ "$3" != yes ]; then       # NullMoth has no kext: the version is a marker on the OpenCore disk
+    disk=$(driver_oc_json "$vmid" marker NullMoth | gpu_json 'json.dumps({k: v for k, v in d.items() if v})') || disk="{}"
   fi
   [ -n "$disk" ] || disk="{}"
   # whose word the versions are: the record's when the disk was not read (Intel and AMD only; NVIDIA has only the record)
   # (an undo read the disk while the Mac was stopped and flagged the record: that is the disk's word)
-  { [ "$disk" == "{}" ] && [ -n "$names" ] && [ "$json" != "{}" ] \
-    && [ "$(driver_engine record "$vmid" | gpu_json 'bool(d.get("disk_read"))')" != True ] && echo record || echo disk; } >"${TEMP_DIR:-/tmp}/osx-next-driver-src-$vmid" 2>/dev/null || true
+  { if [ "$disk" == "{}" ] && [ "$stale" == yes ]; then echo stale
+    elif [ "$disk" == "{}" ] && [ -n "$names" ] && [ "$json" != "{}" ] \
+      && [ "$(driver_engine record "$vmid" | gpu_json 'bool(d.get("disk_read"))')" != True ]; then echo record
+    else echo disk; fi; } >"${TEMP_DIR:-/tmp}/osx-next-driver-src-$vmid" 2>/dev/null || true
   python3 -c 'import json,re,sys
 have, found = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 def key(t):
@@ -10684,7 +10765,10 @@ function driver_print_plan() {
   case "$kind" in nvidia) label=NVIDIA ;; intel) label=Intel ;; amd) label=AMD ;; esac
   if [ "$finishing" == yes ]; then echo "Finish the ${label} driver update of ${name:-VM $vmid} (VM ${vmid})"
   else echo "Update the ${label} driver of ${name:-VM $vmid} (VM ${vmid})"; fi
-  driver_engine changes "$kind" "$installed" "$DRIVER_VERSIONS" | sed 's/^/  /'
+  driver_engine changes "$kind" "$installed" "$DRIVER_VERSIONS" $([ "${DRIVER_REINSTALL:-no}" != yes ] || echo reinstall) | sed 's/^/  /'
+  # nothing will change: no steps and no facts, the caller says the Mac is up to date (the Python plan stops here too)
+  if [ "$finishing" != yes ] && [ "${DRIVER_REINSTALL:-no}" != yes ] && [ "$kind" != "" ] \
+    && [ "$(driver_engine judge "$installed" "$DRIVER_VERSIONS" | gpu_json 'd["state"]')" == current ]; then return 0; fi
   first=$(driver_step_name "$kind" "$target")
   echo "Steps:"
   if [ "$finishing" == yes ]; then
@@ -10884,7 +10968,7 @@ function driver_prefetch_amd() {
 function driver_refresh_amfipass() {
   local vmid="$1" have want
   want="${NULLMOTH_AMFIPASS_URL##*/}"; want="${want#AMFIPass-v}"; want="${want%-RELEASE.zip}"
-  have=$(driver_oc_kext "$vmid" versions AMFIPass.kext 2>/dev/null | gpu_json 'd.get("AMFIPass.kext", "")') || have=""
+  have=$(driver_oc_json "$vmid" versions AMFIPass.kext | gpu_json 'd.get("AMFIPass.kext", "")') || have=""
   [ -z "$have" ] || [ "$have" != "$want" ] || return 0
   driver_oc_kext "$vmid" replace AMFIPass.kext "$DRIVER_AMFI_ZIP" "$NULLMOTH_AMFIPASS_SHA256" >/dev/null \
     || { msg_error "Updating AMFIPass on the OpenCore disk failed"; return 1; }
@@ -11035,7 +11119,7 @@ function driver_record_component() {
 # Remember the Lilu and WhateverGreen on the OpenCore disk of an AMD Mac that was just set up (the Mac is stopped).
 function driver_record_amd() {
   local comps
-  comps=$(driver_oc_kext "$1" versions Lilu.kext WhateverGreen.kext 2>/dev/null | python3 -c 'import json,sys
+  comps=$(driver_oc_json "$1" versions Lilu.kext WhateverGreen.kext | python3 -c 'import json,sys
 d = json.load(sys.stdin)
 print(json.dumps([{"name": k[:-5], "version": v, "tag": v, "sha256": "", "source": "disk", "installed_at": ""} for k, v in d.items() if v]))') || return 1
   [ "$comps" != "[]" ] || return 1
@@ -11092,7 +11176,7 @@ function driver_status_command() {
   fi
   [ "$interrupted" != yes ] || echo "The driver update stopped before it finished. Finish it: osx-proxmox-next.sh driver-update $vmid --finish --yes (or undo it: osx-proxmox-next.sh driver-undo $vmid --yes)."
   if [ "$known" == yes ]; then echo "Installed: $(python3 -c 'import json,sys; names={"nvidia": ["NullMoth"], "intel": ["WhateverXe", "WhateverXe Graphics"], "amd": ["Lilu", "WhateverGreen"]}[sys.argv[2]]; d=json.loads(sys.argv[1]); print(" and ".join("%s %s" % (n, d[n]) for n in names if d.get(n)))' "$installed" "$kind")$([ "$from_record" != yes ] || echo " $(driver_text FROM_RECORD)")"
-  else echo "Installed: installed version unknown"; fi
+  else echo "Installed: installed version unknown$([ "$(cat "${TEMP_DIR:-/tmp}/osx-next-driver-src-$vmid" 2>/dev/null)" != stale ] || echo " ($(driver_text STALE_RECORD))")"; fi
   if [ "$have_latest" == yes ]; then
     echo "Latest:    $(python3 -c 'import json,sys; names={"nvidia": ["NullMoth"], "intel": ["WhateverXe", "WhateverXe Graphics"], "amd": ["Lilu", "WhateverGreen"]}[sys.argv[2]]; d=json.loads(sys.argv[1]); print(" and ".join("%s %s" % (n, d[n]) for n in names if d.get(n)))' "$latest" "$kind")"
     if [ "$interrupted" != yes ]; then     # a stopped update has one verdict: the unfinished line above and its next step
@@ -11204,7 +11288,7 @@ function driver_apply_run() {
     driver_engine update-init "$vmid" "$kind" "$name" "$DRIVER_VERSION_TEXT" "$(driver_step_name "$kind" "$DRIVER_TARGET")" \
       "$(gpu_json 'json.dumps({n: d.get(n, {}).get("tag", "") for n in ("NullMoth", "WhateverXe", "WhateverXe Graphics")})' <<<"$DRIVER_TARGET")" \
       "$(gpu_json 'json.dumps([{"name": n, "version": v} for n, v in d.items()])' <<<"$DRIVER_INSTALLED")" \
-      "$(sed -n 's/^hostpci0: //p' <<<"$cfg")" >/dev/null
+      "$(sed -n 's/^hostpci0: //p' <<<"$cfg")" "" $(driver_is_stopped "$vmid" && echo stopped) >/dev/null
   fi
   case "$kind" in
     amd) driver_run_amd "$vmid" || rc=1 ;;
@@ -11257,7 +11341,7 @@ function driver_undo_read_disk() {
   kind=$(driver_engine record "$vmid" | gpu_json 'd.get("kind", "")') || return 0
   case "$kind" in amd) names="Lilu.kext WhateverGreen.kext" ;; intel) names="WhateverXe.kext" ;; *) return 0 ;; esac
   # shellcheck disable=SC2086
-  found=$(driver_oc_kext "$vmid" versions $names 2>/dev/null | gpu_json 'json.dumps({k[:-5]: v for k, v in d.items() if v})') || return 0
+  found=$(driver_oc_json "$vmid" versions $names | gpu_json 'json.dumps({k[:-5]: v for k, v in d.items() if v})') || return 0
   [ -z "$found" ] || driver_engine disk-read "$vmid" "$found" >/dev/null 2>&1 || true
 }
 

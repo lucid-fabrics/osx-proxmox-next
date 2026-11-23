@@ -93,7 +93,7 @@ def _abandon(u: Updater, exc: Exception) -> str:
     except Exception:  # noqa: BLE001 - the record of disks is a courtesy of the failure path
         pass
     snap = u.state.get("snapshot", "")
-    message = f"{exc} {engine.failure_text(u.state, u.running())}" + FINISH_HINT % u.vmid
+    message = engine.join_text(str(exc), engine.failure_text(u.state, u.running())) + FINISH_HINT % u.vmid
     if snap:
         message += UNDO_HINT % (engine.snapshot_date(snap), snap)
     u.state["error"] = message

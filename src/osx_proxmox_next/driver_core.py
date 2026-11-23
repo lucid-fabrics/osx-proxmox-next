@@ -91,7 +91,7 @@ class Updater:
         self.resumed = bool(resume)
         self.state = dict(resume) if resume else engine.new_update(
             plan.kind, plan.name, plan.version_label, plan.step_name(), self._choice(),
-            [{"name": n, "version": v} for n, v in plan.installed.items()], plan.cfg.get("hostpci0", ""))
+            [{"name": n, "version": v} for n, v in plan.installed.items()], plan.cfg.get("hostpci0", ""), plan.running)
         if resume:
             engine.reset_for_resume(self.state)
             self.state.setdefault("card", (self.state.get("original") or {}).get("hostpci0") or "")
@@ -185,6 +185,8 @@ class Updater:
         if self.begin("stop"):
             stop_mac(self.env, self.vmid)
             self.end("stop")
+        elif not self.resumed and not any(r["id"] == "stop" for r in self.state["steps"]):
+            stop_mac(self.env, self.vmid)       # the plan found the Mac stopped and listed no step: a no-op unless it started since
 
     def snapshot(self) -> None:
         if not self.begin("snapshot"):

@@ -350,9 +350,10 @@ def test_a_bash_update_that_fails_puts_the_card_back_and_names_the_snapshot(host
     assert "set 109 --hostpci0 0000:01:00,pcie=0" in host.calls() and not (host.state / "109.lock").exists()
     state = engine.read_update(109, str(host.state))        # the same state file the Python twin leaves: steps, phase, what was remembered
     assert state["phase"] == "failed" and state["snapshot"] == SNAP and state["original"]["hostpci0"] == "0000:01:00,pcie=0"
-    assert [r["id"] for r in state["steps"]] == [i for i, _t in engine.step_titles("nvidia")]
-    assert [r["state"] for r in state["steps"]] == ["done", "done", "done", "fail", "pending", "pending", "pending"]
-    assert [r["title"] for r in state["steps"]] == [t for _i, t in engine.step_titles("nvidia", "NullMoth v2.9")]
+    # the run lists the steps its plan listed: a Mac that was stopped has no "Stop the Mac" row (live check 2026-11-23, VM 984)
+    assert [r["id"] for r in state["steps"]] == [i for i, _t in engine.plan_steps("nvidia", "the driver", False)]
+    assert [r["state"] for r in state["steps"]] == ["done", "done", "fail", "pending", "pending", "pending"]
+    assert [r["title"] for r in state["steps"]] == [t for _i, t in engine.plan_steps("nvidia", "NullMoth v2.9", False)]
     assert engine.read_record(109, str(host.state))["components"][0]["version"] == "v2.8.1"      # the record did not move
 
 

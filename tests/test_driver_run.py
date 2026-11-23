@@ -153,13 +153,37 @@ def test_amfipass_on_the_opencore_disk_is_replaced_only_when_it_differs(tmp_path
     res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
     assert res.ok
     scripts = [r[2] for r in pve.runs if r[0] == "bash"]
-    assert len(scripts) == 2 and "versions AMFIPass.kext" in scripts[0] and "replace AMFIPass.kext" in scripts[1]
+    assert len(scripts) == 3 and "versions AMFIPass.kext" in scripts[0] and "replace AMFIPass.kext" in scripts[1]
+    assert "mark NullMoth v2.9" in scripts[2]       # the version goes on the OpenCore disk, where a manual rollback finds it
     assert engine.installed_versions(engine.read_record(9))["AMFIPass"] == driver_nvidia.AMFIPASS.version
     pve2 = DPve(bash_output=['{"AMFIPass.kext": "%s"}' % driver_nvidia.AMFIPASS.version])
     plan2 = plan_for("nvidia", pve2)
     plan2.target = nv_target()
     driver_run.run_update(plan2, env_for(pve2, rec, tmp_path))
-    assert len([r for r in pve2.runs if r[0] == "bash"]) == 1          # read, found it right, wrote nothing
+    assert len([r for r in pve2.runs if r[0] == "bash"]) == 2          # read, found it right, wrote no kext: only the version marker
+
+
+def test_a_marker_that_cannot_be_written_is_a_note_not_a_failure(tmp_path, stubs, rec, monkeypatch):
+    """The NullMoth version marker is a courtesy: the update still finishes, and says what a manual rollback will cost."""
+    def broken(pve, vmid, name, version):
+        raise driver_nvidia.driver_oc.OcError("mount failed")
+    monkeypatch.setattr(driver_nvidia.driver_oc, "write_marker", broken)
+    pve = DPve(bash_output='{"AMFIPass.kext": "%s"}' % driver_nvidia.AMFIPASS.version)
+    plan = plan_for("nvidia", pve)
+    plan.target = nv_target()
+    res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
+    assert res.ok and any("Could not note the NullMoth version on the OpenCore disk (mount failed)" in n for n in res.notes)
+
+
+def test_a_mac_that_started_after_its_plan_found_it_stopped_is_stopped_first(tmp_path, stubs, rec):
+    """The plan of a stopped Mac lists no stop step; a Mac that was started since is still stopped before anything else."""
+    pve = DPve(bash_output='{"AMFIPass.kext": "%s"}' % driver_nvidia.AMFIPASS.version)
+    plan = plan_for("nvidia", pve)
+    plan.target = nv_target()
+    pve.status = "running"
+    res = driver_run.run_update(plan, env_for(pve, rec, tmp_path))
+    assert res.ok and ("shutdown", "9", "--timeout", "120") in pve.calls
+    assert rec.steps[0][0] == "snapshot"
 
 
 def test_a_failed_opencore_read_stops_the_update_and_puts_the_card_back(tmp_path, stubs, rec):
@@ -173,7 +197,7 @@ def test_a_failed_opencore_read_stops_the_update_and_puts_the_card_back(tmp_path
     assert engine.read_update(9)["error"] == res.error
     assert ("set", "9", "--hostpci0", "0000:01:00,pcie=0") in pve.calls
     state = engine.read_update(9)
-    assert state["phase"] == "failed" and state["steps"][3]["state"] == "fail" and engine.unfinished(9)["phase"] == "failed"
+    assert state["phase"] == "failed" and {r["id"]: r["state"] for r in state["steps"]}["stage"] == "fail" and engine.unfinished(9)["phase"] == "failed"
     assert ("stage", "fail") in rec.steps and engine.read_record(9) == {}
 
 

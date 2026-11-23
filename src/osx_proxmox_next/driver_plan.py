@@ -37,6 +37,7 @@ class DriverPlan:
     older_snapshots: list[str] = field(default_factory=list)
     interrupted: bool = False         # an update was cut off and nobody runs it
     cfg: dict[str, str] = field(default_factory=dict)
+    unknown_why: str = ""             # why the installed version is not known, when there was a record that cannot be believed
     from_record: bool = False         # the installed versions are the record's: the Mac's disk could not be read (it runs)
     undo: str = ""                    # how this tool says "undo" (empty: the key r and osx-next-cli; bash has its own command)
     resume: dict = field(default_factory=dict)   # the state of the stopped run a Finish goes on with
@@ -71,7 +72,7 @@ class DriverPlan:
         who = f"{self.name or 'VM %d' % self.vmid} (VM {self.vmid})"
         finishing = self.finishing
         out.append(f"Finish the {label} driver update of {who}" if finishing else f"Update the {label} driver of {who}")
-        out += ["  " + l for l in engine.change_lines(self.kind, self.installed, self.target.versions())]
+        out += ["  " + l for l in engine.change_lines(self.kind, self.installed, self.target.versions(), self.reinstall)]
         if self.nothing_to_do:
             return out + [engine.UP_TO_DATE]
         out.append("Steps:")
@@ -144,6 +145,7 @@ def cfg_refusals(vmid: int, cfg: dict[str, str], base: str | None = None, resumi
 
 
 DISK_COMPONENTS = {"amd": ("Lilu", "WhateverGreen"), "intel": ("WhateverXe",)}
+MARKED = {"nvidia": "NullMoth"}      # a driver without a kext of its own: its version is a marker file on the OpenCore disk
 
 
 def installed_versions(pve: ProxmoxAdapter, vmid: int, kind: str, running: bool,
@@ -155,8 +157,9 @@ def installed_versions(pve: ProxmoxAdapter, vmid: int, kind: str, running: bool,
     when the versions of an Intel or AMD Mac are the record's because the disk was not read (the Mac runs)."""
     record = engine.read_record(vmid)
     have = {n: v for n, v in engine.installed_versions(record).items() if n in engine.COMPONENTS[kind] or n == "AMFIPass"}
+    stale = False
     if have and cfg is not None and not driver_disks.record_is_true(pve, vmid, record, cfg):
-        have = {}
+        have, stale = {}, True
     found: dict[str, str] = {}
     if kind in DISK_COMPONENTS and not running:
         try:
@@ -164,14 +167,21 @@ def installed_versions(pve: ProxmoxAdapter, vmid: int, kind: str, running: bool,
         except driver_oc.OcError:
             found = {}
         found = {n: v for n, v in found.items() if v}
-        if found:
-            if any(n in have and engine.compare(have[n], v) != 0 for n, v in found.items()):
-                have = {}       # the disk disagrees: what the record says about the other parts is stale too
-            have.update(found)
+    elif kind in MARKED and not running:
+        try:
+            found = {MARKED[kind]: driver_oc.read_marker(pve, vmid, MARKED[kind])}
+        except driver_oc.OcError:
+            found = {}
+        found = {n: v for n, v in found.items() if v}
+    if found:
+        if any(n in have and engine.compare(have[n], v) != 0 for n, v in found.items()):
+            have = {}       # the disk disagrees: what the record says about the other parts is stale too
+        have.update(found)
     if source is not None:
         # an undo read the disk while the Mac was stopped and flagged the record (a record of other disks was dropped above)
         read_by_undo = bool(record.get("disk_read"))
         source["record"] = bool(have) and kind in DISK_COMPONENTS and not found and not read_by_undo
+        source["why"] = engine.STALE_RECORD if stale and not found else ""
     return have, bool(have)
 
 
@@ -203,6 +213,7 @@ def prepare(vmid: int, choice: Choice | None = None, pve: ProxmoxAdapter | None 
     where: dict = {}
     plan.installed, plan.installed_known = installed_versions(pve, vmid, plan.kind, plan.running, plan.cfg, where)
     plan.from_record = bool(where.get("record"))
+    plan.unknown_why = where.get("why", "") if not plan.installed else ""
     plan.resume = resume or (engine.unfinished(vmid, base) if plan.interrupted else {})
     plan.verdict = plan.judged()["state"]
     plan.snapshot = snapshot if engine.SNAPSHOT_RE.match(snapshot or "") else engine.snapshot_name()
