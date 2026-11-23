@@ -328,6 +328,8 @@ async def test_a_short_narrow_new_mac_keeps_its_blank_row_and_leaves_out_what_do
         assert head.styles.margin.bottom == 1                           # the blank row under the title, as on the wide screen
         assert not screen.query_one("#new-note").display                # no room for the watch-it hint under 90 columns
         for row in screen.query("#new-form > ChoiceRow"):
+            if not row.display:               # the GPU row exists for the Stela choice only
+                continue
             assert "…" not in row.render().plain and row.size.height == 1
         assert "Tahoe 26" not in screen.query_one("#r-macos").render().plain
     async with NextApp().run_test(size=SIZE) as pilot2:

@@ -11,16 +11,18 @@ from ..defaults import HOST_RAM_RESERVE_MB
 from ..domain import MIN_DISK_GB, MIN_MEMORY_MB, VmConfig, validate_config
 from ..forms import FormValues, build_vm_config_from_values, validate_form_values
 from ..presets import SizePreset
+from ..stela import StelaConfig, validate_stela_config
 from ..smbios import SmbiosIdentity, resolve_smbios
 
-__all__ = ["ARM64_KEY", "NewMacState", "ROW_ORDER", "default_name", "effective_size", "validate_arm64_new_mac",
-           "validate_new_mac"]
+__all__ = ["ARM64_KEY", "NewMacState", "ROW_ORDER", "STELA_KEY", "default_name", "effective_size",
+           "validate_arm64_new_mac", "validate_new_mac", "validate_stela_new_mac"]
 
 ARM64_KEY = "arm64"   # the macOS choice that creates the arm64 (beta) runner instead of an OpenCore Mac
+STELA_KEY = "stela"   # the macOS choice that installs macOS 27 with a downloaded Stela release, no Mac needed
 
 # Top to bottom: the order the screen focuses the first bad row in.
 ROW_ORDER = (
-    "macos", "name", "size", "cores", "memory", "disk", "storage", "install", "apple",
+    "macos", "name", "size", "cores", "memory", "disk", "storage", "gpu", "install", "apple",
     "vmid", "bridge", "vlan", "iso_dir", "installer_path", "existing_uuid", "penryn", "nic",
     "vmgenid", "mac", "force",
 )
@@ -53,6 +55,7 @@ class NewMacState:
     vmgenid: str = ""
     mac: str = ""
     force_download: bool = False
+    gpu_pci: str = ""                # Stela only: a host GPU to pass to the VM, "" = none
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -61,6 +64,15 @@ class NewMacState:
     @property
     def is_arm64(self) -> bool:
         return self.macos == ARM64_KEY
+
+    @property
+    def is_stela(self) -> bool:
+        return self.macos == STELA_KEY
+
+    @property
+    def is_beta(self) -> bool:
+        """One of the two macOS 27 arm64 choices: neither is an OpenCore Mac."""
+        return self.is_arm64 or self.is_stela
 
     def set_macos(self, macos: str) -> None:
         """Switch version; a name the user did not edit follows it."""
@@ -181,6 +193,42 @@ def validate_arm64_new_mac(
     )
     for issue in validate_arm64_config(config):
         for pattern, row in _ARM64_ISSUE_ROWS:
+            if re.search(pattern, issue):
+                errors.setdefault(row, issue)
+                break
+    if host_memory_limit_mb and int(memory_mb) > host_memory_limit_mb:
+        errors["memory"] = (f"Memory: this host has only {host_memory_limit_mb // 1024} GB free for a VM "
+                            f"(it keeps {HOST_RAM_RESERVE_MB // 1024} GB for itself). Lower it.")
+    ordered = {key: errors[key] for key in ROW_ORDER if key in errors}
+    return ordered, (config if not ordered else None)
+
+
+_STELA_ISSUE_ROWS = (
+    (r"^VMID", "vmid"), (r"^VM name", "name"), (r"CPU cores", "cores"), (r"RAM", "memory"), (r"GB disk", "disk"),
+    (r"^Storage", "storage"), (r"^Bridge", "bridge"), (r"^GPU", "gpu"),
+)
+
+
+def validate_stela_new_mac(
+    state: NewMacState,
+    presets: dict[str, SizePreset],
+    host_memory_limit_mb: int = 0,
+) -> tuple[dict[str, str], StelaConfig | None]:
+    """(errors by row key in screen order, the StelaConfig when there are none), for the Stela choice."""
+    cores, memory_mb, disk = effective_size(state, presets)
+    errors: dict[str, str] = {}
+    vmid = state.vmid.strip()
+    numbers = {"cores": cores, "memory": memory_mb, "disk": disk, "vmid": vmid}
+    for key, value in numbers.items():
+        if not (value.isascii() and value.isdigit()):
+            errors[key] = f"{key.capitalize()} must be a whole number."
+    if errors:
+        return {key: errors[key] for key in ROW_ORDER if key in errors}, None
+    config = StelaConfig(
+        vmid=int(vmid), name=state.name.strip(), storage=state.storage.strip(), cores=int(cores),
+        memory_mb=int(memory_mb), disk_gb=int(disk), bridge=state.bridge.strip(), gpu_pci=state.gpu_pci)
+    for issue in validate_stela_config(config):
+        for pattern, row in _STELA_ISSUE_ROWS:
             if re.search(pattern, issue):
                 errors.setdefault(row, issue)
                 break

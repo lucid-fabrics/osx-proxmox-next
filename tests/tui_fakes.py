@@ -110,6 +110,7 @@ def patch_host(monkeypatch, vms=None, checks=None, drivers=None, grab=None, fact
     monkeypatch.setattr("osx_proxmox_next.app.run_preflight", lambda: list(good_checks() if checks is None else checks))
     monkeypatch.setattr("osx_proxmox_next.app.load_host_facts", lambda: facts or host_facts())
     monkeypatch.setattr("osx_proxmox_next.app.socket.gethostname", lambda: "pve")
+    monkeypatch.setattr("osx_proxmox_next.screens.new_mac.list_host_gpus", lambda: [])
     for mod in ("home", "new_mac"):
         monkeypatch.setattr(f"osx_proxmox_next.screens.{mod}.detect_cpu_cores", lambda: 8)
         monkeypatch.setattr(f"osx_proxmox_next.screens.{mod}.detect_memory_mb", lambda: 16384)

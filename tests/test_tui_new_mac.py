@@ -34,8 +34,8 @@ def test_bar_state():
     assert bar_state(11, 10) == "over"
 
 
-def test_version_options_are_newest_first_then_the_arm64_beta():
-    assert [o.value for o in version_options()] == ["tahoe", "sequoia", "sonoma", "ventura", "monterey", "arm64"]
+def test_version_options_are_newest_first_then_the_two_arm64_betas():
+    assert [o.value for o in version_options()] == ["tahoe", "sequoia", "sonoma", "ventura", "monterey", "arm64", "stela"]
 
 
 @F.tui

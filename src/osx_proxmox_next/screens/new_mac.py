@@ -14,10 +14,17 @@ from textual.widgets import Button, Input, Static
 
 from ..defaults import DEFAULT_STORAGE, detect_cpu_cores, detect_memory_mb
 from ..domain import SUPPORTED_MACOS
-from ..models.wizard_state import NewMacState, effective_size, validate_arm64_new_mac, validate_new_mac
+from ..models.wizard_state import (
+    NewMacState,
+    effective_size,
+    validate_arm64_new_mac,
+    validate_new_mac,
+    validate_stela_new_mac,
+)
 from ..presets import PRESET_KEYS, build_presets, preset_fits, preset_label
 from ..services.host_facts import HostFacts
 from ..smbios import SmbiosIdentity, model_for_macos, resolve_smbios
+from ..stela_gpus import HostGpu, list_host_gpus
 from ..widgets.capacity import CapacityBar
 from ..widgets.rows import ActionRow, ChoiceRow, ExpandRow, FieldRow, Option
 from .base import OsxScreen
@@ -50,6 +57,7 @@ class NewMacScreen(OsxScreen):
         self.base_memory_mb = detect_memory_mb()
         self.targets: list[str] = []
         self.identity: SmbiosIdentity | None = None   # the model and serial the Mac gets, when Apple ID is on
+        self.gpus: list[HostGpu] = []                  # host GPUs the Stela VM can take (read once, at compose)
 
     # ── setup ────────────────────────────────────────────────────────
 
@@ -66,6 +74,7 @@ class NewMacScreen(OsxScreen):
             targets.remove(DEFAULT_STORAGE)
             targets.insert(0, DEFAULT_STORAGE)
         self.targets = targets or [DEFAULT_STORAGE]
+        self.gpus = list_host_gpus()
         st.storage = self.targets[0]
         st.iso_dir = self.facts.iso_dir
         st.use_penryn = self.facts.cpu.needs_penryn
@@ -91,6 +100,8 @@ class NewMacScreen(OsxScreen):
                     yield Vertical(*custom_rows(st), id="custom-box")
                     yield ChoiceRow("Lives on", [Option(t, t) for t in self.targets],
                                     st.storage, id="r-storage", hint_lines=0, drop_long=True)
+                    yield ChoiceRow("GPU", [Option("none", "None"), *[Option(g.slot, g.label) for g in self.gpus]],
+                                    "none", id="r-gpu", hint_lines=0, drop_long=True)
                     yield ChoiceRow("Install", [Option("handsoff", "Hands-off"), Option("manual", "Manual")],
                                     "handsoff", id="r-install", drop_long=True)
                     yield ChoiceRow("Apple ID", [Option("off", "Off"), Option("on", "On")], "off", id="r-apple",
@@ -139,7 +150,7 @@ class NewMacScreen(OsxScreen):
 
     def _presets(self):
         facts = self.facts
-        macos = "tahoe" if self.state.is_arm64 else self.state.macos   # the arm64 runner is sized like the newest Mac
+        macos = "tahoe" if self.state.is_beta else self.state.macos   # the arm64 targets are sized like the newest Mac
         return build_presets(macos, self.base_cores, self.base_memory_mb,
                              facts.host_cores, facts.host_memory_mb)
 
@@ -175,14 +186,15 @@ class NewMacScreen(OsxScreen):
         storage = q("#r-storage", ChoiceRow)
         storage.set_text(f"network {st.bridge.strip() or '?'}")
         for rid in ("#r-install", "#r-apple", "#r-more"):
-            q(rid).display = not st.is_arm64      # these only apply to an OpenCore Mac
+            q(rid).display = not st.is_beta       # these only apply to an OpenCore Mac
+        q("#r-gpu").display = st.is_stela         # only the Stela VM can take a GPU
         install = q("#r-install", ChoiceRow)
         install.set_text("BETA" if st.handsoff else "",
                          "Runs by itself up to Setup Assistant" if st.handsoff
                          else "You finish it in the Proxmox console")
         apple = q("#r-apple", ChoiceRow)
         apple.set_text("iMessage, FaceTime and iCloud" if st.apple_services else "no iMessage, FaceTime or iCloud")
-        q("#more-box").display = q("#r-more", ExpandRow).open and not st.is_arm64
+        q("#more-box").display = q("#r-more", ExpandRow).open and not st.is_beta
         q("#r-vmgenid").display = st.apple_services
         q("#r-mac").display = st.apple_services
         q("#r-identity").display = st.apple_services
@@ -242,7 +254,11 @@ class NewMacScreen(OsxScreen):
 
     def _sync_after(self) -> None:
         st, pal = self.state, self.app.get_css_variables()
-        if st.is_arm64:
+        if st.is_stela:
+            steps = [("Download Stela and make the boot stick", "about 2 min"),
+                     (f"Create VM {st.vmid.strip() or '?'}", "no Mac needed"),
+                     ("Install macOS 27, by itself", "about 1 hour, until Setup Assistant")]
+        elif st.is_arm64:
             steps = [("Create the runner VM", f"VM {st.vmid.strip() or '?'}, about 2 min"),
                      ("The runner builds the beta", "about 10 min, on its own"),
                      ("Install macOS", "not in this beta build yet")]
@@ -282,6 +298,8 @@ class NewMacScreen(OsxScreen):
             st.size = value
         elif rid == "r-storage":
             st.storage = value
+        elif rid == "r-gpu":
+            st.gpu_pci = "" if value == "none" else value
         elif rid == "r-install":
             st.handsoff = value == "handsoff"
         elif rid == "r-apple":
@@ -386,7 +404,7 @@ class NewMacScreen(OsxScreen):
     def _row_widget(self, key: str) -> Widget | None:
         ids = {
             "macos": "#r-macos", "name": "#r-name", "size": "#r-size", "cores": "#r-cores", "memory": "#r-memory",
-            "disk": "#r-disk", "storage": "#r-storage", "install": "#r-install", "apple": "#r-apple",
+            "disk": "#r-disk", "storage": "#r-storage", "gpu": "#r-gpu", "install": "#r-install", "apple": "#r-apple",
             "vmid": "#r-vmid", "bridge": "#r-bridge", "vlan": "#r-vlan", "iso_dir": "#r-iso",
             "installer_path": "#r-installer", "existing_uuid": "#r-uuid", "penryn": "#r-penryn", "nic": "#r-nic",
             "vmgenid": "#r-vmgenid", "mac": "#r-mac", "force": "#r-force", "identity": "#r-identity",
@@ -398,7 +416,11 @@ class NewMacScreen(OsxScreen):
         st = self.state
         presets = self._presets()
         arm_config = None
-        if st.is_arm64:
+        stela_config = None
+        if st.is_stela:
+            errors, stela_config = validate_stela_new_mac(st, presets, self.facts.vm_memory_limit_mb)
+            config = None
+        elif st.is_arm64:
             errors, arm_config = validate_arm64_new_mac(st, presets, self.facts.vm_memory_limit_mb)
             config = None
         else:
@@ -422,6 +444,10 @@ class NewMacScreen(OsxScreen):
             self._focus_first_bad(errors)
             return
         error_box.update("")
+        if st.is_stela:
+            from .stela_build import StelaBuildScreen
+            self.app.switch_screen(StelaBuildScreen(stela_config))
+            return
         if st.is_arm64:
             from .arm64_build import Arm64BuildScreen
             self.app.switch_screen(Arm64BuildScreen(arm_config))

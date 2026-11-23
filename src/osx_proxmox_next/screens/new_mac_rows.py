@@ -7,8 +7,9 @@ from collections.abc import Iterator
 from textual.widget import Widget
 
 from ..arm64 import ARM64_LABEL
+from ..stela import STELA_LABEL
 from ..domain import SUPPORTED_MACOS
-from ..models.wizard_state import ARM64_KEY, NewMacState
+from ..models.wizard_state import ARM64_KEY, STELA_KEY, NewMacState
 from ..services.host_facts import HostFacts
 from ..widgets.rows import ActionRow, ChoiceRow, FieldRow, Option
 
@@ -30,12 +31,15 @@ MORE_ROWS = ("vmid", "bridge", "vlan", "iso_dir", "installer_path", "existing_uu
 def short_label(key: str) -> str:
     if key == ARM64_KEY:
         return ARM64_LABEL.replace("macOS ", "")
+    if key == STELA_KEY:
+        return STELA_LABEL.replace("macOS ", "")
     return SUPPORTED_MACOS[key]["label"].replace("macOS ", "")
 
 
 def version_options() -> list[Option]:
-    # the arm64 (beta) target is the last choice: it creates a runner VM, not an OpenCore Mac
-    return [Option(key, short_label(key)) for key in (*VERSION_ORDER, ARM64_KEY) if key in SUPPORTED_MACOS or key == ARM64_KEY]
+    # the two arm64 (beta) targets come last: neither is an OpenCore Mac
+    return [Option(key, short_label(key)) for key in (*VERSION_ORDER, ARM64_KEY, STELA_KEY)
+            if key in SUPPORTED_MACOS or key in (ARM64_KEY, STELA_KEY)]
 
 
 def _on_off(label: str, value: bool, *, id: str, hint: str = "") -> ChoiceRow:
