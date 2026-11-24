@@ -169,7 +169,11 @@ def update_readme(block: str) -> bool:
     readme = README.read_text(encoding="utf-8")
     # Normalize CRLF -> LF so the Sponsors-block regex matches on Windows checkouts.
     readme = readme.replace("\r\n", "\n")
-    new = BLOCK_RE.sub(block, readme, count=1)
+    # The match stops before "\n---", so the block must carry its own trailing
+    # newline: otherwise the blank line before the rule is eaten, and Markdown
+    # turns the text line above "---" into a heading.
+    replacement = block.rstrip("\n") + "\n"
+    new = BLOCK_RE.sub(lambda _m: replacement, readme, count=1)
     if new == readme:
         return False
     README.write_text(new, encoding="utf-8")
