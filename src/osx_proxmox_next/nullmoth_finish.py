@@ -22,20 +22,21 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 
 from . import driver_disks, driver_engine as engine_rec, driver_oc, nullmoth, nullmoth_engine as engine
-from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .downloader import DownloadError
 from .executor import apply_plan
+from .finish_common import (
+    FinishError, _drop_disk, _storage_of, note_picker_restore, recovery_image, require_stopped, save_snapshot, start_vm, vm_config,
+    wait_stopped,
+)
 from .gpu import parse_config
-from .igpu_finish import FinishError, StageJob, _drop_disk, _storage_of, stage_recovery, wait_stopped
+from .igpu_finish import StageJob, stage_recovery
 from .infrastructure import ProxmoxAdapter
 from .oc_builder import ensure_amfipass
 from .planner import POST_INSTALL_BOOT_ORDER
-from .rollback import create_snapshot
-from .services import fetch_vm_info, get_proxmox_adapter
+from .services import get_proxmox_adapter
 from .unattended import QmConsole
 
 __all__ = ["FinishError", "FinishResult", "finish", "versions"]
@@ -78,15 +79,11 @@ def versions(get: Callable = engine.github_get) -> list[dict]:
 
 
 def _check_vm(vmid: int, pve: ProxmoxAdapter) -> dict[str, str]:
-    info = fetch_vm_info(vmid, adapter=pve)
-    if info is None:
-        raise FinishError(f"VM {vmid} not found.")
-    cfg = parse_config(info.config_raw)
+    info, cfg = vm_config(vmid, pve)
     if "hostpci0" in cfg:
         raise FinishError(f"VM {vmid} already has a PCI device on hostpci0. Run nvidia-detach (or gpu-setup --undo) "
                           "first, then try again.")
-    if info.status != "stopped":
-        raise FinishError(f"VM {vmid} is running. Stop it first: qm stop {vmid}")
+    require_stopped(vmid, info)
     return cfg
 
 
@@ -185,9 +182,7 @@ def _attach_and_boot(vmid: int, gpu: str, amfipass: Path, macos: str, pve: Proxm
 
     on_event("First boot with the card: the guest turns on remote access, installs the driver and restarts "
              "(about 10 minutes)")
-    res = pve.qm("start", str(vmid))
-    if not res.ok:
-        raise FinishError(f"Could not start VM {vmid}: {res.output.strip()[-300:]}")
+    start_vm(pve, vmid)
     result.result = _wait_result(pve, vmid, payload_ref, FIRSTBOOT_TIMEOUT, on_event, clock, sleep)
 
 
@@ -244,8 +239,7 @@ def finish(
     pick = dict(pick, sha=tar_sha)
     cfg = _check_vm(vmid, pve)  # the downloads took a while: the VM must still be stopped
     storage = _storage_of(cfg)
-    snapshot = create_snapshot(vmid, adapter=pve)
-    say(f"Saved the VM config to {snapshot.path}")
+    save_snapshot(vmid, pve, say)
 
     payload = work / f"nullmoth-payload-{vmid}.img"
     say("Building the payload disk (driver, first-boot script)")
@@ -253,17 +247,11 @@ def finish(
     ok, msg = engine.build_payload(payload, files)
     if not ok:
         raise FinishError(msg)
-    recovery = resolve_recovery_or_installer_path(SimpleNamespace(installer_path="", macos=version))  # type: ignore[arg-type]
-    if not recovery.exists():
-        from .downloader import download_recovery
-        say(f"Downloading the {version} recovery image")
-        recovery = download_recovery(version, iso)
+    recovery = recovery_image(version, iso, say)
     payload_ref = stage_recovery(
         StageJob(vmid, pve, console, storage, lambda m: say(m.replace("graphics package", "NullMoth driver")), clock, sleep),
         payload, recovery, cfg)
-    err = console.restore_picker_timeout()
-    if err:
-        result.notes.append(f"Could not restore the picker's auto-boot ({err}); run post-install afterwards.")
+    note_picker_restore(console, result.notes)
 
     try:
         _attach_and_boot(vmid, gpu, amfipass, macos, pve, payload_ref, result, on_event, clock, sleep, sysfs_root)

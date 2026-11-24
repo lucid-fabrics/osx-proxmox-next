@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from osx_proxmox_next import igpu_finish, nullmoth_engine as engine, nullmoth_finish as nf
+from osx_proxmox_next import finish_common, igpu_finish, nullmoth_engine as engine, nullmoth_finish as nf
 from osx_proxmox_next.domain import PlanStep
 from osx_proxmox_next.downloader import DownloadError
 from osx_proxmox_next.executor import ApplyResult, StepResult
@@ -33,8 +33,8 @@ def env(tmp_path, monkeypatch):
         (tmp_path / name).write_bytes(b"x")
     e.tarball.write_bytes(b"t")
     monkeypatch.setattr(nf, "ensure_amfipass", lambda iso: tmp_path / "a.zip")
-    monkeypatch.setattr(nf, "resolve_recovery_or_installer_path", lambda cfg: tmp_path / "rec.img")
-    monkeypatch.setattr(nf, "create_snapshot", lambda vmid, adapter=None: SimpleNamespace(path=tmp_path / "snap"))
+    monkeypatch.setattr(finish_common, "resolve_recovery_or_installer_path", lambda cfg: tmp_path / "rec.img")
+    monkeypatch.setattr(finish_common, "create_snapshot", lambda vmid, adapter=None: SimpleNamespace(path=tmp_path / "snap"))
 
     def resolve(choice, get):
         if e.resolve_error:
@@ -210,7 +210,7 @@ def test_payload_and_import_failures(env):
 
 
 def test_a_missing_recovery_image_is_downloaded(env, monkeypatch):
-    monkeypatch.setattr(nf, "resolve_recovery_or_installer_path", lambda cfg: env.tmp / "absent.img")
+    monkeypatch.setattr(finish_common, "resolve_recovery_or_installer_path", lambda cfg: env.tmp / "absent.img")
     seen = []
     monkeypatch.setattr("osx_proxmox_next.downloader.download_recovery",
                         lambda version, iso: seen.append(version) or env.tmp / "rec.img")
