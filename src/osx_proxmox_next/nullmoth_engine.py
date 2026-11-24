@@ -404,47 +404,81 @@ def _usage():
     return 64
 
 
+def _cmd_releases(argv):
+    _emit({"releases": list_releases()})
+
+
+def _cmd_resolve(argv):
+    _emit(resolve(argv[2]))
+
+
+def _cmd_fetch(argv):
+    pick = resolve(argv[2])
+    path, sha = fetch_release(pick, argv[3])
+    _emit(dict(pick, path=str(path), sha256=sha))
+
+
+def _cmd_fw_pins(argv):
+    _emit(firmware_pins(argv[2]) or {})
+
+
+def _cmd_fw_fetch(argv):
+    pins = firmware_pins(argv[2])
+    if pins is None:
+        sys.stderr.write("the release pins no firmware package\n")
+        return 1
+    _emit(dict(pins, path=str(fetch_firmware(pins, argv[3]))))
+
+
+def _cmd_payload(argv):
+    fw = argv[5] if len(argv) == 7 else None
+    ok, msg = build_payload(argv[2], payload_files(argv[3], argv[4], fw, argv[6] if fw else ""))
+    sys.stderr.write(msg + "\n")
+    return 0 if ok else 1
+
+
+def _cmd_result(argv):
+    sys.stdout.write(read_result(argv[2]) + "\n")
+
+
+def _cmd_parse_result(argv):
+    _emit(parse_result(argv[2]))
+
+
+def _cmd_vm_mac(argv):
+    cfg = dict(line.split(": ", 1) for line in sys.stdin.read().splitlines() if ": " in line)
+    sys.stdout.write(vm_mac(cfg) + "\n")
+
+
+def _cmd_find_ip(argv):
+    sys.stdout.write(find_guest_ip(argv[2].lower()) + "\n")
+
+
+def _cmd_port(argv):
+    return 0 if port_open(argv[2], int(argv[3])) else 1
+
+
+# command name -> (accepted argument counts, handler(argv)). The counts are len(argv) as the bash installer passes it: a tuple of
+# the counts that are accepted, or None for any. A handler returns an exit code, or None for 0.
+COMMANDS = {
+    "releases": (None, _cmd_releases), "resolve": ((3,), _cmd_resolve), "fetch": ((4,), _cmd_fetch), "fw-pins": ((3,), _cmd_fw_pins),
+    "fw-fetch": ((4,), _cmd_fw_fetch), "payload": ((5, 7), _cmd_payload), "result": ((3,), _cmd_result),
+    "parse-result": ((3,), _cmd_parse_result), "vm-mac": (None, _cmd_vm_mac), "find-ip": ((3,), _cmd_find_ip),
+    "port": ((4,), _cmd_port),
+}
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
+    entry = COMMANDS.get(cmd)
     try:
-        if cmd == "releases":
-            _emit({"releases": list_releases()})
-        elif cmd == "resolve" and len(argv) == 3:
-            _emit(resolve(argv[2]))
-        elif cmd == "fetch" and len(argv) == 4:
-            pick = resolve(argv[2])
-            path, sha = fetch_release(pick, argv[3])
-            _emit(dict(pick, path=str(path), sha256=sha))
-        elif cmd == "fw-pins" and len(argv) == 3:
-            _emit(firmware_pins(argv[2]) or {})
-        elif cmd == "fw-fetch" and len(argv) == 4:
-            pins = firmware_pins(argv[2])
-            if pins is None:
-                sys.stderr.write("the release pins no firmware package\n")
-                return 1
-            _emit(dict(pins, path=str(fetch_firmware(pins, argv[3]))))
-        elif cmd == "payload" and len(argv) in (5, 7):
-            fw = argv[5] if len(argv) == 7 else None
-            ok, msg = build_payload(argv[2], payload_files(argv[3], argv[4], fw, argv[6] if fw else ""))
-            sys.stderr.write(msg + "\n")
-            return 0 if ok else 1
-        elif cmd == "result" and len(argv) == 3:
-            sys.stdout.write(read_result(argv[2]) + "\n")
-        elif cmd == "parse-result" and len(argv) == 3:
-            _emit(parse_result(argv[2]))
-        elif cmd == "vm-mac":
-            cfg = dict(line.split(": ", 1) for line in sys.stdin.read().splitlines() if ": " in line)
-            sys.stdout.write(vm_mac(cfg) + "\n")
-        elif cmd == "find-ip" and len(argv) == 3:
-            sys.stdout.write(find_guest_ip(argv[2].lower()) + "\n")
-        elif cmd == "port" and len(argv) == 4:
-            return 0 if port_open(argv[2], int(argv[3])) else 1
-        else:
+        if entry is None or not (entry[0] is None or len(argv) in entry[0]):
             return _usage()
+        code = entry[1](argv)
     except (ReleaseError, OSError) as exc:
         sys.stderr.write("ERROR: %s\n" % exc)
         return 1
-    return 0
+    return 0 if code is None else code
 
 
 if __name__ == "__main__":
