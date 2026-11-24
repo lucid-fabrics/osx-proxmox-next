@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-import conftest as guard
+import temp_size as guard
 
 MB = 1024 * 1024
 
@@ -40,14 +40,14 @@ def test_a_missing_base_dir_is_an_empty_report(tmp_path):
 
 
 def test_nothing_is_reported_under_both_limits():
-    assert guard.temp_size_problems(100 * MB, [(10 * MB, "test_a0")], 500, 50) == []
+    assert guard.temp_size_problems(100 * MB, [(10 * MB, "test_a0")], 1000, 50) == []
 
 
 def test_the_total_limit_names_the_largest_dirs():
-    lines = guard.temp_size_problems(600 * MB, [(40 * MB, "test_big0"), (1 * MB, "test_small0")], 500, 50)
-    assert "600 MB" in lines[0] and "test_big0" in lines[1] and "Stub the build" in lines[-1]
+    lines = guard.temp_size_problems(1200 * MB, [(40 * MB, "test_big0"), (1 * MB, "test_small0")], 1000, 50)
+    assert "1200 MB" in lines[0] and "test_big0" in lines[1] and "Stub the build" in lines[-1]
 
 
 def test_one_big_test_dir_fails_even_when_the_total_is_small():
-    lines = guard.temp_size_problems(80 * MB, [(60 * MB, "test_wedged0")], 500, 50)
+    lines = guard.temp_size_problems(80 * MB, [(60 * MB, "test_wedged0")], 1000, 50)
     assert lines and "test_wedged0" in lines[1]
