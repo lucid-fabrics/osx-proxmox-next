@@ -5,9 +5,15 @@ Textual's cleanup can race with loop teardown, causing 'Event loop is closed'
 in subsequent tests. This fixture ensures each test gets a clean loop policy.
 """
 
+from __future__ import annotations
+
 import asyncio
+import os
+import shutil
 
 import pytest
+
+import temp_size
 
 
 @pytest.fixture(autouse=True)
@@ -121,3 +127,34 @@ def _no_host_pci_devices(monkeypatch, tmp_path):
     empty = str(tmp_path / "no-sysfs")
     monkeypatch.setattr(driver_engine, "live_kind", lambda cfg, root="/sys": real(cfg, empty if str(root) == "/sys" else root))
     monkeypatch.setenv("SYSFS_ROOT", empty)
+
+
+@pytest.fixture(autouse=True)
+def _sweep_bash_engine_copies(tmp_path):
+    """The bash installer writes its embedded engines (about 350 KB) to a fresh $TMPDIR/gpuengine.XXXXXX on every call
+    that runs in a subshell, and never removes them. One bash test makes hundreds of calls: 100 MB on Linux CI. The
+    copies are of no use once the test is over, so they go with it."""
+    yield
+    for _ in range(3):  # a bash process that is still winding down can add files while the first pass runs
+        for leftover in tmp_path.glob("gpuengine.*"):
+            shutil.rmtree(leftover, ignore_errors=True)
+
+
+# Fails the run when the tests leave too much behind in the pytest base temp dir (see temp_size.py).
+def pytest_sessionfinish(session, exitstatus):
+    factory = getattr(session.config, "_tmp_path_factory", None)
+    if factory is None:
+        return
+    total, sizes = temp_size.temp_size_report(str(factory.getbasetemp()))
+    lines = temp_size.temp_size_problems(total, sizes, temp_size.TOTAL_LIMIT_MB, temp_size.DIR_LIMIT_MB)
+    if not lines:
+        return
+    lines[-1:-1] = temp_size.biggest_children(os.path.join(str(factory.getbasetemp()), sizes[0][1]))
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    for line in ["", *lines]:
+        if reporter:
+            reporter.write_line(line, red=True)
+        else:
+            print(line)
+    if session.exitstatus == 0:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
