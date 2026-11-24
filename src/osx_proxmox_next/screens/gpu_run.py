@@ -15,6 +15,7 @@ from .. import host_setup
 from ..gpu_flow import needs_typed, plan_for_approval, plan_lines, short_card_name
 from ..gpu_setup import CONFIRM_PHRASE
 from .reading import ReadScroll
+from .gpu_contract import GpuHost
 
 TIMELINE_WIDTH = 40
 WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
@@ -37,7 +38,7 @@ class Guidance:
     muted: tuple[int, ...] = ()           # indexes of the lines that are quiet notes
 
 
-class RunMixin:
+class RunMixin(GpuHost):
     """The run view of GpuScreen: the steps that apply, a box for what needs the user, the host and restart steps."""
 
     # ── the timeline ─────────────────────────────────────────────────

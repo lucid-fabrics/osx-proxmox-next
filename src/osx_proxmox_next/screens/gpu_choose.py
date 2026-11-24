@@ -28,6 +28,7 @@ from ..gpu_setup import DISPLAY_OPTIONS, GpuCard, VmOption
 from ..widgets.lines import Line, Lines
 from ..widgets.rows import ChoiceRow, Option
 from .gpu_before import BeforeDialog
+from .gpu_contract import GpuHost
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ SAFE_LINE = "Every file is backed up first."
 NO_CARD = "No card here can run macOS graphics. See the docs for cards that work."
 
 
-class ChooseMixin:
+class ChooseMixin(GpuHost):
     """The choose view of GpuScreen: rows on the left, "What it takes on this host" on the right."""
 
     async def _show_choose(self, notice: str = "") -> None:
