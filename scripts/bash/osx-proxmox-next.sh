@@ -6197,89 +6197,131 @@ def _usage():
     return 64
 
 
+def _cmd_check(argv):
+    root = os.environ.get("GPU_ROOT", "/")
+    _emit(check(root, wex=argv[2] if len(argv) == 3 else "latest"))
+
+
+def _cmd_verdict(argv):
+    devices = device_list(argv[3] if len(argv) == 4 else "latest")
+    _emit(dict(zip(("kind", "headline", "detail"), verdict(int(argv[2], 16), devices["text"], devices))))
+
+
+def _cmd_lookup(argv):
+    devices = device_list(argv[3] if len(argv) == 4 else "latest")
+    _emit(lookup(int(argv[2], 16), devices["text"]) or {})
+
+
+def _cmd_devices(argv):
+    devices = device_list(argv[2] if len(argv) == 3 else "latest")
+    _emit(dict({k: v for k, v in devices.items() if k != "text"}, basis=basis(devices)))
+
+
+def _cmd_settings(argv):
+    _emit(vm_settings(int(argv[2]), argv[3]))
+
+
+def _cmd_args(argv):
+    data = json.loads(sys.stdin.read())
+    fn = merge_args if argv[1] == "merge-args" else strip_args
+    sys.stdout.write(fn(data["args"], data["wanted"]) + "\n")
+
+
+def _cmd_fetch(argv):
+    kind, _, key = argv[2].partition(":")
+    entry = ROMS.get(key) if kind == "rom" else PINS.get(key)
+    if entry is None:
+        sys.stderr.write("unknown download %s\n" % argv[2])
+        return 64
+    try:
+        path = fetch(entry[1], entry[2], Path(argv[3]) / entry[0])
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("ERROR: %s\n" % exc)
+        return 1
+    sys.stdout.write(str(path) + "\n")
+
+
+def _cmd_assets(argv):
+    try:
+        picks = select_assets(*argv[3:])
+        out = {k: dict(p, path=str(fetch_release(p, argv[2]))) for k, p in picks.items()}
+    except (ReleaseError, OSError, ValueError) as exc:
+        sys.stderr.write("ERROR: %s\n" % exc)
+        return 1
+    _emit(out)
+
+
+def _cmd_releases(argv):
+    try:
+        _emit(list_releases(argv[2]))
+    except ReleaseError as exc:
+        sys.stderr.write("ERROR: %s\n" % exc)
+        return 1
+
+
+def _cmd_state_write(argv):
+    _emit(write_state(argv[2], json.loads(sys.stdin.read())))
+
+
+def _cmd_state_record(argv):
+    picks = json.loads(sys.stdin.read())
+    write_state(argv[2], picks_state(picks, argv[3]))
+
+
+def _cmd_state_show(argv):
+    sys.stdout.write("\n".join(describe_state(read_state(argv[2]))) + "\n")
+
+
+def _cmd_payload(argv):
+    ok, msg = build_payload(argv[2], argv[3])
+    sys.stderr.write(msg + "\n")
+    return 0 if ok else 1
+
+
+def _cmd_result(argv):
+    sys.stdout.write(read_result(argv[2]) + "\n")
+
+
+def _cmd_accel_check(argv):
+    active, detail = check_accel(int(argv[2]) if len(argv) == 3 else ACCEL_TIMEOUT)
+    sys.stdout.write(("active" if active else "inactive") + ": " + detail + "\n")
+    return 0 if active else 1
+
+
+def _cmd_stage_command(argv):
+    sys.stdout.write(STAGE_COMMAND + "\n")
+
+
+def _cmd_pins(argv):
+    _emit({"roms": {k: list(v) for k, v in ROMS.items()}, "pins": {k: list(v) for k, v in PINS.items()}})
+
+
+# command name -> (accepted argument counts, handler(argv)). The counts are len(argv) as the bash installer passes it: a tuple of
+# the counts that are accepted, None for any, or a function of argv. A handler returns an exit code, or None for 0.
+COMMANDS = {
+    "check": ((2, 3), _cmd_check), "verdict": ((3, 4), _cmd_verdict), "lookup": ((3, 4), _cmd_lookup),
+    "devices": ((2, 3), _cmd_devices), "settings": ((4,), _cmd_settings), "merge-args": (None, _cmd_args),
+    "strip-args": (None, _cmd_args), "fetch": ((4,), _cmd_fetch), "assets": ((3, 4, 5), _cmd_assets),
+    "releases": (lambda argv: len(argv) == 3 and argv[2] in RELEASE_KINDS, _cmd_releases), "state-write": ((3,), _cmd_state_write),
+    "state-record": ((4,), _cmd_state_record), "state-show": ((3,), _cmd_state_show), "payload": ((4,), _cmd_payload),
+    "result": ((3,), _cmd_result), "accel-check": ((2, 3), _cmd_accel_check), "stage-command": (None, _cmd_stage_command),
+    "pins": (None, _cmd_pins),
+}
+
+
+def _accepts(counts, argv):
+    if counts is None:
+        return True
+    return counts(argv) if callable(counts) else len(argv) in counts
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
-    root = os.environ.get("GPU_ROOT", "/")
-    if cmd == "check" and len(argv) in (2, 3):
-        _emit(check(root, wex=argv[2] if len(argv) == 3 else "latest"))
-        return 0
-    if cmd == "verdict" and len(argv) in (3, 4):
-        devices = device_list(argv[3] if len(argv) == 4 else "latest")
-        _emit(dict(zip(("kind", "headline", "detail"), verdict(int(argv[2], 16), devices["text"], devices))))
-        return 0
-    if cmd == "lookup" and len(argv) in (3, 4):
-        devices = device_list(argv[3] if len(argv) == 4 else "latest")
-        _emit(lookup(int(argv[2], 16), devices["text"]) or {})
-        return 0
-    if cmd == "devices" and len(argv) in (2, 3):
-        devices = device_list(argv[2] if len(argv) == 3 else "latest")
-        _emit(dict({k: v for k, v in devices.items() if k != "text"}, basis=basis(devices)))
-        return 0
-    if cmd == "settings" and len(argv) == 4:
-        _emit(vm_settings(int(argv[2]), argv[3]))
-        return 0
-    if cmd in ("merge-args", "strip-args"):
-        data = json.loads(sys.stdin.read())
-        fn = merge_args if cmd == "merge-args" else strip_args
-        sys.stdout.write(fn(data["args"], data["wanted"]) + "\n")
-        return 0
-    if cmd == "fetch" and len(argv) == 4:
-        kind, _, key = argv[2].partition(":")
-        entry = ROMS.get(key) if kind == "rom" else PINS.get(key)
-        if entry is None:
-            sys.stderr.write("unknown download %s\n" % argv[2])
-            return 64
-        try:
-            path = fetch(entry[1], entry[2], Path(argv[3]) / entry[0])
-        except (OSError, ValueError) as exc:
-            sys.stderr.write("ERROR: %s\n" % exc)
-            return 1
-        sys.stdout.write(str(path) + "\n")
-        return 0
-    if cmd == "assets" and len(argv) in (3, 4, 5):
-        try:
-            picks = select_assets(*argv[3:])
-            out = {k: dict(p, path=str(fetch_release(p, argv[2]))) for k, p in picks.items()}
-        except (ReleaseError, OSError, ValueError) as exc:
-            sys.stderr.write("ERROR: %s\n" % exc)
-            return 1
-        _emit(out)
-        return 0
-    if cmd == "releases" and len(argv) == 3 and argv[2] in RELEASE_KINDS:
-        try:
-            _emit(list_releases(argv[2]))
-        except ReleaseError as exc:
-            sys.stderr.write("ERROR: %s\n" % exc)
-            return 1
-        return 0
-    if cmd == "state-write" and len(argv) == 3:
-        _emit(write_state(argv[2], json.loads(sys.stdin.read())))
-        return 0
-    if cmd == "state-record" and len(argv) == 4:
-        picks = json.loads(sys.stdin.read())
-        write_state(argv[2], picks_state(picks, argv[3]))
-        return 0
-    if cmd == "state-show" and len(argv) == 3:
-        sys.stdout.write("\n".join(describe_state(read_state(argv[2]))) + "\n")
-        return 0
-    if cmd == "payload" and len(argv) == 4:
-        ok, msg = build_payload(argv[2], argv[3])
-        sys.stderr.write(msg + "\n")
-        return 0 if ok else 1
-    if cmd == "result" and len(argv) == 3:
-        sys.stdout.write(read_result(argv[2]) + "\n")
-        return 0
-    if cmd == "accel-check" and len(argv) in (2, 3):
-        active, detail = check_accel(int(argv[2]) if len(argv) == 3 else ACCEL_TIMEOUT)
-        sys.stdout.write(("active" if active else "inactive") + ": " + detail + "\n")
-        return 0 if active else 1
-    if cmd == "stage-command":
-        sys.stdout.write(STAGE_COMMAND + "\n")
-        return 0
-    if cmd == "pins":
-        _emit({"roms": {k: list(v) for k, v in ROMS.items()}, "pins": {k: list(v) for k, v in PINS.items()}})
-        return 0
-    return _usage()
+    entry = COMMANDS.get(cmd)
+    if entry is None or not _accepts(entry[0], argv):
+        return _usage()
+    code = entry[1](argv)
+    return 0 if code is None else code
 
 
 if __name__ == "__main__":
