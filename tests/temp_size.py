@@ -82,3 +82,18 @@ def biggest_children(path: str, count: int = 3) -> list[str]:
     except OSError:
         return []
     return [f"      {n / _MB:8.1f} MB  {name}" for n, name in sorted(rows, reverse=True)[:count]]
+
+
+def engine_copies(base) -> list[str]:
+    """The gpuengine.* directories left below *base* (a test's temp dir), relative to it. The bash installer unpacks its engines
+    into one of them and removes it when it ends, so any left is a leak. The Mac's python keeps a bytecode cache under
+    $HOME/Library/Caches that mirrors the paths it imported from: not a copy."""
+    base = os.fspath(base)
+    found = []
+    for here, dirs, _files in os.walk(base):
+        rel = os.path.relpath(here, base)
+        if "Library" in rel.split(os.sep):
+            dirs[:] = []
+            continue
+        found += [os.path.normpath(os.path.join(rel, d)) for d in dirs if d.startswith("gpuengine.")]
+    return sorted(found)

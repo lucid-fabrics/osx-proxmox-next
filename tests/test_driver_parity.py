@@ -113,7 +113,7 @@ def host(tmp_path):
         (qm_dir / "config").write_text("\n".join(f"{k}: {v}" for k, v in cfg.items()) + "\n")
 
     def run(snippet, expect=0):
-        res = subprocess.run(["bash", "-c", f"set -u; source {script}\n{snippet}"], capture_output=True, text=True, env=env, timeout=120)
+        res = subprocess.run(["bash", "-c", f"set -u; source {script}\ngpu_engine_setup; trap gpu_engine_remove EXIT\n{snippet}"], capture_output=True, text=True, env=env, timeout=120)
         if expect is not None:
             assert res.returncode == expect, (res.returncode, res.stdout, res.stderr)
         return res
