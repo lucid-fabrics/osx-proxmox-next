@@ -13,7 +13,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from . import __version__
-from .infrastructure import ProxmoxAdapter
+from .infrastructure import get_proxmox_adapter
 
 log = logging.getLogger(__name__)
 
@@ -183,7 +183,6 @@ def download_recovery(
 
 
 def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> None:
-    from .services import get_proxmox_adapter
     adapter = get_proxmox_adapter()
     result = adapter.run(["dmg2img", str(dmg_path), str(dest)])
     if not result.ok:

@@ -28,6 +28,8 @@ import tempfile
 import time
 from collections.abc import Callable
 
+from .planner import restore_picker_timeout_script
+
 log = logging.getLogger(__name__)
 
 __all__ = ["QmConsole", "UnattendedError", "erase_install_command", "open_recovery_terminal",
@@ -202,8 +204,7 @@ class QmConsole:
         left in place, every later boot of the VM waits for a return.
         The VM must be stopped. Returns "" on success, otherwise the
         reason the disk could not be patched."""
-        from .planner import _restore_picker_timeout_script
-        result = self._run(["bash", "-c", _restore_picker_timeout_script(self.vmid)],
+        result = self._run(["bash", "-c", restore_picker_timeout_script(self.vmid)],
                            capture_output=True, text=True)
         if getattr(result, "returncode", 1) == 0:
             return ""

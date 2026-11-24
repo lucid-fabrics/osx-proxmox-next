@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import re
 import sys
@@ -9,55 +8,32 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .assets import required_assets, suggested_fetch_commands
-from .defaults import DEFAULT_ISO_DIR, detect_cpu_info, detect_iso_storage, detect_net_model
+from .defaults import DEFAULT_ISO_DIR, detect_cpu_info
 from .diagnostics import export_log_bundle, recovery_guide
 from .doctor import run_doctor, Severity
-from .domain import MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, EditChanges, validate_config, validate_edit_changes
+from .domain import MIN_VMID, MAX_VMID, SUPPORTED_MACOS, VmConfig, EditChanges, validate_edit_changes
 from .downloader import (
     DownloadError,
     DownloadProgress,
     download_opencore,
     download_recovery,
     download_restrictevents,
-    ensure_restrictevents,
 )
 from .executor import apply_plan
 from .planner import build_plan, build_destroy_plan, build_edit_plan, build_clone_plan, build_post_install_plan, POST_INSTALL_BOOT_ORDER
-from .services import fetch_vm_info, get_proxmox_adapter, run_download_worker
+from .services import fetch_vm_info, get_proxmox_adapter
 from .script_renderer import render_script
 from .preflight import run_preflight, has_missing_build_deps, install_missing_packages
 from .rollback import create_snapshot, rollback_hints
 from .support import SUPPORT_LINE, SUPPORT_LINES_POST_INSTALL
+from .cli_common import (
+    auto_download_missing as _auto_download_missing,  # noqa: F401 (kept importable from cli)
+    config_from_args as _config_from_args,
+    validate_and_fetch_assets as _validate_and_fetch_assets,
+)
 from . import driver_cli, gpu_attach, gpu_setup_cli, igpu_cli, nullmoth, nullmoth_cli
 
 _MB = 1024 * 1024
-
-
-def _config_from_args(args: argparse.Namespace) -> VmConfig:
-    return VmConfig(
-        vmid=args.vmid,
-        name=args.name,
-        macos=args.macos,
-        cores=args.cores,
-        memory_mb=args.memory,
-        disk_gb=args.disk,
-        bridge=args.bridge,
-        vlan=getattr(args, "vlan", 0) or 0,
-        storage=args.storage,
-        installer_path=args.installer_path or "",
-        smbios_serial=args.smbios_serial or "",
-        smbios_uuid=args.smbios_uuid or "",
-        smbios_mlb=args.smbios_mlb or "",
-        smbios_rom=args.smbios_rom or "",
-        smbios_model=args.smbios_model or "",
-        no_smbios=args.no_smbios,
-        apple_services=args.apple_services,
-        verbose_boot=args.verbose_boot,
-        iso_dir=getattr(args, "iso_dir", "") or "",
-        cpu_model=getattr(args, "cpu_model", "") or "",
-        net_model=getattr(args, "net_model", "") or detect_net_model(detect_cpu_info()),
-    )
 
 
 def _cli_progress(p: DownloadProgress) -> None:
@@ -69,28 +45,6 @@ def _cli_progress(p: DownloadProgress) -> None:
     else:
         sys.stdout.write(f"\r[{p.phase}] {mb_down:.1f} MB")
     sys.stdout.flush()
-
-
-def _auto_download_missing(config: VmConfig, dest_dir: Path) -> None:
-    assets = required_assets(config)
-    missing = [a for a in assets if (not a.ok or a.stale) and a.downloadable]
-    if not missing:
-        # ISO may be cached from an older version; still make sure the
-        # RestrictEvents kext zip is available for the OpenCore disk build.
-        ensure_restrictevents(dest_dir)
-        return
-
-    config_with_dir = config if config.iso_dir else \
-        dataclasses.replace(config, iso_dir=str(dest_dir))
-
-    def _on_progress(phase: str, pct: int) -> None:
-        sys.stdout.write(f"\r[{phase}] {pct}%")
-        sys.stdout.flush()
-
-    errors = run_download_worker(config_with_dir, missing, on_progress=_on_progress)
-    print()
-    for err in errors:
-        print(f"Download failed: {err}")
 
 
 def _build_common_parser() -> argparse.ArgumentParser:
@@ -406,35 +360,6 @@ def _run_install_unattended(args: argparse.Namespace) -> int:
     print("Finish Setup Assistant on the VM console, then run:")
     print(f"  osx-next-cli post-install --vmid {args.vmid} --execute")
     return 0
-
-
-def _validate_and_fetch_assets(args: argparse.Namespace, config: VmConfig) -> int | None:
-    """Validate config and ensure required assets exist. Returns error code or None."""
-    issues = validate_config(config)
-    if issues:
-        for issue in issues:
-            print(f"ERROR: {issue}")
-        return 2
-
-    assets = required_assets(config)
-    missing = [a for a in assets if not a.ok]
-    stale = any(a.stale for a in assets)
-
-    if (missing or stale) and not getattr(args, "no_download", False):
-        dest_dir = Path(config.iso_dir) if config.iso_dir else Path(detect_iso_storage()[0])
-        _auto_download_missing(config, dest_dir)
-        # Re-check after download
-        assets = required_assets(config)
-        missing = [a for a in assets if not a.ok]
-
-    if missing:
-        for item in missing:
-            print(f"MISSING: {item.name}: {item.path}")
-        for cmd in suggested_fetch_commands(config):
-            print(cmd)
-        return 3
-
-    return None
 
 
 def _print_cpu_info(args: argparse.Namespace, config: VmConfig) -> None:

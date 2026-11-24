@@ -12,6 +12,8 @@ import base64
 import io
 import plistlib
 import re
+import shutil as _shutil
+import subprocess as _sp
 import tarfile
 import zipfile
 from pathlib import Path
@@ -414,7 +416,7 @@ class _FakeAdapter:
 
 
 def _patch_adapter(monkeypatch, adapter) -> None:
-    monkeypatch.setattr("osx_proxmox_next.services.get_proxmox_adapter", lambda: adapter)
+    monkeypatch.setattr("osx_proxmox_next.oc_builder.get_proxmox_adapter", lambda: adapter)
 
 
 def test_build_opencore_iso_success(fake_components: Path, monkeypatch) -> None:
@@ -656,9 +658,6 @@ def test_assemble_progress_is_monotonic_across_components(fake_components: Path,
 # Bash execution parity (needs bash >= 4 and sha256sum; runs in CI, skips
 # on stock macOS)
 # ---------------------------------------------------------------------------
-
-import shutil as _shutil
-import subprocess as _sp
 
 
 def _bash_supports_harness() -> bool:

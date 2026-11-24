@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .defaults import DEFAULT_ISO_DIR
 from .domain import VmConfig
+from .oc_builder import is_current
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +68,6 @@ def _opencore_stale(path: Path) -> bool:
     another name are left alone."""
     if path.name != _UNIVERSAL_OC or not path.exists():
         return False
-    from .oc_builder import is_current
     return not is_current(path)
 
 

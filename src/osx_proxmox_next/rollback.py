@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .infrastructure import ProxmoxAdapter
+from .infrastructure import ProxmoxAdapter, get_proxmox_adapter
 
 
 @dataclass
@@ -20,7 +20,6 @@ def create_snapshot(vmid: int, adapter: ProxmoxAdapter | None = None) -> Rollbac
     path = out_dir / f"vm-{vmid}-{ts}.conf"
 
     if adapter is None:
-        from .services import get_proxmox_adapter
         adapter = get_proxmox_adapter()
     runtime = adapter
     result = runtime.run(["qm", "config", str(vmid)])
