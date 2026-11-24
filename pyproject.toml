@@ -77,7 +77,7 @@ line-length = 140
 select = ["E", "F", "W", "B", "BLE", "C90"]
 
 [tool.ruff.lint.mccabe]
-max-complexity = 40
+max-complexity = 25
 
 [tool.ruff.lint.per-file-ignores]
 # Rules that only make sense for shipped code. Tests re-import names inside test bodies (F811), use short
