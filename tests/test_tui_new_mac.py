@@ -299,7 +299,7 @@ async def test_enter_creates_the_mac_and_opens_the_build_screen(monkeypatch):
     class FakeBuild(build.BuildScreen):
         def on_mount(self) -> None:
             started.append((self.config, self.pipe.unattended, self.pipe.force_download))
-            self.pipe.deps.preflight = lambda: []
+            self._worker_started = True   # Textual also runs BuildScreen.on_mount: keep it from starting the real pipeline
 
     monkeypatch.setattr("osx_proxmox_next.screens.build.BuildScreen", FakeBuild)
     app = NextApp()
@@ -313,6 +313,7 @@ async def test_enter_creates_the_mac_and_opens_the_build_screen(monkeypatch):
         assert (config.cores, config.memory_mb, config.disk_gb, config.storage) == (8, 16384, 128, "local-lvm")
         assert unattended is True and force is False and config.smbios_serial and config.net_model == "vmxnet3"
         assert not any(isinstance(s_, NewMacScreen) for s_ in app.screen_stack)   # the build replaced the form
+        assert not app.screen.pipe.running and not app.screen.pipe.started_at   # no download or build ran
         await pilot.press("escape")
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen))
 
@@ -326,6 +327,7 @@ async def test_the_button_creates_a_manual_install_with_a_forced_download(monkey
     class FakeBuild(build.BuildScreen):
         def on_mount(self) -> None:
             started.append((self.config, self.pipe.unattended, self.pipe.force_download))
+            self._worker_started = True   # Textual also runs BuildScreen.on_mount: keep it from starting the real pipeline
 
     monkeypatch.setattr("osx_proxmox_next.screens.build.BuildScreen", FakeBuild)
     app = NextApp()
