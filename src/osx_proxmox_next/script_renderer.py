@@ -295,8 +295,10 @@ def _loop_cleanup_script(opencore_path: Path, dest: Path) -> str:
         "[ -n \"$DEST_LOOP\" ] && losetup -d $DEST_LOOP 2>/dev/null; "
         "rm -rf $OC_SRC $OC_DEST' EXIT; "
         "umount $OC_SRC 2>/dev/null; umount $OC_DEST 2>/dev/null; "
-        f'for lo in $(losetup -j {shquote(str(opencore_path))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
-        f'for lo in $(losetup -j {shquote(str(dest))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+        f'for lo in $(losetup -j {shquote(str(opencore_path))} -O NAME --noheadings 2>/dev/null); do '
+        'umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+        f'for lo in $(losetup -j {shquote(str(dest))} -O NAME --noheadings 2>/dev/null); do '
+        'umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
     )
 
 
@@ -304,7 +306,8 @@ def _mount_source_oc_script(opencore_path: Path) -> str:
     """Return bash snippet to loop-mount the source OpenCore ISO."""
     return (
         f'SRC_LOOP=$(losetup -fP --show {shquote(str(opencore_path))}) && '
-        "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
+        "{ [ -b \"$SRC_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore "
+        "source ISO. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         f"{_partprobe_retry_snippet('SRC_LOOP')} && "
         # Probe misses are expected for GPT containers and non-FAT partitions.
         # Keep this selection in sync with the standalone bash installer.
@@ -314,7 +317,8 @@ def _mount_source_oc_script(opencore_path: Path) -> str:
         'SRC_PART="$SRC_CANDIDATE"; break; fi; done; '
         'if [ -n "$SRC_PART" ]; then mount "$SRC_PART" "$OC_SRC"; '
         'else echo \'WARN: No vfat partition found on source ISO via blkid, trying raw mount\'; mount "$SRC_LOOP" "$OC_SRC"; fi && '
-        "{ mountpoint -q $OC_SRC || { echo \"ERROR: $OC_SRC is not mounted. Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
+        "{ mountpoint -q $OC_SRC || { echo \"ERROR: $OC_SRC is not mounted. "
+        "Hints: file $SRC_LOOP; blkid $SRC_LOOP; dmesg | tail -5\"; false; }; } && "
     )
 
 
@@ -326,12 +330,15 @@ def _format_dest_oc_script(dest: Path) -> str:
         f'sgdisk -Z {qp} && '
         f'sgdisk -n 1:0:0 -t 1:EF00 -c 1:OPENCORE {qp} && '
         f'DEST_LOOP=$(losetup -fP --show {qp}) && '
-        "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
+        "{ [ -b \"$DEST_LOOP\" ] || { echo 'ERROR: losetup failed for OpenCore "
+        "destination disk. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
         f"{_partprobe_retry_snippet('DEST_LOOP')} && "
-        "{ [ -b \"${DEST_LOOP}p1\" ] || { echo \"ERROR: ${DEST_LOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
+        "{ [ -b \"${DEST_LOOP}p1\" ] || { echo \"ERROR: ${DEST_LOOP}p1 not found after "
+        "partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
         "mkfs.fat -F 32 -n OPENCORE ${DEST_LOOP}p1 && "
         "mount ${DEST_LOOP}p1 $OC_DEST && "
-        "{ mountpoint -q $OC_DEST || { echo \"ERROR: $OC_DEST is not mounted. Hints: file ${DEST_LOOP}p1; blkid ${DEST_LOOP}p1; dmesg | tail -5\"; false; }; } && "
+        "{ mountpoint -q $OC_DEST || { echo \"ERROR: $OC_DEST is not mounted. "
+        "Hints: file ${DEST_LOOP}p1; blkid ${DEST_LOOP}p1; dmesg | tail -5\"; false; }; } && "
     )
 
 
@@ -352,14 +359,16 @@ def _build_oc_disk_script(
 
     return (
         # Fail early with a clear message instead of a losetup cascade
-        f'{{ [ -f {shquote(str(opencore_path))} ] || {{ echo "ERROR: OpenCore ISO not found: {shquote(str(opencore_path))}. Hint: osx-next-cli download --macos {macos}"; false; }}; }} && '
+        f'{{ [ -f {shquote(str(opencore_path))} ] || {{ echo "ERROR: OpenCore ISO not '
+        f'found: {shquote(str(opencore_path))}. Hint: osx-next-cli download --macos {macos}"; false; }}; }} && '
         + _loop_cleanup_script(opencore_path, dest)
         + _format_dest_oc_script(dest)
         + _mount_source_oc_script(opencore_path)
         # Copy OpenCore files (including hidden files)
         + "cp -a $OC_SRC/. $OC_DEST/ && "
         # Validate EFI structure was copied
-        "{ [ -d $OC_DEST/EFI/OC ] || { echo 'ERROR: OpenCore ISO does not contain expected EFI/OC directory. ISO may be corrupt.'; false; }; } && "
+        "{ [ -d $OC_DEST/EFI/OC ] || { echo 'ERROR: OpenCore ISO does not "
+        "contain expected EFI/OC directory. ISO may be corrupt.'; false; }; } && "
         # Add RestrictEvents.kext (silences MacPro7,1 memory warning)
         + _inject_restrictevents_script(opencore_path)
         # Patch config.plist

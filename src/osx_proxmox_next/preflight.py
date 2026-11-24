@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 
 from .defaults import detect_cpu_info, detect_cpu_vendor
-from .infrastructure import ProxmoxAdapter
+from .infrastructure import ProxmoxAdapter, get_proxmox_adapter
 
 log = logging.getLogger(__name__)
 
@@ -312,7 +312,6 @@ def install_missing_packages(
     _emit(f"Installing: {', '.join(packages)}")
 
     if adapter is None:
-        from .services import get_proxmox_adapter
         adapter = get_proxmox_adapter()
     runtime = adapter
     result = runtime.run(["apt-get", "install", "-y", *packages])

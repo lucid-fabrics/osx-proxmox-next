@@ -60,7 +60,7 @@ def _run(pve: ProxmoxAdapter, vmid: int, calls: list[list[str]]):
 def read_versions(pve: ProxmoxAdapter, vmid: int, names: list[str]) -> dict[str, str]:
     """{name: version} of the kexts on the Mac's OpenCore disk, '' for one that is missing. The Mac must be stopped."""
     res = _run(pve, vmid, [["versions", *[bundle_of(n) for n in names]]])
-    line = next((l for l in reversed(res.output.splitlines()) if l.startswith("{")), "")
+    line = next((ln for ln in reversed(res.output.splitlines()) if ln.startswith("{")), "")
     if not res.ok or not line:
         raise OcError("Could not read the OpenCore disk: " + res.output.strip()[-300:])
     try:
@@ -74,7 +74,7 @@ def read_marker(pve: ProxmoxAdapter, vmid: int, name: str) -> str:
     """The version a driver without a kext of its own (NullMoth) left on the Mac's OpenCore disk, '' when none. The Mac must
     be stopped. The marker rolls back with the disk, so after a manual `qm rollback` it still tells the version the Mac has."""
     res = _run(pve, vmid, [["marker", name]])
-    line = next((l for l in reversed(res.output.splitlines()) if l.startswith("{")), "")
+    line = next((ln for ln in reversed(res.output.splitlines()) if ln.startswith("{")), "")
     if not res.ok or not line:
         raise OcError("Could not read the OpenCore disk: " + res.output.strip()[-300:])
     try:
@@ -98,10 +98,10 @@ def replace_kexts(pve: ProxmoxAdapter, vmid: int, items: list[tuple[str, Path, s
     res = _run(pve, vmid, calls)
     if not res.ok:
         raise OcError("Replacing the kexts failed: " + res.output.strip()[-300:])
-    lines = [l.strip() for l in res.output.splitlines()]
-    versions = [l[len("VERSION "):] for l in lines if l.startswith("VERSION ")]
+    lines = [ln.strip() for ln in res.output.splitlines()]
+    versions = [ln[len("VERSION "):] for ln in lines if ln.startswith("VERSION ")]
     if notes is not None:
-        notes += [l[len("NOTE: "):] for l in lines if l.startswith("NOTE: ")]
+        notes += [ln[len("NOTE: "):] for ln in lines if ln.startswith("NOTE: ")]
     return {name: (versions[i] if i < len(versions) else "") for i, (name, _z, _s) in enumerate(items)}
 
 

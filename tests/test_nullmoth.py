@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import importlib.util
-import io
 import plistlib
 import zipfile
 from pathlib import Path
 
 import pytest
-from textual.widgets import Button, Checkbox, Input, Select, Static
 
-from nullmoth_fakes import GUID, MAC_CFG, FakeQm, good_card, oc_config, write_oc
+from nullmoth_fakes import GUID, MAC_CFG, FakeQm, good_card, write_oc
 from osx_proxmox_next import cli, gpu, nullmoth
 from osx_proxmox_next import oc_builder
-from osx_proxmox_next.domain import PlanStep
 from osx_proxmox_next.executor import ApplyResult
-from osx_proxmox_next.gpu import GpuInfo
 
 REPO = Path(__file__).resolve().parent.parent
 PATCHER = REPO / "src/osx_proxmox_next/data/nullmoth/oc_patch.py"
@@ -302,7 +297,7 @@ def test_ensure_amfipass_verifies(tmp_path, monkeypatch):
 def patch_cli(monkeypatch, tmp_path, vms=None, results=None):
     good_card(tmp_path)
     fake = FakeQm(vms or {100: ("stopped", MAC_CFG)})
-    monkeypatch.setattr("osx_proxmox_next.services.proxmox_service._pve", fake)
+    monkeypatch.setattr("osx_proxmox_next.infrastructure._pve", fake)
     real = nullmoth.check_nvidia_gpu
     monkeypatch.setattr(nullmoth, "check_nvidia_gpu", lambda b, r=None, c=None: real(b, tmp_path, tmp_path / "cmd"))
     applied = []

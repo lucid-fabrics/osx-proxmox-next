@@ -4,10 +4,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import plistlib
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 
 import pytest

@@ -11,6 +11,7 @@ from textual.widgets import Button, Static
 
 from ..widgets.lines import Line, Lines
 from .base import ConfirmDialog
+from .gpu_contract import GpuHost
 
 QR_GAP = 4          # the border and padding of the QR column
 SEARCH_LINE = "Cannot find it? The BIOS search finds settings by name."
@@ -55,7 +56,7 @@ def _how(view: dict, pal: dict) -> list[Line]:
     return rows
 
 
-class BiosMixin:
+class BiosMixin(GpuHost):
     """Stage 3 of GpuScreen: the BIOS screen, "Restart into BIOS" and "Check again"."""
 
     def step_bios(self) -> None:

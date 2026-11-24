@@ -48,7 +48,7 @@ def fetch_github_sponsors() -> list[dict]:
         page += 1
         query = (
             "query($login:String!,$first:Int!,$after:String){"
-            f"organization(login:$login){{"
+            "organization(login:$login){"
             "sponsorshipsAsMaintainer(first:$first,after:$after,includePrivate:false){"
             "pageInfo{hasNextPage endCursor}"
             "nodes{"

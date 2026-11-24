@@ -72,7 +72,7 @@ class DriverPlan:
         who = f"{self.name or 'VM %d' % self.vmid} (VM {self.vmid})"
         finishing = self.finishing
         out.append(f"Finish the {label} driver update of {who}" if finishing else f"Update the {label} driver of {who}")
-        out += ["  " + l for l in engine.change_lines(self.kind, self.installed, self.target.versions(), self.reinstall)]
+        out += ["  " + ln for ln in engine.change_lines(self.kind, self.installed, self.target.versions(), self.reinstall)]
         if self.nothing_to_do:
             return out + [engine.UP_TO_DATE]
         out.append("Steps:")

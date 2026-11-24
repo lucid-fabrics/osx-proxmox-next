@@ -122,7 +122,7 @@ async def test_up_and_down_walk_every_row_and_stop_at_the_ends(monkeypatch):
     F.patch_host(monkeypatch)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
-        screen = await new_mac(pilot, app)
+        await new_mac(pilot, app)
         seen = [app.focused.id]
         for _ in range(8):
             await pilot.press("down")
@@ -304,7 +304,7 @@ async def test_enter_creates_the_mac_and_opens_the_build_screen(monkeypatch):
     monkeypatch.setattr("osx_proxmox_next.screens.build.BuildScreen", FakeBuild)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
-        screen = await new_mac(pilot, app)
+        await new_mac(pilot, app)
         await pilot.press("enter")
         await F.settle(pilot, lambda: bool(started), what="the build screen to start")
         await F.screen_gone(pilot, app, NewMacScreen)

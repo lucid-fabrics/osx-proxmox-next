@@ -7,7 +7,7 @@ from .driver_core import DriverError, RunEnv, RunResult, Updater, stop_mac
 from .driver_plan import DISK_COMPONENTS, DriverPlan, prepare
 from .driver_targets import Choice
 from .gpu import parse_config
-from .igpu_finish import FinishError, _drop_disk
+from .igpu_finish import _drop_disk
 
 __all__ = ["finish_interrupted", "finish_plan", "put_back", "remove_safety_snapshot", "run_update", "undo_target"]
 

@@ -21,7 +21,8 @@ from .nullmoth import NOTICE_BODY, NOTICE_TITLE
 
 __all__ = ["LATER", "Choice", "same_plan", "REBOOT_SECONDS", "Before", "Preview", "approval_record", "attach_differs", "build_before",
            "build_preview", "changes_text", "needs_typed", "plan_fingerprint", "plan_for_approval", "plan_lines",
-           "preview_vm_plan", "replan_attach", "card_facts", "stop_mac", "need_rows", "part_steps", "short_card_name", "vm_fingerprint", "card_verdict"]
+           "preview_vm_plan", "replan_attach", "card_facts", "stop_mac", "need_rows", "part_steps", "short_card_name", "vm_fingerprint",
+           "card_verdict"]
 
 LATER = "later"
 REBOOT_SECONDS = "about 3 min"

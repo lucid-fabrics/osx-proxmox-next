@@ -1,7 +1,6 @@
 """Unit tests for detection_service."""
 from __future__ import annotations
 
-import pytest
 
 from osx_proxmox_next.infrastructure import CommandResult, ProxmoxAdapter
 from osx_proxmox_next.domain import DEFAULT_VMID, MIN_VMID, MAX_VMID

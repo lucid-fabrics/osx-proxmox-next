@@ -7,12 +7,10 @@ import pytest
 from driver_fakes import Clock, DPve, comps, mac
 from osx_proxmox_next import driver_core, driver_disks, driver_engine as engine, driver_intel, driver_plan, driver_run, igpu_finish
 from osx_proxmox_next.domain import SUPPORTED_MACOS, VmConfig
-from osx_proxmox_next.driver_core import DriverError
 from osx_proxmox_next.driver_plan import DriverPlan
-from osx_proxmox_next.driver_targets import Target
 from osx_proxmox_next.nullmoth import detect_macos
 from osx_proxmox_next.planner import build_plan
-from test_driver_resume import ORIGINAL, cut_off, first_run, nv_pve
+from test_driver_resume import cut_off, first_run, nv_pve
 from test_driver_run import (  # noqa: F401 - fixtures and helpers
     NEW_SNAP, OLD_SNAP, amd_target, env_for, intel_target, nv_target, plan_for, rec, small_vm_ids, stubs,
 )

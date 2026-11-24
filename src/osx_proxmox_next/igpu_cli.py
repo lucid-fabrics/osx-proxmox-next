@@ -9,8 +9,10 @@ from pathlib import Path
 
 from . import igpu_attach, igpu_engine, igpu_finish, igpu_report, igpu_watchdog
 from .igpu_attach import SETUP_ASSISTANT_NOTE
+from .cli_common import config_from_args, validate_and_fetch_assets
 from .defaults import DEFAULT_ISO_DIR
 from .domain import MAX_VMID, MIN_VMID, SUPPORTED_MACOS
+from .infrastructure import get_proxmox_adapter
 from .intel_host import check_intel_gpu
 
 TROUBLESHOOTING_URL = "https://github.com/lucid-fabrics/osx-proxmox-next/blob/main/docs/docs/guides/intel-igpu-passthrough.md"
@@ -187,18 +189,16 @@ def run_finish(args: argparse.Namespace) -> int:
 
 
 def run_install(args: argparse.Namespace) -> int:
-    from . import cli
     from .executor import apply_plan
     from .planner import build_plan
     from .rollback import create_snapshot, rollback_hints
-    from .services import get_proxmox_adapter
     from .unattended import QmConsole, UnattendedError, run_unattended_install
 
-    config = cli._config_from_args(args)
+    config = config_from_args(args)
     if config.macos in igpu_attach.UNSUPPORTED_MACOS:
         print(f"ERROR: {igpu_attach.UNSUPPORTED_NOTE}")
         return 2
-    rc = cli._validate_and_fetch_assets(args, config)
+    rc = validate_and_fetch_assets(args, config)
     if rc is not None:
         return rc
     report = check_intel_gpu(wex=getattr(args, "wex_version", "") or igpu_engine.LATEST)
@@ -227,7 +227,8 @@ def run_install(args: argparse.Namespace) -> int:
         return 2
     snapshot = create_snapshot(config.vmid)
     # everything build_plan does except its final "Start VM"
-    steps = [s for s in build_plan(config) if s.title != "Start VM"] + igpu_attach.build_fresh_vm_steps(config.vmid, SUPPORTED_MACOS[config.macos]["label"])
+    steps = [s for s in build_plan(config) if s.title != "Start VM"]
+    steps += igpu_attach.build_fresh_vm_steps(config.vmid, SUPPORTED_MACOS[config.macos]["label"])
     result = apply_plan(steps, execute=True)
     if not result.ok:
         failed = next((r for r in result.results if not r.ok), None)

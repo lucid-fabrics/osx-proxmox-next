@@ -1,9 +1,9 @@
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from osx_proxmox_next import cli as cli_module
+from osx_proxmox_next import cli_common
 from osx_proxmox_next.cli import run_cli
 from osx_proxmox_next.planner import POST_INSTALL_BOOT_ORDER
 
@@ -15,7 +15,7 @@ def _stub_restrictevents(monkeypatch, tmp_path):
     downloaded: list[bool] = []
 
     monkeypatch.setattr(
-        cli_module, "ensure_restrictevents",
+        cli_common, "ensure_restrictevents",
         lambda dest_dir: ensured.append(dest_dir) or None,
     )
 
@@ -54,7 +54,7 @@ def test_cli_plan_json(monkeypatch, capsys):
     import json as json_mod
     from osx_proxmox_next.assets import AssetCheck
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
     rc = run_cli(_plan_args() + ["--json"])
@@ -75,7 +75,7 @@ def test_cli_plan_prints_cpu_info(monkeypatch, capsys):
     """Non-JSON plan prints CPU info line."""
     from osx_proxmox_next.assets import AssetCheck
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
     rc = run_cli(_plan_args())
@@ -88,7 +88,7 @@ def test_cli_plan_cpu_override_display(monkeypatch, capsys):
     """CPU model override is shown in plan output."""
     from osx_proxmox_next.assets import AssetCheck
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
     rc = run_cli(_plan_args() + ["--cpu-model", "Skylake-Server-IBRS"])
@@ -101,7 +101,7 @@ def test_cli_plan_net_model_e1000(monkeypatch, capsys):
     """--net-model e1000-82545em flows into qm create command."""
     from osx_proxmox_next.assets import AssetCheck
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
     rc = run_cli(_plan_args() + ["--net-model", "e1000-82545em"])
@@ -115,7 +115,7 @@ def test_cli_plan_net_model_default_vmxnet3(monkeypatch, capsys):
     from osx_proxmox_next.assets import AssetCheck
     from osx_proxmox_next.defaults import CpuInfo
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
     # Simulate a modern non-Xeon Intel CPU so the real detect_net_model logic
@@ -125,6 +125,8 @@ def test_cli_plan_net_model_default_vmxnet3(monkeypatch, capsys):
         family=6, model=165, needs_emulated_cpu=False,
         needs_penryn=False, is_xeon=False,
     )
+    # config_from_args lives in cli_common and looks detect_cpu_info up there.
+    monkeypatch.setattr(cli_common, "detect_cpu_info", lambda: modern_cpu)
     monkeypatch.setattr(cli_module, "detect_cpu_info", lambda: modern_cpu)
     rc = run_cli(_plan_args())
     assert rc == 0
@@ -137,7 +139,7 @@ def test_cli_plan_hedt_xeon_cpu_display(monkeypatch, capsys):
     from osx_proxmox_next.assets import AssetCheck
     from osx_proxmox_next.defaults import CpuInfo
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
     scalable_cpu = CpuInfo(
@@ -207,7 +209,7 @@ def _plan_args():
 def test_cli_plan(monkeypatch, tmp_path):
     from osx_proxmox_next.assets import AssetCheck
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
     rc = run_cli(_plan_args())
@@ -217,7 +219,7 @@ def test_cli_plan(monkeypatch, tmp_path):
 def test_cli_plan_script_out(monkeypatch, tmp_path):
     from osx_proxmox_next.assets import AssetCheck
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, ""), AssetCheck("Rec", Path("/tmp/rec.iso"), True, "")],
     )
     out_file = tmp_path / "script.sh"
@@ -245,11 +247,11 @@ def test_cli_apply_validation_fail():
 def test_cli_apply_missing_assets(monkeypatch):
     from osx_proxmox_next.assets import AssetCheck
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing")],
     )
     monkeypatch.setattr(
-        cli_module, "suggested_fetch_commands",
+        cli_common, "suggested_fetch_commands",
         lambda cfg: ["# fetch oc"],
     )
     rc = run_cli([
@@ -272,7 +274,7 @@ def test_cli_apply_success(monkeypatch, tmp_path):
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
     )
     monkeypatch.setattr(
@@ -303,7 +305,7 @@ def test_cli_apply_failure(monkeypatch, tmp_path, capsys):
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
     )
     monkeypatch.setattr(
@@ -415,16 +417,15 @@ def test_cli_progress_without_total(capsys):
 def test_auto_download_missing_opencore(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
-    import osx_proxmox_next.cli as _cli_mod
 
     downloaded = []
 
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        _cli_mod, "run_download_worker",
+        cli_common, "run_download_worker",
         lambda cfg, missing, on_progress: (downloaded.append("oc"), []),
     )
 
@@ -458,7 +459,7 @@ def test_auto_download_missing_cached_assets_still_ensures_restrictevents(
     from osx_proxmox_next.assets import AssetCheck
 
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), True, "")],
     )
 
@@ -532,16 +533,15 @@ def test_download_without_force_defaults_false(monkeypatch, tmp_path):
 def test_auto_download_missing_recovery(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
-    import osx_proxmox_next.cli as _cli_mod
 
     downloaded = []
 
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        _cli_mod, "run_download_worker",
+        cli_common, "run_download_worker",
         lambda cfg, missing, on_progress: (downloaded.append("rec"), []),
     )
 
@@ -555,14 +555,13 @@ def test_auto_download_missing_recovery(monkeypatch, tmp_path):
 def test_auto_download_missing_opencore_error(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
-    import osx_proxmox_next.cli as _cli_mod
 
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OpenCore image", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        _cli_mod, "run_download_worker",
+        cli_common, "run_download_worker",
         lambda cfg, missing, on_progress: ["OpenCore: network error"],
     )
 
@@ -575,14 +574,13 @@ def test_auto_download_missing_opencore_error(monkeypatch, tmp_path):
 def test_auto_download_missing_recovery_error(monkeypatch, tmp_path):
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
-    import osx_proxmox_next.cli as _cli_mod
 
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("Installer / recovery image", Path("/tmp/rec.iso"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        _cli_mod, "run_download_worker",
+        cli_common, "run_download_worker",
         lambda cfg, missing, on_progress: ["Recovery: network error"],
     )
 
@@ -596,15 +594,14 @@ def test_auto_download_missing_unknown_asset_type(monkeypatch, tmp_path):
     """Asset with unknown name is silently skipped (run_download_worker handles routing)."""
     from osx_proxmox_next.cli import _auto_download_missing
     from osx_proxmox_next.assets import AssetCheck
-    import osx_proxmox_next.cli as _cli_mod
 
     called = []
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("Unknown Asset", Path("/tmp/unknown"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        _cli_mod, "run_download_worker",
+        cli_common, "run_download_worker",
         lambda cfg, missing, on_progress: (called.append(True), []),
     )
 
@@ -619,7 +616,7 @@ def test_auto_download_missing_nothing_downloadable(monkeypatch, tmp_path):
     from osx_proxmox_next.assets import AssetCheck
 
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
     )
 
@@ -677,11 +674,11 @@ def test_cli_download_failure(monkeypatch, tmp_path):
 def test_cli_apply_no_download_flag(monkeypatch):
     from osx_proxmox_next.assets import AssetCheck
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)],
     )
     monkeypatch.setattr(
-        cli_module, "suggested_fetch_commands",
+        cli_common, "suggested_fetch_commands",
         lambda cfg: ["# fetch oc"],
     )
     rc = run_cli([
@@ -731,8 +728,8 @@ def test_cli_auto_download_on_missing(monkeypatch, tmp_path):
             return [AssetCheck("OC", Path("/tmp/oc.iso"), False, "missing", downloadable=True)]
         return [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")]
 
-    monkeypatch.setattr(cli_module, "required_assets", fake_required_assets)
-    monkeypatch.setattr(cli_module, "_auto_download_missing", lambda cfg, dest: None)
+    monkeypatch.setattr(cli_common, "required_assets", fake_required_assets)
+    monkeypatch.setattr(cli_common, "auto_download_missing", lambda cfg, dest: None)
     monkeypatch.setattr(
         cli_module, "create_snapshot",
         lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
@@ -763,10 +760,10 @@ def test_cli_apply_refreshes_stale_opencore(monkeypatch, tmp_path):
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     refreshed = []
-    monkeypatch.setattr(cli_module, "required_assets", lambda cfg: [
+    monkeypatch.setattr(cli_common, "required_assets", lambda cfg: [
         AssetCheck("OpenCore image", Path("/tmp/oc.iso"), True, "", downloadable=True, stale=True)])
-    monkeypatch.setattr(cli_module, "_auto_download_missing", lambda cfg, dest: refreshed.append(dest))
-    monkeypatch.setattr(cli_module, "detect_iso_storage", lambda: [str(tmp_path)])
+    monkeypatch.setattr(cli_common, "auto_download_missing", lambda cfg, dest: refreshed.append(dest))
+    monkeypatch.setattr(cli_common, "detect_iso_storage", lambda: [str(tmp_path)])
     monkeypatch.setattr(
         cli_module, "create_snapshot",
         lambda vmid: RollbackSnapshot(vmid=vmid, path=tmp_path / "snap.conf"),
@@ -788,9 +785,9 @@ def test_auto_download_includes_stale_opencore(monkeypatch, tmp_path):
     from osx_proxmox_next.domain import VmConfig
 
     sent = []
-    monkeypatch.setattr(cli_module, "required_assets", lambda cfg: [
+    monkeypatch.setattr(cli_common, "required_assets", lambda cfg: [
         AssetCheck("OpenCore image", Path("/tmp/oc.iso"), True, "", downloadable=True, stale=True)])
-    monkeypatch.setattr(cli_module, "run_download_worker",
+    monkeypatch.setattr(cli_common, "run_download_worker",
                         lambda cfg, missing, on_progress: (sent.extend(missing), [])[1])
     cfg = VmConfig(vmid=900, name="macos-sequoia", macos="sequoia", cores=8,
                    memory_mb=16384, disk_gb=128, bridge="vmbr0", storage="local-lvm")
@@ -1388,7 +1385,7 @@ def test_cli_apply_post_install_hint_correct(monkeypatch, tmp_path, capsys) -> N
     from osx_proxmox_next.rollback import RollbackSnapshot
 
     monkeypatch.setattr(
-        cli_module, "required_assets",
+        cli_common, "required_assets",
         lambda cfg: [AssetCheck("OC", Path("/tmp/oc.iso"), True, "")],
     )
     monkeypatch.setattr(cli_module, "create_snapshot",

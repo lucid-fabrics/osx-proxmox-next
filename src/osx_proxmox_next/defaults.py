@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .infrastructure import get_proxmox_adapter
+
 if TYPE_CHECKING:
     from .infrastructure import ProxmoxAdapter
 
@@ -252,7 +254,6 @@ DEFAULT_ISO_DIR = "/var/lib/vz/template/iso"
 
 def detect_iso_storage() -> list[str]:
     """Return ISO directory paths from Proxmox storage pools that support ISO content."""
-    from .services import get_proxmox_adapter
     pve = get_proxmox_adapter()
     dirs: list[str] = []
     res = pve.pvesm("status", "-content", "iso")

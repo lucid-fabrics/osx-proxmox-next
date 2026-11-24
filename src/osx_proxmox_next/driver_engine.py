@@ -18,13 +18,15 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update,
+        release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update,
+        release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -65,7 +67,8 @@ NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothin
 TEXTS = {"REFUSE_INSTALLING": REFUSE_INSTALLING, "REFUSE_CARD_SETUP": REFUSE_CARD_SETUP, "REFUSE_LOCKED": REFUSE_LOCKED,
          "REFUSE_NO_CARD": REFUSE_NO_CARD, "REFUSE_UNKNOWN_KIND": REFUSE_UNKNOWN_KIND, "REFUSE_NOT_MAC": REFUSE_NOT_MAC,
          "REFUSE_NOTHING_TO_UNDO": REFUSE_NOTHING_TO_UNDO, "UP_TO_DATE": UP_TO_DATE,
-         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD, "STALE_RECORD": STALE_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
+         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD,
+         "STALE_RECORD": STALE_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
          "REFUSE_CARD_CHANGED": REFUSE_CARD_CHANGED, "REFUSE_NEWER_SNAPSHOTS": REFUSE_NEWER_SNAPSHOTS,
          "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED, "REFUSE_MAPS_HELD": REFUSE_MAPS_HELD}
 VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
@@ -610,13 +613,16 @@ def main(argv):
     elif cmd == "unfinished" and len(argv) == 3:
         _emit(unfinished(argv[2]))
     elif cmd in ("update-init", "update-resume", "update-begin", "update-end", "update-fail", "update-set", "update-clear",
-                 "update-get", "update-add-disk", "update-forget-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
+                 "update-get", "update-add-disk", "update-forget-disk", "pending-kind", "failure-text", "card-changed", "kind",
+                 "replace-names",
                  "snapshot-date",
                  "newer-than", "all-snapshots"):
         return run_update_command(cmd, argv[2:])
     else:
-        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|finish-facts|todo-steps|steps|snapshot-name|"
-                         "snapshot-argv|tool-snapshots|snapshot-support|first-boot-text|text|from-igpu|compare|unfinished|update-*|failure-text|kind|"
+        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|finish-facts|todo-steps|steps|"
+                         "snapshot-name|"
+                         "snapshot-argv|tool-snapshots|snapshot-support|first-boot-text|text|from-igpu|compare|unfinished|update-*|"
+                         "failure-text|kind|"
                          "fingerprint|trusted|stamp|stale-maps|maps-held ...\n")
         return 64
     return 0

@@ -7,9 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from gpu_fakes import add_card, make_host, write
-from nullmoth_fakes import MAC_CFG, FakeQm
-from osx_proxmox_next import cli, gpu, gpu_setup, gpu_setup_cli, host_setup
+from gpu_fakes import add_card, write
+from osx_proxmox_next import cli, gpu_setup, gpu_setup_cli, host_setup
 from osx_proxmox_next.executor import ApplyResult, StepResult
 from test_gpu_setup import ANSWERS, SEQUOIA, Env, patch_executor, ready  # noqa: F401  (fixtures reused)
 

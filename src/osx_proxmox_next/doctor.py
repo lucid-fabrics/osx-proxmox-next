@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .defaults import detect_cpu_info
-from .infrastructure import ProxmoxAdapter
+from .infrastructure import ProxmoxAdapter, get_proxmox_adapter
 
 
 class Severity(str, Enum):
@@ -201,7 +201,6 @@ def _check_cpu_hedt(cfg: dict[str, str], vmid: int) -> DoctorCheck | None:
 
 def run_doctor(vmid: int, adapter: ProxmoxAdapter | None = None) -> list[DoctorCheck]:
     if adapter is None:
-        from .services import get_proxmox_adapter
         adapter = get_proxmox_adapter()
 
     result = adapter.qm("config", str(vmid))

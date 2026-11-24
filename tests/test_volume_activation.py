@@ -8,8 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from gpu_fakes import FakeRun
-from osx_proxmox_next import gpu, planner
+from osx_proxmox_next import planner
 from osx_proxmox_next.infrastructure import CommandResult, ProxmoxAdapter
 from test_gpu_parity import BASH, BLOCK, STUBS
 

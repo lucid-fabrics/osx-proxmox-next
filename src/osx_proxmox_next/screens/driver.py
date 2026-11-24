@@ -236,11 +236,13 @@ class DriverScreen(OsxScreen):
         if not plan.installed_known:
             rows = [Static(self._row("Driver", Text("installed version unknown", style=pal["muted"])), id="d-driver")]
             if plan.unknown_why:      # a version that cannot be read says why, in words that wrap
-                rows.append(Static(Text(" " + " " * DRIVER_LABEL + plan.unknown_why[:1].upper() + plan.unknown_why[1:] + ".", style=pal["muted"]), id="d-why"))
+                why = " " + " " * DRIVER_LABEL + plan.unknown_why[:1].upper() + plan.unknown_why[1:] + "."
+                rows.append(Static(Text(why, style=pal["muted"]), id="d-why"))
             return rows
         parts = [f"{n} {plan.installed[n]}" for n in engine.COMPONENTS[plan.kind] if plan.installed.get(n)]
-        rows: list[Widget] = [Static(self._row("Driver" if i == 0 else "", Text(part, style="bold")), id="d-driver" if i == 0 else f"d-driver-{i + 1}")
-                              for i, part in enumerate(parts)]
+        rows: list[Widget] = [
+            Static(self._row("Driver" if i == 0 else "", Text(part, style="bold")), id="d-driver" if i == 0 else f"d-driver-{i + 1}")
+            for i, part in enumerate(parts)]
         if plan.from_record:      # the disk of a running Mac is not read: say whose word this is
             rows.append(Static(self._row("", Text(engine.FROM_RECORD, style=pal["muted"])), id="d-source"))
         return rows
@@ -307,8 +309,8 @@ class DriverScreen(OsxScreen):
         self._label = self._enter_label(pending)
         action = Horizontal(Static(Text(self._note_text(can_go, picker is not None, pending), style=pal["muted"]), id="g-note"),
                             *([Button(self._label, id="d-go", classes="primary")] if can_go else []), id="g-action")
-        await self._show(Static(title, id="g-title"), Horizontal(*([form, side] if side else [form]), id="g-cols"), Static("", id="g-result"),
-                         action, mode="attached")
+        await self._show(Static(title, id="g-title"), Horizontal(*([form, side] if side else [form]), id="g-cols"),
+                         Static("", id="g-result"), action, mode="attached")
         self._facts()
         self._focus_row()
 

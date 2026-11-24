@@ -364,7 +364,7 @@ def collect_incident(vmid, kind, reason, lines, base=None, runner=run, clock=tim
             return
         try:
             fn()
-        except Exception as exc:  # a failed read must never keep the VM from being recovered
+        except Exception as exc:  # noqa: BLE001 a failed read must never keep the VM from being recovered
             skipped.append('%s: %s' % (name, str(exc)[:120]))
 
     part('panic.txt', lambda: put('panic.txt', panic_text(lines)))

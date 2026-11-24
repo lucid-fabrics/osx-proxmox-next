@@ -1,7 +1,6 @@
 """igpu-check, igpu-finish, igpu-install and the oc_builder pins."""
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,7 +100,7 @@ class Pve:
 @pytest.fixture
 def install(monkeypatch):
     s = SimpleNamespace(applied=[], unattended=None, finished=None, fetched=None, saved=None)
-    monkeypatch.setattr(cli, "_validate_and_fetch_assets", lambda args, config: s.fetched)
+    monkeypatch.setattr(igpu_cli, "validate_and_fetch_assets", lambda args, config: s.fetched)
     monkeypatch.setattr(igpu_cli, "check_intel_gpu", lambda **_kw: report())
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "build_plan", lambda config: [PlanStep("Create VM shell", ["true"]), PlanStep("Start VM", ["qm", "start", "9"])])
@@ -114,7 +113,7 @@ def install(monkeypatch):
         return ApplyResult(not failed, [StepResult("Create VM shell", "c", not failed, 1, "x")], Path("/log"))
     monkeypatch.setattr("osx_proxmox_next.executor.apply_plan", apply)
     s.pve = Pve()
-    monkeypatch.setattr("osx_proxmox_next.services.get_proxmox_adapter", lambda: s.pve)
+    monkeypatch.setattr(igpu_cli, "get_proxmox_adapter", lambda: s.pve)
 
     class Console:
         def __init__(self, vmid):

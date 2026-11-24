@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -12,7 +11,7 @@ import pytest
 
 from gpu_fakes import EFI_GRUB, FakeRun, add_card, make_host, write
 from nullmoth_fakes import good_card
-from osx_proxmox_next import amd_host, bios_guide, gpu, gpu_setup, host_setup, nullmoth
+from osx_proxmox_next import amd_host, bios_guide, gpu, gpu_setup, host_setup
 
 REPO = Path(__file__).resolve().parent.parent
 PKG = REPO / "src/osx_proxmox_next"
@@ -415,10 +414,10 @@ def test_gpu_detach_dry_run_and_refusals(bash, vm, tmp_path):
                                           ("--vga", "qm set --vga failed")])
 def test_gpu_detach_qm_set_failures(bash, vm, tmp_path, fail, needle):
     put_record(tmp_path, 100, "0000:06:00", "amd", None, "-cpu host", "std", True, "gpu")
-    vm(100, "stopped", MAC.replace("vga: std", "vga: none") + f"hostpci0: 0000:06:00,pcie=1\n")
+    vm(100, "stopped", MAC.replace("vga: std", "vga: none") + "hostpci0: 0000:06:00,pcie=1\n")
     res = bash("gpu_oc_boot_args() { true; }; gpu_detach_record 100", env={**vm.env, "QM_FAIL": fail}, expect=1)
     assert needle in res.stdout
-    assert (tmp_state := res) and True
+    assert res
 
 
 def test_gpu_detach_oc_failure_changes_nothing(bash, vm, tmp_path):

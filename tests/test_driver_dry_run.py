@@ -8,11 +8,10 @@ import itertools
 
 import pytest
 
-from driver_fakes import DPve, comps
+from driver_fakes import DPve
 from osx_proxmox_next.infrastructure import CommandResult
-from osx_proxmox_next import cli, driver_cli, driver_core, driver_engine as engine, driver_plan, driver_run, driver_state
-from osx_proxmox_next.driver_core import RunEnv, RunResult, Updater
-from osx_proxmox_next.driver_targets import Target
+from osx_proxmox_next import driver_cli, driver_engine as engine, driver_run, driver_state
+from osx_proxmox_next.driver_core import RunEnv, Updater
 from test_driver_cli import NEW_SNAP, host, run  # noqa: F401 - fixture and helper
 
 READ_ONLY = ("config", "status", "listsnapshot")

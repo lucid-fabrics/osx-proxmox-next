@@ -20,7 +20,8 @@ from .domain import PlanStep
 from .infrastructure import ProxmoxAdapter
 from .gpu import (
     MMIO_ARG, NVIDIA_PROFILE, AttachRecord, GpuReport, build_hostpci_attach_steps, build_hostpci_detach_steps,
-    gpu_users, hostpci_bdfs, running_user_issue, shared_note, hostpci_value, load_record, new_record, normalize_bdf, parse_config, record_is_stale, record_path,
+    gpu_users, hostpci_bdfs, running_user_issue, shared_note, hostpci_value, load_record, new_record, parse_config, record_is_stale,
+    record_path,
     record_step,
     stop_step as _stop_step, verify_stopped_step as _verify_stopped_step, with_mmio_arg, without_mmio_arg,
 )

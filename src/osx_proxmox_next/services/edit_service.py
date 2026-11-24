@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 from ..executor import ApplyResult, StepResult, apply_plan
 from ..domain import EditChanges, PlanStep
+from ..planner import build_edit_plan
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +26,5 @@ def run_edit_worker(
     *current_net0* is the raw VM config string used to preserve MAC/VLAN when
     updating the bridge.
     """
-    from ..planner import build_edit_plan  # lazy — avoids planner ↔ services circular import
     steps = build_edit_plan(vmid, changes, start_after=start_after, current_net0=current_net0)
     return apply_plan(steps, execute=True, on_step=on_step)

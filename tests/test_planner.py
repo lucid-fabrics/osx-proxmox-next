@@ -3,7 +3,7 @@ from osx_proxmox_next.defaults import CpuInfo
 from osx_proxmox_next.domain import VmConfig
 from osx_proxmox_next.planner import (
     build_plan, _cpu_args,
-    VmInfo, fetch_vm_info, build_destroy_plan,
+    fetch_vm_info, build_destroy_plan,
     POST_INSTALL_BOOT_ORDER,
 )
 from osx_proxmox_next.script_renderer import (

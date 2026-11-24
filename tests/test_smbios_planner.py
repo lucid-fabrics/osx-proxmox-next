@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 
-import pytest
 
 from osx_proxmox_next.domain import VmConfig
 from osx_proxmox_next.smbios_planner import (

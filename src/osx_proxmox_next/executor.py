@@ -6,7 +6,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Optional
 
-from .infrastructure import ProxmoxAdapter
+from .infrastructure import ProxmoxAdapter, get_proxmox_adapter
 from .domain import PlanStep
 
 
@@ -41,7 +41,6 @@ def apply_plan(
     log_path = out_dir / f"apply-{ts}.log"
 
     if adapter is None:
-        from .services import get_proxmox_adapter
         adapter = get_proxmox_adapter()
     runtime = adapter
     results: list[StepResult] = []

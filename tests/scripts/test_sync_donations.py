@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -96,7 +95,7 @@ def test_main_skips_duplicates(tmp_path, sync_module, monkeypatch):
 
     monkeypatch.setattr(sync_module, "fetch_donations", lambda token: poll_response["donations"])
     monkeypatch.setattr(sync_module, "delete_entries", lambda keys, token: deleted_keys.extend(keys))
-    monkeypatch.setattr(os_module := __import__("os"), "environ", {"POLL_TOKEN": "test"})
+    monkeypatch.setattr(__import__("os"), "environ", {"POLL_TOKEN": "test"})
 
     rc = sync_module.main()
     assert rc == 0

@@ -3,8 +3,8 @@
 
 Run after changing host_setup.py, bios_guide.py, data/gpu/bios_paths.json,
 data/gpu/amd_devices.txt, data/gpu/oc_boot_args.py, data/nullmoth/oc_patch.py, nullmoth_engine.py, data/nullmoth/nm_* or any iGPU
-file (igpu_engine.py, data/gpu/intel_devices.txt, oc_igpu.py, igpu_*.sh, igpu_launchd.plist, igpu_power_watchdog.py, igpu_diag.py, osx-next-power-watchdog@.service)
-or driver_engine.py, driver_state.py or data/gpu/oc_kext.py:
+file (igpu_engine.py, data/gpu/intel_devices.txt, oc_igpu.py, igpu_*.sh, igpu_launchd.plist, igpu_power_watchdog.py, igpu_diag.py,
+osx-next-power-watchdog@.service) or driver_engine.py, driver_state.py or data/gpu/oc_kext.py:
 
     python3 scripts/embed_gpu_engines.py
 
@@ -70,7 +70,7 @@ def main() -> int:
         if not pattern.search(script):
             print(f"marker for {label} not found in {BASH}", file=sys.stderr)
             return 1
-        script = pattern.sub(lambda _m: render(label, var, source), script, count=1)
+        script = pattern.sub(lambda _m: render(label, var, source), script, count=1)  # noqa: B023 runs within this iteration
     BASH.write_text(script)
     return 0
 

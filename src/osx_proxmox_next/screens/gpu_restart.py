@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from ..services.unattended_service import read_driver_state
+from .gpu_contract import GpuHost
 
 ARM_SECONDS = 1.0   # enter typed ahead of the box must never restart the host: it is ignored this long
 
@@ -14,7 +15,7 @@ def _now() -> float:
     return time.monotonic()
 
 
-class RestartMixin:
+class RestartMixin(GpuHost):
     """The restart box of GpuScreen: what a restart does right now, Later and Restart now."""
 
     def step_restart(self) -> None:

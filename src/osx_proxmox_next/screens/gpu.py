@@ -43,7 +43,7 @@ KEPT_LINE = "Anything you edited since is kept and reported."
 
 def undo_progress_text(plan: list[str], finished: int) -> str:
     """The undo in progress: ✓ for each line done, ◐ for the one at work, the rest waiting."""
-    lines = [l for l in plan if not l.startswith("The host needs")]
+    lines = [ln for ln in plan if not ln.startswith("The host needs")]
     rows = [("✓ " if i < finished else "◐ " if i == finished else "  ") + line for i, line in enumerate(lines)]
     return "\n".join(["Undoing..."] + ([""] + rows if rows else []))
 
