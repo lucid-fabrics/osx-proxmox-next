@@ -5,7 +5,9 @@ disk. What only looks alike stays in the two files."""
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,13 +18,25 @@ from .infrastructure import ProxmoxAdapter
 from .rollback import create_snapshot
 from .services import fetch_vm_info
 
-__all__ = ["FinishError", "note_picker_restore", "recovery_image", "save_snapshot", "start_vm", "vm_config", "wait_stopped"]
+__all__ = ["FinishError", "FinishRun", "note_picker_restore", "recovery_image", "require_stopped", "save_snapshot", "start_vm", "vm_config",
+           "wait_stopped"]
 
 POLL = 10
 
 
 class FinishError(Exception):
     """A phase of a graphics finish (iGPU or NVIDIA) did not reach its expected state."""
+
+
+@dataclass(frozen=True)
+class FinishRun:
+    """What every phase of one finish needs: the Mac, how to reach Proxmox, where to report and the pacing. Built once at the top
+    of a finish, so the phases take this one value and not five of its parts."""
+    vmid: int
+    pve: ProxmoxAdapter
+    on_event: Callable[[str], None]
+    clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
 
 
 def vm_config(vmid: int, pve: ProxmoxAdapter):
