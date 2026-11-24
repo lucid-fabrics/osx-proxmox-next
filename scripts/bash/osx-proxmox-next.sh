@@ -1736,7 +1736,7 @@ NULLMOTH_REBOOT_GRACE=420
 NULLMOTH_HALT_WAIT=90
 NULLMOTH_IP_TIMEOUT=300
 NULLMOTH_IP_POLL=15
-NM_RESULT=""; NM_TAG=""; NM_PAYLOAD_REF=""; NM_PAYLOAD_FILE=""; NM_IP=""; NM_SSH_UP=no; NM_VNC_UP=no
+NM_RESULT=""; NM_TAG=""; NM_SHA=""; NM_SOURCE=""; NM_PAYLOAD_REF=""; NM_PAYLOAD_FILE=""; NM_IP=""; NM_SSH_UP=no; NM_VNC_UP=no
 
 # nullmoth_engine.py (embedded below, the same file the Python package imports): releases, downloads, payload, guest lookup.
 function nullmoth_engine() { gpu_engine_init && python3 "$GPU_ENGINE_DIR/nullmoth_engine.py" "$@"; }
@@ -1774,13 +1774,14 @@ function nullmoth_choose_version() {
 function nullmoth_payload_result() { nullmoth_engine result "$(pve_vol_path "$1")" 2>/dev/null || true; }
 
 # Download and verify the driver, build the payload disk, boot recovery and stage it inside macOS.
-# $1 vmid $2 release (latest or a tag) $3 macos. Sets NM_TAG, NM_PAYLOAD_REF, NM_PAYLOAD_FILE. Mirrors the first half of nullmoth_finish.finish.
+# $1 vmid $2 release (latest or a tag) $3 macos. Sets NM_TAG, NM_SHA, NM_SOURCE, NM_PAYLOAD_REF, NM_PAYLOAD_FILE. Mirrors the first half of nullmoth_finish.finish.
 function nullmoth_stage() {
   local IGPU_STAGE_WHAT="the NullMoth driver"      # the shared staging says what it stages
   local vmid="$1" choice="$2" ver="$3" cfg storage dir info tarball sha fwinfo fw="" fwsha="" recovery_src rec_ref rc=0 orig_vga orig_args orig_boot
   dir="${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/iso}/nullmoth"
   info=$(nullmoth_engine fetch "$choice" "$dir") || { msg_error "Could not download or verify the NullMoth release"; return 1; }
   NM_TAG=$(gpu_json 'd["tag"]' <<<"$info"); tarball=$(gpu_json 'd["path"]' <<<"$info"); sha=$(gpu_json 'd["sha256"]' <<<"$info")
+  NM_SHA="$sha"; NM_SOURCE=$(gpu_json 'd.get("source", "")' <<<"$info")      # what the driver record keeps (nullmoth_finish._record_driver)
   msg_ok "NullMoth ${NM_TAG}: downloaded, sha256 ${sha:0:16}... matches SHA256SUMS and the GitHub digest"
   if fwinfo=$(nullmoth_engine fw-fetch "$tarball" "$dir"); then
     fw=$(gpu_json 'd["path"]' <<<"$fwinfo"); fwsha=$(gpu_json 'd["sha256"]' <<<"$fwinfo")
@@ -1919,7 +1920,7 @@ function nullmoth_first_boot() {
   msg_info "Started the VM again; looking for its address"
   nullmoth_guest_address "$vmid" "$ip"
   msg_ok "Done. VM ${vmid}: NullMoth ${NM_TAG} is installed and loaded (${kexts} extensions)."
-  driver_record_component "$vmid" nvidia NullMoth "$NM_TAG" || true
+  driver_record_component "$vmid" nvidia NullMoth "$NM_TAG" "$NM_SHA" "$NM_SOURCE" || true
   if [ -n "$NM_IP" ]; then
     echo "  ssh <user>@${NM_IP}$([ "$NM_SSH_UP" == yes ] || echo '   (not answering yet)')"
     echo "  vnc://${NM_IP}$([ "$NM_VNC_UP" == yes ] || echo '   (not answering yet)')"
@@ -10579,7 +10580,7 @@ function igpu_finish() {
   igpu_attach "$vmid" || { msg_error "Attaching the iGPU failed. Undo with: gpu-setup --undo"; return 1; }
   qm set "$vmid" --boot 'order=ide0;virtio0' >/dev/null
   printf '%s' "$IGPU_ASSETS_JSON" | igpu_engine state-record "$vmid" "$ver" 2>/dev/null || echo -e "${INFO}${YW}Could not record the installed versions; igpu-report will not list them.${CL}"
-  driver_engine from-igpu "$vmid" >/dev/null 2>&1 || true
+  driver_record_igpu "$vmid"
   echo '{"package_installed": false}' | igpu_engine state-write "$vmid" >/dev/null 2>&1 || true
   if igpu_watchdog_enable "$vmid"; then
     msg_ok "Installed the watchdog: it records crashes and finishes the restarts and shut downs that hang on macOS Tahoe"
@@ -10598,7 +10599,7 @@ function igpu_finish() {
   igpu_drop_disk "$vmid" sata2
   rm -f "$payload"
   printf '{"package_installed": %s, "package_result": %s}' "$([ "$result" == "installed" ] && echo true || echo false)" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$result")" | igpu_engine state-write "$vmid" >/dev/null 2>&1 || true
-  driver_engine from-igpu "$vmid" >/dev/null 2>&1 || true
+  driver_record_igpu "$vmid"
   if [ "$result" == "installed" ]; then
     igpu_oc_patch "$vmid" mark || echo -e "${INFO}${YW}Could not note the installed package on the OpenCore disk: gpu-setup --undo would remove WhateverXe, which the installed package needs.${CL}"
   fi
@@ -11286,8 +11287,13 @@ function driver_igpu_oc_patch() {
 
 # NVIDIA: the release (verified), the recovery image and AMFIPass. $1 vmid $2 macos $3 tag
 function driver_prefetch_nvidia() {
-  local dir="${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/iso}"
-  nullmoth_engine fetch "$3" "$dir/nullmoth" >/dev/null || { msg_error "Could not download or verify the NullMoth release"; return 1; }
+  local dir="${NULLMOTH_CACHE_DIR:-/var/lib/vz/template/iso}" info
+  info=$(nullmoth_engine fetch "$3" "$dir/nullmoth") || { msg_error "Could not download or verify the NullMoth release"; return 1; }
+  # the record keeps the hash of the tarball that was verified, not the GitHub digest (driver_nvidia._assets)
+  DRIVER_TARGET=$(python3 -c 'import json,sys
+target = json.loads(sys.argv[1])
+target["NullMoth"]["sha256"] = json.loads(sys.argv[2]).get("sha256", target["NullMoth"].get("sha256", ""))
+print(json.dumps(target))' "$DRIVER_TARGET" "$info")
   DRIVER_AMFI_ZIP=$(nullmoth_fetch_amfipass "$dir") || { msg_error "Could not download AMFIPass"; return 1; }
   download_recovery "$2" "$TEMP_DIR/nullmoth-recovery-${1}.img" || { msg_error "Could not download the $2 recovery image"; return 1; }
 }
@@ -11394,6 +11400,7 @@ function driver_run_intel() {
     driver_engine update-set "$vmid" staged true >/dev/null          # the package is inside macOS now, whatever comes next
     restore_picker_timeout "$vmid" || msg_info "Could not restore the picker's auto-boot; run post-install afterwards"
     driver_igpu_oc_patch "$vmid" attach || { msg_error "Replacing WhateverXe on the OpenCore disk failed"; return 1; }
+    DRIVER_EXTRA=$(python3 -c 'import json,sys; v = sys.argv[1][len("AMFIPass-v"):-len("-RELEASE.zip")]; print(json.dumps({"AMFIPass": {"version": v, "tag": v, "sha256": sys.argv[2], "source": "pinned"}}))' "$(igpu_pin amfipass 0)" "$(igpu_pin amfipass 2)")
     driver_engine update-set "$vmid" payload_ref "$(driver_json_str "$payload_ref")" >/dev/null
     driver_end stage
   else
@@ -11465,15 +11472,25 @@ for n, c in {**extra, **target}.items():
         continue
     have[n] = {"name": n, "version": c["version"], "tag": c["tag"], "sha256": c.get("sha256", ""), "source": c.get("source", ""), "installed_at": now}
 print(json.dumps(list(have.values())))' "$DRIVER_TARGET" "$(driver_engine record "$vmid")" "$3" "$DRIVER_KEPT" "$DRIVER_EXTRA")
-  prev=$(python3 -c 'import json,sys; print(json.dumps([{"name": n, "version": v, "tag": v, "sha256": "", "source": "", "installed_at": ""} for n, v in json.loads(sys.argv[1]).items()]))' "$3")
+  prev=$(python3 -c 'import json,sys,time
+now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+print(json.dumps([{"name": n, "version": v, "tag": v, "sha256": "", "source": "", "installed_at": now} for n, v in json.loads(sys.argv[1]).items()]))' "$3")
   driver_engine write "$vmid" "$kind" "$comps" "$prev" "${4:-}" "${5:-}" "$DRIVER_VERSIONS" "$(driver_fingerprint "$vmid")" >/dev/null
 }
 
-# Remember one installed component of a Mac that was just set up. $1 vmid $2 kind $3 name $4 version
+# Remember one installed component of a Mac that was just set up, with the identity of its disks (so a later manual rollback
+# is noticed). Mirrors nullmoth_finish._record_driver. $1 vmid $2 kind $3 name $4 version $5 sha256 $6 source
 function driver_record_component() {
   local comp
-  comp=$(driver_engine component "$3" "$4" | python3 -c 'import json,sys; print(json.dumps([json.load(sys.stdin)]))') || return 1
-  driver_engine write "$1" "$2" "$comp" >/dev/null
+  comp=$(driver_engine component "$3" "$4" "$4" "${5:-}" "${6:-}" | python3 -c 'import json,sys; print(json.dumps([json.load(sys.stdin)]))') || return 1
+  driver_engine write "$1" "$2" "$comp" null "" "" null "$(driver_fingerprint "$1")" >/dev/null
+}
+
+# The driver record of an Intel Mac from its iGPU record, with the identity of its disks like igpu_finish._record_state
+# (a record without a fingerprint is believed after a manual rollback). $1 vmid
+function driver_record_igpu() {
+  driver_engine from-igpu "$1" >/dev/null 2>&1 || return 0
+  driver_engine stamp "$1" "$(driver_fingerprint "$1")" >/dev/null 2>&1 || true
 }
 
 # Remember the Lilu and WhateverGreen on the OpenCore disk of an AMD Mac that was just set up (the Mac is stopped).
@@ -11481,7 +11498,9 @@ function driver_record_amd() {
   local comps
   comps=$(driver_oc_json "$1" versions Lilu.kext WhateverGreen.kext | python3 -c 'import json,sys
 d = json.load(sys.stdin)
-print(json.dumps([{"name": k[:-5], "version": v, "tag": v, "sha256": "", "source": "disk", "installed_at": ""} for k, v in d.items() if v]))') || return 1
+import time
+now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+print(json.dumps([{"name": k[:-5], "version": v, "tag": v, "sha256": "", "source": "disk", "installed_at": now} for k, v in d.items() if v]))') || return 1
   [ "$comps" != "[]" ] || return 1
   driver_engine write "$1" amd "$comps" >/dev/null
 }
@@ -11494,13 +11513,97 @@ function driver_running_step() {
   driver_engine update-get "$vmid" steps | gpu_json 'next(("%d of %d: %s" % (i, len(d), r.get("title", "")) for i, r in enumerate(d or [], 1) if r.get("state") == "active"), "starting")'
 }
 
+# Prints the `driver-status --json` object. The arguments are key=value pairs for the fields that are known; every other field
+# has the value driver_cli.status_data gives a Mac nothing is known of. `refused` is one refusal per line, `snapshots` is
+# split on spaces, installed|latest|installed_from_record|unfinished|updating are JSON text, the rest is plain text.
+function driver_status_json() {
+  python3 -c 'import json,sys
+d = {"vmid": 0, "name": "", "kind": "", "refused": [], "installed": None, "installed_from_record": False, "latest": {}, "state": "",
+     "snapshots": [], "unfinished": False, "latest_error": "", "updating": False, "step": ""}
+for arg in sys.argv[1:]:
+    key, _, value = arg.partition("=")
+    if key == "refused":
+        d[key] = [line for line in value.split("\n") if line]
+    elif key == "snapshots":
+        d[key] = value.split()
+    elif key in ("installed", "latest", "installed_from_record", "unfinished", "updating"):
+        d[key] = json.loads(value)
+    else:
+        d[key] = int(value) if key == "vmid" else value
+print(json.dumps(d, indent=2, sort_keys=True))' "$@"
+}
+
+# Fills DRIVER_ISSUES like driver_plan.prepare fills plan.refusals before it asks GitHub: the Mac's own refusals, the card, then
+# the checks of the kind. Sets DRIVER_KIND. $1 vmid $2 qm config $3 yes when an update runs or was cut off $4 its kind
+function driver_status_refusals() {
+  local macos
+  driver_refusals "$1" "$2" "$3"
+  driver_pick_kind "$1" "$2" "$4"
+  [ -n "$DRIVER_KIND" ] || return 0
+  macos=$(nullmoth_detect_macos "$2" || true)
+  if [ "$DRIVER_KIND" == intel ] && [ "${macos,,}" == monterey ]; then DRIVER_ISSUES+=("$IGPU_MONTEREY_NOTE")
+  elif [ "$DRIVER_KIND" != amd ] && [ -z "$macos" ]; then
+    DRIVER_ISSUES+=("Cannot tell which macOS this Mac runs (its description or name should say). Pass --macos (ventura, sonoma, sequoia or tahoe).")
+  fi
+}
+
+# The message of a failed release lookup from the stderr the engine left in file $1: the last line without its prefix
+# (the same text driver_plan.prepare adds to the refusals).
+function driver_lookup_error() {
+  local line
+  line=$(tail -n 1 "$1" 2>/dev/null)
+  line="${line#ERROR: }"; line="${line##*ReleaseError: }"
+  echo "${line:-Could not look up the releases}"
+}
+
+# `driver-status <vmid> --json`: the object driver_cli.status_data gives, and its exit code (2 while something is refused).
+# $1 vmid $2 qm config $3 running yes|no
+function driver_status_json_command() {
+  local vmid="$1" cfg="$2" running="$3" pending interrupted=no kind step snaps errf issue rc=0 known=no
+  local installed="{}" latest="{}" verdict="" from_record=no
+  local -a shown=()
+  pending=$(driver_engine pending-kind "$vmid")
+  [ "$(driver_engine unfinished "$vmid" | gpu_json 'd.get("phase", "")')" == "" ] || interrupted=yes
+  step=$(driver_running_step "$vmid")
+  snaps=$(driver_snapshots "$vmid" | paste -sd' ' -)
+  DRIVER_ISSUES=()
+  driver_status_refusals "$vmid" "$cfg" "$([ -n "$pending" ] && echo yes || echo no)" "$pending"
+  kind="$DRIVER_KIND"
+  if [ ${#DRIVER_ISSUES[@]} -eq 0 ]; then
+    errf=$(mktemp) || return 1
+    if driver_target "$kind" "" "" "" 2>"$errf"; then
+      installed=$(driver_installed "$vmid" "$kind" "$running")
+      [ "$installed" == "{}" ] || known=yes
+      [ "$known" == yes ] && [ "$(cat "${TEMP_DIR:-/tmp}/osx-next-driver-src-$vmid" 2>/dev/null)" == record ] && from_record=yes
+      latest="$DRIVER_VERSIONS"
+      verdict=$(driver_engine judge "$installed" "$DRIVER_VERSIONS" | gpu_json 'd["state"]')
+    else
+      DRIVER_ISSUES+=("$(driver_lookup_error "$errf")")
+    fi
+    rm -f "$errf"
+  fi
+  for issue in "${DRIVER_ISSUES[@]}"; do      # the update that runs says it better than "locked"
+    { [ -n "$step" ] && [ "$issue" == "$(driver_text REFUSE_LOCKED)" ]; } || shown+=("$issue")
+  done
+  [ ${#shown[@]} -eq 0 ] || rc=2
+  driver_status_json vmid="$vmid" name="$(sed -n 's/^name: //p' <<<"$cfg")" kind="$kind" refused="$(printf '%s\n' "${shown[@]}")" \
+    installed="$([ "$known" == yes ] && echo "$installed" || echo null)" installed_from_record="$([ "$from_record" == yes ] && echo true || echo false)" \
+    latest="$latest" state="$verdict" snapshots="$snaps" unfinished="$([ "$interrupted" == yes ] && echo true || echo false)" \
+    updating="$([ -n "$step" ] && echo true || echo false)" step="$step"
+  return "$rc"
+}
+
 # `osx-proxmox-next.sh driver-status <vmid> [--json]`
 function driver_status_command() {
   local vmid="${1:-}" json=no cfg kind installed line running=no snaps known pending interrupted=no step verdict="" latest="{}" have_latest=no from_record=no
   [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh driver-status <vmid> [--json]"; return 1; }
   [ "${2:-}" != "--json" ] || json=yes
-  cfg=$(qm config "$vmid" 2>/dev/null) || { msg_error "VM $vmid not found."; return 1; }
+  if ! cfg=$(qm config "$vmid" 2>/dev/null); then
+    [ "$json" != yes ] || { driver_status_json vmid="$vmid" refused="VM $vmid not found."; return 2; }
+    msg_error "VM $vmid not found."; return 1
+  fi
   qm status "$vmid" 2>/dev/null | grep -q 'status: running' && running=yes
+  [ "$json" != yes ] || { driver_status_json_command "$vmid" "$cfg" "$running"; return; }
   pending=$(driver_engine pending-kind "$vmid")
   [ "$(driver_engine unfinished "$vmid" | gpu_json 'd.get("phase", "")')" == "" ] || interrupted=yes
   DRIVER_ISSUES=()
@@ -11522,11 +11625,6 @@ function driver_status_command() {
     fi
   else
     installed="{}"; known=no
-  fi
-  if [ "$json" == yes ]; then
-    python3 -c 'import json,sys; print(json.dumps({"vmid": int(sys.argv[1]), "kind": sys.argv[2], "installed": json.loads(sys.argv[3]) if sys.argv[4] == "yes" else None, "installed_from_record": sys.argv[10] == "yes", "latest": json.loads(sys.argv[5]), "state": sys.argv[6], "snapshots": sys.argv[7].split(), "unfinished": sys.argv[8] == "yes", "updating": bool(sys.argv[9]), "step": sys.argv[9]}, indent=2, sort_keys=True))' \
-      "$vmid" "$kind" "$installed" "$known" "$latest" "$verdict" "$snaps" "$interrupted" "$step" "$from_record"
-    return 0
   fi
   echo "VM $vmid $(sed -n 's/^name: //p' <<<"$cfg"): $(case "$kind" in nvidia) echo NVIDIA ;; intel) echo Intel ;; amd) echo AMD ;; esac) card"
   if [ -n "$step" ]; then

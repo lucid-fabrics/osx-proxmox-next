@@ -238,8 +238,9 @@ def test_bash_status_matches_the_python_status(host, capsys, monkeypatch):
                    "A newer driver is available.", "Driver snapshots: none"]                       # the lines the Python status prints
     (host.qm_dir / "snaps").write_text("osx-next-driver-20261120-0900\n")
     data = json.loads(host.run(STUB_NULLMOTH + "driver_status_command 109 --json\n").stdout)
-    assert data == {"vmid": 109, "kind": "nvidia", "installed": {"NullMoth": "v2.8.1"}, "installed_from_record": False, "latest": {"NullMoth": "v2.9"}, "state": "update",
-                    "snapshots": ["osx-next-driver-20261120-0900"], "unfinished": False, "updating": False, "step": ""}
+    assert data == {"vmid": 109, "name": "macos-sequoia", "kind": "nvidia", "refused": [], "installed": {"NullMoth": "v2.8.1"}, "installed_from_record": False,
+                    "latest": {"NullMoth": "v2.9"}, "state": "update", "snapshots": ["osx-next-driver-20261120-0900"], "unfinished": False,
+                    "latest_error": "", "updating": False, "step": ""}
     (host.state / "109.json").unlink()
     out = host.run(STUB_NULLMOTH + "gpu_record_load() { REC_VENDOR=nvidia; return 0; }\ndriver_status_command 109\n").stdout
     assert "Installed: installed version unknown" in out and "The installed version is not known." in out
