@@ -14,8 +14,13 @@ function header_info {
 
 EOF
 }
-header_info
-echo -e "\n Loading..."
+# A command that is asked for JSON prints that document on stdout and nothing else: no banner, no screen clear, no colours.
+JSON_OUTPUT=no
+for arg in "$@"; do [ "$arg" != "--json" ] || JSON_OUTPUT=yes; done
+if [ "$JSON_OUTPUT" != yes ]; then
+  header_info
+  echo -e "\n Loading..."
+fi
 
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 if ! [[ "$GEN_MAC" =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]]; then
@@ -124,7 +129,7 @@ function error_handler() {
   local line_number="$1"
   local command="$2"
   local error_message="${RD}[ERROR]${CL} in line ${RD}$line_number${CL}: exit code ${RD}$exit_code${CL}: while executing command ${YW}$command${CL}"
-  echo -e "\n$error_message\n"
+  if [ "${JSON_OUTPUT:-no}" == yes ]; then echo -e "\n$error_message\n" >&2; else echo -e "\n$error_message\n"; fi
   trap - ERR  # Prevent recursion if cleanup_vmid fails
   cleanup_vmid
 }
@@ -251,6 +256,10 @@ function safe_mount() {
 
 function check_root() {
   if [[ "$(id -u)" -ne 0 || $(ps -o comm= -p "$PPID") == "sudo" ]]; then
+    if [ "${JSON_OUTPUT:-no}" == yes ]; then
+      msg_error "Please run this script as root." >&2
+      exit 1
+    fi
     clear
     msg_error "Please run this script as root."
     echo -e "\nExiting..."
@@ -10976,7 +10985,7 @@ function driver_lock_acquire() {
   f=$(driver_lock_file "$1")
   mkdir -p "$(dirname "$f")" || return 1
   exec {DRIVER_LOCK_FD}>>"$f" || return 1
-  if ! flock -n "$DRIVER_LOCK_FD"; then exec {DRIVER_LOCK_FD}>&-; return 1; fi
+  if ! flock -n "$DRIVER_LOCK_FD"; then exec {DRIVER_LOCK_FD}>&-; unset DRIVER_LOCK_FD; return 1; fi
   printf '%s\n%s\n%s\n' "$$" "$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null)" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" >"$f"
 }
 
@@ -11629,7 +11638,11 @@ function driver_status_json_command() {
 # `osx-proxmox-next.sh driver-status <vmid> [--json]`
 function driver_status_command() {
   local vmid="${1:-}" json=no cfg kind installed line running=no snaps known pending interrupted=no step verdict="" latest="{}" have_latest=no from_record=no
-  [[ "$vmid" =~ ^[0-9]+$ ]] || { msg_error "Usage: osx-proxmox-next.sh driver-status <vmid> [--json]"; return 1; }
+  if ! [[ "$vmid" =~ ^[0-9]+$ ]]; then
+    if [ "${JSON_OUTPUT:-no}" == yes ]; then msg_error "Usage: osx-proxmox-next.sh driver-status <vmid> [--json]" >&2
+    else msg_error "Usage: osx-proxmox-next.sh driver-status <vmid> [--json]"; fi
+    return 1
+  fi
   [ "${2:-}" != "--json" ] || json=yes
   if ! cfg=$(qm config "$vmid" 2>/dev/null); then
     [ "$json" != yes ] || { driver_status_json vmid="$vmid" refused="[$(driver_json_str "VM $vmid not found.")]"; return 2; }
