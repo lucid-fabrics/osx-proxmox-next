@@ -2738,8 +2738,21 @@ def plan_intel_binding(facts, target, root, plan):
     plan["binding"] = "ids"
 
 
-def _plan_already_bound(facts, target, fns, ids, root, plan, opts):
+def _card_functions(target):
+    return [f for f in target["functions"] if bindable(f, target["vendor"])]
+
+
+def _twins_of(facts, target, ids):
+    """The other devices on the host that have one of the card's PCI ids."""
+    mine = {fn["bdf"] for fn in target["functions"]}
+    return sorted(d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d["vendor"] is not None
+                  and "%04x:%04x" % (d["vendor"], d["device"]) in ids)
+
+
+def _plan_already_bound(facts, target, root, plan, opts):
     """The card is bound to vfio-pci now: skip, note or make the boot-time binding optional. True when the plan is done."""
+    fns = _card_functions(target)
+    ids = _function_ids(fns)
     mine_bdfs = {fn["bdf"] for fn in target["functions"]}
     has_twin = any(d["bdf"] not in mine_bdfs and d["vendor"] is not None
                    and "%04x:%04x" % (d["vendor"], d["device"]) in ids for d in facts["pci"])
@@ -2768,8 +2781,14 @@ def _plan_already_bound(facts, target, fns, ids, root, plan, opts):
     return False
 
 
-def _plan_bind_by_address(facts, target, fns, ids, twins, root, plan, existing, earlier, softdep):
+def _plan_bind_by_address(facts, target, root, plan):
     """Another device has the same PCI id: bind this card by address from an initramfs script."""
+    fns = _card_functions(target)
+    ids = _function_ids(fns)
+    twins = _twins_of(facts, target, ids)
+    existing = _existing_ids_lines(root)
+    earlier = _live_ids(_read(_p(root, MODPROBE_FILE)) or "")  # ids this tool bound for a card set up before
+    softdep = "".join("softdep %s pre: vfio-pci\n" % n for n in _softdeps(target))
     mine = {fn["bdf"] for fn in target["functions"]}
     plan["binding"] = "per-device"
     plan["notes"].append(
@@ -2801,8 +2820,12 @@ def _plan_bind_by_address(facts, target, fns, ids, twins, root, plan, existing, 
                 "Bind this card by PCI address early in boot", mode=0o755)
 
 
-def _plan_bind_by_ids(ids, root, plan, existing, earlier, softdep):
+def _plan_bind_by_ids(target, root, plan):
     """No other device has the card's PCI id: bind it by id from modprobe.d."""
+    ids = _function_ids(_card_functions(target))
+    existing = _existing_ids_lines(root)
+    earlier = _live_ids(_read(_p(root, MODPROBE_FILE)) or "")  # ids this tool bound for a card set up before
+    softdep = "".join("softdep %s pre: vfio-pci\n" % n for n in _softdeps(target))
     plan["binding"] = "ids"
     merged_all = True
     for path, text in existing:
@@ -2826,22 +2849,15 @@ def plan_binding(facts, target, root, plan, opts=None):
     if target["vendor"] == "intel":
         plan_intel_binding(facts, target, root, plan)
         return
-    fns = [f for f in target["functions"] if bindable(f, target["vendor"])]
+    fns = _card_functions(target)
     ids = _function_ids(fns)
     drivers = {d["bdf"]: d.get("driver") for d in facts["pci"]}
-    if fns and all(drivers.get(f["bdf"]) == "vfio-pci" for f in fns) and \
-            _plan_already_bound(facts, target, fns, ids, root, plan, opts):
+    if fns and all(drivers.get(f["bdf"]) == "vfio-pci" for f in fns) and _plan_already_bound(facts, target, root, plan, opts):
         return
-    mine = {fn["bdf"] for fn in target["functions"]}
-    twins = sorted(d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d["vendor"] is not None
-                   and "%04x:%04x" % (d["vendor"], d["device"]) in ids)
-    existing = _existing_ids_lines(root)
-    earlier = _live_ids(_read(_p(root, MODPROBE_FILE)) or "")  # ids this tool bound for a card set up before
-    softdep = "".join("softdep %s pre: vfio-pci\n" % n for n in _softdeps(target))
-    if twins:
-        _plan_bind_by_address(facts, target, fns, ids, twins, root, plan, existing, earlier, softdep)
+    if _twins_of(facts, target, ids):
+        _plan_bind_by_address(facts, target, root, plan)
     else:
-        _plan_bind_by_ids(ids, root, plan, existing, earlier, softdep)
+        _plan_bind_by_ids(target, root, plan)
 
 
 def _class_prefix(fn):
