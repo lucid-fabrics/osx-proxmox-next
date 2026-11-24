@@ -30,6 +30,7 @@ _LATER = "left lazy until the {} stack is restructured in a later change: hoisti
 _GPU = _LATER.format("gpu setup")
 _IGPU = _LATER.format("igpu")
 _NULLMOTH = _LATER.format("nullmoth")
+_FINISH = _LATER.format("igpu and nullmoth finish")
 _DRIVER = _LATER.format("driver update")
 LAZY_IMPORTS: dict[tuple[str, str], str] = {
     ("app.py", "screens.home"): _TEXTUAL_SCREEN,
@@ -47,6 +48,7 @@ LAZY_IMPORTS: dict[tuple[str, str], str] = {
     ("driver_nvidia.py", "downloader"): _DRIVER,
     ("driver_nvidia.py", "igpu_finish"): _DRIVER,
     ("driver_oc.py", "driver_engine"): _DRIVER,
+    ("finish_common.py", "downloader"): _FINISH,
     ("gpu_setup.py", "defaults"): _GPU,
     ("gpu_setup.py", "executor"): _GPU,
     ("gpu_setup.py", "oc_builder"): _GPU,
@@ -56,10 +58,8 @@ LAZY_IMPORTS: dict[tuple[str, str], str] = {
     ("igpu_cli.py", "planner"): _IGPU,
     ("igpu_cli.py", "rollback"): _IGPU,
     ("igpu_cli.py", "unattended"): _IGPU,
-    ("igpu_finish.py", "downloader"): _IGPU,
     ("nullmoth.py", "oc_builder"): _NULLMOTH,
     ("nullmoth_cli.py", "oc_builder"): _NULLMOTH,
-    ("nullmoth_finish.py", "downloader"): _NULLMOTH,
     ("screens/gpu_attach_step.py", "executor"): _GPU,
     ("screens/gpu_attach_step.py", "rollback"): _GPU,
 }
