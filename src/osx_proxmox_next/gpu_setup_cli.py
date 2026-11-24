@@ -84,27 +84,62 @@ def _print_findings(io: _Io, plan_like) -> None:
 
 # ── steps ────────────────────────────────────────────────────────────
 
-def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
+def _list_cards(s: Session, io: _Io, args: argparse.Namespace) -> list:
+    """Scan the host and print every card found."""
     io.say(s.summary_line())
     cards = s.scan(exclude_vm=args.vm if args.vm is not None else -1, macos=s.macos_for(args.vm, args.macos))
     if not cards:
         io.say("No supported graphics card found in this host.")
     for card in cards:
         io.say(card_text(card))
-    usable = [c for c in cards if c.selectable]
-    if not usable:
-        if any(c.kind != "unsupported" for c in cards):
-            io.say("No supported card can be used right now. See the 'Can't use' line on each card above, fix "
-                   "that, then run the scan again.")
-        else:
-            io.say(f"Nothing here can run macOS graphics. Cards that work: {SUPPORTED_DOC}")
-        return EXIT_REFUSED
+    return cards
+
+
+def _say_nothing_usable(io: _Io, cards: list) -> int:
+    if any(c.kind != "unsupported" for c in cards):
+        io.say("No supported card can be used right now. See the 'Can't use' line on each card above, fix "
+               "that, then run the scan again.")
+    else:
+        io.say(f"Nothing here can run macOS graphics. Cards that work: {SUPPORTED_DOC}")
+    return EXIT_REFUSED
+
+
+def _select_card(io: _Io, args: argparse.Namespace, usable: list):
+    """The card the user names, the only one left or the one picked from a list. None, after saying why, when none is chosen."""
+    if args.gpu:
+        wanted = gpu.normalize_bdf(args.gpu)
+        chosen = next((c for c in usable if c.bdf == wanted), None)
+        if chosen is None:
+            io.say(f"{args.gpu} is not one of the usable cards above.")
+        return chosen
+    if len(usable) == 1 and usable[0].vendor == "intel":
+        # switched away from the recommendation to the iGPU: it still takes the host console, so ask
+        io.say(usable[0].detected_line)
+        if not io.confirm(f"Use the {usable[0].name} ({usable[0].bdf}) for macOS?", args.yes):
+            io.say("Nothing was changed.")
+            return None
+        return usable[0]
+    if len(usable) == 1:
+        return usable[0]
+    chosen = None
+    if io.interactive:
+        for idx, c in enumerate(usable, start=1):
+            io.say(f"  {idx}) {c.name} ({c.bdf})")
+        pick = io.ask("Which card? ")
+        chosen = usable[int(pick) - 1] if pick.isdigit() and 0 < int(pick) <= len(usable) else None
+    if chosen is None:
+        io.say("Pick a card with --gpu <address>.")
+    return chosen
+
+
+def _pick_card(io: _Io, args: argparse.Namespace, usable: list) -> tuple:
+    """(card, exit code): the card to use, or the exit code of a run that ends here."""
     chosen = None
     rec = next((c for c in usable if c.recommended), None)
     if not args.gpu and rec is None:
         io.say(f"No graphics card here works with {gpu_setup.MACOS_NAMES[usable[0].macos]}. Continuing without "
                "passthrough: nothing was changed.")
-        return EXIT_OK
+        return None, EXIT_OK
     if not args.gpu and (rec.vendor == "intel" or len(usable) > 1):
         io.say(rec.detected_line if rec.vendor == "intel" else f"Recommended: {rec.name} ({rec.bdf}), {rec.status}.")
         if io.confirm(f"Use the {rec.name} ({rec.bdf}) for macOS?", args.yes):
@@ -112,43 +147,30 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         elif len(usable) == 1:
             io.say("Nothing was changed. Run again and confirm (or pass --yes) to use it. Nothing is enabled "
                    "without that confirmation" + (": the Intel iGPU takes the host console." if rec.vendor == "intel" else "."))
-            return EXIT_REFUSED
+            return None, EXIT_REFUSED
         else:
             usable = [c for c in usable if c is not rec]
-    if chosen is not None:
-        pass
-    elif args.gpu:
-        wanted = gpu.normalize_bdf(args.gpu)
-        chosen = next((c for c in usable if c.bdf == wanted), None)
-        if chosen is None:
-            io.say(f"{args.gpu} is not one of the usable cards above.")
-            return EXIT_REFUSED
-    elif len(usable) == 1 and usable[0].vendor == "intel":
-        # switched away from the recommendation to the iGPU: it still takes the host console, so ask
-        io.say(usable[0].detected_line)
-        if not io.confirm(f"Use the {usable[0].name} ({usable[0].bdf}) for macOS?", args.yes):
-            io.say("Nothing was changed.")
-            return EXIT_REFUSED
-        chosen = usable[0]
-    elif len(usable) == 1:
-        chosen = usable[0]
-    elif io.interactive:
-        for idx, c in enumerate(usable, start=1):
-            io.say(f"  {idx}) {c.name} ({c.bdf})")
-        pick = io.ask("Which card? ")
-        chosen = usable[int(pick) - 1] if pick.isdigit() and 0 < int(pick) <= len(usable) else None
     if chosen is None:
-        io.say("Pick a card with --gpu <address>.")
-        return EXIT_REFUSED
-    share_ok = False
-    if chosen.stopped_users:
-        for note in chosen.notes:
-            io.say("WARN: " + note)
-        share_ok = io.confirm("Use this card anyway?", args.yes)
-        if not share_ok:
-            io.say("Nothing was changed. Run again with --yes (or answer y) to use a card that another stopped VM "
-                   "also lists.")
-            return EXIT_REFUSED
+        chosen = _select_card(io, args, usable)
+    return chosen, (EXIT_REFUSED if chosen is None else None)
+
+
+def _confirm_shared(io: _Io, args: argparse.Namespace, chosen) -> tuple:
+    """(share_ok, exit code): whether the user accepts a card that another stopped VM also lists."""
+    if not chosen.stopped_users:
+        return False, None
+    for note in chosen.notes:
+        io.say("WARN: " + note)
+    share_ok = io.confirm("Use this card anyway?", args.yes)
+    if not share_ok:
+        io.say("Nothing was changed. Run again with --yes (or answer y) to use a card that another stopped VM "
+               "also lists.")
+        return False, EXIT_REFUSED
+    return True, None
+
+
+def _ask_vm(s: Session, io: _Io, args: argparse.Namespace, chosen) -> tuple:
+    """(VM id, exit code): the VM that gets the card, asked for when it was not given and the run is interactive."""
     vmid = args.vm
     if vmid is None and io.interactive:
         options = s.vm_options(chosen.vendor)
@@ -165,14 +187,23 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
                               "boot_vga": chosen.boot_vga, "name": chosen.name,
                               "identity": host_setup.identity_of(s.root, chosen.bdf)}
             io.say("Create the VM with 'osx-next' (menu: Create VM), then run: " + s.pause())
-            return EXIT_OK
+            return None, EXIT_OK
         vmid = int(reply) if reply.isdigit() else None
+    return vmid, None
+
+
+def _ask_display(io: _Io, args: argparse.Namespace, chosen) -> str:
     display = args.display or "gpu"
     if chosen.vendor == "amd" and not args.display and io.interactive:
         io.say("Display:")
         for idx, (_value, label, desc) in enumerate(DISPLAY_OPTIONS, start=1):
             io.say(f"  {idx}) {label}\n     {desc}")
         display = "console" if io.ask("Choice [1]: ") == "2" else "gpu"
+    return display
+
+
+def _show_vendor_notes(io: _Io, args: argparse.Namespace, chosen) -> bool:
+    """The display note of the card's vendor; for NVIDIA also the NullMoth notice, whose acknowledgement is returned."""
     ack = False
     if chosen.vendor == "intel":
         io.say(INTEL_DISPLAY_NOTE)
@@ -180,6 +211,25 @@ def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
         io.say(NVIDIA_DISPLAY_NOTE)
         io.say(nullmoth.notice_text())
         ack = args.accept_risk or io.typed(nullmoth.ACK_LABEL, nullmoth.ACK_PHRASE)
+    return ack
+
+
+def _step_choose(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
+    cards = _list_cards(s, io, args)
+    usable = [c for c in cards if c.selectable]
+    if not usable:
+        return _say_nothing_usable(io, cards)
+    chosen, done = _pick_card(io, args, usable)
+    if done is not None:
+        return done
+    share_ok, done = _confirm_shared(io, args, chosen)
+    if done is not None:
+        return done
+    vmid, done = _ask_vm(s, io, args, chosen)
+    if done is not None:
+        return done
+    display = _ask_display(io, args, chosen)
+    ack = _show_vendor_notes(io, args, chosen)
     issues = s.choose(chosen.bdf, vmid, display, ack, share_ok, confirmed=chosen.stopped_users if share_ok else ())
     for issue in issues:
         io.say("REFUSED: " + issue)
