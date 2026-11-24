@@ -74,7 +74,10 @@ target-version = "py39"
 line-length = 140
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "B", "BLE"]
+select = ["E", "F", "W", "B", "BLE", "C90"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 40
 
 [tool.ruff.lint.per-file-ignores]
 # Rules that only make sense for shipped code. Tests re-import names inside test bodies (F811), use short
