@@ -109,7 +109,7 @@ def run_case(mod, argv, stdin, setup, patches=(), fakes=None):
         with mock.patch.object(sys, "stdin", io.StringIO(stdin)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 rv = mod.main(["prog"] + argv)
-            except BaseException as e:  # noqa
+            except BaseException as e:  # noqa: BLE001 - records SystemExit from main()
                 exc = "%s: %s" % (type(e).__name__, e)
         after = snap(SB)
         changed = {k: v for k, v in after.items() if before.get(k) != v}

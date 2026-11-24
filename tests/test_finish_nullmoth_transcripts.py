@@ -166,7 +166,7 @@ def record(name, env, mp, pve, console=None, find=lambda mac: "", probe=lambda i
             **kw,
         )
         outcome = {"result": dataclasses.asdict(res)}
-    except BaseException as e:  # noqa
+    except BaseException as e:  # noqa: BLE001 - records the KeyboardInterrupt a scenario raises
         outcome = {"exc": "%s: %s" % (type(e).__name__, e)}
     RESULTS[name] = {
         "log": [list(map(str, x)) for x in log],

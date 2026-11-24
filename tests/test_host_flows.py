@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from gpu_fakes import EFI_GRUB, EFI_SDBOOT, FakeRun, add_card, add_other, make_host, write
+from nullmoth_fakes import add_dev
 from osx_proxmox_next import host_setup as hs
 
 GOLDEN = Path(__file__).parent / "data" / "host_flows.json.gz"
@@ -40,6 +41,11 @@ def host(tmp_path, cpu, driver="vfio-pci", extra=""):
     elif extra == "twin-covered":
         add_card(root, bdf="0000:09:00", group=8)
         write(root, "/etc/modprobe.d/vfio.conf", IDS_LINE)
+    elif extra in ("partial", "partial-twin"):
+        add_dev(root / "sys", "0000:06:00.2", 0x1022, 0x15B6, cls=0x0C0330, driver="xhci_hcd", group=7)
+        add_dev(root / "sys", "0000:06:00.3", 0x1002, 0xA808, cls=0x010802, driver="nvme", group=7)
+        if extra == "partial-twin":
+            add_card(root, bdf="0000:09:00", group=8)
     elif extra == "ids-line":
         write(root, "/etc/modprobe.d/vfio.conf", "options vfio-pci ids=10de:2504\n")
     return str(root)
@@ -117,7 +123,8 @@ def test_verify_host_failures_keep_their_order_and_their_commands(tmp_path, name
 
 BINDING_CASES = [("unbound", "amdgpu", "clean"), ("bound-nothing-at-boot", "vfio-pci", "clean"), ("bound-at-boot", "vfio-pci", "bound-at-boot"),
                  ("unbound-stray", "amdgpu", "stray"), ("twin", "amdgpu", "twin"), ("twin-bound", "vfio-pci", "twin"),
-                 ("twin-covered", "amdgpu", "twin-covered"), ("ids-line", "amdgpu", "ids-line")]
+                 ("twin-covered", "amdgpu", "twin-covered"), ("ids-line", "amdgpu", "ids-line"),
+                 ("partial", "amdgpu", "partial"), ("partial-twin", "amdgpu", "partial-twin")]
 
 
 @pytest.mark.parametrize("name,driver,extra", BINDING_CASES)
@@ -140,7 +147,6 @@ def test_plan_host_and_plan_binding_build_the_same_plan_with_the_same_commands(t
 @pytest.mark.parametrize("bootloader", sorted(BOOTLOADERS))
 @pytest.mark.parametrize("reset", ["early-bind", "vendor-reset", "vendor-reset-warn"])
 def test_plan_host_for_the_iGPU_and_for_the_vendor_reset_runs_its_commands_in_order(tmp_path, bootloader, reset):
-    from nullmoth_fakes import add_dev
     root = make_host(tmp_path, cpu="intel", cmdline=CMDLINE["intel"], tables=TABLES["intel"])
     add_dev(root / "sys", "0000:00:02.0", 0x8086, 0x46A6, cls=0x030000, driver="i915", group=3)
     run = new_run(bootloader)

@@ -162,7 +162,7 @@ def record(name, env, mp, pve, console=None, **kw):
             **kw,
         )
         outcome = {"result": dataclasses.asdict(res)}
-    except BaseException as e:  # noqa
+    except BaseException as e:  # noqa: BLE001 - records the KeyboardInterrupt a scenario raises
         outcome = {"exc": "%s: %s" % (type(e).__name__, e)}
     RESULTS[name] = {
         "log": [list(map(str, x)) for x in log],
@@ -571,8 +571,7 @@ def test_the_golden_file_holds_exactly_these_cases(golden):
 def test_golden(name, env, accel, monkeypatch, golden):
     env.accel = accel
     kw = SCENARIOS[name](env, monkeypatch)
-    if kw.pop("slow", False):
-        pass
+    kw.pop("slow", None)
     seen = kw.pop("seen", None)
     record(name, env, monkeypatch, **kw)
     if seen is not None:
