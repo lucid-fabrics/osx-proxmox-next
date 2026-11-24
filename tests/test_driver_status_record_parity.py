@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 
 import pytest
 from pathlib import Path
@@ -16,7 +17,7 @@ from osx_proxmox_next import cli, driver_cli, driver_engine as engine, driver_pl
 from osx_proxmox_next import driver_oc, nullmoth_finish, oc_builder
 from osx_proxmox_next.driver_targets import Target
 from osx_proxmox_next.infrastructure import CommandResult
-from test_driver_parity import BASH, HOLD_LOCK, STUB_NULLMOTH, host, needs_bash4, write_record  # noqa: F401 - fixtures and helpers
+from test_driver_parity import BASH, HOLD_LOCK, REPO, STUB_NULLMOTH, host, needs_bash4, write_record  # noqa: F401 - fixtures and helpers
 from test_driver_parity_wave3 import amd_run
 
 SHA = "ab" * 32
@@ -218,6 +219,86 @@ def test_the_status_text_of_bash_is_untouched_by_the_json_work(host):
     out = host.run(STUB_NULLMOTH + "driver_status_command 109\n").stdout.splitlines()
     assert out == ["VM 109 macos-sequoia: NVIDIA card", "Installed: NullMoth v2.8.1", "Latest:    NullMoth v2.9",
                    "A newer driver is available.", "Driver snapshots: none"]
+
+
+# ── the whole script, started the way a user starts it ───────────────────────
+
+SCRIPT = REPO / "scripts/bash/osx-proxmox-next.sh"
+BANNER = (r"""                        ____  _____   _    ____  ___
+   ____ ___  ____ _____/ __ \/ ___/  | |  / /  |/  /
+  / __ `__ \/ __ `/ __/ / / /\__ \   | | / / /|_/ /
+ / / / / / / /_/ / /_/ /_/ /___/ /   | |/ / /  / /
+/_/ /_/ /_/\__,_/\__/\____//____/    |___/_/  /_/
+
+""")
+
+
+def run_script(host, *args, piped=False):
+    """The script as a whole process, as root, on the stubbed host: what `osx-proxmox-next.sh driver-status 109 --json` does for a user."""
+    (host.dir / "bin" / "id").write_text('#!/bin/sh\n[ "$1" = -u ] && echo 0 || exec /usr/bin/id "$@"\n')
+    (host.dir / "bin" / "id").chmod(0o755)
+    env = dict(host.env, TERM="xterm")
+    if piped:                                           # curl ... | bash -s -- driver-status 109 --json
+        return subprocess.run(["bash", "-s", "--", *args], input=SCRIPT.read_text(), capture_output=True, text=True, env=env, timeout=120)
+    return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, timeout=120)
+
+
+@needs_bash4
+@pytest.mark.parametrize("piped", [False, True])
+def test_a_refused_status_json_is_the_only_thing_on_stdout(host, monkeypatch, capsys, piped):
+    record(host, "nvidia", NullMoth="v2.8.1")
+    host.config(hostpci0=None)
+    python = python_status(monkeypatch, capsys, host, mac(hostpci0=None), NV)
+    res = run_script(host, "driver-status", "109", "--json", piped=piped)
+    assert (res.returncode, json.loads(res.stdout)) == python and python[0] == 2
+    assert res.stdout.startswith("{") and "Loading" not in res.stdout and "\033" not in res.stdout
+
+
+@needs_bash4
+def test_a_normal_status_json_is_the_only_thing_on_stdout(host, monkeypatch, capsys, tmp_path):
+    net = tmp_path / "fakenet"
+    net.mkdir()
+    (net / "sitecustomize.py").write_text(FAKE_NET)
+    (net / "releases.json").write_text(json.dumps(canned_releases()))
+    host.env.update(PYTHONPATH=f"{net}:{host.env['PYTHONPATH']}", FAKE_RELEASES=str(net / "releases.json"),
+                    FAKE_DOWNLOADS=str(tmp_path / "downloads.log"))
+    record(host, "intel", WhateverXe="0.8.0", WhateverXe_Graphics="0.4.0")
+    host.config()
+    (host.qm_dir / "status").write_text("running\n")
+    python = python_status(monkeypatch, capsys, host, mac(), None, get=lambda url: canned_releases()[url])
+    res = run_script(host, "driver-status", "109", "--json")
+    assert (res.returncode, json.loads(res.stdout)) == python
+    assert python[1]["state"] == "update" and python[1]["latest"]["WhateverXe"] == "0.8.3"
+
+
+@needs_bash4
+def test_a_status_json_that_cannot_run_says_so_on_stderr_and_prints_no_json(host):
+    res = run_script(host, "driver-status", "--json")                       # no VM id
+    assert (res.returncode, res.stdout) == (1, "") and "Usage" in res.stderr
+
+
+def test_driver_status_is_the_only_bash_command_that_takes_json():
+    """A command that took --json without being checked above would print the banner before its document."""
+    body = SCRIPT.read_text().splitlines()
+    lines = [n for n, line in enumerate(body, 1) if '"--json"' in line and "JSON_OUTPUT" not in line]
+    start = next(n for n, line in enumerate(body, 1) if line.startswith("function driver_status_command"))
+    end = next(n for n, line in enumerate(body, 1) if n > start and line == "}")
+    assert lines and all(start <= n <= end for n in lines)
+
+
+@needs_bash4
+def test_the_banner_is_still_printed_when_json_is_not_asked_for(host):
+    host.config(hostpci0=None)
+    res = run_script(host, "driver-status", "109")
+    clear = subprocess.run(["clear"], capture_output=True, text=True, env={"TERM": "xterm", "PATH": "/usr/bin:/bin"}).stdout
+    assert res.stdout.startswith(clear + BANNER + "\n Loading...\n") and "REFUSED:" in res.stdout and res.returncode == 2
+
+
+@needs_bash4
+def test_a_refused_driver_lock_leaves_no_driver_run_behind(host):
+    out = host.run(HOLD_LOCK + 'DRIVER_VMID=109; driver_lock_acquire 109 && echo ACQUIRED || echo REFUSED\n'
+                   'driver_run_active 109 && echo ACTIVE || echo IDLE\nkill $holder\n').stdout.split()
+    assert out == ["REFUSED", "IDLE"]
 
 
 # ── the record after a finish ────────────────────────────────────────────────
