@@ -377,20 +377,37 @@ def test_cli_no_smbios():
     assert config.no_smbios is True
 
 
-def test_cli_main_block(monkeypatch):
-    """Cover the if __name__ == '__main__' block."""
-    from osx_proxmox_next.preflight import PreflightCheck
-    monkeypatch.setattr(
-        cli_module, "run_preflight",
-        lambda: [PreflightCheck("qm available", True, "/usr/sbin/qm")],
-    )
+def test_cli_main_block(monkeypatch, capsys):
+    """Cover the if __name__ == '__main__' block.
+
+    runpy re-executes the module in a fresh namespace, so patching
+    cli_module.run_preflight has no effect there: the re-executed
+    ``from .preflight import ...`` reads the names from the preflight module.
+    Patch them at the source, and make a real apt-get unreachable (as root with
+    missing build tools it would install packages and can stall on the network).
+    """
     import runpy
     import sys
+    from osx_proxmox_next import preflight as preflight_module
+    from osx_proxmox_next.preflight import PreflightCheck
+
+    calls = []
+
+    def fake_preflight():
+        calls.append("run_preflight")
+        return [PreflightCheck("qm available", True, "/usr/sbin/qm")]
+
+    def forbidden_install(*_args, **_kwargs):
+        raise AssertionError("the __main__ block must not reach a real apt-get install")
+
+    monkeypatch.setattr(preflight_module, "run_preflight", fake_preflight)
+    monkeypatch.setattr(preflight_module, "install_missing_packages", forbidden_install)
     monkeypatch.setattr(sys, "argv", ["osx-next-cli", "preflight"])
-    try:
+    with pytest.raises(SystemExit) as exc:
         runpy.run_module("osx_proxmox_next.cli", run_name="__main__")
-    except SystemExit as e:
-        assert e.code == 0
+    assert exc.value.code == 0
+    assert calls == ["run_preflight"]
+    assert "OK qm available: /usr/sbin/qm" in capsys.readouterr().out
 
 
 def test_cli_progress_with_total(capsys):
