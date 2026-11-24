@@ -69,3 +69,16 @@ def temp_size_problems(total: int, sizes: list[tuple[int, str]], total_limit_mb:
     lines += [f"  {n / _MB:8.1f} MB  {name}" for n, name in sizes[:10]]
     lines.append("A test is writing a real image or payload. Stub the build, copy or download, or point it at a tiny fixture.")
     return lines
+
+
+def biggest_children(path: str, count: int = 3) -> list[str]:
+    """The largest entries inside one test dir, as report lines (shows what a big test dir is made of)."""
+    rows = []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                size = allocated_bytes(entry.path) if entry.is_dir(follow_symlinks=False) else entry.stat(follow_symlinks=False).st_blocks * 512
+                rows.append((size, entry.name))
+    except OSError:
+        return []
+    return [f"      {n / _MB:8.1f} MB  {name}" for n, name in sorted(rows, reverse=True)[:count]]

@@ -8,6 +8,7 @@ in subsequent tests. This fixture ensures each test gets a clean loop policy.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 
 import pytest
@@ -134,8 +135,9 @@ def _sweep_bash_engine_copies(tmp_path):
     that runs in a subshell, and never removes them. One bash test makes hundreds of calls: 100 MB on Linux CI. The
     copies are of no use once the test is over, so they go with it."""
     yield
-    for leftover in tmp_path.glob("gpuengine.*"):
-        shutil.rmtree(leftover, ignore_errors=True)
+    for _ in range(3):  # a bash process that is still winding down can add files while the first pass runs
+        for leftover in tmp_path.glob("gpuengine.*"):
+            shutil.rmtree(leftover, ignore_errors=True)
 
 
 # Fails the run when the tests leave too much behind in the pytest base temp dir (see temp_size.py).
@@ -147,6 +149,7 @@ def pytest_sessionfinish(session, exitstatus):
     lines = temp_size.temp_size_problems(total, sizes, temp_size.TOTAL_LIMIT_MB, temp_size.DIR_LIMIT_MB)
     if not lines:
         return
+    lines[-1:-1] = temp_size.biggest_children(os.path.join(str(factory.getbasetemp()), sizes[0][1]))
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     for line in ["", *lines]:
         if reporter:

@@ -69,3 +69,12 @@ def test_the_engine_copies_of_the_test_before_are_swept_and_other_files_are_not(
     assert _LEFT, "the test above has to run first"
     assert not (_LEFT[0] / "gpuengine.abc123").exists()
     assert (_LEFT[0] / "keep.txt").exists()
+
+
+def test_the_biggest_entries_of_a_dir_are_named(tmp_path):
+    (tmp_path / "big").mkdir()
+    (tmp_path / "big" / "f").write_bytes(b"x" * (3 * MB))
+    (tmp_path / "small.txt").write_text("x")
+    lines = guard.biggest_children(str(tmp_path))
+    assert "big" in lines[0] and "small.txt" in lines[1]
+    assert guard.biggest_children(str(tmp_path / "nope")) == []
