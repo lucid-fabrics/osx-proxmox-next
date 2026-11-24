@@ -22,10 +22,15 @@ ROOT = Path(osx_proxmox_next.__file__).resolve().parent
 # Every entry must still exist in the source: a stale entry fails the test.
 _TEXTUAL_SCREEN = "Textual screen loaded on demand: keeps start-up fast and the screen modules out of CLI runs"
 _SCREEN_TO_SCREEN = "screens open each other on user action; a top-level import would couple their load order"
-# None of the entries below is a cycle workaround: hoisting them creates no cycle (the cycle test proves it). The
-# gpu/igpu/nullmoth/driver front ends and cli keep them lazy because their tests patch the source module, and those
-# stacks are restructured separately. Do not add an entry to dodge a cycle.
-_STACK = "deferred hoist: tests patch the source module and this stack is restructured separately (not a cycle)"
+# None of the entries below is a cycle workaround (hoisting them creates no cycle, the cycle test proves it) and none
+# has a runtime reason such as an optional dependency or start-up cost. Each stack is a front end that a later change
+# restructures, and hoisting its imports now would mean retargeting the tests' patches twice. Do not add an entry to
+# dodge a cycle.
+_LATER = "left lazy until the {} stack is restructured in a later change: hoisting now means retargeting test patches twice"
+_GPU = _LATER.format("gpu setup")
+_IGPU = _LATER.format("igpu")
+_NULLMOTH = _LATER.format("nullmoth")
+_DRIVER = _LATER.format("driver update")
 LAZY_IMPORTS: dict[tuple[str, str], str] = {
     ("app.py", "screens.home"): _TEXTUAL_SCREEN,
     ("app.py", "screens.new_mac"): _TEXTUAL_SCREEN,
@@ -36,27 +41,27 @@ LAZY_IMPORTS: dict[tuple[str, str], str] = {
     ("screens/vm_actions.py", "screens.driver"): _SCREEN_TO_SCREEN,
     ("screens/vm_view.py", "screens.build"): _SCREEN_TO_SCREEN,
     ("screens/vm_view.py", "screens.gpu"): _SCREEN_TO_SCREEN,
-    ("cli.py", "gpu_setup"): _STACK,
-    ("cli.py", "unattended"): _STACK,
-    ("driver_intel.py", "downloader"): _STACK,
-    ("driver_nvidia.py", "downloader"): _STACK,
-    ("driver_nvidia.py", "igpu_finish"): _STACK,
-    ("driver_oc.py", "driver_engine"): _STACK,
-    ("gpu_setup.py", "defaults"): _STACK,
-    ("gpu_setup.py", "executor"): _STACK,
-    ("gpu_setup.py", "oc_builder"): _STACK,
-    ("gpu_setup_cli.py", "executor"): _STACK,
-    ("gpu_setup_cli.py", "rollback"): _STACK,
-    ("igpu_cli.py", "executor"): _STACK,
-    ("igpu_cli.py", "planner"): _STACK,
-    ("igpu_cli.py", "rollback"): _STACK,
-    ("igpu_cli.py", "unattended"): _STACK,
-    ("igpu_finish.py", "downloader"): _STACK,
-    ("nullmoth.py", "oc_builder"): _STACK,
-    ("nullmoth_cli.py", "oc_builder"): _STACK,
-    ("nullmoth_finish.py", "downloader"): _STACK,
-    ("screens/gpu_attach_step.py", "executor"): _STACK,
-    ("screens/gpu_attach_step.py", "rollback"): _STACK,
+    ("cli.py", "gpu_setup"): _GPU,
+    ("cli.py", "unattended"): _IGPU,
+    ("driver_intel.py", "downloader"): _DRIVER,
+    ("driver_nvidia.py", "downloader"): _DRIVER,
+    ("driver_nvidia.py", "igpu_finish"): _DRIVER,
+    ("driver_oc.py", "driver_engine"): _DRIVER,
+    ("gpu_setup.py", "defaults"): _GPU,
+    ("gpu_setup.py", "executor"): _GPU,
+    ("gpu_setup.py", "oc_builder"): _GPU,
+    ("gpu_setup_cli.py", "executor"): _GPU,
+    ("gpu_setup_cli.py", "rollback"): _GPU,
+    ("igpu_cli.py", "executor"): _IGPU,
+    ("igpu_cli.py", "planner"): _IGPU,
+    ("igpu_cli.py", "rollback"): _IGPU,
+    ("igpu_cli.py", "unattended"): _IGPU,
+    ("igpu_finish.py", "downloader"): _IGPU,
+    ("nullmoth.py", "oc_builder"): _NULLMOTH,
+    ("nullmoth_cli.py", "oc_builder"): _NULLMOTH,
+    ("nullmoth_finish.py", "downloader"): _NULLMOTH,
+    ("screens/gpu_attach_step.py", "executor"): _GPU,
+    ("screens/gpu_attach_step.py", "rollback"): _GPU,
 }
 
 

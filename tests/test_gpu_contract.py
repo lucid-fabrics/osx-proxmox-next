@@ -5,6 +5,10 @@ resolution order it had before the base existed, and every method that more than
 to the same class."""
 from __future__ import annotations
 
+import ast
+import inspect
+import sys
+
 from osx_proxmox_next.screens import gpu_contract
 from osx_proxmox_next.screens.gpu import GpuScreen
 from osx_proxmox_next.screens.gpu_attach_step import AttachMixin
@@ -45,6 +49,16 @@ def test_the_contract_is_plain_object_at_run_time() -> None:
     for mixin in (ChooseMixin, BiosMixin, RunMixin, RestartMixin, BootMixin, CardBusyMixin):
         assert mixin.__bases__ == (object,)
     assert AttachMixin.__bases__ == (CardBusyMixin,)
+
+
+def test_every_mixin_declares_the_contract_in_its_source() -> None:
+    # GpuHost is plain object at run time, so issubclass cannot see it: read the class statements instead.
+    # AttachMixin reaches the contract through CardBusyMixin.
+    for mixin in (ChooseMixin, BiosMixin, RunMixin, RestartMixin, AttachMixin, BootMixin, CardBusyMixin):
+        tree = ast.parse(inspect.getsource(sys.modules[mixin.__module__]))
+        cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == mixin.__name__)
+        want = "CardBusyMixin" if mixin is AttachMixin else "GpuHost"
+        assert [b.id for b in cls.bases if isinstance(b, ast.Name)] == [want], mixin.__name__
 
 
 def test_the_screen_keeps_its_method_resolution_order() -> None:

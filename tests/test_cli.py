@@ -125,6 +125,8 @@ def test_cli_plan_net_model_default_vmxnet3(monkeypatch, capsys):
         family=6, model=165, needs_emulated_cpu=False,
         needs_penryn=False, is_xeon=False,
     )
+    # config_from_args lives in cli_common and looks detect_cpu_info up there.
+    monkeypatch.setattr(cli_common, "detect_cpu_info", lambda: modern_cpu)
     monkeypatch.setattr(cli_module, "detect_cpu_info", lambda: modern_cpu)
     rc = run_cli(_plan_args())
     assert rc == 0
