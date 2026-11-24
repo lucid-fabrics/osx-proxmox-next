@@ -8,6 +8,7 @@ in subsequent tests. This fixture ensures each test gets a clean loop policy.
 from __future__ import annotations
 
 import asyncio
+import shutil
 
 import pytest
 
@@ -125,6 +126,16 @@ def _no_host_pci_devices(monkeypatch, tmp_path):
     empty = str(tmp_path / "no-sysfs")
     monkeypatch.setattr(driver_engine, "live_kind", lambda cfg, root="/sys": real(cfg, empty if str(root) == "/sys" else root))
     monkeypatch.setenv("SYSFS_ROOT", empty)
+
+
+@pytest.fixture(autouse=True)
+def _sweep_bash_engine_copies(tmp_path):
+    """The bash installer writes its embedded engines (about 350 KB) to a fresh $TMPDIR/gpuengine.XXXXXX on every call
+    that runs in a subshell, and never removes them. One bash test makes hundreds of calls: 100 MB on Linux CI. The
+    copies are of no use once the test is over, so they go with it."""
+    yield
+    for leftover in tmp_path.glob("gpuengine.*"):
+        shutil.rmtree(leftover, ignore_errors=True)
 
 
 # Fails the run when the tests leave too much behind in the pytest base temp dir (see temp_size.py).

@@ -10,7 +10,7 @@ import os
 # end of the session, and fails the run when the base temp dir is far bigger than the suite really needs.
 # Usage is counted in allocated blocks (st_blocks * 512), not apparent size, so a sparse file costs what it uses.
 
-TOTAL_LIMIT_MB = int(os.environ.get("PYTEST_TMP_TOTAL_LIMIT_MB", "1000"))
+TOTAL_LIMIT_MB = int(os.environ.get("PYTEST_TMP_TOTAL_LIMIT_MB", "500"))
 DIR_LIMIT_MB = int(os.environ.get("PYTEST_TMP_DIR_LIMIT_MB", "50"))
 _MB = 1024 * 1024
 
