@@ -229,6 +229,14 @@ def test_bash_status_of_an_unfinished_update_has_no_up_to_date_line(host):
     assert "Up to date." in host.run(STUB_NULLMOTH + "driver_status_command 109\n").stdout
 
 
+# The Intel status looks the newest releases up with `igpu_engine assets`, which downloads the WhateverXe and graphics
+# packages into the cache (93 MB on CI, from the real GitHub). The look-up is answered here with the two newest versions.
+NO_RELEASE_DOWNLOAD = (
+    "igpu_engine() { case \"$1\" in assets) echo '{\"whateverxe\": {\"version\": \"0.8.4\", \"tag\": \"0.8.4\", \"sha256\": \"\", "
+    "\"source\": \"latest\", \"path\": \"/dev/null\"}, \"graphics\": {\"version\": \"0.4.5\", \"tag\": \"v0.4.5\", \"sha256\": \"\", "
+    "\"source\": \"latest\", \"path\": \"/dev/null\"}}';; *) return 1;; esac; }\n")
+
+
 @needs_bash4
 def test_bash_undo_reads_the_rolled_back_disk_so_the_versions_are_not_from_the_last_update(host):
     write_record(host, "intel", WhateverXe="0.8.3", WhateverXe_Graphics="0.4.4")
@@ -241,7 +249,7 @@ def test_bash_undo_reads_the_rolled_back_disk_so_the_versions_are_not_from_the_l
     record = engine.read_record(109, str(host.state))
     assert record["disk_read"] is True and engine.installed_versions(record) == {"WhateverXe": "0.8.0", "WhateverXe Graphics": "0.4.3"}
     (host.qm_dir / "status").write_text("running\n")                         # the Mac runs again: the record is the disk's word
-    out = host.run('driver_oc_kext() { echo "{}"; }\n' + STUB_NULLMOTH + "driver_status_command 109\n").stdout
+    out = host.run('driver_oc_kext() { echo "{}"; }\n' + STUB_NULLMOTH + NO_RELEASE_DOWNLOAD + "driver_status_command 109\n").stdout
     assert "Installed: WhateverXe 0.8.0 and WhateverXe Graphics 0.4.3\n" in out and "from the last update" not in out
 
 
