@@ -204,7 +204,6 @@ def test_without_a_payload_disk_nothing_is_reported_and_nothing_is_powered_off(t
 def test_verification_tells_the_host_the_restart_worked_before_it_waits(tmp_path):
     fb = FirstBoot(tmp_path, kexts=2)
     fb.run()
-    seen = []
     real = fb.sb.payload / "result.txt"
     fb.sb.stub("sleep", f'cat "{real}" >>"{tmp_path}/seen.txt"')
     fb.run()

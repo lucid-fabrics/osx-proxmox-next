@@ -258,8 +258,9 @@ def finish(
         from .downloader import download_recovery
         say(f"Downloading the {version} recovery image")
         recovery = download_recovery(version, iso)
-    payload_ref = stage_recovery(StageJob(vmid, pve, console, storage, lambda m: say(m.replace("graphics package", "NullMoth driver")), clock, sleep),
-                                  payload, recovery, cfg)
+    payload_ref = stage_recovery(
+        StageJob(vmid, pve, console, storage, lambda m: say(m.replace("graphics package", "NullMoth driver")), clock, sleep),
+        payload, recovery, cfg)
     err = console.restore_picker_timeout()
     if err:
         result.notes.append(f"Could not restore the picker's auto-boot ({err}); run post-install afterwards.")

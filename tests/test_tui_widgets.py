@@ -162,7 +162,7 @@ def test_grab_frame_uses_the_qm_console_with_its_own_probe(monkeypatch, tmp_path
 async def test_the_capacity_bar_colours_and_text():
     bar = CapacityBar("CPU", "cores")
     app = Host(bar)
-    async with app.run_test(size=(40, 4)) as pilot:
+    async with app.run_test(size=(40, 4)):
         bar.set_values(8, 32, "cores")
         text = bar.render()
         assert text.plain.splitlines()[0].startswith("CPU") and text.plain.splitlines()[0].endswith("8 of 32 cores")

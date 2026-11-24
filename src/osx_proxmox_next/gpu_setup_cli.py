@@ -7,7 +7,9 @@ from collections.abc import Callable
 
 from . import bios_guide, gpu, host_setup, igpu_engine, igpu_finish, nullmoth, nullmoth_cli, nullmoth_finish
 from . import gpu_setup
-from .gpu_setup import DISPLAY_OPTIONS, INTEL_DISPLAY_NOTE, NVIDIA_DISPLAY_NOTE, SUPPORTED_DOC, TROUBLESHOOTING, CardChanged, Session, card_text, render_rail
+from .gpu_setup import (
+    DISPLAY_OPTIONS, INTEL_DISPLAY_NOTE, NVIDIA_DISPLAY_NOTE, SUPPORTED_DOC, TROUBLESHOOTING, CardChanged, Session, card_text, render_rail,
+)
 
 __all__ = ["add_parser", "run"]
 
@@ -301,7 +303,8 @@ def _step_reboot(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
 def _step_verify(s: Session, io: _Io, args: argparse.Namespace) -> int | None:
     checks = s.verify()
     for c in checks:
-        io.say(f"  [{ {'ok': 'ok', 'fail': '!!', 'warn': '??', 'info': '..'}[c['status']] }] {c['label']}" + (f" - {c['detail']}" if c["detail"] else ""))
+        io.say(f"  [{ {'ok': 'ok', 'fail': '!!', 'warn': '??', 'info': '..'}[c['status']] }] {c['label']}"
+               + (f" - {c['detail']}" if c["detail"] else ""))
     fails = [c for c in checks if c["status"] == "fail"]
     if not fails:
         return None

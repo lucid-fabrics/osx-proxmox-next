@@ -238,7 +238,7 @@ def test_offline_falls_back_to_the_bundled_list_and_says_so(tmp_path):
 def test_unreadable_or_unknown_headers_fall_back(tmp_path):
     get = two_releases()
     for text in ("// moved", ""):
-        d = eng.device_list("latest", get=get, header_get=lambda tag: text, cache_dir=tmp_path)
+        d = eng.device_list("latest", get=get, header_get=lambda tag, text=text: text, cache_dir=tmp_path)
         assert d["source"] == "fallback"
     broken = urllib.error.URLError("boom")
 

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from driver_fakes import DPve, comps, mac
+from driver_fakes import DPve, comps
 from osx_proxmox_next import driver_engine as engine, driver_plan, driver_state, driver_targets
 from osx_proxmox_next.data.gpu import oc_kext
 from osx_proxmox_next.driver_targets import Target

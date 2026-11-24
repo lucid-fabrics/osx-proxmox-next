@@ -1520,7 +1520,9 @@ def _emit(obj):
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     root = os.environ.get("GPU_ROOT", "/")
-    payload = json.loads(sys.stdin.read() or "{}") if cmd not in ("facts", "state", "hint-clear", "undo", "reboot-pending", "mark-reboot", "rebooted") else {}
+    payload = {}
+    if cmd not in ("facts", "state", "hint-clear", "undo", "reboot-pending", "mark-reboot", "rebooted"):
+        payload = json.loads(sys.stdin.read() or "{}")
     if cmd == "facts":
         _emit(detect_facts(root))
     elif cmd == "target":
@@ -1585,7 +1587,8 @@ def main(argv):
     elif cmd == "hint-clear":
         clear_login_hint(root)
     else:
-        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|vm-stale|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
+        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|vm-stale|step|plan|preview|"
+                         "apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
         return 64
     return 0
 

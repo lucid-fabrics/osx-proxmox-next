@@ -198,18 +198,23 @@ def test_bash_acknowledge_without_tty_refuses():
 
 def test_bash_patcher_executes_like_python(tmp_path):
     from nullmoth_fakes import write_oc
-    import plistlib, zipfile, importlib.util
+    import plistlib
+    import zipfile
+    import importlib.util
     spec = importlib.util.spec_from_file_location("oc_patch", REPO / "src/osx_proxmox_next/data/nullmoth/oc_patch.py")
-    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
     z = tmp_path / "a.zip"
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("AMFIPass.kext/Contents/Info.plist", "x")
-    oc = tmp_path / "bash/OC"; write_oc(oc)
+    oc = tmp_path / "bash/OC"
+    write_oc(oc)
     script = re.search(r"<<'NULLMOTH_PY'\n(.*?)\nNULLMOTH_PY\n", BLOCK, re.S).group(1)
     res = subprocess.run(["python3", "-", str(oc), "attach"], input=script, text=True, capture_output=True,
                          env={"AMFIPASS_ZIP": str(z), "PATH": "/usr/bin:/bin"})
     assert res.returncode == 0, res.stderr
-    oc2 = tmp_path / "py/OC"; write_oc(oc2)
+    oc2 = tmp_path / "py/OC"
+    write_oc(oc2)
     import os
     os.environ["AMFIPASS_ZIP"] = str(z)
     try:

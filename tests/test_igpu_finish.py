@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 from collections import deque
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest

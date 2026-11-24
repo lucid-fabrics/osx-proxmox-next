@@ -459,7 +459,8 @@ def test_device_map_names_come_from_the_logical_volume():
 
 def test_the_command_line_runs_the_new_helpers(capsys, base):
     def call(*argv, stdin=""):
-        import io as _io, sys as _sys
+        import io as _io
+        import sys as _sys
         old = _sys.stdin
         _sys.stdin = _io.StringIO(stdin)
         try:

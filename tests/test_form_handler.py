@@ -1,7 +1,6 @@
 """Unit tests for form_handler: validate_form_values and build_vm_config_from_values."""
 from __future__ import annotations
 
-import pytest
 
 from osx_proxmox_next.domain import MIN_VMID, MAX_VMID, MIN_MEMORY_MB, MIN_DISK_GB
 from osx_proxmox_next.forms.form_handler import (

@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from gpu_fakes import add_card, add_other, make_host, write
-from nullmoth_fakes import add_dev
 from osx_proxmox_next import gpu
 from test_gpu_parity import BASH, MAC, NV_STUBS, block_file, bash, nvidia_env, put_record, vm  # noqa: F401
 

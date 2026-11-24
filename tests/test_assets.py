@@ -94,7 +94,6 @@ def test_find_iso_match(tmp_path, monkeypatch):
     # Patch the roots list to only include tmp_path
     monkeypatch.setattr(Path, "exists", lambda self: str(self) == str(tmp_path) or self == iso_file)
 
-    original_find = _find_iso
 
     def patched_find(patterns):
         # Directly test with tmp_path as the only root

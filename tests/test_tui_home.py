@@ -387,7 +387,7 @@ async def test_the_command_palette_lists_every_destination_and_every_mac(monkeyp
     F.patch_host(monkeypatch)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
-        screen = await home(pilot, app)
+        await home(pilot, app)
         from osx_proxmox_next.app import OsxCommands
         provider = OsxCommands(app.screen)
         found = [hit.text async for hit in provider.discover()]

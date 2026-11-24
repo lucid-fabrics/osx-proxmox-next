@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import pytest
 
 from osx_proxmox_next.domain import (
     EditChanges,
-    MIN_VMID,
-    MAX_VMID,
     MIN_CORES,
     MIN_MEMORY_MB,
     validate_edit_changes,

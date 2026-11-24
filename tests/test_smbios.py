@@ -4,7 +4,6 @@ import uuid as uuid_mod
 from osx_proxmox_next.smbios import (
     APPLE_PLATFORM_DATA,
     BASE34,
-    _YEAR_CHARS,
     _encode_year_week,
     _verify_mlb_checksum,
     generate_mac,

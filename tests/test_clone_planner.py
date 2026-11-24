@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
 
 from osx_proxmox_next.planner import _parse_net0, build_clone_plan
 

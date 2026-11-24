@@ -1,14 +1,13 @@
 """The walkthrough: Session steps and the command line front end."""
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import pytest
 
 from gpu_fakes import EFI_GRUB, FakeRun, add_card, add_other, make_host, write
 from nullmoth_fakes import MAC_CFG, FakeQm
-from osx_proxmox_next import gpu_attach, gpu_setup, gpu_setup_cli, host_setup, nullmoth
+from osx_proxmox_next import gpu_setup, host_setup
 from osx_proxmox_next.executor import ApplyResult, StepResult
 from osx_proxmox_next.gpu_setup import GpuCard, Session
 

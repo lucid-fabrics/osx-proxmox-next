@@ -98,7 +98,8 @@ def choose_release(kind: str, ask: Callable[[str], str], say: Callable[[str], No
         if tag:
             return igpu_engine.LATEST if tag == latest else tag
         say(f"{answer!r} is not in the list.")
-    raise igpu_engine.ReleaseError(f"No {label} release was picked. Pass --wex-version / --graphics-version, or press Enter for the latest.")
+    raise igpu_engine.ReleaseError(
+        f"No {label} release was picked. Pass --wex-version / --graphics-version, or press Enter for the latest.")
 
 
 def _storage_of(cfg: dict[str, str]) -> str:

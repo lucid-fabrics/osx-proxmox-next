@@ -278,7 +278,7 @@ def snapshot(vmid, kind, what, recent, runner=run):
         return None
     try:
         where = igpu_diag.collect_incident(vmid, kind, what, list(recent or ()), runner=runner)
-    except Exception as exc:  # recovery matters more than the evidence
+    except Exception as exc:  # noqa: BLE001 recovery matters more than the evidence
         log(vmid, 'could not save the crash snapshot: %s' % str(exc)[:200])
         return None
     log(vmid, 'saved the crash snapshot to %s' % where)

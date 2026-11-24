@@ -74,8 +74,8 @@ PAYLOAD_FILES = (("igpu_stage.sh", "stage.sh"), ("igpu_firstboot.sh", "firstboot
 # mount -t msdos), Ventura does. So: find the partition by its label, free it, mount it by hand, run the script.
 # Typed key by key into Tahoe's slow recovery Terminal, so it stays as short as it can: all the logic is in stage.sh.
 # The mount point is under /tmp: the recovery root volume is read-only, so `mkdir /p` fails and nothing runs.
-STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /tmp/p;mount -t msdos /dev/$d /tmp/p&&sh /tmp/p/stage.sh"
-                 % PAYLOAD_LABEL)
+STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /tmp/p;"
+                 "mount -t msdos /dev/$d /tmp/p&&sh /tmp/p/stage.sh" % PAYLOAD_LABEL)
 BOOT_ARGS = ("-allow3d", "-disablegfxfirmware", "-wex-tgl-hold-render-wake")
 GMS_ARG = "0x3"
 
@@ -916,9 +916,11 @@ def _emit(obj):
 
 
 def _usage():
-    sys.stderr.write("usage: igpu_engine.py check [wex]|verdict <id> [wex]|lookup <id> [wex]|devices [wex]|settings <mb> <rom>|merge-args|strip-args|"
+    sys.stderr.write("usage: igpu_engine.py check [wex]|verdict <id> [wex]|lookup <id> [wex]|devices [wex]|settings <mb> <rom>|"
+                     "merge-args|strip-args|"
                      "fetch <rom:KEY|pin:NAME> <dir>|assets <dir> [wex] [graphics]|releases <whateverxe|graphics>|"
-                     "state-write <vmid>|state-record <vmid> <macos>|state-show <vmid>|payload <pkg> <img>|result <img>|accel-check [seconds]|stage-command|pins\n")
+                     "state-write <vmid>|state-record <vmid> <macos>|state-show <vmid>|payload <pkg> <img>|result <img>|"
+                     "accel-check [seconds]|stage-command|pins\n")
     return 64
 
 

@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from gpu_fakes import add_card, write
-from nullmoth_fakes import MAC_CFG
 from osx_proxmox_next import cli, gpu, gpu_attach, gpu_setup, gpu_setup_cli, nullmoth, nullmoth_finish
 from test_gpu_parity import BASH, MAC, NV_STUBS, bash, block_file, nvidia_env, vm  # noqa: F401
 from test_gpu_setup import SEQUOIA, Env

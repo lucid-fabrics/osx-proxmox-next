@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -651,7 +650,7 @@ def test_a_file_changed_twice_is_one_line_of_the_undo_result(tmp_path):
     path.parent.mkdir(parents=True)
     path.write_text("third\n")
     state = hs.new_state()
-    for existed, before, after in ((False, "", "second\n"), (True, "second\n", "third\n")):
+    for existed, _before, after in ((False, "", "second\n"), (True, "second\n", "third\n")):
         state["host_changes"].append({"path": "/etc/twice.conf", "existed": existed, "backup": "", "stamp": "s",
                                       "sha_before": "", "sha_after": hs._sha(after), "reverted": False})
     state["host_changes"][1]["backup"] = str(tmp_path / "bak")

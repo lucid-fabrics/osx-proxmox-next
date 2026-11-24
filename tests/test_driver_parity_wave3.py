@@ -4,10 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-from driver_fakes import comps, mac
+from driver_fakes import comps
 from osx_proxmox_next import driver_engine as engine
-from osx_proxmox_next.driver_plan import DriverPlan
-from osx_proxmox_next.driver_targets import Target
 from test_driver_parity import (  # noqa: F401 - fixtures and helpers
     HOLD_LOCK, NV, SNAP, STUB_NULLMOTH, UNDO, host, needs_bash4, py_lines, write_record)
 
@@ -51,7 +49,7 @@ def test_the_bash_finish_plan_is_the_python_finish_plan(host):
     state = {"kind": "nvidia", "phase": "failed", "snapshot": SNAP, "steps": steps}
     engine.write_update(109, state, str(host.state))
     snippet = (STUB_NULLMOTH + "DRIVER_VERSIONS='{\"NullMoth\": \"v2.9\"}'\nDRIVER_TARGET=$(cat <<'J'\n" + json.dumps(NV) + "\nJ\n)\n"
-               f"driver_print_plan 109 macos-sequoia nvidia '{{\"NullMoth\": \"v2.8.1\"}}' \"$DRIVER_TARGET\" osx-next-driver-NEW yes no sequoia yes\n")
+               "driver_print_plan 109 macos-sequoia nvidia '{\"NullMoth\": \"v2.8.1\"}' \"$DRIVER_TARGET\" osx-next-driver-NEW yes no sequoia yes\n")
     out = host.run(snippet).stdout.splitlines()
     assert out == py_lines("nvidia", {"NullMoth": "v2.8.1"}, NV, "osx-next-driver-NEW", resume=state)
     assert out[0] == "Finish the NVIDIA driver update of macos-sequoia (VM 109)" and "  1. Stage NullMoth v2.9" in out

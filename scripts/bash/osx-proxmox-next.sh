@@ -53,6 +53,7 @@ DEFAULT="${TAB}⚙️${TAB}${CL}"
 MACADDRESS="${TAB}🔗${TAB}${CL}"
 VLANTAG="${TAB}🏷️${TAB}${CL}"
 CREATING="${TAB}🚀${TAB}${CL}"
+# shellcheck disable=SC2034  # ADVANCED is a message prefix nothing reads yet
 ADVANCED="${TAB}🧩${TAB}${CL}"
 
 # ── macOS version definitions ──
@@ -1361,6 +1362,7 @@ function gpu_users() {
 # Bash twin of src/osx_proxmox_next/nullmoth.py and nvidia_host.py. The notice,
 # pins, device allowlist and OpenCore patcher below are diffed against the
 # Python side by tests/test_nullmoth_parity.py; change both together.
+# shellcheck disable=SC2034  # NULLMOTH_URL mirrors the Python constant, which tests/test_nullmoth_parity.py compares
 NULLMOTH_URL="https://github.com/nullmoth/nvidia-macos-driver"
 NULLMOTH_NOTICE_TITLE="NVIDIA GPU support (Beta)"
 read -r -d '' NULLMOTH_NOTICE_BODY <<'NULLMOTH_NOTICE' || true
@@ -1646,7 +1648,7 @@ def references_kext(path):
         with open(path, 'rb') as f:
             cfg = plistlib.load(f)
         return any(k.get('BundlePath') == KEXT for k in cfg.get('Kernel', {}).get('Add', []))
-    except Exception:
+    except Exception:  # noqa: BLE001 unreadable counts as referenced: keep the kext
         return True
 
 
@@ -3632,7 +3634,9 @@ def _emit(obj):
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     root = os.environ.get("GPU_ROOT", "/")
-    payload = json.loads(sys.stdin.read() or "{}") if cmd not in ("facts", "state", "hint-clear", "undo", "reboot-pending", "mark-reboot", "rebooted") else {}
+    payload = {}
+    if cmd not in ("facts", "state", "hint-clear", "undo", "reboot-pending", "mark-reboot", "rebooted"):
+        payload = json.loads(sys.stdin.read() or "{}")
     if cmd == "facts":
         _emit(detect_facts(root))
     elif cmd == "target":
@@ -3697,7 +3701,8 @@ def main(argv):
     elif cmd == "hint-clear":
         clear_login_hint(root)
     else:
-        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|vm-stale|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
+        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|vm-stale|step|plan|preview|"
+                         "apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
         return 64
     return 0
 
@@ -5229,8 +5234,8 @@ PAYLOAD_FILES = (("igpu_stage.sh", "stage.sh"), ("igpu_firstboot.sh", "firstboot
 # mount -t msdos), Ventura does. So: find the partition by its label, free it, mount it by hand, run the script.
 # Typed key by key into Tahoe's slow recovery Terminal, so it stays as short as it can: all the logic is in stage.sh.
 # The mount point is under /tmp: the recovery root volume is read-only, so `mkdir /p` fails and nothing runs.
-STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /tmp/p;mount -t msdos /dev/$d /tmp/p&&sh /tmp/p/stage.sh"
-                 % PAYLOAD_LABEL)
+STAGE_COMMAND = ("d=$(diskutil list|awk '/%s/{print $NF}');diskutil unmount $d;mkdir /tmp/p;"
+                 "mount -t msdos /dev/$d /tmp/p&&sh /tmp/p/stage.sh" % PAYLOAD_LABEL)
 BOOT_ARGS = ("-allow3d", "-disablegfxfirmware", "-wex-tgl-hold-render-wake")
 GMS_ARG = "0x3"
 
@@ -6071,9 +6076,11 @@ def _emit(obj):
 
 
 def _usage():
-    sys.stderr.write("usage: igpu_engine.py check [wex]|verdict <id> [wex]|lookup <id> [wex]|devices [wex]|settings <mb> <rom>|merge-args|strip-args|"
+    sys.stderr.write("usage: igpu_engine.py check [wex]|verdict <id> [wex]|lookup <id> [wex]|devices [wex]|settings <mb> <rom>|"
+                     "merge-args|strip-args|"
                      "fetch <rom:KEY|pin:NAME> <dir>|assets <dir> [wex] [graphics]|releases <whateverxe|graphics>|"
-                     "state-write <vmid>|state-record <vmid> <macos>|state-show <vmid>|payload <pkg> <img>|result <img>|accel-check [seconds]|stage-command|pins\n")
+                     "state-write <vmid>|state-record <vmid> <macos>|state-show <vmid>|payload <pkg> <img>|result <img>|"
+                     "accel-check [seconds]|stage-command|pins\n")
     return 64
 
 
@@ -7599,7 +7606,7 @@ def snapshot(vmid, kind, what, recent, runner=run):
         return None
     try:
         where = igpu_diag.collect_incident(vmid, kind, what, list(recent or ()), runner=runner)
-    except Exception as exc:  # recovery matters more than the evidence
+    except Exception as exc:  # noqa: BLE001 recovery matters more than the evidence
         log(vmid, 'could not save the crash snapshot: %s' % str(exc)[:200])
         return None
     log(vmid, 'saved the crash snapshot to %s' % where)
@@ -8065,7 +8072,7 @@ def collect_incident(vmid, kind, reason, lines, base=None, runner=run, clock=tim
             return
         try:
             fn()
-        except Exception as exc:  # a failed read must never keep the VM from being recovered
+        except Exception as exc:  # noqa: BLE001 a failed read must never keep the VM from being recovered
             skipped.append('%s: %s' % (name, str(exc)[:120]))
 
     part('panic.txt', lambda: put('panic.txt', panic_text(lines)))
@@ -8243,13 +8250,15 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update,
+        release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update,
+        release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -8290,7 +8299,8 @@ NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothin
 TEXTS = {"REFUSE_INSTALLING": REFUSE_INSTALLING, "REFUSE_CARD_SETUP": REFUSE_CARD_SETUP, "REFUSE_LOCKED": REFUSE_LOCKED,
          "REFUSE_NO_CARD": REFUSE_NO_CARD, "REFUSE_UNKNOWN_KIND": REFUSE_UNKNOWN_KIND, "REFUSE_NOT_MAC": REFUSE_NOT_MAC,
          "REFUSE_NOTHING_TO_UNDO": REFUSE_NOTHING_TO_UNDO, "UP_TO_DATE": UP_TO_DATE,
-         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD, "STALE_RECORD": STALE_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
+         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD,
+         "STALE_RECORD": STALE_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
          "REFUSE_CARD_CHANGED": REFUSE_CARD_CHANGED, "REFUSE_NEWER_SNAPSHOTS": REFUSE_NEWER_SNAPSHOTS,
          "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED, "REFUSE_MAPS_HELD": REFUSE_MAPS_HELD}
 VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
@@ -8835,13 +8845,16 @@ def main(argv):
     elif cmd == "unfinished" and len(argv) == 3:
         _emit(unfinished(argv[2]))
     elif cmd in ("update-init", "update-resume", "update-begin", "update-end", "update-fail", "update-set", "update-clear",
-                 "update-get", "update-add-disk", "update-forget-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
+                 "update-get", "update-add-disk", "update-forget-disk", "pending-kind", "failure-text", "card-changed", "kind",
+                 "replace-names",
                  "snapshot-date",
                  "newer-than", "all-snapshots"):
         return run_update_command(cmd, argv[2:])
     else:
-        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|finish-facts|todo-steps|steps|snapshot-name|"
-                         "snapshot-argv|tool-snapshots|snapshot-support|first-boot-text|text|from-igpu|compare|unfinished|update-*|failure-text|kind|"
+        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|finish-facts|todo-steps|steps|"
+                         "snapshot-name|"
+                         "snapshot-argv|tool-snapshots|snapshot-support|first-boot-text|text|from-igpu|compare|unfinished|update-*|"
+                         "failure-text|kind|"
                          "fingerprint|trusted|stamp|stale-maps|maps-held ...\n")
         return 64
     return 0
@@ -9582,7 +9595,10 @@ function gpu_record_write() {
 function gpu_record_load() {
   local out
   # shellcheck disable=SC2034  # read by the callers
-  REC_FOUND=no; REC_BDF=""; REC_VENDOR=""; REC_OC=""
+  REC_FOUND=no
+  # shellcheck disable=SC2034  # read by the callers
+  REC_BDF=""
+  REC_VENDOR=""; REC_OC=""
   out=$(python3 - "$(gpu_record_path "$1")" <<'GPU_RECORD_PY'
 import json, shlex, sys
 try:
@@ -9699,6 +9715,7 @@ function amd_attach() {
   new_args=$(gpu_with_global_arg "$args" "$GPU_HOTPLUG_ARG")
   extra=$(amd_hostpci_extra "$dev")
   boot_args=$(amd_family_for "$dev" | cut -d'|' -f4)
+  # shellcheck disable=SC2034  # vga is assigned but not read; left as is, this change does not alter behaviour
   vga=$(sed -n 's/^vga: //p' <<<"$cfg")
   if [ "$dry" == "yes" ]; then
     echo -e "\nDRY RUN - nothing is changed. Plan:"
@@ -10120,6 +10137,7 @@ function igpu_drop_disk() {
   [ -n "$ref" ] || return 0
   # the loop devices and partition maps that hold the volume go first; when one remains the volume cannot be removed:
   # strict stops with the command, else (an error is being handled) the volume is left as an unused disk
+  # shellcheck disable=SC2046  # intentional word splitting: driver_disk_paths prints one path per word
   if ! out=$(driver_release_paths "$vmid" $(driver_disk_paths "$vmid" "$ref")) && [ "$strict" == strict ]; then echo "$out"; return 1; fi
   qm set "$vmid" --delete "$slot" >/dev/null 2>&1 || true
   key=$(qm config "$vmid" 2>/dev/null | sed -n "s/^\(unused[0-9]*\): ${ref//\//\\/}\(,.*\)\?\$/\1/p" | head -1)
@@ -10775,6 +10793,7 @@ function driver_snapshot_ok() {
   st=$(mktemp) || return 1
   pvesm status >"$st" 2>/dev/null || true
   DRIVER_SNAP_WHY=""
+  # shellcheck disable=SC2034  # DRIVER_SNAP_WHY is the documented output of this function; no caller reads it yet
   if DRIVER_SNAP_WHY=$(driver_engine snapshot-support "$st" <<<"$1"); then rm -f "$st"; return 0; fi
   rm -f "$st"
   return 1
@@ -10808,6 +10827,7 @@ function driver_print_plan() {
   case "$kind" in nvidia) label=NVIDIA ;; intel) label=Intel ;; amd) label=AMD ;; esac
   if [ "$finishing" == yes ]; then echo "Finish the ${label} driver update of ${name:-VM $vmid} (VM ${vmid})"
   else echo "Update the ${label} driver of ${name:-VM $vmid} (VM ${vmid})"; fi
+  # shellcheck disable=SC2046  # intentional word splitting: an empty result must pass no argument at all
   driver_engine changes "$kind" "$installed" "$DRIVER_VERSIONS" $([ "${DRIVER_REINSTALL:-no}" != yes ] || echo reinstall) | sed 's/^/  /'
   # nothing will change: no steps and no facts, the caller says the Mac is up to date (the Python plan stops here too)
   if [ "$finishing" != yes ] && [ "${DRIVER_REINSTALL:-no}" != yes ] && [ "$kind" != "" ] \
@@ -10816,13 +10836,16 @@ function driver_print_plan() {
   echo "Steps:"
   if [ "$finishing" == yes ]; then
     local todo pending=""
+    # shellcheck disable=SC2046  # intentional word splitting: an empty result must pass no argument at all
     todo=$(driver_engine todo-steps "$vmid" "$kind" "$first" $([ "$running" == yes ] || echo stopped) | sed '/^$/d')
     while read -r _ line; do n=$((n + 1)); echo "  ${n}. ${line}"; done <<<"$todo"
     # the Finish saves a snapshot when the cut-off run never got to that step: the lines follow the same list of steps
     ! grep -q '^snapshot ' <<<"$todo" || pending="$snap"
+    # shellcheck disable=SC2046  # intentional word splitting: an empty result must pass no argument at all
     driver_engine finish-facts "$kind" "$(driver_engine update-get "$vmid" snapshot | gpu_json 'd or ""')" "$undo" "$pending" \
       $([ "$snap_ok" == yes ] && echo supported || echo unsupported)
   else
+    # shellcheck disable=SC2046  # intentional word splitting: an empty result must pass no argument at all
     while read -r _ line; do n=$((n + 1)); echo "  ${n}. ${line}"; done < <(driver_engine steps "$kind" "$first" $([ "$running" == yes ] || echo stopped))
     older=$(driver_snapshots "$vmid" | paste -sd' ' -)
     # shellcheck disable=SC2086
@@ -10873,6 +10896,7 @@ function driver_drop_unused() {
     [ -n "$ref" ] || continue
     key=$(qm config "$vmid" 2>/dev/null | awk -F': ' -v r="$ref" '$1 ~ /^unused[0-9]+$/ { split($2, a, ","); if (a[1] == r) { print $1; exit } }')
     [ -n "$key" ] || continue
+    # shellcheck disable=SC2046  # intentional word splitting: driver_disk_paths prints one path per word
     if ! out=$(driver_release_paths "$vmid" $(driver_disk_paths "$vmid" "$ref")); then echo "$out"; return 1; fi
     qm set "$vmid" --delete "$key" >/dev/null 2>&1 && gone="${gone:+$gone, }$ref"
   done
@@ -11332,10 +11356,12 @@ function driver_apply_run() {
   DRIVER_VMID="$vmid"; DRIVER_SNAPSHOT=""; DRIVER_WANT_SNAPSHOT=""; DRIVER_EXTRA="{}"
   [ "$snap_ok" != yes ] || DRIVER_WANT_SNAPSHOT="$snap"
   if [ "$resume" == yes ]; then
+    # shellcheck disable=SC2046  # intentional word splitting: an empty result must pass no argument at all
     driver_engine update-resume "$vmid" $(driver_is_stopped "$vmid" || echo running)
     DRIVER_SNAPSHOT=$(driver_state_get snapshot)
     driver_drop_unused "$vmid" || true     # a disk a device map still holds is told with its command, not a reason to stop
   else
+    # shellcheck disable=SC2046  # intentional word splitting: an empty result must pass no argument at all
     driver_engine update-init "$vmid" "$kind" "$name" "$DRIVER_VERSION_TEXT" "$(driver_step_name "$kind" "$DRIVER_TARGET")" \
       "$(gpu_json 'json.dumps({n: d.get(n, {}).get("tag", "") for n in ("NullMoth", "WhateverXe", "WhateverXe Graphics")})' <<<"$DRIVER_TARGET")" \
       "$(gpu_json 'json.dumps([{"name": n, "version": v} for n, v in d.items()])' <<<"$DRIVER_INSTALLED")" \
@@ -11672,6 +11698,7 @@ function gpu_card_notes() {
   local -a stopped=()
   for u in ${users//,/ }; do [ "${u#*:}" == "running" ] || stopped+=("${u%%:*}"); done
   [ ${#stopped[@]} -eq 0 ] || gpu_shared_note "${stopped[@]}"
+  # shellcheck disable=SC2207  # intentional word splitting: card starters are space-free VM ids
   local -a starters=($(gpu_card_starters "$1"))
   [ ${#starters[@]} -eq 0 ] || gpu_starts_note "${starters[@]}"
   if [ "$boot" == "1" ] && [ "$console" != "1" ]; then echo "The firmware shows its boot screen on this card."; fi
@@ -12916,6 +12943,7 @@ function default_settings() {
 }
 
 function advanced_settings() {
+  # shellcheck disable=SC2034  # METHOD is assigned but not read; left as is, this change does not alter behaviour
   METHOD="advanced"
 
   if MACOS_VER=$(whiptail --backtitle "OSX Proxmox Next" --title "macOS Version" --radiolist "Choose macOS version" --cancel-button Exit-Script 15 58 5 \
