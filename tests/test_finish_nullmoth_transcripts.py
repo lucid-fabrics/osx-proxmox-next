@@ -38,7 +38,7 @@ REPO = str(Path(igpu_engine.__file__).resolve().parents[2])
 
 def short(text):
     """An argument list as a log line: without the temporary directory (which differs per run), cut at 160 characters."""
-    return TS.sub("<ts>", text.replace(TMP, "<tmp>").replace(REPO, "<repo>"))[:160]
+    return re.sub(r"0x[0-9a-f]{6,}", "0x?", TS.sub("<ts>", text.replace(TMP, "<tmp>").replace(REPO + "/", "<repo>/")))[:160]
 
 
 def spy(mp, log, name, mods=MODS):
@@ -494,7 +494,7 @@ def settled(name, env):
     text = TS.sub("<ts>", json.dumps(RESULTS[name], sort_keys=True, default=str))
     for path in {str(env.tmp), str(env.tmp.resolve())}:
         text = text.replace(path, "<tmp>")
-    text = text.replace(REPO, "<repo>")
+    text = text.replace(REPO + "/", "<repo>/")
     return json.loads(re.sub(r"0x[0-9a-f]{6,}", "0x?", text))
 
 

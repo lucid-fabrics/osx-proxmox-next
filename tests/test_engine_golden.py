@@ -14,6 +14,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -78,6 +79,7 @@ def run_case(mod, argv, stdin, setup, patches=(), fakes=None):
         st.enter_context(mock.patch.dict(os.environ, env))
         os.environ.pop("IGPU_DEVICES", None)
         st.enter_context(mock.patch("subprocess.run", _fake_subprocess_run))
+        st.enter_context(mock.patch("os.uname", lambda: SimpleNamespace(release="6.8.12-1-pve")))
         st.enter_context(mock.patch("time.time", lambda: NOW))
         st.enter_context(mock.patch("time.localtime", lambda *a: _REAL_GMTIME(NOW)))
         st.enter_context(mock.patch("time.strftime", lambda fmt, t=None: _REAL_STRFTIME(fmt, _REAL_GMTIME(NOW) if t is None else t)))

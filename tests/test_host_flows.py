@@ -7,6 +7,7 @@ import gzip
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,11 @@ BOOTLOADERS = {"grub": EFI_GRUB, "systemd-boot": EFI_SDBOOT}
 MODULES = "vfio 1 0 - Live 0x0\nvfio_iommu_type1 1 0 - Live 0x0\nvfio_pci 1 0 - Live 0x0\n"
 IDS_LINE = "options vfio-pci ids=1002:73ff,1002:ab28 disable_vga=1\n"
 RESULTS: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _kernel(monkeypatch):
+    monkeypatch.setattr(os, "uname", lambda: SimpleNamespace(release="6.8.12-1-pve"))
 
 
 def host(tmp_path, cpu, driver="vfio-pci", extra=""):
