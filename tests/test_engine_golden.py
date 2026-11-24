@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import gzip
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -19,7 +20,6 @@ from unittest import mock
 
 import pytest
 
-from conftest import fake_github_releases
 from gpu_fakes import EFI_GRUB, FakeRun, add_card, make_host, write
 from nullmoth_fakes import add_dev
 from osx_proxmox_next import driver_engine as de
@@ -28,6 +28,17 @@ from osx_proxmox_next import igpu_engine as ie
 from osx_proxmox_next import nullmoth_engine as ne
 
 GOLDEN = Path(__file__).parent / "data" / "engine_mains.json.gz"
+
+
+def _tests_conftest():
+    """tests/conftest.py by its path: the module name `conftest` is also tests/scripts/conftest.py when the whole suite is collected."""
+    spec = importlib.util.spec_from_file_location("osx_next_tests_conftest", Path(__file__).with_name("conftest.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+fake_github_releases = _tests_conftest().fake_github_releases
 SB = Path()
 NOW = 1790000000.0
 _REAL_GMTIME = time.gmtime
