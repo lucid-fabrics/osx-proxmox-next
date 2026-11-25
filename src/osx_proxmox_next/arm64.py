@@ -49,6 +49,8 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _URL_RE = re.compile(r"https?://[A-Za-z0-9._\-]+(:[0-9]{1,5})?/[A-Za-z0-9._/\-{}]*")
 _PCI_RE = re.compile(r"([0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]")
 _SSH_KEY_RE = re.compile(r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}( [A-Za-z0-9_.@\-]{1,64})?")
+_PATH_RE = re.compile(r"/[A-Za-z0-9._@+/\-]+")
+_ECID_RE = re.compile(r"[0-9]{1,20}")
 
 
 @dataclass
@@ -69,6 +71,10 @@ class Arm64Config:
     source_sha256: str = DEFAULT_SOURCE_SHA256  # sha256 of the archive at source_ref; the runner refuses any other file
     renderer_url: str = ""           # empty = the release tarball named in pins.env; a build from a local copy sets both
     renderer_sha256: str = ""
+    ipsw: str = ""                   # path on the runner to the IPSW the Mac-free install restores
+    aux: str = ""                    # path on the runner to the aux image the restore boots with
+    ecid: str = ""                   # the machine uuid (ECID) the restore is personalized for, decimal
+    disk_target: str = ""            # path on the runner for the raw disk the restore writes
 
     @property
     def archive_url(self) -> str:
@@ -112,4 +118,9 @@ def validate_arm64_config(config: Arm64Config) -> list[str]:
         issues.append("Renderer URL must be http, https or file and contain only URL-safe characters.")
     if config.renderer_sha256 and not _SHA256_RE.fullmatch(config.renderer_sha256):
         issues.append("Renderer sha256 must be 64 lowercase hex digits.")
+    for label, value in (("IPSW", config.ipsw), ("Aux image", config.aux), ("Disk target", config.disk_target)):
+        if value and (not _PATH_RE.fullmatch(value) or ".." in value):
+            issues.append(f"{label} must be an absolute path of letters, digits and . _ + @ / - (no ..).")
+    if config.ecid and (not _ECID_RE.fullmatch(config.ecid) or not 0 < int(config.ecid) < 2**64):
+        issues.append("ECID must be decimal digits (1 to 20) and fit in 64 bits.")
     return issues

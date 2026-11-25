@@ -5,7 +5,7 @@ import dataclasses
 
 import pytest
 
-from arm64_fakes import REF, RENDERER_SHA, SHA
+from arm64_fakes import REF, SHA
 from osx_proxmox_next.arm64 import DEFAULT_SOURCE_URL, Arm64Config, validate_arm64_config
 
 
@@ -54,6 +54,10 @@ def test_the_archive_url_names_the_ref():
     (dict(renderer_sha256="b" * 64), "together"),
     (dict(renderer_url="https://example.com/r;id", renderer_sha256="b" * 64), "Renderer URL"),
     (dict(renderer_url="https://example.com/r.tar.gz", renderer_sha256="xyz"), "Renderer sha256"),
+    (dict(ipsw="relative/a.ipsw"), "IPSW"), (dict(ipsw="/a/../b.ipsw"), "IPSW"),
+    (dict(aux="/opt/a b.img"), "Aux image"), (dict(disk_target="d.raw"), "Disk target"),
+    (dict(ecid="abc"), "ECID"), (dict(ecid="0"), "ECID"), (dict(ecid="1" * 21), "ECID"),
+    (dict(ecid=str(2**64)), "ECID"),
 ])
 def test_each_bad_value_is_refused(change, needle):
     issues = validate_arm64_config(good(**change))
@@ -68,6 +72,9 @@ def test_each_bad_value_is_refused(change, needle):
     dict(renderer_url="file:///srv/r/arm64-renderer-1.tar.gz", renderer_sha256="b" * 64),
     dict(renderer_url="https://example.com/r.tar.gz", renderer_sha256="b" * 64),
     dict(source_url="https://example.com:8443/archive/{ref}.tar.gz"),
+    dict(ipsw="/var/lib/ipsw/UniversalMac_27.2.1_26B131_Restore.ipsw"),
+    dict(aux="/var/lib/vm/aux.img"), dict(ecid="4533301000242790675"),
+    dict(disk_target="/var/lib/vm/install.raw"),
 ])
 def test_good_optional_values_pass(change):
     assert validate_arm64_config(good(**change)) == []
@@ -78,6 +85,16 @@ def test_the_defaults_name_no_branch_and_a_checksum_is_mandatory():
     assert DEFAULT_SOURCE_REF not in ("main", "master", "HEAD")
     assert validate_arm64_config(Arm64Config(vmid=478, name="macos27-runner", storage="local-lvm")), "an unpinned config must be refused"
     assert not DEFAULT_SOURCE_SHA256 or len(DEFAULT_SOURCE_SHA256) == 64
+
+
+def test_the_release_pin_is_set_or_the_test_says_wave_b_has_not_tagged_yet():
+    """Wave B sets DEFAULT_SOURCE_REF and DEFAULT_SOURCE_SHA256; until then the pair is empty and this is skipped."""
+    from osx_proxmox_next.arm64 import DEFAULT_SOURCE_REF, DEFAULT_SOURCE_SHA256
+    assert bool(DEFAULT_SOURCE_REF) == bool(DEFAULT_SOURCE_SHA256), "the two defaults are set together"
+    if not DEFAULT_SOURCE_REF:
+        pytest.skip("Wave B has not tagged the beta yet")
+    assert DEFAULT_SOURCE_REF[0] == "v" or len(DEFAULT_SOURCE_REF) == 40
+    assert len(DEFAULT_SOURCE_SHA256) == 64 and int(DEFAULT_SOURCE_SHA256, 16) >= 0
 
 
 def test_the_config_is_a_plain_dataclass():

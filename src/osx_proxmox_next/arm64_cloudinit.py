@@ -58,7 +58,7 @@ as_user {snap} build --only mesa
 
 say installing-macos
 rc=0
-as_user {snap} install || rc=$?
+as_user {snap} install{install_args} || rc=$?
 case $rc in
   0) say ready ;;
   3) say install-pending ;;
@@ -74,10 +74,21 @@ def _renderer_env(config: Arm64Config) -> str:
     return f"env {quote('RENDERER_URL=' + config.renderer_url)} {quote('RENDERER_SHA256=' + config.renderer_sha256)} "
 
 
+def _install_args(config: Arm64Config) -> str:
+    """The Mac-free install's inputs as arguments: the four the user chose, or nothing for the runner's defaults."""
+    parts: list[str] = []
+    for flag, value in (("--ipsw", config.ipsw), ("--aux", config.aux), ("--disk", config.disk_target)):
+        if value:
+            parts.extend([flag, quote(value)])
+    if config.ecid:
+        parts.extend(["--ecid", quote(config.ecid)])
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def render_setup_script(config: Arm64Config) -> str:
     return _SETUP.format(status=quote(STATUS_PATH), log=quote(LOG_PATH), install=quote(INSTALL_DIR),
                          url=quote(config.archive_url), sha=quote(config.source_sha256), user=RUNNER_USER,
-                         envs=_renderer_env(config),
+                         envs=_renderer_env(config), install_args=_install_args(config),
                          snap=quote(f"{INSTALL_DIR}/snapintosh"))
 
 

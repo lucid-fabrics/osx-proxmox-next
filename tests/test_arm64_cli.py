@@ -131,3 +131,17 @@ def test_every_plan_gives_the_runner_a_login_key(capsys):
     assert run_cli([*BASE, "--json"]) == 0
     titles = [s["title"] for s in json.loads(capsys.readouterr().out)]
     assert "Make the runner's SSH key" in titles
+
+
+def test_the_install_inputs_reach_the_setup_script(capsys):
+    assert run_cli([*BASE, "--json", "--ipsw", "/var/lib/ipsw/a.ipsw", "--aux", "/var/lib/vm/aux.img",
+                    "--ecid", "4533301000242790675", "--disk-target", "/var/lib/vm/install.raw"]) == 0
+    steps = json.loads(capsys.readouterr().out)
+    script = next(s for s in steps if s["title"] == "Write the cloud-init file")["argv"][4]
+    assert ("snapintosh install --ipsw /var/lib/ipsw/a.ipsw --aux /var/lib/vm/aux.img "
+            "--disk /var/lib/vm/install.raw --ecid 4533301000242790675") in script
+
+
+def test_a_bad_ecid_is_named_and_exits_2(capsys):
+    assert run_cli([*BASE, "--ecid", "abc"]) == 2
+    assert "ECID" in capsys.readouterr().out

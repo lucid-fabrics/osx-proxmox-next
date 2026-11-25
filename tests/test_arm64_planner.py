@@ -83,7 +83,9 @@ def test_the_ssh_key_goes_through_a_private_file_because_qm_reads_a_path():
 
 def test_a_runner_without_a_given_key_gets_one_made_on_the_host(tmp_path):
     """Audit item: a wizard-made runner had no login at all. Run the step for real with ssh-keygen."""
-    import os, stat, subprocess
+    import os
+    import stat
+    import subprocess
     steps = build_arm64_plan(cfg())
     cloud = by_title(steps, "Set up cloud-init").argv
     assert cloud[cloud.index("--sshkeys") + 1] == key_path(478)
@@ -141,6 +143,17 @@ def test_the_setup_script_fetches_the_ref_and_runs_snapintosh_as_the_runner_user
     assert "build -j" in script and "build --only mesa" in script and "install" in script
     assert STATUS_PATH in script and LOG_PATH in script and "install-pending" in script
     assert script.count("runuser -l snapintosh") == 1   # one helper, every call goes through it
+
+
+def test_the_install_inputs_become_arguments_and_the_script_stays_bash():
+    import subprocess
+    script = render_setup_script(cfg(ipsw="/var/lib/ipsw/a.ipsw", aux="/var/lib/vm/aux.img",
+                                     ecid="4533301000242790675", disk_target="/var/lib/vm/install.raw"))
+    assert ("snapintosh install --ipsw /var/lib/ipsw/a.ipsw --aux /var/lib/vm/aux.img "
+            "--disk /var/lib/vm/install.raw --ecid 4533301000242790675 || rc=$?") in script
+    assert "snapintosh install || rc=$?" in render_setup_script(cfg())
+    check = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+    assert check.returncode == 0, check.stderr
 
 
 def test_the_setup_script_sets_home_and_refuses_an_empty_package_list():

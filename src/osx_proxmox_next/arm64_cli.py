@@ -46,6 +46,10 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
         cmd.add_argument("--source-sha256", default=DEFAULT_SOURCE_SHA256, help="sha256 of the archive at the ref (the runner refuses any other)")
         cmd.add_argument("--renderer-url", default="", help="Renderer tarball to build from instead of the release one (with --renderer-sha256)")
         cmd.add_argument("--renderer-sha256", default="")
+        cmd.add_argument("--ipsw", default="", help="Path on the runner to the IPSW the Mac-free install restores")
+        cmd.add_argument("--aux", default="", help="Path on the runner to the aux image the restore boots with")
+        cmd.add_argument("--ecid", default="", help="Machine uuid (ECID) the restore is personalized for, decimal")
+        cmd.add_argument("--disk-target", default="", help="Path on the runner for the raw disk the install writes")
         if name == "plan":
             cmd.add_argument("--json", action="store_true", help="Print the plan as JSON")
         else:
@@ -64,6 +68,7 @@ def _config(args: argparse.Namespace) -> Arm64Config:
         disk_gb=args.disk, bridge=args.bridge, vlan=args.vlan, cpu_units=args.cpuunits, ssh_public_key=key,
         gpu_pci=args.gpu_pci, source_url=args.source_url, source_ref=args.source_ref,
         source_sha256=args.source_sha256, renderer_url=args.renderer_url, renderer_sha256=args.renderer_sha256,
+        ipsw=args.ipsw, aux=args.aux, ecid=args.ecid, disk_target=args.disk_target,
     )
 
 
