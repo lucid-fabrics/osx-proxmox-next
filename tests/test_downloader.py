@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import io
 import json
-import subprocess as real_subprocess
 import urllib.error
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -15,7 +13,6 @@ from osx_proxmox_next.downloader import (
     DownloadProgress,
     download_opencore,
     download_recovery,
-    _build_recovery_image,
     _download_file,
     _download_file_with_token,
     _fetch_github_releases,
@@ -178,7 +175,6 @@ class TestDownloadRecovery:
         session_resp.headers = {"Set-Cookie": "session=ABC123; path=/; HttpOnly"}
 
         captured_os_type = [None]
-        original_get_info = dl_module._get_recovery_image_info
 
         def spy_get_info(session, board_id, os_type="default"):
             captured_os_type[0] = os_type
@@ -310,7 +306,6 @@ class TestDownloadFile:
         """When .part file is created but download fails mid-stream, it gets cleaned up."""
         monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
 
-        original_do_download = dl_module._do_download
         call_count = [0]
 
         def failing_do_download(url, dest, on_progress, phase, extra_headers=None):
@@ -677,7 +672,7 @@ class TestBuildRecoveryImage:
             dest.write_bytes(b"\x00" * 2048)
             return CommandResult(ok=True, returncode=0, output="")
 
-        import osx_proxmox_next.services as _svc
+        import osx_proxmox_next.downloader as _svc
         monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         _build_recovery_image(dmg, chunklist, dest)
@@ -703,7 +698,7 @@ class TestBuildRecoveryImage:
             dest.write_bytes(b"\x00" * 2048)
             return CommandResult(ok=True, returncode=0, output="")
 
-        import osx_proxmox_next.services as _svc
+        import osx_proxmox_next.downloader as _svc
         monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         def deny_align(path, alignment=None):
@@ -728,7 +723,7 @@ class TestBuildRecoveryImage:
             dest.write_bytes(b"\x00" * aligned_size)
             return CommandResult(ok=True, returncode=0, output="")
 
-        import osx_proxmox_next.services as _svc
+        import osx_proxmox_next.downloader as _svc
         monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         _build_recovery_image(dmg, chunklist, dest)
@@ -748,7 +743,7 @@ class TestBuildRecoveryImage:
         def handler(argv):
             return CommandResult(ok=False, returncode=1, output="dmg2img failed")
 
-        import osx_proxmox_next.services as _svc
+        import osx_proxmox_next.downloader as _svc
         monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         with pytest.raises(DownloadError, match="Failed to convert recovery DMG"):
@@ -768,7 +763,7 @@ class TestBuildRecoveryImage:
         def handler(argv):
             return CommandResult(ok=False, returncode=1, output="dmg2img failed")
 
-        import osx_proxmox_next.services as _svc
+        import osx_proxmox_next.downloader as _svc
         monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         with pytest.raises(DownloadError, match="Failed to convert recovery DMG"):
@@ -788,7 +783,7 @@ class TestBuildRecoveryImage:
         def handler(argv):
             return CommandResult(ok=False, returncode=127, output="Command not found: dmg2img")
 
-        import osx_proxmox_next.services as _svc
+        import osx_proxmox_next.downloader as _svc
         monkeypatch.setattr(_svc, "get_proxmox_adapter", lambda: _FakeAdapter(handler))
 
         with pytest.raises(DownloadError, match="dmg2img is required but not installed"):

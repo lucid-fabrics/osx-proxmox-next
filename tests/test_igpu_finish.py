@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import json
 from collections import deque
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from osx_proxmox_next import igpu_attach, igpu_finish
+from osx_proxmox_next import finish_common, igpu_attach, igpu_finish
 from osx_proxmox_next.executor import ApplyResult, StepResult
 from osx_proxmox_next.infrastructure import CommandResult
 from osx_proxmox_next.nullmoth import AttachPlan
@@ -138,8 +137,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(igpu_finish, "ensure_igpu_assets", lambda iso, key, **k: e.asked.append(k) or assets)
     monkeypatch.setattr(igpu_finish.igpu_engine, "build_payload", lambda pkg, out: (True, ""))
     monkeypatch.setattr(igpu_finish.igpu_engine, "read_result", lambda path: (e.results[0] if len(e.results) == 1 else e.results.popleft()) if e.results else "")
-    monkeypatch.setattr(igpu_finish, "resolve_recovery_or_installer_path", lambda cfg: tmp_path / "rec.img")
-    monkeypatch.setattr(igpu_finish, "create_snapshot", lambda vmid, adapter=None: SimpleNamespace(path=tmp_path / "snap"))
+    monkeypatch.setattr(finish_common, "resolve_recovery_or_installer_path", lambda cfg: tmp_path / "rec.img")
+    monkeypatch.setattr(finish_common, "create_snapshot", lambda vmid, adapter=None: SimpleNamespace(path=tmp_path / "snap"))
 
     def plan(*a, **k):
         p = AttachPlan(9)
@@ -447,12 +446,12 @@ def test_first_start_failure_after_attach(env):
 
 def test_helpers(env):
     with pytest.raises(igpu_finish.FinishError):
-        igpu_finish._storage_of({})
-    assert igpu_finish._storage_of({"ide0": "dir:vm-1,media=disk"}) == "dir"
+        finish_common._storage_of({})
+    assert finish_common._storage_of({"ide0": "dir:vm-1,media=disk"}) == "dir"
     pve = Pve({**CFG, "sata1": "local-lvm:vm-9-disk-5,media=disk"})
-    igpu_finish._drop_disk(pve, 9, "sata1")
+    finish_common._drop_disk(pve, 9, "sata1")
     assert "sata1" not in pve.cfg and not any(v == "local-lvm:vm-9-disk-5" for v in pve.cfg.values())
-    igpu_finish._drop_disk(pve, 9, "sata2")  # nothing there: no error
+    finish_common._drop_disk(pve, 9, "sata2")  # nothing there: no error
     assert igpu_finish._read_payload_result(Pve(), "ref") == "staged"  # the fake read_result answers
 
 

@@ -7,7 +7,7 @@ from shlex import quote as shquote
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import CpuInfo, detect_cpu_info
 from .domain import SUPPORTED_MACOS, VmConfig, PlanStep, EditChanges, validate_config
-from .infrastructure import ProxmoxAdapter
+from .infrastructure import VmInfo, fetch_vm_info  # noqa: F401 (re-exported, callers import them from here)
 from .script_renderer import (
     PICKER_TIMEOUT_INSTALLED,
     _APPLE_OSK,
@@ -251,9 +251,11 @@ def _recovery_steps(
                 "RLOOP=''; OC_REC=$(mktemp -d) && "
                 "trap '[ -n \"$RLOOP\" ] && { umount $OC_REC 2>/dev/null; losetup -d $RLOOP 2>/dev/null; }; rm -rf $OC_REC' EXIT; "
                 # Cleanup stale loops from previous failed runs (always runs, before python3)
-                f'for lo in $(losetup -j {shquote(str(recovery_raw))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+                f'for lo in $(losetup -j {shquote(str(recovery_raw))} -O NAME --noheadings 2>/dev/null); do '
+                'umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
                 # Fail early with a clear message instead of a losetup cascade
-                f'{{ [ -f {shquote(str(recovery_raw))} ] || {{ echo "ERROR: Recovery image not found: {shquote(str(recovery_raw))}. Hint: osx-next-cli download --macos {config.macos}"; false; }}; }} && '
+                f'{{ [ -f {shquote(str(recovery_raw))} ] || {{ echo "ERROR: Recovery image not found: '
+                f'{shquote(str(recovery_raw))}. Hint: osx-next-cli download --macos {config.macos}"; false; }}; }} && '
                 # Pad to a 1MiB boundary: images built by older versions (or by
                 # hand) may not be request-alignment multiples, and QEMU then
                 # refuses to start. Download-time alignment only covers fresh
@@ -281,12 +283,15 @@ def _recovery_steps(
                 "f.seek(off); f.write(struct.pack(\">I\",a)); "
                 "f.close(); print(\"HFS+ flags fixed\")' && "
                 f'RLOOP=$(losetup -fP --show {shquote(str(recovery_raw))}) && '
-                "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
+                "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for "
+                "recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
                 # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
                 f"{_partprobe_retry_snippet('RLOOP')} && "
-                "{ [ -b \"${RLOOP}p1\" ] || { echo \"ERROR: ${RLOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
+                "{ [ -b \"${RLOOP}p1\" ] || { echo \"ERROR: ${RLOOP}p1 not found after partprobe. "
+                "Hint: Try running the script again (slow storage)\"; false; }; } && "
                 "mount -t hfsplus -o rw ${RLOOP}p1 $OC_REC && "
-                "{ mountpoint -q $OC_REC || { echo \"ERROR: $OC_REC is not mounted. Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
+                "{ mountpoint -q $OC_REC || { echo \"ERROR: $OC_REC is not mounted. "
+                "Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
                 # Set custom name via .contentDetails in blessed directory.
                 # NEVER rm first: unlinking on the Linux hfsplus driver can
                 # leave a stale catalog entry that makes any recreate fail
@@ -404,7 +409,7 @@ def build_post_install_plan(vmid: int) -> list[PlanStep]:
         ),
         PlanStep(
             title="Restore boot picker timeout",
-            argv=["bash", "-c", _restore_picker_timeout_script(vid)],
+            argv=["bash", "-c", restore_picker_timeout_script(vid)],
         ),
         PlanStep(
             title="Set post-install boot order",
@@ -463,7 +468,7 @@ def mount_oc_disk_script(vid: str, ro: bool = False, require_stopped: bool = Fal
     )
 
 
-def _restore_picker_timeout_script(vid: str) -> str:
+def restore_picker_timeout_script(vid: str) -> str:
     """Return bash that puts the OpenCore picker back to auto-boot.
 
     The disk is built with Timeout=0 so a half-finished install can never
@@ -486,6 +491,10 @@ def _restore_picker_timeout_script(vid: str) -> str:
     )
 
 
+
+
+# Old private name, kept because tests import it.
+_restore_picker_timeout_script = restore_picker_timeout_script
 
 
 def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
@@ -738,6 +747,3 @@ def build_clone_plan(
         ))
 
     return steps
-
-
-from .services import VmInfo, fetch_vm_info  # noqa: E402

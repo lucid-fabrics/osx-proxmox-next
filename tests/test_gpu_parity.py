@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -12,7 +11,7 @@ import pytest
 
 from gpu_fakes import EFI_GRUB, FakeRun, add_card, make_host, write
 from nullmoth_fakes import good_card
-from osx_proxmox_next import amd_host, bios_guide, gpu, gpu_setup, host_setup, nullmoth
+from osx_proxmox_next import amd_host, bios_guide, gpu, gpu_setup, host_setup
 
 REPO = Path(__file__).resolve().parent.parent
 PKG = REPO / "src/osx_proxmox_next"
@@ -66,7 +65,7 @@ def bash(block_file, tmp_path):
         full = {"PATH": f"{path + ':' if path else ''}{stub_bin}:/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
                 "GPU_STATE_DIR": str(tmp_path / "state"), "IGPU_DEVICES_OFFLINE": "1",
                 "IGPU_DEVICES_CACHE": str(tmp_path / "devices-cache"), **(env or {})}
-        res = subprocess.run(["bash", "-c", f"set -u; source {block_file}\n{snippet}"], capture_output=True, text=True,
+        res = subprocess.run(["bash", "-c", f"set -u; source {block_file}\ngpu_engine_setup; trap gpu_engine_remove EXIT\n{snippet}"], capture_output=True, text=True,
                              env=full, timeout=120)
         if expect is not None:
             assert res.returncode == expect, (res.returncode, res.stdout, res.stderr)
@@ -415,10 +414,10 @@ def test_gpu_detach_dry_run_and_refusals(bash, vm, tmp_path):
                                           ("--vga", "qm set --vga failed")])
 def test_gpu_detach_qm_set_failures(bash, vm, tmp_path, fail, needle):
     put_record(tmp_path, 100, "0000:06:00", "amd", None, "-cpu host", "std", True, "gpu")
-    vm(100, "stopped", MAC.replace("vga: std", "vga: none") + f"hostpci0: 0000:06:00,pcie=1\n")
+    vm(100, "stopped", MAC.replace("vga: std", "vga: none") + "hostpci0: 0000:06:00,pcie=1\n")
     res = bash("gpu_oc_boot_args() { true; }; gpu_detach_record 100", env={**vm.env, "QM_FAIL": fail}, expect=1)
     assert needle in res.stdout
-    assert (tmp_state := res) and True
+    assert res
 
 
 def test_gpu_detach_oc_failure_changes_nothing(bash, vm, tmp_path):

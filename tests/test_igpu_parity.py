@@ -72,7 +72,7 @@ def test_check_command_prints_the_layout(bash, tmp_path):
 def test_vm_issues_match_python(bash, change, text):
     cfg = VM_CFG.replace(*change)
     py = igpu_attach.vm_issues(100, gpu_parse(cfg), False, False)
-    sh = bash(f"GPU_ISSUES=(); igpu_vm_issues 100 \"$CFG\" 'status: stopped' no; printf '%s\\n' \"${{GPU_ISSUES[@]}}\"", env={"CFG": cfg}).stdout.splitlines()
+    sh = bash("GPU_ISSUES=(); igpu_vm_issues 100 \"$CFG\" 'status: stopped' no; printf '%s\\n' \"${GPU_ISSUES[@]}\"", env={"CFG": cfg}).stdout.splitlines()
     assert text in py[-1 if len(py) == 1 else 0] + " ".join(py)
     # the bash hint names the installer where Python names the CLI; everything else is word for word
     norm = lambda lines: [re.sub(r"Create a new VM with: .*", "", ln) for ln in lines]
@@ -129,7 +129,7 @@ def test_fresh_vm_conversion_matches_python(bash, vm, tmp_path):
 
 
 def test_the_recommendation_line_is_the_same(bash):
-    line = "0000:00:02|intel|%d|Intel|intel|h|d|1|%s|||" 
+    line = "0000:00:02|intel|%d|Intel|intel|h|d|1|%s|||"
     for driver, prepared in (("i915", False), ("vfio-pci", True)):
         card = gpu_setup.GpuCard(bdf="0000:00:02", vendor="intel", device_id=0x46A6, name="n", kind="intel", headline="", detail="",
                                  driver=driver, model="Intel Iris Xe Graphics")

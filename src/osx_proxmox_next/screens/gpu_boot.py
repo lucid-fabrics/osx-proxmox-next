@@ -12,6 +12,7 @@ from textual.widgets import Button, Static
 
 from ..gpu_flow import short_card_name
 from .reading import ReadScroll
+from .gpu_contract import GpuHost
 
 LOOK_AT_MONITOR = "Look at the monitor plugged into the card"
 FIRST_START = "The first start takes up to 2 minutes."
@@ -46,7 +47,7 @@ def reflow_help(text: str, width: int = HELP_WIDTH) -> str:
     return "\n".join(lines)
 
 
-class BootMixin:
+class BootMixin(GpuHost):
     """The first boot and the finished summary of GpuScreen."""
 
     def _boot_title(self, nvidia: bool, troubleshooting: bool) -> str:

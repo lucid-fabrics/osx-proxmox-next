@@ -43,6 +43,14 @@ def test_status_shows_installed_latest_and_snapshots(host, capsys):
     assert out[3] == "A newer driver is available." and out[4] == "Driver snapshots: " + NEW_SNAP
 
 
+def test_status_says_why_the_version_of_a_rolled_back_mac_is_unknown(host, capsys, monkeypatch):
+    """Live 2026-11-23 (NVIDIA, VM 984): "installed version unknown" after a manual qm rollback, with no reason."""
+    engine.write_record(109, "nvidia", comps(NullMoth="v3.0"), fingerprint="before")
+    monkeypatch.setattr(driver_plan.driver_disks, "fingerprint", lambda pve, cfg: "after")
+    assert run("driver-status", "--vmid", "109") == 0
+    assert f"Installed: installed version unknown ({engine.STALE_RECORD})" in capsys.readouterr().out
+
+
 def test_status_for_a_mac_with_no_record_and_one_that_is_up_to_date_or_cut_off(host, capsys):
     engine.record_path(109).unlink()
     from osx_proxmox_next import gpu
@@ -168,10 +176,10 @@ def test_a_refusal_raised_by_the_run_is_an_error(host, capsys, monkeypatch):
 
 def test_finish_continues_an_interrupted_update(host, capsys, monkeypatch):
     seen = []
-    monkeypatch.setattr(driver_cli, "finish_interrupted", lambda vmid, env: seen.append(vmid) or host["result"])
+    monkeypatch.setattr(driver_cli, "finish_interrupted", lambda vmid, env, name="": seen.append(vmid) or host["result"])
     assert run("driver-update", "--vmid", "109", "--finish", "--yes") == 0 and seen == [109]
 
-    def none(vmid, env):
+    def none(vmid, env, name=""):
         raise driver_core.DriverError("There is no unfinished driver update for this Mac.")
     monkeypatch.setattr(driver_cli, "finish_interrupted", none)
     assert run("driver-update", "--vmid", "109", "--finish") == 2
@@ -180,7 +188,7 @@ def test_finish_continues_an_interrupted_update(host, capsys, monkeypatch):
 
 def test_undo_asks_then_rolls_back(host, capsys, monkeypatch):
     seen = []
-    monkeypatch.setattr(driver_cli, "put_back", lambda vmid, env: seen.append(vmid) or NEW_SNAP)
+    monkeypatch.setattr(driver_cli, "put_back", lambda vmid, env, name="": seen.append(vmid) or NEW_SNAP)
     assert run("driver-undo", "--vmid", "109") == 2                     # not a terminal, no --yes
     assert seen == [] and f"its disks go back to the snapshot of 2026-11-21 10:30 ({NEW_SNAP})" in capsys.readouterr().out
     assert run("driver-undo", "--vmid", "109", "--yes") == 0

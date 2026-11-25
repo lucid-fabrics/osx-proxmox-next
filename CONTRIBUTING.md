@@ -18,6 +18,8 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
+Lint with `pip install ruff==0.17.6 && ruff check src tests scripts` and `shellcheck -S warning scripts/bash/osx-proxmox-next.sh install.sh scripts/install.sh` (CI runs both).
+
 ## Code Style
 
 - Python 3.9+ with type hints

@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from driver_fakes import DPve, comps, mac
-from osx_proxmox_next import driver_core, driver_disks, driver_engine as engine, driver_plan, driver_run, driver_snapshot, igpu_finish
-from osx_proxmox_next.driver_core import DriverError, RunEnv
+from osx_proxmox_next import driver_disks, driver_engine as engine, driver_plan, driver_run, driver_snapshot, igpu_finish
+from osx_proxmox_next.driver_core import DriverError
 from osx_proxmox_next.driver_targets import Target
 from osx_proxmox_next.infrastructure import CommandResult
 from test_driver_run import NEW_SNAP, env_for, rec, small_vm_ids  # noqa: F401 - fixtures
@@ -223,7 +223,8 @@ def test_only_the_boot_and_opencore_disks_tell_a_rolled_back_mac():
 
 
 def test_qm_rollback_is_not_cut_off_by_a_signal_and_the_signal_comes_after():
-    import os, signal
+    import os
+    import signal
     pve = MapPve(maps=(), snapshots=[NEW_SNAP])
     original = pve.run
 

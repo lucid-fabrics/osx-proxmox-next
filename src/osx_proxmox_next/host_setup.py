@@ -581,15 +581,21 @@ def _blacklisted(root, name):
     return False
 
 
-def plan_intel_binding(facts, target, root, plan):
-    """The Intel iGPU: the host gives it up completely. i915 is blacklisted and vfio-pci binds the id at boot.
-    No disable_vga (the legacy IGD mode needs the VGA decode), no softdeps (nothing else may load first)."""
-    fns = [f for f in target["functions"] if bindable(f, "intel")]
+def _function_ids(fns):
+    """The distinct vendor:device ids of *fns*, in order."""
     ids = []
     for fn in fns:
         ident = "%04x:%04x" % (fn["vendor"], fn["device"])
         if ident not in ids:
             ids.append(ident)
+    return ids
+
+
+def plan_intel_binding(facts, target, root, plan):
+    """The Intel iGPU: the host gives it up completely. i915 is blacklisted and vfio-pci binds the id at boot.
+    No disable_vga (the legacy IGD mode needs the VGA decode), no softdeps (nothing else may load first)."""
+    fns = [f for f in target["functions"] if bindable(f, "intel")]
+    ids = _function_ids(fns)
     drivers = {d["bdf"]: d.get("driver") for d in facts["pci"]}
     if fns and all(drivers.get(f["bdf"]) == "vfio-pci" for f in fns) and _blacklisted(root, "i915"):
         how = _persistent_binding(facts, target, fns, ids, root)
@@ -618,96 +624,126 @@ def plan_intel_binding(facts, target, root, plan):
     plan["binding"] = "ids"
 
 
+def _card_functions(target):
+    return [f for f in target["functions"] if bindable(f, target["vendor"])]
+
+
+def _twins_of(facts, target, ids):
+    """The other devices on the host that have one of the card's PCI ids."""
+    mine = {fn["bdf"] for fn in target["functions"]}
+    return sorted(d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d["vendor"] is not None
+                  and "%04x:%04x" % (d["vendor"], d["device"]) in ids)
+
+
+def _plan_already_bound(facts, target, root, plan, opts):
+    """The card is bound to vfio-pci now: skip, note or make the boot-time binding optional. True when the plan is done."""
+    fns = _card_functions(target)
+    ids = _function_ids(fns)
+    mine_bdfs = {fn["bdf"] for fn in target["functions"]}
+    has_twin = any(d["bdf"] not in mine_bdfs and d["vendor"] is not None
+                   and "%04x:%04x" % (d["vendor"], d["device"]) in ids for d in facts["pci"])
+    # an id-wide binding also takes an identical second card: that is the refusal further down, not "already OK"
+    # a host driver that can claim the card makes ids alone worthless: vfio-pci must be ordered first
+    claimers = _claiming_drivers(root) if target["vendor"] == "nvidia" else ["amdgpu", "radeon"]
+    ordered = not claimers or _softdeps_listed(target, root)
+    idwide = has_twin and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
+    how = "" if idwide else _persistent_binding(facts, target, fns, ids, root, by_id=not has_twin,
+                                                ordered=ordered)
+    if how:
+        plan["skipped"].append("The card is already bound to vfio-pci and set to bind at boot (%s)" % how)
+        return True
+    if not idwide and not claimers and _softdeps_listed(target, root):
+        plan["skipped"].append("The card is already bound to vfio-pci and no host driver claims it at boot")
+        plan["notes"].append("Proxmox hands the card to vfio-pci when the VM starts; no host driver claims it "
+                             "at boot.")
+        return True
+    # a driver that can claim the card (and AMD's reset bug) needs the early binding: no optional skip
+    if not idwide and not claimers and not opts.get("write_optional"):
+        plan["optional"] = True
+        plan["warnings"].append(
+            "The card is bound to vfio-pci now, but nothing we can find binds it at boot; it may be lost "
+            "after a reboot. Writing a boot-time binding is optional and skipped unless you ask for it.")
+        return True
+    return False
+
+
+def _plan_bind_by_address(facts, target, root, plan):
+    """Another device has the same PCI id: bind this card by address from an initramfs script."""
+    fns = _card_functions(target)
+    ids = _function_ids(fns)
+    twins = _twins_of(facts, target, ids)
+    existing = _existing_ids_lines(root)
+    earlier = _live_ids(_read(_p(root, MODPROBE_FILE)) or "")  # ids this tool bound for a card set up before
+    softdep = "".join("softdep %s pre: vfio-pci\n" % n for n in _softdeps(target))
+    mine = {fn["bdf"] for fn in target["functions"]}
+    plan["binding"] = "per-device"
+    plan["notes"].append(
+        "Another device on this host has the same PCI id (%s). Binding by id would take it too, so this "
+        "card is bound by address instead." % ", ".join(twins))
+    covered = [p for p, text in existing if any(i in _live_ids(text) for i in ids)]
+    if covered:
+        plan["refusals"].append(
+            "%s already binds the id %s to vfio-pci for every device with that id, including the other "
+            "card. Remove that id from the file first." % (covered[0], ", ".join(ids)))
+        return
+    keep = [i for i in earlier if i not in ids]
+    head = HEADER + ("options vfio-pci ids=%s disable_vga=1\n" % ",".join(keep) if keep else "")
+    _add_change(plan, root, MODPROBE_FILE, head + softdep, "Load vfio-pci before the GPU drivers")
+    rows = _bind_entries(_read(_p(root, BIND_SCRIPT)))
+    for fn in fns:
+        row = (fn["bdf"], "0x%04x" % fn["vendor"], "0x%04x" % fn["device"], _class_prefix(fn),
+               _subsys(fn.get("subsys_vendor")), _subsys(fn.get("subsys_device")))
+        rows = [r for r in rows if r[:3] != row[:3]]
+        rows.append(row)
+        same = [d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d.get("vendor") == fn["vendor"]
+                and d.get("device") == fn["device"] and d.get("subsys_vendor") == fn.get("subsys_vendor")
+                and d.get("subsys_device") == fn.get("subsys_device")]
+        if same and fn["bdf"].endswith(".0"):
+            plan["warnings"].append(
+                "%s has the same ids as %s, even the subsystem ids, so the card is told apart by its slot "
+                "only. Do not move either card to another slot." % (fn["bdf"][:-2], ", ".join(same)))
+    _add_change(plan, root, BIND_SCRIPT, _bind_script(rows),
+                "Bind this card by PCI address early in boot", mode=0o755)
+
+
+def _plan_bind_by_ids(target, root, plan):
+    """No other device has the card's PCI id: bind it by id from modprobe.d."""
+    ids = _function_ids(_card_functions(target))
+    existing = _existing_ids_lines(root)
+    earlier = _live_ids(_read(_p(root, MODPROBE_FILE)) or "")  # ids this tool bound for a card set up before
+    softdep = "".join("softdep %s pre: vfio-pci\n" % n for n in _softdeps(target))
+    plan["binding"] = "ids"
+    merged_all = True
+    for path, text in existing:
+        new = _merge_ids(text, ids)
+        if new != text:
+            merged_all = False
+            _add_change(plan, root, path, new, "Add the card's ids to your existing vfio-pci line")
+    body = HEADER + softdep
+    if not existing:
+        union = earlier + [i for i in ids if i not in earlier]
+        if len(union) > len(ids):
+            plan["notes"].append("The ids of the card you set up before stay bound: " + ", ".join(earlier) + ".")
+        body = HEADER + "options vfio-pci ids=%s disable_vga=1\n" % ",".join(union) + softdep
+    elif merged_all:
+        plan["notes"].append("The card's ids are already in your vfio-pci options.")
+    _add_change(plan, root, MODPROBE_FILE, body, "Bind the card to vfio-pci before its driver loads")
+
+
 def plan_binding(facts, target, root, plan, opts=None):
     opts = opts or {}
     if target["vendor"] == "intel":
         plan_intel_binding(facts, target, root, plan)
         return
-    fns = [f for f in target["functions"] if bindable(f, target["vendor"])]
-    ids = []
-    for fn in fns:
-        ident = "%04x:%04x" % (fn["vendor"], fn["device"])
-        if ident not in ids:
-            ids.append(ident)
+    fns = _card_functions(target)
+    ids = _function_ids(fns)
     drivers = {d["bdf"]: d.get("driver") for d in facts["pci"]}
-    if fns and all(drivers.get(f["bdf"]) == "vfio-pci" for f in fns):
-        mine_bdfs = {fn["bdf"] for fn in target["functions"]}
-        has_twin = any(d["bdf"] not in mine_bdfs and d["vendor"] is not None
-                       and "%04x:%04x" % (d["vendor"], d["device"]) in ids for d in facts["pci"])
-        # an id-wide binding also takes an identical second card: that is the refusal further down, not "already OK"
-        # a host driver that can claim the card makes ids alone worthless: vfio-pci must be ordered first
-        claimers = _claiming_drivers(root) if target["vendor"] == "nvidia" else ["amdgpu", "radeon"]
-        ordered = not claimers or _softdeps_listed(target, root)
-        idwide = has_twin and bool(_persistent_binding(facts, target, fns, ids, root, ids_only=True))
-        how = "" if idwide else _persistent_binding(facts, target, fns, ids, root, by_id=not has_twin,
-                                                    ordered=ordered)
-        if how:
-            plan["skipped"].append("The card is already bound to vfio-pci and set to bind at boot (%s)" % how)
-            return
-        if not idwide and not claimers and _softdeps_listed(target, root):
-            plan["skipped"].append("The card is already bound to vfio-pci and no host driver claims it at boot")
-            plan["notes"].append("Proxmox hands the card to vfio-pci when the VM starts; no host driver claims it "
-                                 "at boot.")
-            return
-        # a driver that can claim the card (and AMD's reset bug) needs the early binding: no optional skip
-        if not idwide and not claimers and not opts.get("write_optional"):
-            plan["optional"] = True
-            plan["warnings"].append(
-                "The card is bound to vfio-pci now, but nothing we can find binds it at boot; it may be lost "
-                "after a reboot. Writing a boot-time binding is optional and skipped unless you ask for it.")
-            return
-    mine = {fn["bdf"] for fn in target["functions"]}
-    twins = sorted(d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d["vendor"] is not None
-                   and "%04x:%04x" % (d["vendor"], d["device"]) in ids)
-    existing = _existing_ids_lines(root)
-    earlier = _live_ids(_read(_p(root, MODPROBE_FILE)) or "")  # ids this tool bound for a card set up before
-    softdep = "".join("softdep %s pre: vfio-pci\n" % n for n in _softdeps(target))
-    if twins:
-        plan["binding"] = "per-device"
-        plan["notes"].append(
-            "Another device on this host has the same PCI id (%s). Binding by id would take it too, so this "
-            "card is bound by address instead." % ", ".join(twins))
-        covered = [p for p, text in existing if any(i in _live_ids(text) for i in ids)]
-        if covered:
-            plan["refusals"].append(
-                "%s already binds the id %s to vfio-pci for every device with that id, including the other "
-                "card. Remove that id from the file first." % (covered[0], ", ".join(ids)))
-            return
-        keep = [i for i in earlier if i not in ids]
-        head = HEADER + ("options vfio-pci ids=%s disable_vga=1\n" % ",".join(keep) if keep else "")
-        _add_change(plan, root, MODPROBE_FILE, head + softdep, "Load vfio-pci before the GPU drivers")
-        rows = _bind_entries(_read(_p(root, BIND_SCRIPT)))
-        for fn in fns:
-            row = (fn["bdf"], "0x%04x" % fn["vendor"], "0x%04x" % fn["device"], _class_prefix(fn),
-                   _subsys(fn.get("subsys_vendor")), _subsys(fn.get("subsys_device")))
-            rows = [r for r in rows if r[:3] != row[:3]]
-            rows.append(row)
-            same = [d["bdf"] for d in facts["pci"] if d["bdf"] not in mine and d.get("vendor") == fn["vendor"]
-                    and d.get("device") == fn["device"] and d.get("subsys_vendor") == fn.get("subsys_vendor")
-                    and d.get("subsys_device") == fn.get("subsys_device")]
-            if same and fn["bdf"].endswith(".0"):
-                plan["warnings"].append(
-                    "%s has the same ids as %s, even the subsystem ids, so the card is told apart by its slot "
-                    "only. Do not move either card to another slot." % (fn["bdf"][:-2], ", ".join(same)))
-        _add_change(plan, root, BIND_SCRIPT, _bind_script(rows),
-                    "Bind this card by PCI address early in boot", mode=0o755)
+    if fns and all(drivers.get(f["bdf"]) == "vfio-pci" for f in fns) and _plan_already_bound(facts, target, root, plan, opts):
+        return
+    if _twins_of(facts, target, ids):
+        _plan_bind_by_address(facts, target, root, plan)
     else:
-        plan["binding"] = "ids"
-        merged_all = True
-        for path, text in existing:
-            new = _merge_ids(text, ids)
-            if new != text:
-                merged_all = False
-                _add_change(plan, root, path, new, "Add the card's ids to your existing vfio-pci line")
-        body = HEADER + softdep
-        if not existing:
-            union = earlier + [i for i in ids if i not in earlier]
-            if len(union) > len(ids):
-                plan["notes"].append("The ids of the card you set up before stay bound: " + ", ".join(earlier) + ".")
-            body = HEADER + "options vfio-pci ids=%s disable_vga=1\n" % ",".join(union) + softdep
-        elif merged_all:
-            plan["notes"].append("The card's ids are already in your vfio-pci options.")
-        _add_change(plan, root, MODPROBE_FILE, body, "Bind the card to vfio-pci before its driver loads")
+        _plan_bind_by_ids(target, root, plan)
 
 
 def _class_prefix(fn):
@@ -1208,44 +1244,47 @@ def _check(cid, label, status, detail="", fix=""):
     return {"id": cid, "label": label, "status": status, "detail": detail, "fix": fix}
 
 
-def verify_host(target, root="/", run=default_run):
-    """Post-reboot checks. status is ok, fail, warn or info; fix says where to go on a failure."""
-    moved = check_identity(root, target.get("identity"))
-    if moved:
-        return [_check("identity", "The chosen card is still there", "fail", moved, "scan")]
-    probe = new_plan()
-    if not _guard_target(dict(target, mismatch=""), probe):
-        return [_check("identity", "The chosen card is still there", "fail", probe["refusals"][0], "scan")]
-    facts = detect_facts(root, run)
-    out = []
+def _check_cmdline(facts, target, root):
     configured = configured_cmdline(facts["bootloader"], root)
     live = _tokens(facts["cmdline"])
     wanted = wanted_kernel_args(facts, target)
     not_live = [a for a in wanted if _has_arg(configured, a) and not _has_arg(live, a)]
     absent = [a for a in wanted if not _has_arg(live, a)]
-    out.append(_check("cmdline", "Kernel arguments are active",
-                      "ok" if not absent else "fail",
-                      "Reboot the host: configured but not active: " + " ".join(not_live) if not_live else
-                      "Missing: " + " ".join(absent) if absent else "", "host" if absent else ""))
+    return [_check("cmdline", "Kernel arguments are active",
+                   "ok" if not absent else "fail",
+                   "Reboot the host: configured but not active: " + " ".join(not_live) if not_live else
+                   "Missing: " + " ".join(absent) if absent else "", "host" if absent else "")]
+
+
+def _check_iommu(facts):
     active = facts["iommu_groups"] > 0
-    out.append(_check("iommu", "IOMMU is on", "ok" if active else "fail",
-                      "" if active else ("The firmware table is there but the kernel did not enable it: check the "
-                                         "kernel arguments." if facts["dmar"] or facts["ivrs"] else
-                                         "The motherboard hides the IOMMU from the OS: turn on VT-d / AMD IOMMU in the BIOS."),
-                      "" if active else ("host" if facts["dmar"] or facts["ivrs"] else "bios")))
+    return [_check("iommu", "IOMMU is on", "ok" if active else "fail",
+                   "" if active else ("The firmware table is there but the kernel did not enable it: check the "
+                                      "kernel arguments." if facts["dmar"] or facts["ivrs"] else
+                                      "The motherboard hides the IOMMU from the OS: turn on VT-d / AMD IOMMU in the BIOS."),
+                   "" if active else ("host" if facts["dmar"] or facts["ivrs"] else "bios"))]
+
+
+def _check_irq(run):
     _, dmesg = run(["dmesg"])
-    if dmesg:
-        remap = re.search(r"Interrupt remapping enabled|Enabled IRQ remapping", dmesg, re.I)
-        out.append(_check("irq", "Interrupt remapping", "ok" if remap else "warn",
-                          "" if remap else "Not reported in dmesg. Passthrough still works but is less isolated."))
-    mine = {f["bdf"] for f in target["functions"]}
-    devs = {d["bdf"]: d for d in facts["pci"]}
+    if not dmesg:
+        return []
+    remap = re.search(r"Interrupt remapping enabled|Enabled IRQ remapping", dmesg, re.I)
+    return [_check("irq", "Interrupt remapping", "ok" if remap else "warn",
+                   "" if remap else "Not reported in dmesg. Passthrough still works but is less isolated.")]
+
+
+def _check_driver(target, devs):
     wrong = [f["bdf"] + " (" + (devs.get(f["bdf"], {}).get("driver") or "no driver") + ")"
              for f in target["functions"]
              if bindable(f, target["vendor"]) and devs.get(f["bdf"], {}).get("driver") != "vfio-pci"]
-    out.append(_check("driver", "The card is held by vfio-pci", "ok" if not wrong else "fail",
-                      "" if not wrong else "Not bound: " + ", ".join(wrong) + ". Go back to the host step and reboot after applying.",
-                      "" if not wrong else "host"))
+    return [_check("driver", "The card is held by vfio-pci", "ok" if not wrong else "fail",
+                   "" if not wrong else "Not bound: " + ", ".join(wrong) + ". Go back to the host step and reboot after applying.",
+                   "" if not wrong else "host")]
+
+
+def _check_group(facts, target, devs):
+    mine = {f["bdf"] for f in target["functions"]}
     group = (devs.get(target["bdf"] + ".0") or {}).get("group")
     stray = []
     storage_net = []
@@ -1258,40 +1297,74 @@ def verify_host(target, root="/", run=default_run):
             if (cls >> 8) in (0x01, 0x02):
                 storage_net.append(d["bdf"])
     if group is None:
-        out.append(_check("group", "IOMMU group holds only the card", "fail", "The card has no IOMMU group.", "bios"))
-    else:
-        detail = ""
-        if stray:
-            detail = ("Also in the group: " + ", ".join(stray) + ". Move the card to another slot first. "
-                      "Some guides suggest the pcie_acs_override kernel option to split the group. It only hides the "
-                      "problem and can let the VM reach those devices, so this tool never uses it.")
-            if storage_net:
-                detail += " The group holds storage or network devices (" + ", ".join(storage_net) + ")."
-        out.append(_check("group", "IOMMU group holds only the card", "fail" if stray else "ok", detail,
-                          "acs" if stray else ""))
+        return [_check("group", "IOMMU group holds only the card", "fail", "The card has no IOMMU group.", "bios")]
+    detail = ""
+    if stray:
+        detail = ("Also in the group: " + ", ".join(stray) + ". Move the card to another slot first. "
+                  "Some guides suggest the pcie_acs_override kernel option to split the group. It only hides the "
+                  "problem and can let the VM reach those devices, so this tool never uses it.")
+        if storage_net:
+            detail += " The group holds storage or network devices (" + ", ".join(storage_net) + ")."
+    return [_check("group", "IOMMU group holds only the card", "fail" if stray else "ok", detail,
+                   "acs" if stray else "")]
+
+
+def _check_modules(root):
     mods = _read(_p(root, "/proc/modules")) or ""
     loaded = {ln.split()[0] for ln in mods.splitlines() if ln.strip()}
     missing_mods = [m for m in VFIO_MODULES if m not in loaded]
-    out.append(_check("modules", "VFIO modules are loaded", "ok" if not missing_mods else "fail",
-                      "Not loaded: " + ", ".join(missing_mods) if missing_mods else "", "host" if missing_mods else ""))
+    return [_check("modules", "VFIO modules are loaded", "ok" if not missing_mods else "fail",
+                   "Not loaded: " + ", ".join(missing_mods) if missing_mods else "", "host" if missing_mods else "")]
+
+
+def _check_unsafe(root):
     unsafe = (_read(_p(root, "/sys/module/vfio_iommu_type1/parameters/allow_unsafe_interrupts")) or "").strip()
-    if unsafe == "Y":
-        out.append(_check("unsafe", "Interrupt isolation", "warn",
-                          "allow_unsafe_interrupts is on (weakened isolation). This tool does not change it."))
-    if target.get("reset", "none").startswith("vendor-reset"):
-        method = (_read(_p(root, "/sys/bus/pci/devices/%s.0/reset_method" % target["bdf"])) or "").split()
-        ok = "device_specific" in method
-        out.append(_check("reset", "Reset method (AMD reset bug)", "ok" if ok else "warn",
-                          "" if ok else "vendor-reset is not active for this card, so it may only work once per host boot.",
-                          "" if ok else "host"))
+    if unsafe != "Y":
+        return []
+    return [_check("unsafe", "Interrupt isolation", "warn",
+                   "allow_unsafe_interrupts is on (weakened isolation). This tool does not change it.")]
+
+
+def _check_reset(target, root):
+    if not target.get("reset", "none").startswith("vendor-reset"):
+        return []
+    method = (_read(_p(root, "/sys/bus/pci/devices/%s.0/reset_method" % target["bdf"])) or "").split()
+    ok = "device_specific" in method
+    return [_check("reset", "Reset method (AMD reset bug)", "ok" if ok else "warn",
+                   "" if ok else "vendor-reset is not active for this card, so it may only work once per host boot.",
+                   "" if ok else "host")]
+
+
+def _check_bar(target, root):
     bar = _bar_size(_p(root, "/sys/bus/pci/devices/%s.0/resource" % target["bdf"]), 0 if target["vendor"] == "amd" else 1)
-    if bar is not None:
-        label = "BAR size"
-        if bar > BAR_WARN_BYTES:
-            out.append(_check("bar", label, "warn", "%d MiB. Larger than 256 MiB is untested for macOS guests; "
-                              "turn Resizable BAR off in the BIOS if the VM will not start." % (bar // 1048576)))
-        else:
-            out.append(_check("bar", label, "info", "%d MiB" % (bar // 1048576)))
+    if bar is None:
+        return []
+    label = "BAR size"
+    if bar > BAR_WARN_BYTES:
+        return [_check("bar", label, "warn", "%d MiB. Larger than 256 MiB is untested for macOS guests; "
+                       "turn Resizable BAR off in the BIOS if the VM will not start." % (bar // 1048576))]
+    return [_check("bar", label, "info", "%d MiB" % (bar // 1048576))]
+
+
+def verify_host(target, root="/", run=default_run):
+    """Post-reboot checks. status is ok, fail, warn or info; fix says where to go on a failure."""
+    moved = check_identity(root, target.get("identity"))
+    if moved:
+        return [_check("identity", "The chosen card is still there", "fail", moved, "scan")]
+    probe = new_plan()
+    if not _guard_target(dict(target, mismatch=""), probe):
+        return [_check("identity", "The chosen card is still there", "fail", probe["refusals"][0], "scan")]
+    facts = detect_facts(root, run)
+    devs = {d["bdf"]: d for d in facts["pci"]}
+    out = _check_cmdline(facts, target, root)
+    out += _check_iommu(facts)
+    out += _check_irq(run)
+    out += _check_driver(target, devs)
+    out += _check_group(facts, target, devs)
+    out += _check_modules(root)
+    out += _check_unsafe(root)
+    out += _check_reset(target, root)
+    out += _check_bar(target, root)
     return out
 
 
@@ -1517,77 +1590,136 @@ def _emit(obj):
     sys.stdout.write(json.dumps(obj, indent=2, sort_keys=True) + "\n")
 
 
+def _cmd_facts(root, payload):
+    _emit(detect_facts(root))
+
+
+def _cmd_target(root, payload):
+    _emit(build_target(root, payload["bdf"], payload["vendor"], payload.get("reset", "none"),
+                       payload.get("identity")))
+
+
+def _cmd_identity(root, payload):
+    _emit(identity_of(root, payload["bdf"]) or {})
+
+
+def _cmd_mappings(root, payload):
+    _emit({k: sorted(v) for k, v in load_mappings(root).items()})
+
+
+def _cmd_holds(root, payload):
+    print("yes" if cfg_holds_card(parse_config(payload["cfg_raw"]), payload["bdf"], load_mappings(root)) else "no")
+
+
+def _cmd_lxc(root, payload):
+    for ctid, node in lxc_gpu_users(root):
+        print("%d %s" % (ctid, node))
+
+
+def _cmd_record_write(root, payload):
+    _emit(record_write(payload))
+
+
+def _cmd_vm_restore(root, payload):
+    _emit(vm_restore(payload["record"], parse_config(payload["cfg_raw"])))
+
+
+def _cmd_vm_stale(root, payload):
+    print("1" if record_vm_changed(payload["record"], parse_config(payload["cfg_raw"])) else "0")
+
+
+def _cmd_step(root, payload):
+    state = load_state(root) or new_state()
+    (goto_step(state, payload["step"]) if payload.get("goto")
+     else complete_step(state, payload["step"], bool(payload.get("skipped"))))
+    save_state(state, root)
+
+
+def _cmd_plan(root, payload):
+    _emit(plan_host(detect_facts(root), payload["target"], payload.get("opts"), root))
+
+
+def _cmd_preview(root, payload):
+    sys.stdout.write(render_preview(payload) + "\n")
+
+
+def _cmd_apply(root, payload):
+    state = load_state(root) or new_state()
+    res = apply_plan(payload["plan"], state, root, confirmed=bool(payload.get("confirmed")))
+    _emit(res)
+    return 0 if res["ok"] else 1
+
+
+def _cmd_undo(root, payload):
+    state = load_state(root)
+    if state is None:
+        _emit({"ok": True, "restored": [], "errors": [], "kept": [], "reboot_required": False})
+        return 0
+    res = undo_host(state, root)
+    _emit(res)
+    return 0 if res["ok"] else 1
+
+
+def _cmd_verify(root, payload):
+    _emit(verify_host(payload["target"], root))
+
+
+def _cmd_mark_reboot(root, payload):
+    state = load_state(root) or new_state()
+    goto_step(state, 5)
+    state["reboot_needed"] = True
+    state["boot_id"] = boot_id(root)
+    save_state(state, root)
+
+
+def _cmd_rebooted(root, payload):
+    print("yes" if rebooted_since_apply(load_state(root) or new_state(), root) else "no")
+
+
+def _cmd_reboot_pending(root, payload):
+    print("yes" if reboot_pending(load_state(root) or new_state(), root) else "no")
+
+
+def _cmd_state(root, payload):
+    _emit(load_state(root) or new_state())
+
+
+def _cmd_state_save(root, payload):
+    state = {**(load_state(root) or new_state()), **payload}
+    save_state(state, root)
+
+
+def _cmd_hint_set(root, payload):
+    set_login_hint(load_state(root) or new_state(), root)
+
+
+def _cmd_hint_clear(root, payload):
+    clear_login_hint(root)
+
+
+# command name -> handler(root, payload). A handler returns an exit code, or None for 0. No command checks its argument count.
+COMMANDS = {
+    "facts": _cmd_facts, "target": _cmd_target, "identity": _cmd_identity, "mappings": _cmd_mappings, "holds": _cmd_holds,
+    "lxc": _cmd_lxc, "record-write": _cmd_record_write, "vm-restore": _cmd_vm_restore, "vm-stale": _cmd_vm_stale,
+    "step": _cmd_step, "plan": _cmd_plan, "preview": _cmd_preview, "apply": _cmd_apply, "undo": _cmd_undo, "verify": _cmd_verify,
+    "mark-reboot": _cmd_mark_reboot, "rebooted": _cmd_rebooted, "reboot-pending": _cmd_reboot_pending, "state": _cmd_state,
+    "state-save": _cmd_state_save, "hint-set": _cmd_hint_set, "hint-clear": _cmd_hint_clear,
+}
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     root = os.environ.get("GPU_ROOT", "/")
-    payload = json.loads(sys.stdin.read() or "{}") if cmd not in ("facts", "state", "hint-clear", "undo", "reboot-pending", "mark-reboot", "rebooted") else {}
-    if cmd == "facts":
-        _emit(detect_facts(root))
-    elif cmd == "target":
-        _emit(build_target(root, payload["bdf"], payload["vendor"], payload.get("reset", "none"),
-                           payload.get("identity")))
-    elif cmd == "identity":
-        _emit(identity_of(root, payload["bdf"]) or {})
-    elif cmd == "mappings":
-        _emit({k: sorted(v) for k, v in load_mappings(root).items()})
-    elif cmd == "holds":
-        print("yes" if cfg_holds_card(parse_config(payload["cfg_raw"]), payload["bdf"], load_mappings(root)) else "no")
-    elif cmd == "lxc":
-        for ctid, node in lxc_gpu_users(root):
-            print("%d %s" % (ctid, node))
-    elif cmd == "record-write":
-        _emit(record_write(payload))
-    elif cmd == "vm-restore":
-        _emit(vm_restore(payload["record"], parse_config(payload["cfg_raw"])))
-    elif cmd == "vm-stale":
-        print("1" if record_vm_changed(payload["record"], parse_config(payload["cfg_raw"])) else "0")
-    elif cmd == "step":
-        state = load_state(root) or new_state()
-        (goto_step(state, payload["step"]) if payload.get("goto")
-         else complete_step(state, payload["step"], bool(payload.get("skipped"))))
-        save_state(state, root)
-    elif cmd == "plan":
-        _emit(plan_host(detect_facts(root), payload["target"], payload.get("opts"), root))
-    elif cmd == "preview":
-        sys.stdout.write(render_preview(payload) + "\n")
-    elif cmd == "apply":
-        state = load_state(root) or new_state()
-        res = apply_plan(payload["plan"], state, root, confirmed=bool(payload.get("confirmed")))
-        _emit(res)
-        return 0 if res["ok"] else 1
-    elif cmd == "undo":
-        state = load_state(root)
-        if state is None:
-            _emit({"ok": True, "restored": [], "errors": [], "kept": [], "reboot_required": False})
-            return 0
-        res = undo_host(state, root)
-        _emit(res)
-        return 0 if res["ok"] else 1
-    elif cmd == "verify":
-        _emit(verify_host(payload["target"], root))
-    elif cmd == "mark-reboot":
-        state = load_state(root) or new_state()
-        goto_step(state, 5)
-        state["reboot_needed"] = True
-        state["boot_id"] = boot_id(root)
-        save_state(state, root)
-    elif cmd == "rebooted":
-        print("yes" if rebooted_since_apply(load_state(root) or new_state(), root) else "no")
-    elif cmd == "reboot-pending":
-        print("yes" if reboot_pending(load_state(root) or new_state(), root) else "no")
-    elif cmd == "state":
-        _emit(load_state(root) or new_state())
-    elif cmd == "state-save":
-        state = {**(load_state(root) or new_state()), **payload}
-        save_state(state, root)
-    elif cmd == "hint-set":
-        set_login_hint(load_state(root) or new_state(), root)
-    elif cmd == "hint-clear":
-        clear_login_hint(root)
-    else:
-        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|vm-stale|step|plan|preview|apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
+    payload = {}
+    if cmd not in ("facts", "state", "hint-clear", "undo", "reboot-pending", "mark-reboot", "rebooted"):
+        payload = json.loads(sys.stdin.read() or "{}")
+    handler = COMMANDS.get(cmd)
+    if handler is None:
+        sys.stderr.write("usage: host_setup.py facts|target|identity|mappings|holds|lxc|record-write|vm-restore|vm-stale|step|plan|preview|"
+                         "apply|undo|verify|state|state-save|reboot-pending|rebooted|mark-reboot|hint-set|hint-clear\n")
         return 64
-    return 0
+    code = handler(root, payload)
+    return 0 if code is None else code
 
 
 if __name__ == "__main__":

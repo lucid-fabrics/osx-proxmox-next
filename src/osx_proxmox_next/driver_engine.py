@@ -18,13 +18,15 @@ from pathlib import Path
 try:
     from .driver_state import (  # noqa: F401 - re-exported: the package reaches these through this module
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update,
+        release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 except ImportError:      # run as a script by the bash installer: driver_state.py sits next to this file
     from driver_state import (  # noqa: F401
         STATE_DIR, STEPS, acquire_lock, add_disk, begin_step, card_changed, clear_update, end_step, fail_update, failure_text,
-        forget_disk, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update, release_lock, reset_for_resume, resume_index,
+        changes_disks, forget_disk, join_text, lock_holder, lock_path, new_update, plan_steps, read_json as _read_json, read_update,
+        release_lock, reset_for_resume, resume_index,
         state_dir, step_titles, undo_titles, unfinished, update_path, write_json as _write_json, write_update,
     )
 
@@ -57,6 +59,7 @@ REFUSE_MAPS_HELD = ("Device maps still hold the disks of VM %s (%s), so they can
 FIRST_BOOT_STUCK = 600      # seconds without disk I/O in the first boot, with no result, before the Mac counts as stuck
 INTEL_BOOT_NOTE = ("The update ends with a first boot of macOS with the iGPU. If this Mac already stops at startup with "
                    "the iGPU (a kernel panic), the update cannot finish: fix that first.")
+STALE_RECORD = "the Mac was rolled back since its last driver update, so the version that update recorded is not its own"
 FROM_RECORD = "(from the last update)"      # shown after versions that the record gave because the Mac's disk could not be read
 UP_TO_DATE = "Up to date: nothing to do."
 NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothing can undo the update if it goes wrong. "
@@ -64,7 +67,8 @@ NO_SNAPSHOT_WARNING = ("The storage of this Mac cannot take snapshots, so nothin
 TEXTS = {"REFUSE_INSTALLING": REFUSE_INSTALLING, "REFUSE_CARD_SETUP": REFUSE_CARD_SETUP, "REFUSE_LOCKED": REFUSE_LOCKED,
          "REFUSE_NO_CARD": REFUSE_NO_CARD, "REFUSE_UNKNOWN_KIND": REFUSE_UNKNOWN_KIND, "REFUSE_NOT_MAC": REFUSE_NOT_MAC,
          "REFUSE_NOTHING_TO_UNDO": REFUSE_NOTHING_TO_UNDO, "UP_TO_DATE": UP_TO_DATE,
-         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
+         "NO_SNAPSHOT_WARNING": NO_SNAPSHOT_WARNING, "INTEL_BOOT_NOTE": INTEL_BOOT_NOTE, "FROM_RECORD": FROM_RECORD,
+         "STALE_RECORD": STALE_RECORD, "REFUSE_KIND_CHANGED": REFUSE_KIND_CHANGED,
          "REFUSE_CARD_CHANGED": REFUSE_CARD_CHANGED, "REFUSE_NEWER_SNAPSHOTS": REFUSE_NEWER_SNAPSHOTS,
          "REFUSE_NOT_STOPPED": REFUSE_NOT_STOPPED, "REFUSE_MAPS_HELD": REFUSE_MAPS_HELD}
 VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
@@ -277,21 +281,22 @@ def driver_line(kind, installed):
 
 # ── plan lines ───────────────────────────────────────────────────────
 
-def change_lines(kind, installed, target):
+def change_lines(kind, installed, target, reinstall=True):
     """One line per component: what changes, in plain words. A component that already has the target version is
-    "reinstalled" only when nothing else is behind (the whole driver goes in again); next to one that is behind it is
-    "already X, kept", except on Intel, where the kext and the graphics package always go in together."""
+    "reinstalled" only when the user asked for a reinstall and nothing else is behind (the whole driver goes in again);
+    otherwise it is "already X, kept" (on Intel next to one that is behind the kext and the graphics package go in
+    together). A plan that will change nothing never says "reinstalled"."""
     lines = []
     all_current = judge(installed, target)["state"] == "current"
     for name, want in target.items():
         have = installed.get(name, "")
         if not have:
             lines.append("%s: installed version unknown, to %s" % (name, want))
-        elif have == want and all_current:
+        elif have == want and all_current and reinstall:
             lines.append("%s: %s, reinstalled" % (name, want))
         elif have == want:
             lines.append("%s: already %s, %s" % (name, want, "installed again with the update"
-                                                  if kind == "intel" else "kept"))
+                                                  if kind == "intel" and not all_current else "kept"))
         elif compare(have, want) > 0:
             lines.append("%s: %s is newer than %s, kept" % (name, have, want))
         else:
@@ -338,18 +343,39 @@ def before_facts(kind, snapshot, supported=True, older=(), undo=""):
 
 def todo_steps(kind, name, running, state):
     """The steps a Finish still has to do: the plan's steps without the ones the stopped run finished."""
-    done = {r["id"] for r in (state or {}).get("steps", []) if r.get("state") == "done"}
-    return [(sid, title) for sid, title in plan_steps(kind, name, running) if sid not in done]
+    rows = (state or {}).get("steps", [])
+    done = {r["id"] for r in rows if r.get("state") == "done"}
+    listed = {r["id"] for r in rows}      # the run lists its own steps: a run that found the Mac stopped has no "Stop the Mac"
+    # a Mac that runs now is stopped first, whatever the run recorded, while a step that changes its disks is to do
+    return [(sid, title) for sid, title in plan_steps(kind, name, running)
+            if (sid == "stop" and running and changes_disks(state or {}))
+            or (sid not in done and (not listed or sid in listed))]
 
 
-def finish_facts(kind, snapshot="", undo=""):
-    """What "Finish" does, for a run that stopped. It saves no new snapshot: the one of the run stays."""
+def snapshot_pending(todo):
+    """True when the steps a Finish still has to do include the snapshot: the run was cut off before it."""
+    return any(sid == "snapshot" for sid, _title in todo)
+
+
+def finish_facts(kind, snapshot="", undo="", pending=None, supported=True):
+    """What "Finish" does, for a run that stopped. *pending* is the name of the snapshot the Finish will save, or None
+    when the run already got past that step (then the snapshot of the run stays and no new one is saved). The lines
+    come from the same step list the run follows, so they never promise what the run does not do."""
     lines = ["The Mac is stopped first when it runs."]
     if kind != "amd":
         lines.append("The card is taken off when a step needs it, and put back.")
-    lines.append("No new snapshot is saved: %s from before the update stays." % (snapshot or "the snapshot")
-                 if snapshot else "No new snapshot is saved: this update ran without one.")
-    lines.append(undo_line(undo))
+    if pending is not None:
+        if not supported:
+            lines.append(NO_SNAPSHOT_WARNING)
+        else:
+            lines.append("A snapshot called %s is saved first." % pending)
+        lines.append(undo_line(undo))
+    elif snapshot:
+        lines.append("No new snapshot is saved: %s from before the update stays." % snapshot)
+        lines.append(undo_line(undo))
+    else:
+        lines.append("No new snapshot is saved: this update ran without one.")
+        lines.append("Nothing can put this Mac back: this update has no driver snapshot.")
     return lines
 
 
@@ -518,83 +544,168 @@ def _emit(obj):
     sys.stdout.write(json.dumps(obj, indent=2, sort_keys=True) + "\n")
 
 
+def _cmd_record(argv):
+    _emit(read_record(argv[2]))
+
+
+def _cmd_write(argv):
+    _emit(write_record(argv[2], argv[3], json.loads(argv[4]), previous=json.loads(argv[5]) if len(argv) > 5 else None,
+                       snapshot=argv[6] if len(argv) > 7 else "", card=argv[7] if len(argv) > 7 else "",
+                       latest=json.loads(argv[8]) if len(argv) > 8 else None,
+                       fingerprint=argv[9] if len(argv) > 9 else ""))
+
+
+def _cmd_revert(argv):
+    return 0 if revert_record(argv[2]) else 1
+
+
+def _cmd_disk_read(argv):
+    return 0 if mark_disk_read(argv[2], json.loads(argv[3])) else 1
+
+
+def _cmd_component(argv):
+    _emit(component(argv[2], argv[3], *(argv[4:7] if len(argv) == 7 else ())))
+
+
+def _cmd_judge(argv):
+    _emit(judge(json.loads(argv[2]), json.loads(argv[3])))
+
+
+def _cmd_changes(argv):
+    sys.stdout.write("\n".join(change_lines(argv[2], json.loads(argv[3]), json.loads(argv[4]), argv[5:] == ["reinstall"])) + "\n")
+
+
+def _cmd_facts(argv):
+    flag = argv[4] if len(argv) > 4 and argv[4] in ("supported", "unsupported") else ""
+    rest = list(argv[5 if flag else 4:])
+    undo = next((a[len("undo="):] for a in rest if a.startswith("undo=")), "")
+    sys.stdout.write("\n".join(before_facts(argv[2], argv[3], flag != "unsupported",
+                                             [a for a in rest if not a.startswith("undo=")], undo)) + "\n")
+
+
+def _cmd_todo_steps(argv):
+    sys.stdout.write("\n".join("%s %s" % p for p in todo_steps(argv[3], argv[4], argv[5:] != ["stopped"], read_update(argv[2]))) + "\n")
+
+
+def _cmd_finish_facts(argv):
+    pending = argv[5] if len(argv) > 5 and argv[5] else None     # the snapshot the Finish will save, when it still has to
+    sys.stdout.write("\n".join(finish_facts(argv[2], argv[3] if len(argv) > 3 else "",
+                                             argv[4] if len(argv) > 4 else "", pending,
+                                             not (len(argv) > 6 and argv[6] == "unsupported"))) + "\n")
+
+
+def _cmd_steps(argv):
+    sys.stdout.write("\n".join("%s %s" % p for p in plan_steps(argv[2], argv[3], argv[4:] != ["stopped"])) + "\n")
+
+
+def _cmd_fingerprint(argv):
+    sys.stdout.write(volume_fingerprint(sys.stdin.read().split()) + "\n")
+
+
+def _cmd_trusted(argv):
+    return 0 if record_trusted(read_record(argv[2]), argv[3]) else 1
+
+
+def _cmd_stamp(argv):
+    return 0 if stamp_record(argv[2], argv[3]) else 1
+
+
+def _cmd_stale_maps(argv):
+    sys.stdout.write("\n".join(stale_maps(sys.stdin.read(), argv[2:])) + "\n")
+
+
+def _cmd_maps_held(argv):
+    sys.stdout.write(maps_held_text(argv[2], argv[3:]) + "\n")
+
+
+def _cmd_first_boot_text(argv):
+    sys.stdout.write(first_boot_text(argv[2], float(argv[3]), float(argv[4])) + "\n")
+
+
+def _cmd_snapshot_name(argv):
+    sys.stdout.write(snapshot_name() + "\n")
+
+
+def _cmd_snapshot_argv(argv):
+    sys.stdout.write("\n".join(snapshot_argv(argv[2], argv[3], argv[4])) + "\n")
+
+
+def _cmd_tool_snapshots(argv):
+    sys.stdout.write("\n".join(tool_snapshots(sys.stdin.read())) + "\n")
+
+
+def _cmd_snapshot_support(argv):
+    cfg = dict(line.split(": ", 1) for line in sys.stdin.read().splitlines() if ": " in line)
+    ok, why = snapshot_support(cfg, parse_storage_types(Path(argv[2]).read_text()))
+    sys.stdout.write(why + "\n")
+    return 0 if ok else 1
+
+
+def _cmd_text(argv):
+    sys.stdout.write(TEXTS[argv[2]] + "\n")
+
+
+def _cmd_from_igpu(argv):
+    record = from_igpu_state(argv[2], _read_json(Path(os.environ.get("IGPU_STATE_DIR") or IGPU_DIR) / ("%s.json" % int(argv[2]))))
+    if record:
+        write_record(argv[2], "intel", record["components"])
+    return 0 if record else 1
+
+
+def _cmd_compare(argv):
+    sys.stdout.write("%d\n" % compare(argv[2], argv[3]))
+
+
+def _cmd_unfinished(argv):
+    _emit(unfinished(argv[2]))
+
+
+def _cmd_update(argv):
+    return run_update_command(argv[1], argv[2:])
+
+
+def _at_least(count):
+    return lambda argv: len(argv) >= count
+
+
+# command name -> (accepted argument counts, handler(argv)). The counts are len(argv) as the bash installer passes it: a tuple of
+# the counts that are accepted, None for any, or a function of argv. A handler returns an exit code, or None for 0.
+COMMANDS = {
+    "record": ((3,), _cmd_record), "write": ((5, 6, 8, 9, 10), _cmd_write), "revert": ((3,), _cmd_revert),
+    "disk-read": ((4,), _cmd_disk_read), "component": ((4, 7), _cmd_component), "judge": ((4,), _cmd_judge),
+    "changes": ((5, 6), _cmd_changes), "facts": (_at_least(4), _cmd_facts), "todo-steps": ((5, 6), _cmd_todo_steps),
+    "finish-facts": (_at_least(3), _cmd_finish_facts), "steps": ((4, 5), _cmd_steps), "fingerprint": (None, _cmd_fingerprint),
+    "trusted": ((4,), _cmd_trusted), "stamp": ((4,), _cmd_stamp), "stale-maps": (None, _cmd_stale_maps),
+    "maps-held": (_at_least(4), _cmd_maps_held), "first-boot-text": ((5,), _cmd_first_boot_text),
+    "snapshot-name": (None, _cmd_snapshot_name), "snapshot-argv": ((5,), _cmd_snapshot_argv),
+    "tool-snapshots": (None, _cmd_tool_snapshots), "snapshot-support": ((3,), _cmd_snapshot_support),
+    "text": (lambda argv: len(argv) == 3 and argv[2] in TEXTS, _cmd_text), "from-igpu": ((3,), _cmd_from_igpu),
+    "compare": ((4,), _cmd_compare), "unfinished": ((3,), _cmd_unfinished),
+}
+COMMANDS.update({name: (None, _cmd_update) for name in (
+    "update-init", "update-resume", "update-begin", "update-end", "update-fail", "update-set", "update-clear", "update-get",
+    "update-add-disk", "update-forget-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
+    "snapshot-date", "newer-than", "all-snapshots")})
+
+
+def _accepts(counts, argv):
+    if counts is None:
+        return True
+    return counts(argv) if callable(counts) else len(argv) in counts
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
-    if cmd == "record" and len(argv) == 3:
-        _emit(read_record(argv[2]))
-    elif cmd == "write" and len(argv) in (5, 6, 8, 9, 10):
-        _emit(write_record(argv[2], argv[3], json.loads(argv[4]), previous=json.loads(argv[5]) if len(argv) > 5 else None,
-                           snapshot=argv[6] if len(argv) > 7 else "", card=argv[7] if len(argv) > 7 else "",
-                           latest=json.loads(argv[8]) if len(argv) > 8 else None,
-                           fingerprint=argv[9] if len(argv) > 9 else ""))
-    elif cmd == "revert" and len(argv) == 3:
-        return 0 if revert_record(argv[2]) else 1
-    elif cmd == "disk-read" and len(argv) == 4:
-        return 0 if mark_disk_read(argv[2], json.loads(argv[3])) else 1
-    elif cmd == "component" and len(argv) in (4, 7):
-        _emit(component(argv[2], argv[3], *(argv[4:7] if len(argv) == 7 else ())))
-    elif cmd == "judge" and len(argv) == 4:
-        _emit(judge(json.loads(argv[2]), json.loads(argv[3])))
-    elif cmd == "changes" and len(argv) == 5:
-        sys.stdout.write("\n".join(change_lines(argv[2], json.loads(argv[3]), json.loads(argv[4]))) + "\n")
-    elif cmd == "facts" and len(argv) >= 4:
-        flag = argv[4] if len(argv) > 4 and argv[4] in ("supported", "unsupported") else ""
-        rest = list(argv[5 if flag else 4:])
-        undo = next((a[len("undo="):] for a in rest if a.startswith("undo=")), "")
-        sys.stdout.write("\n".join(before_facts(argv[2], argv[3], flag != "unsupported",
-                                                 [a for a in rest if not a.startswith("undo=")], undo)) + "\n")
-    elif cmd == "todo-steps" and len(argv) in (5, 6):
-        sys.stdout.write("\n".join("%s %s" % p for p in todo_steps(argv[3], argv[4], argv[5:] != ["stopped"], read_update(argv[2]))) + "\n")
-    elif cmd == "finish-facts" and len(argv) >= 3:
-        sys.stdout.write("\n".join(finish_facts(argv[2], argv[3] if len(argv) > 3 else "",
-                                                 argv[4] if len(argv) > 4 else "")) + "\n")
-    elif cmd == "steps" and len(argv) in (4, 5):
-        sys.stdout.write("\n".join("%s %s" % p for p in plan_steps(argv[2], argv[3], argv[4:] != ["stopped"])) + "\n")
-    elif cmd == "fingerprint":
-        sys.stdout.write(volume_fingerprint(sys.stdin.read().split()) + "\n")
-    elif cmd == "trusted" and len(argv) == 4:
-        return 0 if record_trusted(read_record(argv[2]), argv[3]) else 1
-    elif cmd == "stamp" and len(argv) == 4:
-        return 0 if stamp_record(argv[2], argv[3]) else 1
-    elif cmd == "stale-maps":
-        sys.stdout.write("\n".join(stale_maps(sys.stdin.read(), argv[2:])) + "\n")
-    elif cmd == "maps-held" and len(argv) >= 4:
-        sys.stdout.write(maps_held_text(argv[2], argv[3:]) + "\n")
-    elif cmd == "first-boot-text" and len(argv) == 5:
-        sys.stdout.write(first_boot_text(argv[2], float(argv[3]), float(argv[4])) + "\n")
-    elif cmd == "snapshot-name":
-        sys.stdout.write(snapshot_name() + "\n")
-    elif cmd == "snapshot-argv" and len(argv) == 5:
-        sys.stdout.write("\n".join(snapshot_argv(argv[2], argv[3], argv[4])) + "\n")
-    elif cmd == "tool-snapshots":
-        sys.stdout.write("\n".join(tool_snapshots(sys.stdin.read())) + "\n")
-    elif cmd == "snapshot-support" and len(argv) == 3:
-        cfg = dict(line.split(": ", 1) for line in sys.stdin.read().splitlines() if ": " in line)
-        ok, why = snapshot_support(cfg, parse_storage_types(Path(argv[2]).read_text()))
-        sys.stdout.write(why + "\n")
-        return 0 if ok else 1
-    elif cmd == "text" and len(argv) == 3 and argv[2] in TEXTS:
-        sys.stdout.write(TEXTS[argv[2]] + "\n")
-    elif cmd == "from-igpu" and len(argv) == 3:
-        record = from_igpu_state(argv[2], _read_json(Path(os.environ.get("IGPU_STATE_DIR") or IGPU_DIR) / ("%s.json" % int(argv[2]))))
-        if record:
-            write_record(argv[2], "intel", record["components"])
-        return 0 if record else 1
-    elif cmd == "compare" and len(argv) == 4:
-        sys.stdout.write("%d\n" % compare(argv[2], argv[3]))
-    elif cmd == "unfinished" and len(argv) == 3:
-        _emit(unfinished(argv[2]))
-    elif cmd in ("update-init", "update-resume", "update-begin", "update-end", "update-fail", "update-set", "update-clear",
-                 "update-get", "update-add-disk", "update-forget-disk", "pending-kind", "failure-text", "card-changed", "kind", "replace-names",
-                 "snapshot-date",
-                 "newer-than", "all-snapshots"):
-        return run_update_command(cmd, argv[2:])
-    else:
-        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|finish-facts|todo-steps|steps|snapshot-name|"
-                         "snapshot-argv|tool-snapshots|snapshot-support|first-boot-text|text|from-igpu|compare|unfinished|update-*|failure-text|kind|"
+    entry = COMMANDS.get(cmd)
+    if entry is None or not _accepts(entry[0], argv):
+        sys.stderr.write("usage: driver_engine.py record|write|revert|component|judge|changes|facts|finish-facts|todo-steps|steps|"
+                         "snapshot-name|"
+                         "snapshot-argv|tool-snapshots|snapshot-support|first-boot-text|text|from-igpu|compare|unfinished|update-*|"
+                         "failure-text|kind|"
                          "fingerprint|trusted|stamp|stale-maps|maps-held ...\n")
         return 64
-    return 0
+    code = entry[1](argv)
+    return 0 if code is None else code
 
 
 def run_update_command(cmd, args):
@@ -630,10 +741,11 @@ def update_state_command(cmd, args):
         sys.stdout.write((state.get("kind", "") if state.get("phase") != "done" else "") + "\n")
         return 0
     if cmd == "update-init":     # kind name label step-name choice-json previous-json card original-json snapshot
-        state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7])
+        state = new_update(args[1], args[2], args[3], args[4], json.loads(args[5]), json.loads(args[6]), args[7],
+                           running=args[9:] != ["stopped"])      # the 9th is the original, the 10th "stopped" for a Mac that is
         state.update(original=json.loads(args[8]) if len(args) > 8 and args[8] else None)
-    elif cmd == "update-resume":
-        reset_for_resume(state)
+    elif cmd == "update-resume":                  # the 2nd is "running" for a Mac that runs now: it gets its stop row
+        reset_for_resume(state, args[1:] == ["running"])
         state.update(phase="running", error="")
     elif cmd in ("update-add-disk", "update-forget-disk"):
         if not state:                 # no run is going or cut off for this Mac: there is nothing to write a disk into

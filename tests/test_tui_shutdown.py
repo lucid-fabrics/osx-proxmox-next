@@ -208,7 +208,7 @@ async def test_a_second_shut_down_request_starts_no_second_qm_and_offers_force_s
     patch_qm(monkeypatch, qm)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
-        screen = await home(pilot, app)
+        await home(pilot, app)
         await pilot.press("s")
         await pilot.press("enter")                                          # first request: qm shutdown blocks
         await F.settle(pilot, lambda: ("shutdown", "101") in qm.calls)
@@ -273,7 +273,7 @@ async def test_removing_a_mac_forgets_its_shutdown_request(monkeypatch):
     monkeypatch.setattr("osx_proxmox_next.screens.vm_actions.RemoveDialog", RemoveStub)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
-        screen = await home(pilot, app)
+        await home(pilot, app)
         app.shutdowns.ask(101)
         app.shutdowns.forcing.add(101)
         await pilot.press("d")

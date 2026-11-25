@@ -263,7 +263,7 @@ def test_amd_attach_other_checks(tmp_path):
 def test_prepare_detach_amd_uses_the_record_and_the_gpu_patcher(tmp_path):
     rec = gpu.AttachRecord(100, "0000:06:00", "amd", hostpci0=None, args=None, vga="std", vga_changed=True, oc="gpu")
     run_step(gpu.record_step(rec))
-    cfg = AMD_CFG.replace("vga: std", "vga: none") + f"hostpci0: 0000:06:00,pcie=1\n"
+    cfg = AMD_CFG.replace("vga: std", "vga: none") + "hostpci0: 0000:06:00,pcie=1\n"
     cfg = cfg.replace("-cpu host\n", "-cpu host " + HOTPLUG + "\n")
     plan = gpu_attach.prepare_detach(100, adapter=FakeQm({100: ("stopped", cfg)}))
     assert plan.ok

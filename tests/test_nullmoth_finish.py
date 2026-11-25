@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from osx_proxmox_next import igpu_finish, nullmoth_engine as engine, nullmoth_finish as nf
+from osx_proxmox_next import finish_common, igpu_finish, nullmoth_engine as engine, nullmoth_finish as nf
 from osx_proxmox_next.domain import PlanStep
 from osx_proxmox_next.downloader import DownloadError
 from osx_proxmox_next.executor import ApplyResult, StepResult
@@ -33,8 +33,8 @@ def env(tmp_path, monkeypatch):
         (tmp_path / name).write_bytes(b"x")
     e.tarball.write_bytes(b"t")
     monkeypatch.setattr(nf, "ensure_amfipass", lambda iso: tmp_path / "a.zip")
-    monkeypatch.setattr(nf, "resolve_recovery_or_installer_path", lambda cfg: tmp_path / "rec.img")
-    monkeypatch.setattr(nf, "create_snapshot", lambda vmid, adapter=None: SimpleNamespace(path=tmp_path / "snap"))
+    monkeypatch.setattr(finish_common, "resolve_recovery_or_installer_path", lambda cfg: tmp_path / "rec.img")
+    monkeypatch.setattr(finish_common, "create_snapshot", lambda vmid, adapter=None: SimpleNamespace(path=tmp_path / "snap"))
 
     def resolve(choice, get):
         if e.resolve_error:
@@ -210,7 +210,7 @@ def test_payload_and_import_failures(env):
 
 
 def test_a_missing_recovery_image_is_downloaded(env, monkeypatch):
-    monkeypatch.setattr(nf, "resolve_recovery_or_installer_path", lambda cfg: env.tmp / "absent.img")
+    monkeypatch.setattr(finish_common, "resolve_recovery_or_installer_path", lambda cfg: env.tmp / "absent.img")
     seen = []
     monkeypatch.setattr("osx_proxmox_next.downloader.download_recovery",
                         lambda version, iso: seen.append(version) or env.tmp / "rec.img")
@@ -349,3 +349,26 @@ def test_the_payload_image_goes_to_a_folder_that_proxmox_does_not_list(env, tmp_
     res = nf.finish(9, "0000:01:00.0", "latest", console=Console(), pve=pve, iso_dir=env.tmp, on_event=lambda m: None,
                     clock=clock.monotonic, sleep=clock.sleep, find_ip=lambda m: "", probe=lambda i, p: True)
     assert res.verified and (env.tmp / "nullmoth").is_dir()
+
+
+def test_the_nullmoth_version_is_left_on_the_opencore_disk_before_the_first_boot(env, monkeypatch):
+    """Live 2026-11-23 (NVIDIA RTX 3060 Ti): after a manual rollback the version was unknown; the marker rolls back with the disk."""
+    marks = []
+    monkeypatch.setattr(nf.driver_oc, "write_marker", lambda pve, vmid, name, version: marks.append((vmid, name, version, pve.status)))
+    res, _pve = go(env)
+    assert marks == [(9, "NullMoth", "v2.9", "stopped")] and res.verified          # written while the Mac is stopped, before it starts
+
+    def broken(pve, vmid, name, version):
+        raise nf.driver_oc.OcError("mount failed")
+    monkeypatch.setattr(nf.driver_oc, "write_marker", broken)
+    res, _pve = go(env)
+    assert res.verified and any("Could not note the NullMoth version on the OpenCore disk (mount failed)" in n for n in res.notes)
+
+
+def test_a_driver_that_is_not_confirmed_leaves_no_version_on_the_opencore_disk(env, monkeypatch):
+    """The marker beats the record, so it is only written once the guest reported the driver installed."""
+    marks = []
+    monkeypatch.setattr(nf.driver_oc, "write_marker", lambda pve, vmid, name, version: marks.append(version))
+    env.guest = deque(["failed: the driver installer stopped: STOP macOS 14"])
+    res, _pve = go(env)
+    assert not res.verified and marks == []

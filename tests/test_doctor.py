@@ -4,7 +4,6 @@ import pytest
 
 from osx_proxmox_next.defaults import CpuInfo
 from osx_proxmox_next.doctor import (
-    DoctorCheck,
     Severity,
     _check_agent,
     _check_balloon,

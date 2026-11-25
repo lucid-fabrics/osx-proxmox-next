@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osx-proxmox-next"
-version = "0.38.4"
+version = "0.38.5"
 description = "Independent TUI-first macOS on Proxmox automation"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -68,3 +68,18 @@ osx_proxmox_next = [
 
 [tool.pytest.ini_options]
 addopts = "--cov=osx_proxmox_next --cov-branch --cov-report=term-missing --cov-fail-under=95"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "BLE", "C90"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.ruff.lint.per-file-ignores]
+# Rules that only make sense for shipped code. Tests re-import names inside test bodies (F811), use short
+# throwaway names (E741), assign lambdas for fakes (E731) and keep long literals and expected strings on one line (E501).
+"tests/**" = ["E501", "F811", "E741", "E731"]

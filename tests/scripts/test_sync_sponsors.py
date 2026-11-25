@@ -266,3 +266,52 @@ def test_fetch_deduplicates_sponsors(monkeypatch, sync_module):
     logins = [s["login"] for s in sponsors]
     assert logins == ["alice", "bob"]
     assert len(logins) == 2
+
+
+MANUAL_ONLY_README = "Intro\n\n{block}\n---\n\n## Next\n"
+
+
+def _write_readme(tmp_path, sync_module, block_text):
+    readme = tmp_path / "README.md"
+    readme.write_text(MANUAL_ONLY_README.format(block=block_text), encoding="utf-8")
+    sync_module.README = readme
+    return readme
+
+
+def test_block_keeps_blank_line_before_following_rule(tmp_path, sync_module):
+    """A text line directly above '---' becomes a Markdown heading."""
+    block = sync_module.render_block([], ["Tim ($5 Ko-fi)"])
+    readme = _write_readme(tmp_path, sync_module, "**Sponsors:**\n\n- stale\n")
+    sync_module.update_readme(block)
+    content = readme.read_text(encoding="utf-8")
+    assert "Sponsor on GitHub](https://github.com/sponsors/lucid-fabrics)_\n\n---\n" in content
+
+
+def test_update_readme_restores_missing_blank_line(tmp_path, sync_module):
+    block = sync_module.render_block([], ["Tim ($5 Ko-fi)"])
+    readme = _write_readme(tmp_path, sync_module, block)  # no blank before ---
+    assert "_\n---\n" in readme.read_text(encoding="utf-8")
+    assert sync_module.update_readme(block) is True
+    assert "_\n\n---\n" in readme.read_text(encoding="utf-8")
+
+
+def test_update_readme_idempotent_on_own_output(tmp_path, sync_module):
+    block = sync_module.render_block([], ["Tim ($5 Ko-fi)"])
+    readme = _write_readme(tmp_path, sync_module, "**Sponsors:**\n\n- stale\n")
+    assert sync_module.update_readme(block) is True
+    first = readme.read_text(encoding="utf-8")
+    assert sync_module.update_readme(block) is False
+    assert readme.read_text(encoding="utf-8") == first
+
+
+def test_current_readme_is_a_fixed_point(tmp_path, sync_module):
+    """Real README + real SPONSORS.md + no GitHub sponsors: no diff."""
+    root = SCRIPT_PATH.parent.parent
+    readme = tmp_path / "README.md"
+    original = (root / "README.md").read_text(encoding="utf-8")
+    readme.write_text(original, encoding="utf-8")
+    sync_module.README = readme
+    sync_module.MANUAL_FILE = root / "SPONSORS.md"
+    block = sync_module.render_block([], sync_module.load_manual())
+    assert sync_module.update_readme(block) is False
+    assert readme.read_text(encoding="utf-8") == original

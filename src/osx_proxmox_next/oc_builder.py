@@ -32,6 +32,7 @@ from .downloader import (
 )
 
 from . import igpu_engine
+from .infrastructure import get_proxmox_adapter
 
 log = logging.getLogger(__name__)
 
@@ -379,8 +380,6 @@ def is_current(iso: Path) -> bool:
 
 def build_opencore_iso(dest_dir: Path, on_progress: ProgressCallback = None) -> Path:
     """Assemble the OpenCore ISO from pinned components into *dest_dir*."""
-    from .services import get_proxmox_adapter
-
     dest_dir.mkdir(parents=True, exist_ok=True)
     iso = dest_dir / _OPENCORE_UNIVERSAL
     # mkdtemp: 0700 with an unpredictable name, so a hostile sibling in a

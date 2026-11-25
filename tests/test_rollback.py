@@ -1,8 +1,6 @@
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 from osx_proxmox_next.infrastructure import CommandResult, ProxmoxAdapter
 from osx_proxmox_next.rollback import create_snapshot, rollback_hints, RollbackSnapshot
@@ -73,7 +71,7 @@ def test_create_snapshot_calls_qm_config(monkeypatch, tmp_path):
 
 
 def test_create_snapshot_uses_proxmox_service_when_no_adapter(monkeypatch, tmp_path):
-    import osx_proxmox_next.services.proxmox_service as svc_module
+    import osx_proxmox_next.infrastructure as svc_module
     monkeypatch.setattr(Path, "cwd", lambda: tmp_path)
     mock_adapter = _fake_adapter(ok=True, output="fallback config")
     monkeypatch.setattr(svc_module, "_pve", mock_adapter)

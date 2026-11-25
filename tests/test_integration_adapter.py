@@ -1,9 +1,8 @@
 import subprocess
 
-import pytest
 
-from osx_proxmox_next.executor import apply_plan, ApplyResult
-from osx_proxmox_next.infrastructure import ProxmoxAdapter, CommandResult
+from osx_proxmox_next.executor import apply_plan
+from osx_proxmox_next.infrastructure import ProxmoxAdapter
 from osx_proxmox_next.domain import PlanStep
 from adapter_fakes import patch_adapter_run
 
@@ -44,7 +43,7 @@ def test_adapter_pvesm_wraps_binary(monkeypatch) -> None:
 def test_adapter_pvesh_wraps_binary(monkeypatch) -> None:
     calls: list[list[str]] = []
     patch_adapter_run(monkeypatch, lambda argv, **kw: (calls.append(argv), _fake_ok(argv))[1])
-    result = ProxmoxAdapter().pvesh("get", "/nodes")
+    ProxmoxAdapter().pvesh("get", "/nodes")
     assert calls[0][:2] == ["pvesh", "get"]
 
 

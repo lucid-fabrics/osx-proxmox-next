@@ -459,7 +459,8 @@ class Session:
             shares, risky = [], []
             if first["group"]:
                 for other in facts["pci"]:
-                    if other["group"] == first["group"] and other["bdf"] not in funcs and (other["class"] or 0) >> 8 not in (0x0604, 0x0600):
+                    if (other["group"] == first["group"] and other["bdf"] not in funcs
+                            and (other["class"] or 0) >> 8 not in (0x0604, 0x0600)):
                         shares.append(other["bdf"])
                         if (other["class"] or 0) >> 16 in (0x01, 0x02):
                             risky.append(other["bdf"])

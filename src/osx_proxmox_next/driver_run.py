@@ -7,9 +7,9 @@ from .driver_core import DriverError, RunEnv, RunResult, Updater, stop_mac
 from .driver_plan import DISK_COMPONENTS, DriverPlan, prepare
 from .driver_targets import Choice
 from .gpu import parse_config
-from .igpu_finish import FinishError, _drop_disk
+from .igpu_finish import _drop_disk
 
-__all__ = ["finish_interrupted", "put_back", "remove_safety_snapshot", "run_update", "undo_target"]
+__all__ = ["finish_interrupted", "finish_plan", "put_back", "remove_safety_snapshot", "run_update", "undo_target"]
 
 RUNNERS = {"nvidia": driver_nvidia.run, "intel": driver_intel.run, "amd": driver_amd.run}
 FINISH_HINT = " Finish continues it (osx-next-cli driver-update --vmid %d --finish)."
@@ -93,7 +93,7 @@ def _abandon(u: Updater, exc: Exception) -> str:
     except Exception:  # noqa: BLE001 - the record of disks is a courtesy of the failure path
         pass
     snap = u.state.get("snapshot", "")
-    message = f"{exc} {engine.failure_text(u.state, u.running())}" + FINISH_HINT % u.vmid
+    message = engine.join_text(str(exc), engine.failure_text(u.state, u.running())) + FINISH_HINT % u.vmid
     if snap:
         message += UNDO_HINT % (engine.snapshot_date(snap), snap)
     u.state["error"] = message
@@ -120,16 +120,23 @@ def run_update(plan: DriverPlan, env: RunEnv, resume: dict | None = None) -> Run
         engine.release_lock(plan.vmid, env.base)
 
 
-def finish_interrupted(vmid: int, env: RunEnv) -> RunResult:
-    """Continue the update a closed terminal, a lost connection or a failure left behind, from the step it stopped at.
-    The Mac is looked at again: it is stopped and its card taken off before anything is staged."""
+def finish_plan(vmid: int, env: RunEnv, snapshot: str = "") -> tuple[DriverPlan, dict]:
+    """The plan of the Finish and the state it resumes. Reads Proxmox and GitHub, changes nothing. *snapshot* is the name
+    a screen already showed for the snapshot a cut-off run still has to save."""
     state = engine.unfinished(vmid, env.base)
     if not state:
         raise DriverError("There is no unfinished driver update for this Mac.")
     choice = state.get("choice", {})
     plan = prepare(vmid, Choice(choice.get("NullMoth", ""), choice.get("WhateverXe", ""),
                                 choice.get("WhateverXe Graphics", "")), env.pve, reinstall=True,
-                   get=env.get, base=env.base, resume=state)
+                   get=env.get, base=env.base, resume=state, snapshot=snapshot)
+    return plan, state
+
+
+def finish_interrupted(vmid: int, env: RunEnv, snapshot: str = "") -> RunResult:
+    """Continue the update a closed terminal, a lost connection or a failure left behind, from the step it stopped at.
+    The Mac is looked at again: it is stopped and its card taken off before anything is staged."""
+    plan, state = finish_plan(vmid, env, snapshot)
     return run_update(plan, env, resume=state)
 
 

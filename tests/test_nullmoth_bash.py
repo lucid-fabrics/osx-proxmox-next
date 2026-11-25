@@ -160,7 +160,7 @@ def test_first_boot_report_of_a_verified_driver(bash, tmp_path):
     assert "The card has no display yet" in out  # no monitor was seen
     assert "Escape hatch" in out and "1401 app" in out
     log = calls(tmp_path)
-    assert "drop 100 sata2" in log and log[-1] == "qm start 100"
+    assert "drop 100 sata2" in log and log[-2:] == ["qm start 100", "qm config 100"]   # nothing follows the start but the one read of the disks' identity for the record
     assert not (tmp_path / "p.img").exists()
 
 
@@ -228,6 +228,6 @@ nullmoth_wait_result() { kill -INT $$; sleep 1; }
 NM_PAYLOAD_REF=ref; NM_PAYLOAD_FILE="$TMPDIR/p.img"
 nullmoth_first_boot 100
 '''
-    res = run(bash, snippet, env={"QM_STATUS": "running"}, expect=130)
+    run(bash, snippet, env={"QM_STATUS": "running"}, expect=130)
     log = calls(tmp_path)
     assert "qm stop 100" in log and "drop 100 sata2" in log

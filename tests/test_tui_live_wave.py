@@ -445,6 +445,6 @@ async def test_the_home_banner_says_when_the_restart_is_done(monkeypatch):
         monkeypatch.setattr(host_setup, "boot_id", lambda root="/", boot=boot: boot)
         app = NextApp()
         async with app.run_test(size=SIZE) as pilot:
-            await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen) and app.screen.loaded)
+            await F.settle(pilot, lambda app=app: isinstance(app.screen, HomeScreen) and app.screen.loaded)
             await pilot.pause(0.3)
             assert F.text_of(app.screen.query_one("#resume")) == expected

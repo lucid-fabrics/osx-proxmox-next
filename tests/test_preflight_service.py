@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
 
-import pytest
 
 from osx_proxmox_next.preflight import PreflightCheck
 from osx_proxmox_next.services import preflight_service as svc_module
@@ -30,7 +28,6 @@ def test_missing_deps_triggers_install_and_reruns(monkeypatch):
         calls["run"] += 1
         return first if calls["run"] == 1 else second
 
-    install_called = []
     monkeypatch.setattr(svc_module, "run_preflight", _run)
     monkeypatch.setattr(svc_module, "has_missing_build_deps", lambda c: True)
     monkeypatch.setattr(
@@ -72,7 +69,7 @@ def test_install_succeeds_but_no_packages(monkeypatch):
         "install_missing_packages",
         lambda on_output=None: (True, []),
     )
-    result = run_preflight_worker()
+    run_preflight_worker()
     assert run_calls["n"] == 1  # no re-run when pkgs list empty
 
 

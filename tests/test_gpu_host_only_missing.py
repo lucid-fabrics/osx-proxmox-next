@@ -284,7 +284,6 @@ def test_undo_of_an_empty_record_does_not_say_nothing_to_undo(tmp_path):
 
 def test_nvidia_guidance_says_a_monitor_or_dummy_plug_is_required():
     from osx_proxmox_next import gpu_setup, nullmoth
-    need = ("monitor or an HDMI/DisplayPort dummy plug", "Screen Sharing", "SSH always works")
     assert all(n in nullmoth.DISPLAY_LINE for n in ("monitor or an HDMI/DisplayPort dummy plug", "Screen Sharing"))
     assert "Proxmox console goes black" in nullmoth.DISPLAY_LINE
     assert "dummy plug" in gpu_setup.NVIDIA_DISPLAY_NOTE

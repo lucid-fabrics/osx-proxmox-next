@@ -113,7 +113,7 @@ def host(tmp_path):
         (qm_dir / "config").write_text("\n".join(f"{k}: {v}" for k, v in cfg.items()) + "\n")
 
     def run(snippet, expect=0):
-        res = subprocess.run(["bash", "-c", f"set -u; source {script}\n{snippet}"], capture_output=True, text=True, env=env, timeout=120)
+        res = subprocess.run(["bash", "-c", f"set -u; source {script}\ngpu_engine_setup; trap gpu_engine_remove EXIT\n{snippet}"], capture_output=True, text=True, env=env, timeout=120)
         if expect is not None:
             assert res.returncode == expect, (res.returncode, res.stdout, res.stderr)
         return res
@@ -238,8 +238,9 @@ def test_bash_status_matches_the_python_status(host, capsys, monkeypatch):
                    "A newer driver is available.", "Driver snapshots: none"]                       # the lines the Python status prints
     (host.qm_dir / "snaps").write_text("osx-next-driver-20261120-0900\n")
     data = json.loads(host.run(STUB_NULLMOTH + "driver_status_command 109 --json\n").stdout)
-    assert data == {"vmid": 109, "kind": "nvidia", "installed": {"NullMoth": "v2.8.1"}, "installed_from_record": False, "latest": {"NullMoth": "v2.9"}, "state": "update",
-                    "snapshots": ["osx-next-driver-20261120-0900"], "unfinished": False, "updating": False, "step": ""}
+    assert data == {"vmid": 109, "name": "macos-sequoia", "kind": "nvidia", "refused": [], "installed": {"NullMoth": "v2.8.1"}, "installed_from_record": False,
+                    "latest": {"NullMoth": "v2.9"}, "state": "update", "snapshots": ["osx-next-driver-20261120-0900"], "unfinished": False,
+                    "latest_error": "", "updating": False, "step": ""}
     (host.state / "109.json").unlink()
     out = host.run(STUB_NULLMOTH + "gpu_record_load() { REC_VENDOR=nvidia; return 0; }\ndriver_status_command 109\n").stdout
     assert "Installed: installed version unknown" in out and "The installed version is not known." in out
@@ -350,9 +351,10 @@ def test_a_bash_update_that_fails_puts_the_card_back_and_names_the_snapshot(host
     assert "set 109 --hostpci0 0000:01:00,pcie=0" in host.calls() and not (host.state / "109.lock").exists()
     state = engine.read_update(109, str(host.state))        # the same state file the Python twin leaves: steps, phase, what was remembered
     assert state["phase"] == "failed" and state["snapshot"] == SNAP and state["original"]["hostpci0"] == "0000:01:00,pcie=0"
-    assert [r["id"] for r in state["steps"]] == [i for i, _t in engine.step_titles("nvidia")]
-    assert [r["state"] for r in state["steps"]] == ["done", "done", "done", "fail", "pending", "pending", "pending"]
-    assert [r["title"] for r in state["steps"]] == [t for _i, t in engine.step_titles("nvidia", "NullMoth v2.9")]
+    # the run lists the steps its plan listed: a Mac that was stopped has no "Stop the Mac" row (live check 2026-11-23, VM 984)
+    assert [r["id"] for r in state["steps"]] == [i for i, _t in engine.plan_steps("nvidia", "the driver", False)]
+    assert [r["state"] for r in state["steps"]] == ["done", "done", "fail", "pending", "pending", "pending"]
+    assert [r["title"] for r in state["steps"]] == [t for _i, t in engine.plan_steps("nvidia", "NullMoth v2.9", False)]
     assert engine.read_record(109, str(host.state))["components"][0]["version"] == "v2.8.1"      # the record did not move
 
 

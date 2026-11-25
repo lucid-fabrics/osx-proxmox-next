@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..gpu import Holder
 from .gpu_run import Guidance
+from .gpu_contract import GpuHost
 
 BUSY_FAIL = "Card is in use by VM {ids}"
 
@@ -34,7 +35,7 @@ def busy_lines(holders: list[Holder], warnings: list[str]) -> tuple[list[str], t
     return lines + warnings, muted
 
 
-class CardBusyMixin:
+class CardBusyMixin(GpuHost):
     """The box shown while another VM holds the card, in the check step and again in the attach step."""
 
     def card_busy(self, holders: list[Holder], warnings: list[str]) -> None:

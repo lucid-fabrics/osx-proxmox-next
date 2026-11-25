@@ -56,9 +56,11 @@ class DriverView:
     graphics: list[dict] = field(default_factory=list)   # Intel: the releases of the graphics package
 
 
-def load_view(vmid: int, choice: Choice | None = None, releases: bool = True) -> DriverView:
-    """Worker work: the plan (Proxmox, GitHub) and the picker's releases. A release list that cannot be read is empty."""
-    plan = prepare(vmid, choice, reinstall=True)
+def load_view(vmid: int, choice: Choice | None = None, releases: bool = True, reinstall: bool = False) -> DriverView:
+    """Worker work: the plan (Proxmox, GitHub) and the picker's releases. A release list that cannot be read is empty.
+    *reinstall* is for a plan the user asked for by moving the version row: a Mac that is up to date has nothing to do
+    until then, so its screen has no "What happens" panel and no button."""
+    plan = prepare(vmid, choice, reinstall=reinstall)
     found: list[dict] = []
     graphics: list[dict] = []
     if releases and plan.kind in ("nvidia", "intel"):
@@ -188,7 +190,7 @@ class DriverScreen(OsxScreen):
 
         def work() -> None:
             try:
-                view = load_view(self.vmid, choice, releases=not keep_picker or self.view is None)
+                view = load_view(self.vmid, choice, releases=not keep_picker or self.view is None, reinstall=keep_picker)
             except Exception as exc:  # noqa: BLE001
                 log.exception("driver view failed")
                 self.app.call_from_thread(self._load_failed, str(exc))
@@ -232,10 +234,15 @@ class DriverScreen(OsxScreen):
         plan = self.plan
         pal = self.app.get_css_variables()
         if not plan.installed_known:
-            return [Static(self._row("Driver", Text("installed version unknown", style=pal["muted"])), id="d-driver")]
+            rows = [Static(self._row("Driver", Text("installed version unknown", style=pal["muted"])), id="d-driver")]
+            if plan.unknown_why:      # a version that cannot be read says why, in words that wrap
+                why = " " + " " * DRIVER_LABEL + plan.unknown_why[:1].upper() + plan.unknown_why[1:] + "."
+                rows.append(Static(Text(why, style=pal["muted"]), id="d-why"))
+            return rows
         parts = [f"{n} {plan.installed[n]}" for n in engine.COMPONENTS[plan.kind] if plan.installed.get(n)]
-        rows: list[Widget] = [Static(self._row("Driver" if i == 0 else "", Text(part, style="bold")), id="d-driver" if i == 0 else f"d-driver-{i + 1}")
-                              for i, part in enumerate(parts)]
+        rows: list[Widget] = [
+            Static(self._row("Driver" if i == 0 else "", Text(part, style="bold")), id="d-driver" if i == 0 else f"d-driver-{i + 1}")
+            for i, part in enumerate(parts)]
         if plan.from_record:      # the disk of a running Mac is not read: say whose word this is
             rows.append(Static(self._row("", Text(engine.FROM_RECORD, style=pal["muted"])), id="d-source"))
         return rows
@@ -302,8 +309,8 @@ class DriverScreen(OsxScreen):
         self._label = self._enter_label(pending)
         action = Horizontal(Static(Text(self._note_text(can_go, picker is not None, pending), style=pal["muted"]), id="g-note"),
                             *([Button(self._label, id="d-go", classes="primary")] if can_go else []), id="g-action")
-        await self._show(Static(title, id="g-title"), Horizontal(*([form, side] if side else [form]), id="g-cols"), Static("", id="g-result"),
-                         action, mode="attached")
+        await self._show(Static(title, id="g-title"), Horizontal(*([form, side] if side else [form]), id="g-cols"),
+                         Static("", id="g-result"), action, mode="attached")
         self._facts()
         self._focus_row()
 
@@ -316,6 +323,8 @@ class DriverScreen(OsxScreen):
             return Text.assemble(("✓ ", pal["success"]), f"Driver snapshot of {engine.snapshot_date(snaps[-1])}. ",
                                  ("r", "bold " + pal["accent"]), " undoes the driver update.")
         if self.plan.interrupted:
+            if self.plan.resume and self.plan.snapshot_pending() and self.plan.snapshot_ok:    # the Finish still saves one
+                return Text.assemble(("✓ ", pal["success"]), "A snapshot is saved first, so the update can be undone.")
             return Text.assemble(("! ", pal["warning"]), "This update has no driver snapshot, so it cannot be undone.")
         if not can_go:
             return Text("")
@@ -372,7 +381,7 @@ class DriverScreen(OsxScreen):
         if plan.refusals or not self.query("#d-facts"):
             return
         if plan.interrupted:         # what Finish does: no new snapshot, no "saved first"
-            facts = engine.finish_facts(plan.kind, self._state().get("snapshot", ""))
+            facts = plan.finish_lines() if plan.resume else engine.finish_facts(plan.kind, self._state().get("snapshot", ""))
             rows = [Line(Text.assemble(("✓ ", pal["success"]), fact), wrap=True, hang=2) for fact in facts]
         else:
             facts = engine.before_facts(plan.kind, plan.snapshot, plan.snapshot_ok)
@@ -487,7 +496,8 @@ class DriverScreen(OsxScreen):
         state = engine.read_update(self.vmid)
         tags = state.get("choice", {})
         self._spawn(Choice(tags.get("NullMoth", ""), tags.get("WhateverXe", ""), tags.get("WhateverXe Graphics", "")),
-                    finish=True, accept_risk=state.get("kind") == "nvidia", no_snapshot=bool(state.get("no_snapshot")))
+                    finish=True, accept_risk=state.get("kind") == "nvidia", no_snapshot=bool(state.get("no_snapshot")),
+                    snapshot=self.plan.snapshot if self.plan.resume and self.plan.snapshot_pending() else "")
 
     # ── p: see every change ──────────────────────────────────────────
 

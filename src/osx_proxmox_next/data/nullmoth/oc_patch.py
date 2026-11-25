@@ -188,7 +188,7 @@ def references_kext(path):
         with open(path, 'rb') as f:
             cfg = plistlib.load(f)
         return any(k.get('BundlePath') == KEXT for k in cfg.get('Kernel', {}).get('Add', []))
-    except Exception:
+    except Exception:  # noqa: BLE001 unreadable counts as referenced: keep the kext
         return True
 
 

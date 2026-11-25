@@ -3,10 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from osx_proxmox_next.domain import PlanStep
-from osx_proxmox_next.executor import ApplyResult, StepResult
+from osx_proxmox_next.executor import ApplyResult
 from osx_proxmox_next.rollback import RollbackSnapshot
 from osx_proxmox_next.services.install_service import run_dry_apply, run_live_install
 from osx_proxmox_next.services.destroy_service import run_destroy_worker

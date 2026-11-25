@@ -4,10 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-from driver_fakes import comps, mac
+from driver_fakes import comps
 from osx_proxmox_next import driver_engine as engine
-from osx_proxmox_next.driver_plan import DriverPlan
-from osx_proxmox_next.driver_targets import Target
 from test_driver_parity import (  # noqa: F401 - fixtures and helpers
     HOLD_LOCK, NV, SNAP, STUB_NULLMOTH, UNDO, host, needs_bash4, py_lines, write_record)
 
@@ -51,7 +49,7 @@ def test_the_bash_finish_plan_is_the_python_finish_plan(host):
     state = {"kind": "nvidia", "phase": "failed", "snapshot": SNAP, "steps": steps}
     engine.write_update(109, state, str(host.state))
     snippet = (STUB_NULLMOTH + "DRIVER_VERSIONS='{\"NullMoth\": \"v2.9\"}'\nDRIVER_TARGET=$(cat <<'J'\n" + json.dumps(NV) + "\nJ\n)\n"
-               f"driver_print_plan 109 macos-sequoia nvidia '{{\"NullMoth\": \"v2.8.1\"}}' \"$DRIVER_TARGET\" osx-next-driver-NEW yes no sequoia yes\n")
+               "driver_print_plan 109 macos-sequoia nvidia '{\"NullMoth\": \"v2.8.1\"}' \"$DRIVER_TARGET\" osx-next-driver-NEW yes no sequoia yes\n")
     out = host.run(snippet).stdout.splitlines()
     assert out == py_lines("nvidia", {"NullMoth": "v2.8.1"}, NV, "osx-next-driver-NEW", resume=state)
     assert out[0] == "Finish the NVIDIA driver update of macos-sequoia (VM 109)" and "  1. Stage NullMoth v2.9" in out
@@ -231,6 +229,14 @@ def test_bash_status_of_an_unfinished_update_has_no_up_to_date_line(host):
     assert "Up to date." in host.run(STUB_NULLMOTH + "driver_status_command 109\n").stdout
 
 
+# The Intel status looks the newest releases up with `igpu_engine assets`, which downloads the WhateverXe and graphics
+# packages into the cache (93 MB on CI, from the real GitHub). The look-up is answered here with the two newest versions.
+NO_RELEASE_DOWNLOAD = (
+    "igpu_engine() { case \"$1\" in assets) echo '{\"whateverxe\": {\"version\": \"0.8.4\", \"tag\": \"0.8.4\", \"sha256\": \"\", "
+    "\"source\": \"latest\", \"path\": \"/dev/null\"}, \"graphics\": {\"version\": \"0.4.5\", \"tag\": \"v0.4.5\", \"sha256\": \"\", "
+    "\"source\": \"latest\", \"path\": \"/dev/null\"}}';; *) return 1;; esac; }\n")
+
+
 @needs_bash4
 def test_bash_undo_reads_the_rolled_back_disk_so_the_versions_are_not_from_the_last_update(host):
     write_record(host, "intel", WhateverXe="0.8.3", WhateverXe_Graphics="0.4.4")
@@ -243,5 +249,40 @@ def test_bash_undo_reads_the_rolled_back_disk_so_the_versions_are_not_from_the_l
     record = engine.read_record(109, str(host.state))
     assert record["disk_read"] is True and engine.installed_versions(record) == {"WhateverXe": "0.8.0", "WhateverXe Graphics": "0.4.3"}
     (host.qm_dir / "status").write_text("running\n")                         # the Mac runs again: the record is the disk's word
-    out = host.run('driver_oc_kext() { echo "{}"; }\n' + STUB_NULLMOTH + "driver_status_command 109\n").stdout
+    out = host.run('driver_oc_kext() { echo "{}"; }\n' + STUB_NULLMOTH + NO_RELEASE_DOWNLOAD + "driver_status_command 109\n").stdout
     assert "Installed: WhateverXe 0.8.0 and WhateverXe Graphics 0.4.3\n" in out and "from the last update" not in out
+
+
+# ── a Mac that runs now is stopped first, whatever the run recorded ──
+
+def _amd_without_stop(host):
+    rows = [(i, t, d) for (i, t), (_i, d) in zip(engine.step_titles("amd"), engine.step_titles("amd", done=True)) if i != "stop"]
+    steps = [{"id": i, "title": t, "done": d, "state": st} for (i, t, d), st in zip(rows, ["done", "fail", "pending"])]
+    state = {"kind": "amd", "phase": "failed", "snapshot": SNAP, "steps": steps}
+    engine.write_update(109, state, str(host.state))
+    return state
+
+
+@needs_bash4
+def test_bash_finish_of_a_run_recorded_without_a_stop_row_lists_and_does_the_stop_when_the_mac_runs(host):
+    write_record(host, "amd", Lilu="1.6.8", WhateverGreen="1.6.0")
+    state = _amd_without_stop(host)
+    target = '{"Lilu": {"version": "1.7.2"}, "WhateverGreen": {"version": "1.7.0"}}'
+    plan = ("DRIVER_VERSIONS='{\"Lilu\": \"1.7.2\", \"WhateverGreen\": \"1.7.0\"}'\n"
+            f"driver_print_plan 109 mac amd '{{\"Lilu\": \"1.6.8\"}}' '{target}' osx-next-driver-NEW yes yes sequoia yes\n")
+    assert "  1. Stop the Mac" in host.run(plan).stdout
+    assert "Stop the Mac" not in host.run(plan.replace("yes sequoia yes", "no sequoia yes")).stdout
+    (host.qm_dir / "status").write_text("running\n")
+    host.run('DRIVER_VMID=109\ndriver_engine update-resume 109 running\ndriver_step_stop 109\n')
+    rows = engine.read_update(109, str(host.state))["steps"]
+    assert [r["id"] for r in rows][:2] == ["snapshot", "stop"] and rows[1]["state"] == "done"
+    assert any(c.startswith(("shutdown 109", "stop 109")) for c in host.calls())      # the running Mac was stopped first
+    assert [r["id"] for r in state["steps"]] == ["snapshot", "replace", "start"]       # the run was recorded without the row
+
+
+@needs_bash4
+def test_bash_finish_of_a_run_recorded_without_a_stop_row_adds_none_for_a_stopped_mac(host):
+    write_record(host, "amd", Lilu="1.6.8", WhateverGreen="1.6.0")
+    _amd_without_stop(host)
+    host.run('DRIVER_VMID=109\ndriver_engine update-resume 109\ndriver_step_stop 109\n')
+    assert all(r["id"] != "stop" for r in engine.read_update(109, str(host.state))["steps"])

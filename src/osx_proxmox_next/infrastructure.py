@@ -96,9 +96,52 @@ def run_command(cmd: list[str]) -> CommandResult:
         proc = subprocess.run(cmd, check=True, capture_output=True)
         output = (proc.stdout or b"").decode(errors="replace")
         return CommandResult(ok=True, returncode=0, output=output.strip())
-    except subprocess.CalledProcessError as exc:
+    except subprocess.CalledProcessError:
         raise
     except FileNotFoundError:
         return CommandResult(ok=False, returncode=_EXIT_CODE_NOT_FOUND, output=f"Command not found: {cmd[0]}")
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired:
         return CommandResult(ok=False, returncode=_EXIT_CODE_TIMEOUT, output=f"Command timed out: {' '.join(cmd)}")
+
+
+_pve: ProxmoxAdapter | None = None
+
+
+def get_proxmox_adapter() -> ProxmoxAdapter:
+    """Lazy singleton ProxmoxAdapter, avoids import-time side effects."""
+    global _pve  # noqa: PLW0603
+    if _pve is None:
+        _pve = ProxmoxAdapter()
+    return _pve
+
+
+@dataclass
+class VmInfo:
+    vmid: int
+    name: str
+    status: str  # "running" | "stopped"
+    config_raw: str
+
+
+def fetch_vm_info(vmid: int, adapter: ProxmoxAdapter | None = None) -> VmInfo | None:
+    if adapter is None:
+        adapter = get_proxmox_adapter()
+    runtime = adapter
+    status_result = runtime.run(["qm", "status", str(vmid)])
+    if not status_result.ok:
+        return None
+    # Parse status line like "status: running" or "status: stopped"
+    status = "stopped"
+    for line in status_result.output.splitlines():
+        if "running" in line.lower():
+            status = "running"
+            break
+    config_result = runtime.run(["qm", "config", str(vmid)])
+    config_raw = config_result.output if config_result.ok else ""
+    # Parse name from config
+    name = ""
+    for line in config_raw.splitlines():
+        if line.startswith("name:"):
+            name = line.split(":", 1)[1].strip()
+            break
+    return VmInfo(vmid=vmid, name=name, status=status, config_raw=config_raw)

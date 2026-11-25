@@ -23,12 +23,14 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 
 from . import driver_disks, driver_engine, igpu_engine, igpu_watchdog
-from .assets import resolve_recovery_or_installer_path
 from .defaults import DEFAULT_ISO_DIR
 from .executor import apply_plan
+from .finish_common import (
+    POLL, FinishError, FinishRun, _drop_disk, _storage_of, note_picker_restore, recovery_image, require_stopped, save_snapshot, start_vm,
+    vm_config, wait_stopped,
+)
 from .gpu import parse_config
 from .igpu_attach import TAHOE_NOTE, TAHOE_STAGE_NOTE, UNSUPPORTED_MACOS, UNSUPPORTED_NOTE, oc_step, prepare_attach_igpu
 from .infrastructure import ProxmoxAdapter
@@ -37,8 +39,7 @@ from .nullmoth import detect_macos
 from .downloader import DownloadError
 from .oc_builder import ensure_igpu_assets
 from .planner import POST_INSTALL_BOOT_ORDER
-from .rollback import create_snapshot
-from .services import fetch_vm_info, get_proxmox_adapter
+from .services import get_proxmox_adapter
 from .unattended import QmConsole, UnattendedError, open_recovery_terminal
 
 __all__ = ["FinishError", "FinishResult", "StageJob", "choose_release", "finish", "stage_recovery", "wait_stopped"]
@@ -52,12 +53,7 @@ STAGE_DONE = ("staged", "failed:")
 FIRSTBOOT_TIMEOUT = 1500     # boot, WhateverXe wait (up to 120 s), package install, halt
 RESULT_POLL = 30             # Tahoe cannot halt itself (WhateverXe issue 62): look for the guest's result instead
 RESULT_GRACE = 15            # let a result that was seen mid-write finish before it is trusted
-POLL = 10
 KNOWN_RESULTS = ("installed", "failed:", "not installed:")
-
-
-class FinishError(Exception):
-    """A phase of the iGPU finish did not reach its expected state."""
 
 
 @dataclass
@@ -69,6 +65,13 @@ class FinishResult:
     accel_detail: str = ""
     watchdog: bool = False     # the host-side power watchdog is installed
     versions: list[str] = field(default_factory=list)  # what was installed, one plain line per component
+
+
+@dataclass(frozen=True)
+class _IgpuRun(FinishRun):
+    """The finish run of one iGPU setup: what every phase shares, and the outcome the phases fill in."""
+    result: FinishResult = field(default_factory=FinishResult)
+    wex: str = igpu_engine.LATEST
 
 
 def choose_release(kind: str, ask: Callable[[str], str], say: Callable[[str], None],
@@ -98,15 +101,8 @@ def choose_release(kind: str, ask: Callable[[str], str], say: Callable[[str], No
         if tag:
             return igpu_engine.LATEST if tag == latest else tag
         say(f"{answer!r} is not in the list.")
-    raise igpu_engine.ReleaseError(f"No {label} release was picked. Pass --wex-version / --graphics-version, or press Enter for the latest.")
-
-
-def _storage_of(cfg: dict[str, str]) -> str:
-    for key in ("virtio0", "efidisk0", "ide0"):
-        m = re.match(r"([^:,]+):", cfg.get(key, ""))
-        if m:
-            return m.group(1)
-    raise FinishError("Could not tell which storage the VM disks are on.")
+    raise igpu_engine.ReleaseError(
+        f"No {label} release was picked. Pass --wex-version / --graphics-version, or press Enter for the latest.")
 
 
 def _import_disk(pve: ProxmoxAdapter, vmid: int, path: Path, storage: str) -> str:
@@ -117,36 +113,6 @@ def _import_disk(pve: ProxmoxAdapter, vmid: int, path: Path, storage: str) -> st
     if not res.ok or not m:
         raise FinishError(f"Could not import {path.name}: {res.output.strip()[-300:]}")
     return m.group(1)
-
-
-def _drop_disk(pve: ProxmoxAdapter, vmid: int, slot: str, strict: bool = False) -> None:
-    """Detach *slot* and delete the volume it held (the unused entry it leaves behind). The partition maps and loop
-    devices that hold the volume go first; when one remains the volume could not be removed: *strict* raises
-    FinishError with the command, else it is left as an unused disk (this runs while another error is being handled)."""
-    cfg = parse_config(pve.qm("config", str(vmid)).output)
-    ref = cfg.get(slot, "").split(",", 1)[0]
-    if not ref:
-        return
-    try:
-        driver_disks.release_maps(pve, vmid, driver_disks.volume_paths(pve, [ref]))
-    except driver_disks.MapsHeld as exc:
-        if strict:
-            raise FinishError(str(exc)) from exc
-    pve.qm("set", str(vmid), "--delete", slot)
-    cfg = parse_config(pve.qm("config", str(vmid)).output)
-    for key, value in cfg.items():
-        if re.fullmatch(r"unused\d+", key) and value.split(",", 1)[0] == ref:
-            pve.qm("set", str(vmid), "--delete", key)
-
-
-def wait_stopped(pve: ProxmoxAdapter, vmid: int, timeout: float, clock: Callable[[], float],
-                  sleep: Callable[[float], None]) -> bool:
-    deadline = clock() + timeout
-    while clock() < deadline:
-        if "stopped" in pve.qm("status", str(vmid)).output:
-            return True
-        sleep(POLL)
-    return False
 
 
 def _wait_first_boot(pve: ProxmoxAdapter, vmid: int, timeout: float, tahoe: bool, payload_ref: str,
@@ -221,10 +187,7 @@ def watch_first_boot(pve: ProxmoxAdapter, vmid: int, timeout: float, tahoe: bool
 
 
 def _check_vm(vmid: int, pve: ProxmoxAdapter) -> dict[str, str]:
-    info = fetch_vm_info(vmid, adapter=pve)
-    if info is None:
-        raise FinishError(f"VM {vmid} not found.")
-    cfg = parse_config(info.config_raw)
+    info, cfg = vm_config(vmid, pve)
     if "isa-applesmc" not in cfg.get("args", ""):
         raise FinishError(f"VM {vmid} is not a macOS VM made by this tool (no isa-applesmc in its args).")
     if cfg.get("machine", "").split(",")[0] != "pc":
@@ -236,9 +199,101 @@ def _check_vm(vmid: int, pve: ProxmoxAdapter) -> dict[str, str]:
                           "Finish it and run post-install first.")
     if "hostpci0" in cfg:
         raise FinishError(f"VM {vmid} already has a PCI device on hostpci0. Run gpu-setup --undo first, then try again.")
-    if info.status != "stopped":
-        raise FinishError(f"VM {vmid} is running. Stop it first: qm stop {vmid}")
+    require_stopped(vmid, info)
     return cfg
+
+
+def _macos_of(macos: str, cfg: dict[str, str]) -> str:
+    """The macOS release the VM runs (given, else read from its config). FinishError when unknown or not supported."""
+    version = (macos or detect_macos(cfg) or "").lower()
+    if not version:
+        raise FinishError("Cannot tell which macOS this VM runs. Pass --macos (ventura, sonoma, sequoia or tahoe).")
+    if version in UNSUPPORTED_MACOS:
+        raise FinishError(UNSUPPORTED_NOTE)
+    return version
+
+
+def _fetch_assets(iso: Path, wex: str, graphics: str, on_event: Callable[[str], None]):
+    """Check the host's iGPU and download WhateverXe, the graphics package, AMFIPass and the ROM."""
+    report = check_intel_gpu(wex=wex)
+    if not report.ok:
+        raise FinishError("The iGPU is not ready: " + " ".join(report.issues))
+    on_event("Looking up the WhateverXe releases on GitHub")
+    try:
+        assets = ensure_igpu_assets(iso, report.engine["info"]["rom"], wex=wex, graphics=graphics)
+    except (igpu_engine.ReleaseError, DownloadError, OSError) as exc:
+        raise FinishError(str(exc)) from exc
+    picks = assets.picks
+    on_event("Using WhateverXe %s and WhateverXe Graphics %s" % (picks["whateverxe"]["version"], picks["graphics"]["version"]))
+    return assets
+
+
+def _attach_plan(vmid: int, assets, pve: ProxmoxAdapter, wex: str):
+    """The plan that attaches the iGPU. FinishError when the VM or host cannot take it."""
+    plan = prepare_attach_igpu(vmid, assets["whateverxe"], assets["amfipass"], assets["rom"], adapter=pve,
+                               wex_sha=assets.picks["whateverxe"]["sha256"], amfi_sha=igpu_engine.PINS["amfipass"][2],
+                               wex=wex)
+    if not plan.ok:
+        raise FinishError("Cannot attach the iGPU: " + " ".join(plan.issues))
+    return plan
+
+
+def _build_payload(vmid: int, assets, work: Path, on_event: Callable[[str], None]) -> Path:
+    payload = work / f"igpu-payload-{vmid}.img"
+    on_event("Building the payload disk (graphics package, first-boot script)")
+    ok, msg = igpu_engine.build_payload(str(assets["graphics"]), str(payload))
+    if not ok:
+        raise FinishError(msg)
+    return payload
+
+
+def _attach_igpu(run: _IgpuRun, assets, state: dict) -> None:
+    """Attach the iGPU (OpenCore with WhateverXe, hostpci0, args), set the boot order and install the watchdog."""
+    run.on_event("Attaching the iGPU")
+    plan = _attach_plan(run.vmid, assets, run.pve, run.wex)
+    applied = apply_plan(plan.steps, execute=True, adapter=run.pve)
+    if not applied.ok:
+        failed = next((r for r in applied.results if not r.ok), None)
+        raise FinishError("Attaching the iGPU failed" + (f" at: {failed.title}" if failed else "")
+                          + f". Log: {applied.log_path}. Undo with: gpu-setup --undo")
+    run.pve.qm("set", str(run.vmid), "--boot", POST_INSTALL_BOOT_ORDER)
+    _record_state(run.vmid, dict(state, package_installed=False), run.result, run.pve)
+    _enable_watchdog(run.pve, run.vmid, run.result, run.on_event)
+
+
+def _first_boot(run: _IgpuRun, payload_ref: str, tahoe: bool) -> None:
+    """Boot with the iGPU, wait for the guest to install the package and power off, and read what it reported."""
+    pve, vmid, result = run.pve, run.vmid, run.result
+    run.on_event("First boot with the iGPU: the guest installs the graphics package and powers off")
+    start_vm(pve, vmid)
+    if not _wait_first_boot(pve, vmid, FIRSTBOOT_TIMEOUT, tahoe, payload_ref, run.clock, run.sleep):
+        pve.qm("stop", str(vmid))
+        if tahoe:
+            result.notes.append(TAHOE_NOTE)
+        else:
+            result.notes.append(f"The guest did not power off within {FIRSTBOOT_TIMEOUT // 60} minutes, so it was stopped.")
+        wait_stopped(pve, vmid, 120, run.clock, run.sleep)
+    result.result = _read_payload_result(pve, payload_ref)
+    result.installed = result.result == "installed"
+
+
+def _restart(run: _IgpuRun, payload: Path) -> None:
+    """Record the outcome, drop the payload disk, start the VM again and, when the package is in, check the iGPU works."""
+    pve, vmid, result = run.pve, run.vmid, run.result
+    _record_state(vmid, {"package_installed": result.installed, "package_result": result.result}, result, pve)
+    _drop_disk(pve, vmid, "sata2")
+    payload.unlink(missing_ok=True)
+    if result.installed and not apply_plan(
+            [oc_step(str(vmid), "mark", "Note in OpenCore that the graphics package is installed")],
+            execute=True, adapter=pve).ok:
+        result.notes.append("Could not note the installed package on the OpenCore disk: gpu-setup --undo would "
+                            "remove WhateverXe, which the installed package needs.")
+    pve.qm("start", str(vmid))
+    run.on_event("Started the VM again" if result.installed else
+                 "Started the VM again; the graphics package is not installed (see the result above)")
+    if result.installed:
+        run.on_event(f"Checking from the host that macOS uses the iGPU (up to {igpu_engine.ACCEL_TIMEOUT // 60} minutes)")
+        result.accelerated, result.accel_detail = igpu_engine.check_accel(clock=run.clock, sleep=run.sleep)
 
 
 def finish(
@@ -259,96 +314,31 @@ def finish(
     console = console or QmConsole(vmid)
     iso = iso_dir or Path(DEFAULT_ISO_DIR)
     work = work_dir or iso
+    result = FinishResult()
+    run = _IgpuRun(vmid, pve, on_event, clock, sleep, result, wex)
     cfg = _check_vm(vmid, pve)
-    version = (macos or detect_macos(cfg) or "").lower()
-    if not version:
-        raise FinishError("Cannot tell which macOS this VM runs. Pass --macos (ventura, sonoma, sequoia or tahoe).")
-    if version in UNSUPPORTED_MACOS:
-        raise FinishError(UNSUPPORTED_NOTE)
+    version = _macos_of(macos, cfg)
 
-    report = check_intel_gpu(wex=wex)
-    if not report.ok:
-        raise FinishError("The iGPU is not ready: " + " ".join(report.issues))
-    on_event("Looking up the WhateverXe releases on GitHub")
-    try:
-        assets = ensure_igpu_assets(iso, report.engine["info"]["rom"], wex=wex, graphics=graphics)
-    except (igpu_engine.ReleaseError, DownloadError, OSError) as exc:
-        raise FinishError(str(exc)) from exc
+    assets = _fetch_assets(iso, wex, graphics, on_event)
     picks = assets.picks
-    on_event("Using WhateverXe %s and WhateverXe Graphics %s" % (picks["whateverxe"]["version"], picks["graphics"]["version"]))
     # the same preflight the attach will run, so nothing is staged for a VM that could not take the card
-    plan = prepare_attach_igpu(vmid, assets["whateverxe"], assets["amfipass"], assets["rom"], adapter=pve,
-                                  wex_sha=picks["whateverxe"]["sha256"], amfi_sha=igpu_engine.PINS["amfipass"][2],
-                                  wex=wex)
-    if not plan.ok:
-        raise FinishError("Cannot attach the iGPU: " + " ".join(plan.issues))
-    result = FinishResult(notes=list(plan.warnings))
+    plan = _attach_plan(vmid, assets, pve, wex)
+    result.notes.extend(plan.warnings)
     state = igpu_engine.picks_state(picks, version)
     result.versions = igpu_engine.describe_state(state)
     storage = _storage_of(cfg)
-    snapshot = create_snapshot(vmid, adapter=pve)
-    on_event(f"Saved the VM config to {snapshot.path}")
+    save_snapshot(vmid, pve, on_event)
 
-    payload = work / f"igpu-payload-{vmid}.img"
-    on_event("Building the payload disk (graphics package, first-boot script)")
-    ok, msg = igpu_engine.build_payload(str(assets["graphics"]), str(payload))
-    if not ok:
-        raise FinishError(msg)
-    recovery = resolve_recovery_or_installer_path(SimpleNamespace(installer_path="", macos=version))  # type: ignore[arg-type]
-    if not recovery.exists():
-        from .downloader import download_recovery
-        on_event(f"Downloading the {version} recovery image")
-        recovery = download_recovery(version, iso)
+    payload = _build_payload(vmid, assets, work, on_event)
+    recovery = recovery_image(version, iso, on_event)
     job = StageJob(vmid, pve, console, storage, on_event, clock, sleep, version == "tahoe",
                    tuple(igpu_engine.vm_settings(0, "")["args_add"]))
     payload_ref = stage_recovery(job, payload, recovery, cfg)
-    err = console.restore_picker_timeout()
-    if err:
-        result.notes.append(f"Could not restore the picker's auto-boot ({err}); run post-install afterwards.")
+    note_picker_restore(console, result.notes)
 
-    on_event("Attaching the iGPU")
-    plan = prepare_attach_igpu(vmid, assets["whateverxe"], assets["amfipass"], assets["rom"], adapter=pve,
-                                  wex_sha=picks["whateverxe"]["sha256"], amfi_sha=igpu_engine.PINS["amfipass"][2],
-                                  wex=wex)
-    if not plan.ok:
-        raise FinishError("Cannot attach the iGPU: " + " ".join(plan.issues))
-    applied = apply_plan(plan.steps, execute=True, adapter=pve)
-    if not applied.ok:
-        failed = next((r for r in applied.results if not r.ok), None)
-        raise FinishError("Attaching the iGPU failed" + (f" at: {failed.title}" if failed else "")
-                          + f". Log: {applied.log_path}. Undo with: gpu-setup --undo")
-    pve.qm("set", str(vmid), "--boot", POST_INSTALL_BOOT_ORDER)
-    _record_state(vmid, dict(state, package_installed=False), result, pve)
-    _enable_watchdog(pve, vmid, result, on_event)
-
-    on_event("First boot with the iGPU: the guest installs the graphics package and powers off")
-    tahoe = version == "tahoe"
-    res = pve.qm("start", str(vmid))
-    if not res.ok:
-        raise FinishError(f"Could not start VM {vmid}: {res.output.strip()[-300:]}")
-    if not _wait_first_boot(pve, vmid, FIRSTBOOT_TIMEOUT, tahoe, payload_ref, clock, sleep):
-        pve.qm("stop", str(vmid))
-        if tahoe:
-            result.notes.append(TAHOE_NOTE)
-        else:
-            result.notes.append(f"The guest did not power off within {FIRSTBOOT_TIMEOUT // 60} minutes, so it was stopped.")
-        wait_stopped(pve, vmid, 120, clock, sleep)
-    result.result = _read_payload_result(pve, payload_ref)
-    result.installed = result.result == "installed"
-    _record_state(vmid, {"package_installed": result.installed, "package_result": result.result}, result, pve)
-    _drop_disk(pve, vmid, "sata2")
-    payload.unlink(missing_ok=True)
-    if result.installed and not apply_plan(
-            [oc_step(str(vmid), "mark", "Note in OpenCore that the graphics package is installed")],
-            execute=True, adapter=pve).ok:
-        result.notes.append("Could not note the installed package on the OpenCore disk: gpu-setup --undo would "
-                            "remove WhateverXe, which the installed package needs.")
-    pve.qm("start", str(vmid))
-    on_event("Started the VM again" if result.installed else
-             "Started the VM again; the graphics package is not installed (see the result above)")
-    if result.installed:
-        on_event(f"Checking from the host that macOS uses the iGPU (up to {igpu_engine.ACCEL_TIMEOUT // 60} minutes)")
-        result.accelerated, result.accel_detail = igpu_engine.check_accel(clock=clock, sleep=sleep)
+    _attach_igpu(run, assets, state)
+    _first_boot(run, payload_ref, version == "tahoe")
+    _restart(run, payload)
     return result
 
 
@@ -482,9 +472,7 @@ def _stage(vmid: int, pve: ProxmoxAdapter, console: QmConsole, payload_ref: str,
     step = oc_step(str(vmid), "stage", "Make the OpenCore picker show recovery only and wait for a key")
     if not apply_plan([step], execute=True, adapter=pve).ok:
         raise FinishError("Could not patch the OpenCore disk (picker).")
-    res = pve.qm("start", str(vmid))
-    if not res.ok:
-        raise FinishError(f"Could not start VM {vmid}: {res.output.strip()[-300:]}")
+    start_vm(pve, vmid)
     try:
         open_recovery_terminal(console, on_event, clock, sleep)
     except UnattendedError as exc:

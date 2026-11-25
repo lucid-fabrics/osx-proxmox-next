@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import subprocess
 
-import pytest
 
 from osx_proxmox_next.infrastructure import ProxmoxAdapter
-from osx_proxmox_next.services import proxmox_service as svc_module
+from osx_proxmox_next import infrastructure as svc_module
 from osx_proxmox_next.services.proxmox_service import get_proxmox_adapter
 from adapter_fakes import patch_adapter_run
 
