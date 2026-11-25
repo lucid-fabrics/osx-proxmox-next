@@ -123,6 +123,8 @@ declare -A OC_COMPONENT_SHA256=(
 set -euo pipefail
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
+# The GPU engine directory is made by this process (gpu_engine_setup): a value from the environment is never trusted.
+unset GPU_ENGINE_DIR GPU_ENGINE_OWNER GPU_ENGINE_ROOT
 
 function error_handler() {
   local exit_code="$?"
@@ -161,6 +163,8 @@ function cleanup_vmid() {
 
 function cleanup() {
   local mnt loop
+  # (defined further down: a run that ends before the script has been read as far as that has no engine dir)
+  ! declare -F gpu_engine_remove >/dev/null || gpu_engine_remove
   # Unmount all tracked mount points (lazy fallback for busy mounts)
   for mnt in "${BUILD_SRC_MNT:-}" "${BUILD_DEST_MNT:-}" "${RECOVERY_MNT:-}"; do
     [ -n "$mnt" ] && { umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true; }
@@ -9732,10 +9736,24 @@ if __name__ == '__main__':
 GPU_EMBED_OC_KEXT_EOF
 # ── GPU embedded: oc_kext.py end ──
 
-# Write the embedded engines to a temp dir once.
-function gpu_engine_init() {
-  [ -n "${GPU_ENGINE_DIR:-}" ] && [ -d "$GPU_ENGINE_DIR" ] && return 0
-  GPU_ENGINE_DIR=$(mktemp -d "${TEMP_DIR:-${TMPDIR:-/tmp}}/gpuengine.XXXXXX") || return 1
+# The embedded engines are written to one temp dir per script run. gpu_engine_setup makes it at the top level, before
+# any subshell (a command substitution or a pipeline) can ask for it, so every subshell finds the same one. A variable
+# set inside a subshell is lost when it ends. The variables are not exported. Only the process that made the dir
+# (GPU_ENGINE_OWNER) removes it, from the EXIT trap (cleanup), which bash also runs when INT or TERM ends the script.
+function gpu_engine_ok() {
+  local dir="${GPU_ENGINE_DIR:-}" root="${GPU_ENGINE_ROOT:-}"
+  [ -n "$dir" ] && [ -n "$root" ] && [ -n "${GPU_ENGINE_OWNER:-}" ] || return 1
+  [ "${dir%/*}" = "$root" ] && [[ "${dir##*/}" == gpuengine.?????? ]] || return 1
+  # Not a symlink and ours: a swapped-in dir of another user's (a TMPDIR that is not sticky) must not be removed.
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ]
+}
+
+function gpu_engine_setup() {
+  # Inside TEMP_DIR (which cleanup removes whole), so even a copy a subshell makes, because the start-up setup failed, goes with it.
+  local root="${TEMP_DIR:-${TMPDIR:-/tmp}}"
+  GPU_ENGINE_DIR=$(mktemp -d "$root/gpuengine.XXXXXX") || { unset GPU_ENGINE_DIR; return 1; }
+  GPU_ENGINE_ROOT="$root"
+  GPU_ENGINE_OWNER="${BASHPID:-$$}"
   printf '%s' "$GPU_EMBED_HOST_SETUP" >"$GPU_ENGINE_DIR/host_setup.py"
   printf '%s' "$GPU_EMBED_BIOS_GUIDE" >"$GPU_ENGINE_DIR/bios_guide.py"
   printf '%s' "$GPU_EMBED_BIOS_PATHS" >"$GPU_ENGINE_DIR/bios_paths.json"
@@ -9754,6 +9772,18 @@ function gpu_engine_init() {
   printf '%s' "$GPU_EMBED_DRIVER_ENGINE" >"$GPU_ENGINE_DIR/driver_engine.py"
   printf '%s' "$GPU_EMBED_DRIVER_STATE" >"$GPU_ENGINE_DIR/driver_state.py"
   printf '%s' "$GPU_EMBED_OC_KEXT" >"$GPU_ENGINE_DIR/oc_kext.py"
+}
+
+function gpu_engine_init() {
+  gpu_engine_ok || gpu_engine_setup
+}
+
+# Removes the dir, and only the one this process made: never from a subshell, never when the value is not ours.
+function gpu_engine_remove() {
+  [ "${BASHPID:-$$}" = "${GPU_ENGINE_OWNER:-}" ] || return 0
+  gpu_engine_ok || return 0
+  rm -rf -- "$GPU_ENGINE_DIR" || true
+  unset GPU_ENGINE_DIR GPU_ENGINE_OWNER GPU_ENGINE_ROOT
 }
 
 # host_setup.py <command>; JSON on stdin, JSON on stdout. GPU_ROOT redirects it for tests.
@@ -13264,6 +13294,9 @@ cd "${HOME:-/root}" 2>/dev/null || cd /
 
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
+# One engine dir for this run, made here at the top level so subshells share it. A failure is retried at first use, and any copy
+# that retry makes sits in TEMP_DIR, which cleanup removes.
+gpu_engine_setup || true
 
 # `osx-proxmox-next.sh post-install <vmid>`: leave install mode on an existing
 # VM, before any of the create-a-VM prompts.

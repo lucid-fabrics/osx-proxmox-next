@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 
 import pytest
 
@@ -53,22 +54,21 @@ def test_one_big_test_dir_fails_even_when_the_total_is_small():
     assert lines and "test_wedged0" in lines[1]
 
 
-_LEFT = []
+def test_a_left_engine_copy_is_found_at_any_depth_and_other_files_are_not(tmp_path):
+    (tmp_path / "gpuengine.abc123").mkdir()
+    (tmp_path / "tmp.x" / "gpuengine.def456").mkdir(parents=True)
+    (tmp_path / "gpuengine.file").write_text("a file is not a directory")
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "keep" / "keep.txt").write_text("not an engine copy")
+    found = guard.engine_copies(tmp_path)
+    shutil.rmtree(tmp_path / "gpuengine.abc123")          # these are made up here: the fixture in conftest fails a test that leaves any
+    shutil.rmtree(tmp_path / "tmp.x")
+    assert found == ["gpuengine.abc123", "tmp.x/gpuengine.def456"]
 
 
-def test_a_bash_run_leaves_an_engine_copy_behind(tmp_path):
-    copy = tmp_path / "gpuengine.abc123"
-    copy.mkdir()
-    (copy / "host_setup.py").write_bytes(b"x" * 100_000)
-    (tmp_path / "keep.txt").write_text("not an engine copy")
-    _LEFT.append(tmp_path)
-    assert copy.exists()
-
-
-def test_the_engine_copies_of_the_test_before_are_swept_and_other_files_are_not():
-    assert _LEFT, "the test above has to run first"
-    assert not (_LEFT[0] / "gpuengine.abc123").exists()
-    assert (_LEFT[0] / "keep.txt").exists()
+def test_the_bytecode_cache_of_a_mac_is_not_an_engine_copy(tmp_path):
+    (tmp_path / "Library" / "Caches" / "com.apple.python" / "tmp.x" / "gpuengine.abc123").mkdir(parents=True)
+    assert guard.engine_copies(tmp_path) == []
 
 
 def test_the_biggest_entries_of_a_dir_are_named(tmp_path):

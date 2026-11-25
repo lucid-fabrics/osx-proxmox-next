@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 
 import pytest
 
@@ -130,14 +129,13 @@ def _no_host_pci_devices(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _sweep_bash_engine_copies(tmp_path):
-    """The bash installer writes its embedded engines (about 350 KB) to a fresh $TMPDIR/gpuengine.XXXXXX on every call
-    that runs in a subshell, and never removes them. One bash test makes hundreds of calls: 100 MB on Linux CI. The
-    copies are of no use once the test is over, so they go with it."""
+def _no_bash_engine_copies_left(tmp_path):
+    """The bash installer unpacks its embedded engines (about 350 KB) once per run and removes them when the process ends. A test
+    that leaves a gpuengine.* directory behind found a leak (one per subshell, or one that nothing removes): it fails, nothing sweeps
+    it away."""
     yield
-    for _ in range(3):  # a bash process that is still winding down can add files while the first pass runs
-        for leftover in tmp_path.glob("gpuengine.*"):
-            shutil.rmtree(leftover, ignore_errors=True)
+    left = temp_size.engine_copies(tmp_path)
+    assert not left, f"the bash installer left its engine copies behind: {left[:5]}"
 
 
 # Fails the run when the tests leave too much behind in the pytest base temp dir (see temp_size.py).
