@@ -39,6 +39,7 @@ LAZY_IMPORTS: dict[tuple[str, str], str] = {
     ("app.py", "screens.gpu"): _TEXTUAL_SCREEN,
     ("app.py", "screens.vm_view"): _TEXTUAL_SCREEN,
     ("screens/new_mac.py", "screens.build"): _SCREEN_TO_SCREEN,
+    ("screens/new_mac.py", "screens.arm64_build"): _SCREEN_TO_SCREEN,
     ("screens/vm_actions.py", "screens.driver"): _SCREEN_TO_SCREEN,
     ("screens/vm_view.py", "screens.build"): _SCREEN_TO_SCREEN,
     ("screens/vm_view.py", "screens.gpu"): _SCREEN_TO_SCREEN,

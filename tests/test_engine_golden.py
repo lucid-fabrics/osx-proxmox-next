@@ -89,6 +89,7 @@ def run_case(mod, argv, stdin, setup, patches=(), fakes=None):
     with contextlib.ExitStack() as st:
         st.enter_context(mock.patch.dict(os.environ, env))
         os.environ.pop("IGPU_DEVICES", None)
+        os.environ.pop("SSH_CONNECTION", None)  # facts read it; a test run over ssh must stay deterministic
         st.enter_context(mock.patch("subprocess.run", _fake_subprocess_run))
         st.enter_context(mock.patch("os.uname", lambda: SimpleNamespace(release="6.8.12-1-pve")))
         st.enter_context(mock.patch("time.time", lambda: NOW))
