@@ -1,10 +1,16 @@
-# gitleaks: keep the default rules and allow the two files this repository ships on purpose.
-# arm64/lib/install/ is the public restore host: hackkey.pem is a P-384 key generated for stand-in
-# LocalPolicies (its public point is patched into AppleVPBootPolicy, so it is public by design), and
-# m2bhost.py's `key="ApImg4Ticket"` matches the generic-api-key rule by shape, not by secret.
+# gitleaks: keep the default rules and allow the two shapes this repository ships on purpose.
+# hackkey.pem is a P-384 key generated for stand-in LocalPolicies (its public point is patched into
+# AppleVPBootPolicy, so it is public by design), and m2bhost.py's `key="ApImg4Ticket"` matches the
+# generic-api-key rule by shape, not by secret. Narrow on purpose: a real key elsewhere in
+# arm64/lib/install/ must still be reported.
 [extend]
 useDefault = true
 
-[allowlist]
-description = "the public restore host and its policy stand-in key"
-paths = ['''arm64/lib/install/''']
+[[allowlists]]
+description = "hackkey.pem: the public P-384 stand-in key"
+paths = ['''arm64/lib/install/hackkey\.pem''']
+
+[[allowlists]]
+description = "m2bhost.py: the TSS ticket key name, shape only"
+regexTarget = "match"
+regexes = ['''key="ApImg4Ticket"''']
