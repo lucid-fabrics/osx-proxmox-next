@@ -25,11 +25,11 @@ DEBIAN_SUMS_URL = "https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUM
 KEY_DIR = "/root/.ssh"              # on the Proxmox host: the runner's login key, one pair per runner (osx-next-arm64-<vmid>)
 
 # The runner downloads the arm64/ tree of this repository at {ref} and refuses a file whose sha256 differs. The ref must be a tag
-# or a full commit id (a branch moves), and the checksum is mandatory. The two defaults below are set when the beta is tagged:
-# `scripts/arm64-source-pin.sh <ref>` prints both lines. Until then pass --source-ref and --source-sha256.
+# or a full commit id (a branch moves), and the checksum is mandatory. The defaults below are pinned to the beta tag;
+# `arm64/scripts/arm64-source-pin.sh <ref>` prints both lines for a new tag.
 DEFAULT_SOURCE_URL = "https://github.com/lucid-fabrics/osx-proxmox-next/archive/{ref}.tar.gz"
-DEFAULT_SOURCE_REF = ""
-DEFAULT_SOURCE_SHA256 = ""
+DEFAULT_SOURCE_REF = "v0.38.4-beta.1"
+DEFAULT_SOURCE_SHA256 = "345e5c00dd52ab95558dabe2beeeb5fbfa229c75f539040f86f01db01674c183"
 
 MIN_VMID = 100
 MAX_VMID = 999999
