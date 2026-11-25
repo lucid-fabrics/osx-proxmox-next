@@ -26,6 +26,7 @@ concurrency:
 
 jobs:
   release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -217,8 +218,8 @@ jobs:
       - name: Create the prerelease for the given tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
-          TAG="${{ inputs.tag }}"
           case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG already exists"
@@ -231,11 +232,16 @@ jobs:
         if: inputs.renderer_asset_url != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RENDERER_URL: ${{ inputs.renderer_asset_url }}
+          RENDERER_SHA256: ${{ inputs.renderer_sha256 }}
         run: |
-          curl -fL "${{ inputs.renderer_asset_url }}" -o /tmp/arm64-renderer-1.tar.gz
-          if [ -n "${{ inputs.renderer_sha256 }}" ]; then
-            echo "${{ inputs.renderer_sha256 }}  /tmp/arm64-renderer-1.tar.gz" | sha256sum -c -
+          curl -fL "$RENDERER_URL" -o /tmp/arm64-renderer-1.tar.gz
+          SHA="${RENDERER_SHA256:-$(. arm64/pins.env && printf %s "$RENDERER_SHA256")}"
+          if [ -z "$SHA" ]; then
+            echo "no sha256 for the renderer tarball: pass renderer_sha256 or pin RENDERER_SHA256 in arm64/pins.env" >&2
+            exit 1
           fi
+          echo "$SHA  /tmp/arm64-renderer-1.tar.gz" | sha256sum -c -
           if gh release view arm64-renderer-1 >/dev/null 2>&1; then
             echo "release arm64-renderer-1 already exists"
           else
