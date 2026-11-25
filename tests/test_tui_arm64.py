@@ -134,7 +134,7 @@ async def test_enter_creates_the_runner_through_its_own_build_screen(monkeypatch
     monkeypatch.setattr("osx_proxmox_next.screens.arm64_build.apply_plan", fake_apply)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
-        screen = await open_arm64(pilot, app)
+        await open_arm64(pilot, app)
         await pilot.press("enter")
         await F.settle(pilot, lambda: isinstance(app.screen, Arm64BuildScreen) and app.screen.finished,
                        what="the runner build to finish")

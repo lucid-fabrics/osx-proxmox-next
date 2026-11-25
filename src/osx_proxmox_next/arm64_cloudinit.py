@@ -41,7 +41,8 @@ chown -R {user}:{user} {install}
 say adding-swap
 # a safety net for the Rust half of the build (rustc peaks near 3.5 GB); the cloud image has no swap
 if ! swapon --show --noheadings | grep -q .; then
-  {{ fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile; }} || echo "no swap file: continuing without"
+  {{ fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null \
+    && swapon /swapfile; }} || echo "no swap file: continuing without"
 fi
 
 say installing-packages

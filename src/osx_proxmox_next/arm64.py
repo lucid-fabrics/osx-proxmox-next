@@ -108,8 +108,10 @@ def validate_arm64_config(config: Arm64Config) -> list[str]:
     if not _URL_RE.fullmatch(config.source_url):
         issues.append("Source URL must be http or https and contain only URL-safe characters.")
     if not (_COMMIT_RE.fullmatch(config.source_ref) or _TAG_RE.fullmatch(config.source_ref)) or ".." in config.source_ref:
-        issues.append("Source ref must be a release tag (v1.2) or a full 40 digit commit id, not a branch"
-                      + ("; this build has no pinned release yet, pass --source-ref and --source-sha256." if not config.source_ref else "."))
+        tail = ("; this build has no pinned release yet, pass --source-ref and --source-sha256."
+                if not config.source_ref else ".")
+        issues.append("Source ref must be a release tag (v1.2) or a full 40 digit commit id, "
+                      "not a branch" + tail)
     if not _SHA256_RE.fullmatch(config.source_sha256):
         issues.append("Source sha256 must be 64 lowercase hex digits (the checksum of the archive at the ref).")
     if bool(config.renderer_url) != bool(config.renderer_sha256):

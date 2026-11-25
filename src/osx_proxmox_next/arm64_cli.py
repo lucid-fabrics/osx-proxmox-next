@@ -41,10 +41,14 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
         cmd.add_argument("--ssh-key-file", default="",
                          help="Public key file for the runner's login (default: a key is made on this host, see /root/.ssh)")
         cmd.add_argument("--gpu-pci", default="", help="Pass this free host GPU to the runner (default off)")
-        cmd.add_argument("--source-url", default=DEFAULT_SOURCE_URL, help="Archive of this repository ({ref} is replaced)")
-        cmd.add_argument("--source-ref", default=DEFAULT_SOURCE_REF, help="Release tag or full commit id the runner builds from")
-        cmd.add_argument("--source-sha256", default=DEFAULT_SOURCE_SHA256, help="sha256 of the archive at the ref (the runner refuses any other)")
-        cmd.add_argument("--renderer-url", default="", help="Renderer tarball to build from instead of the release one (with --renderer-sha256)")
+        cmd.add_argument("--source-url", default=DEFAULT_SOURCE_URL,
+                         help="Archive of this repository ({ref} is replaced)")
+        cmd.add_argument("--source-ref", default=DEFAULT_SOURCE_REF,
+                         help="Release tag or full commit id the runner builds from")
+        cmd.add_argument("--source-sha256", default=DEFAULT_SOURCE_SHA256,
+                         help="sha256 of the archive at the ref (the runner refuses any other)")
+        cmd.add_argument("--renderer-url", default="",
+                         help="Renderer tarball to build from instead of the release one (with --renderer-sha256)")
         cmd.add_argument("--renderer-sha256", default="")
         cmd.add_argument("--ipsw", default="", help="Path on the runner to the IPSW the Mac-free install restores")
         cmd.add_argument("--aux", default="", help="Path on the runner to the aux image the restore boots with")
