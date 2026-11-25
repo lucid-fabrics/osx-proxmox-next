@@ -250,10 +250,99 @@ cleanup_reset() { CL_P1=""; CL_RMRUN=""; CL_ABORT=(); cleanup_all; CL_PIDS=(); C
 
 need() { command -v "$1" >/dev/null 2>&1 || die "missing tool: $1 ($2)"; }
 
-# The Mac-free install is a separate piece of work. Until it lands the verb exists so the wizard can call it, and says so.
+install_die() { printf 'snapintosh: %s\n' "$*" >&2; exit 2; }
+install_path_ok() { [[ $1 =~ ^/[A-Za-z0-9._@+/-]+$ ]] && [[ $1 != *..* ]]; }
+# install: restore macOS into a raw disk with no Mac, using the restore host in lib/install. --dry-run prints the
+# restore plan and the QEMU command and writes nothing. Without it the pipeline runs: 0 is installed, 3 is
+# install-pending (the restore ended Status 0 but the first-boot LocalPolicy is not there yet; pass --policy FILE
+# once mkpolicy-hack.py made it), 2 is a bad input and anything else is the pipeline's own status. The first boot
+# still needs the policy and the Ambrosia patch, see lib/install/README.md.
 cmd_install() {
-  echo "snapintosh: the Mac-free install is not in this beta build yet" >&2
-  exit 3
+  local ipsw="" aux="" ecid="" disk="" policy="" dry=0 tss=0 f w runs R qemu bundle ramdisk ambrosia rc
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --ipsw) ipsw=${2:-}; shift ;;
+      --aux) aux=${2:-}; shift ;;
+      --ecid) ecid=${2:-}; shift ;;
+      --disk) disk=${2:-}; shift ;;
+      --policy) policy=${2:-}; shift ;;
+      --tss) tss=1 ;;
+      --dry-run) dry=1 ;;
+      -h|--help) usage; return 0 ;;
+      *) install_die "unknown option $1 (install takes --ipsw --aux --ecid --disk [--policy] [--tss] [--dry-run])" ;;
+    esac
+    shift
+  done
+  if [ -z "$ipsw" ]; then
+    for f in "$DL"/*.ipsw; do if [ -f "$f" ]; then ipsw=$f; fi; done
+    if [ -z "$ipsw" ]; then install_die "no IPSW under $DL: snapintosh fetch, or pass --ipsw FILE"; fi
+  fi
+  if [ -z "$aux" ]; then aux=$VM/aux.img; fi
+  if [ -z "$ecid" ] && [ -f "$VM/machineid.bin" ]; then ecid=$(ecid); fi
+  if [ -z "$ecid" ]; then install_die "no ECID: pass --ecid N (the machine uuid the restore is personalized for)"; fi
+  if [ -z "$disk" ]; then disk=$VM/install.raw; fi
+  install_path_ok "$ipsw" || install_die "--ipsw: an absolute path of letters, digits and . _ + @ / - (no ..)"
+  install_path_ok "$aux" || install_die "--aux: an absolute path of letters, digits and . _ + @ / - (no ..)"
+  install_path_ok "$disk" || install_die "--disk: an absolute path of letters, digits and . _ + @ / - (no ..)"
+  [ -f "$ipsw" ] || install_die "no such IPSW: $ipsw"
+  [ -f "$aux" ] || install_die "no such aux image: $aux (the Mac step writes it, or pass --aux FILE)"
+  { [[ $ecid =~ ^[0-9]{1,20}$ ]] && [ "$ecid" != 0 ]; } || install_die "--ecid (ECID): decimal digits (at most 20), not 0"
+  if [ -d "$disk" ]; then install_die "--disk is a directory: $disk"; fi
+  if [ -n "$policy" ]; then
+    install_path_ok "$policy" || install_die "--policy: an absolute path of letters, digits and . _ + @ / - (no ..)"
+    [ -f "$policy" ] || install_die "no such policy image: $policy"
+  fi
+  w=${SNAPINTOSH_INSTALL_BUNDLE:-$HOME_DIR/install/bundle}
+  runs=${SNAPINTOSH_INSTALL_RUNS:-$HOME_DIR/install/runs}
+  R=$runs/install
+  qemu=${QEMU:-$PREFIX/bin/qemu-system-aarch64}
+  bundle=${BUNDLE:-$w/restore.cpio}
+  ramdisk=${RAMDISK:-$w/restore-ramdisk.im4p}
+  ambrosia=${AMBROSIA:-$w/ambrosia-r4.bin}
+  local extra="-chardev socket,id=vusb,path=$R/vusb.sock,server=on,wait=off -device vmapple-virtio-usb-pci,chardev=vusb"
+  if [ "$dry" = 1 ]; then
+    echo "restore plan (dry run, nothing is written)"
+    echo "  ipsw:   $ipsw"
+    echo "  aux:    $aux (its first 16384 bytes become the NVRAM bank)"
+    echo "  ecid:   $ecid"
+    echo "  disk:   $disk ($(if [ -s "$disk" ]; then echo reused; else echo made; fi))"
+    if [ -n "$policy" ]; then echo "  policy: $policy (added to the restore bundle as local-policy.img4)"; fi
+    echo "  run:    $R"
+    echo "  1. drop the aux's first 16 KiB into $R/aux"
+    echo "  2. make the raw disk when it is missing"
+    echo "  3. boot Ambrosia's restore mode; restored drives m2bhost.py over the virtio USB port"
+    echo "  4. answer the data requests from the IPSW and Apple's TSS, stop QEMU at the guest's StatusMsg"
+    echo "QEMU command:"
+    QEMU=$qemu AUX=$aux DISK=$disk ECID=$ecid BUNDLE=$bundle RAMDISK=$ramdisk AMBROSIA=$ambrosia \
+      SNAPINTOSH_INSTALL_RUNS=$runs EXTRA=$extra bash "$LIB/install/run-restore.sh" --print install
+    return 0
+  fi
+  [ -x "$qemu" ] || install_die "QEMU not built: snapintosh build (with the qemu-m2b patches, see pins.env)"
+  [ -f "$bundle" ] || install_die "no restore bundle at $bundle (see lib/install/README.md)"
+  [ -f "$ramdisk" ] || install_die "no restore ramdisk at $ramdisk (see lib/install/README.md)"
+  [ -f "$ambrosia" ] || install_die "no Ambrosia restore build at $ambrosia (see lib/install/README.md)"
+  ensure_home; mkdir -p "$runs" "$w"
+  if [ -n "$policy" ]; then
+    python3 -I "$LIB/install/mkbundle.py" "$bundle" "$w/restore-policy.cpio" "local-policy.img4=$policy" \
+      || install_die "could not add the policy to the restore bundle"
+    bundle=$w/restore-policy.cpio
+  fi
+  export QEMU AUX=$aux DISK=$disk ECID=$ecid BUNDLE=$bundle RAMDISK=$ramdisk AMBROSIA=$ambrosia IPSW=$ipsw
+  export SNAPINTOSH_INSTALL_RUNS=$runs EXTRA=$extra
+  local -a targs=()
+  if [ "$tss" = 1 ]; then targs+=(--tss); fi
+  rc=0
+  bash "$LIB/install/go.sh" install "${targs[@]}" || rc=$?
+  if [ "$rc" = 0 ] && [ -z "$policy" ]; then
+    echo "install-pending: the restore ended Status 0, but the first boot still needs the LocalPolicy" >&2
+    echo "  build it with lib/install/mkpolicy-hack.py, then pass --policy FILE to snapintosh install" >&2
+    exit 3
+  fi
+  if [ "$rc" != 0 ]; then
+    echo "snapintosh: install failed with status $rc (logs: $R/host.out, $R/qemu.out)" >&2
+    exit "$rc"
+  fi
+  ok "installed: $disk"
 }
 
 usage() {
@@ -293,10 +382,15 @@ usage: snapintosh <command> [options]
   run [options]              boot the guest with the default settings (Ambrosia, 12 vCPUs, IOFence patch, DSB skips, ARP seed)
   snapshot NAME [options]    boot, wait for ssh, save a snapshot, quit
   resume NAME [options]      restore a snapshot
+  install --ipsw F --aux F --ecid N --disk F [--policy F] [--tss] [--dry-run]
+                             restore macOS into a raw disk with no Mac, over the virtio USB restore host (lib/install).
+                             --dry-run prints the restore plan and the QEMU command and writes nothing. 0 is installed,
+                             3 is install-pending (restore done, first-boot LocalPolicy still needed: --policy),
+                             other is a failure. --tss allows the requests to Apple's TSS; the first boot and the
+                             Ambrosia patch remain, see lib/install/README.md
   bench [options]            measure boot to ssh and Dock, Safari cold launch, drag fps, resume time and Safari from a resume:
                              N runs (--runs, default 3), JSON plus a table with median and spread, host info (see README).
                              --save-settle S (default 120) is the snapshot settle; all options: bench --help
-  install                    install macOS into the guest disk with no Mac (not in this beta build yet: exits 3)
   status                     show what is installed
 
 run/snapshot/resume options:

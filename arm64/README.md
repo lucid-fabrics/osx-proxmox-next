@@ -2,7 +2,7 @@
 
 Snapintosh runs an arm64 macOS 27 guest on an ordinary x86 Linux box (a virtual machine works). There is no KVM and no Mac involved at run time. The CPU is emulated in software (QEMU TCG, a fork with a `vmapple` machine and a persistent translation cache). The guest boots through Ambrosia, an open boot firmware, instead of Apple's AVPBooter and iBoot. Graphics go through `reims-vgpu` (a paravirtual GPU device) and `metal2vulkan` (Metal commands to Vulkan), so the guest's Metal work lands on your host GPU, or on lavapipe if you have none.
 
-This directory holds the beta: one CLI, `snapintosh`, plus the docs and the sources it builds. It is not a finished installer. Read `docs/BLOCKERS.md` before you start: **installing macOS into the guest disk still needs a Mac, once**.
+This directory holds the beta: one CLI, `snapintosh`, plus the docs and the sources it builds. `snapintosh install` now carries the Mac-free restore host (code and unit tests; a live end-to-end restore is still a follow-up, `lib/install/README.md`). Read `docs/BLOCKERS.md` before you start: **installing macOS into the guest disk still needs a Mac, once, until that live path is proven**.
 
 ## Legal
 
@@ -265,7 +265,7 @@ How it stays safe: the profile only matches the source at one absolute path and 
 
 ### The remaining Mac step
 
-One Mac session, about 15 minutes plus the download: `vzinstall install` restores the IPSW (296 s on an M3 Max), then you click through Setup Assistant by hand (about 3 minutes: account `snap`, automatic login, Shut Down). Apple's Virtualization.framework is the only tool that personalizes the restore for a machine id and writes `aux.img`. There is no Linux replacement yet. No other Apple-side step is left: AVPBooter is gone from `fetch`, `make-disk` and `run`.
+One Mac session, about 15 minutes plus the download: `vzinstall install` restores the IPSW (296 s on an M3 Max), then you click through Setup Assistant by hand (about 3 minutes: account `snap`, automatic login, Shut Down). Apple's Virtualization.framework is the only tool that personalizes the restore for a machine id and writes `aux.img`. A Linux replacement is now wired as `snapintosh install --ipsw F --aux F --ecid N --disk F` (the restore host in `lib/install/`), but that path has unit tests only; the Mac-free restore was proven in the lab, not by this CLI yet. No other Apple-side step is left: AVPBooter is gone from `fetch`, `make-disk` and `run`.
 
 ### Guest builds
 
