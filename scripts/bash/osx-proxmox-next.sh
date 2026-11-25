@@ -9744,12 +9744,13 @@ function gpu_engine_ok() {
   local dir="${GPU_ENGINE_DIR:-}" root="${GPU_ENGINE_ROOT:-}"
   [ -n "$dir" ] && [ -n "$root" ] && [ -n "${GPU_ENGINE_OWNER:-}" ] || return 1
   [ "${dir%/*}" = "$root" ] && [[ "${dir##*/}" == gpuengine.?????? ]] || return 1
+  # Not a symlink and ours: a swapped-in dir of another user's (a TMPDIR that is not sticky) must not be removed.
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ]
 }
 
 function gpu_engine_setup() {
-  local root="${TMPDIR:-/tmp}"
-  unset GPU_ENGINE_DIR GPU_ENGINE_OWNER GPU_ENGINE_ROOT
+  # Inside TEMP_DIR (which cleanup removes whole), so even a copy a subshell makes, because the start-up setup failed, goes with it.
+  local root="${TEMP_DIR:-${TMPDIR:-/tmp}}"
   GPU_ENGINE_DIR=$(mktemp -d "$root/gpuengine.XXXXXX") || { unset GPU_ENGINE_DIR; return 1; }
   GPU_ENGINE_ROOT="$root"
   GPU_ENGINE_OWNER="${BASHPID:-$$}"
@@ -13293,7 +13294,8 @@ cd "${HOME:-/root}" 2>/dev/null || cd /
 
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
-# One engine dir for this run, made here at the top level so subshells share it. A failure is retried at first use.
+# One engine dir for this run, made here at the top level so subshells share it. A failure is retried at first use, and any copy
+# that retry makes sits in TEMP_DIR, which cleanup removes.
 gpu_engine_setup || true
 
 # `osx-proxmox-next.sh post-install <vmid>`: leave install mode on an existing
