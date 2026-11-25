@@ -1,0 +1,10 @@
+# gitleaks: keep the default rules and allow the two files this repository ships on purpose.
+# arm64/lib/install/ is the public restore host: hackkey.pem is a P-384 key generated for stand-in
+# LocalPolicies (its public point is patched into AppleVPBootPolicy, so it is public by design), and
+# m2bhost.py's `key="ApImg4Ticket"` matches the generic-api-key rule by shape, not by secret.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "the public restore host and its policy stand-in key"
+paths = ['''arm64/lib/install/''']

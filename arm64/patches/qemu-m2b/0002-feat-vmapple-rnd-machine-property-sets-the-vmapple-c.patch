@@ -1,0 +1,77 @@
+From 59c7b57ede82267b8a0e3c658edb644d3bc8f95e Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Sun, 22 Nov 2026 15:53:53 -0500
+Subject: [PATCH 2/3] feat(vmapple): rnd machine property sets the vmapple-cfg
+ random value
+
+The AP boot nonce Ambrosia puts in /chosen is the cfg random value repeated, so a restore host that must request tickets before the boot needs to choose it.
+---
+ hw/vmapple/vmapple.c | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 56b83b1772..a9f5bfdca7 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -92,6 +92,9 @@ struct VMAppleMachineState {
+ #endif
+     uint64_t uuid;
+     bool run_installer;
++    /* rnd=N: the vmapple-cfg random value (boot-nonce source), else random */
++    bool has_rnd;
++    uint32_t rnd;
+     int64_t tcg_smp_final_shift;
+     QEMUTimer *tcg_smp_shift_timer;
+     bool tcg_smp_all_powered;
+@@ -258,6 +261,9 @@ static bool create_cfg(VMAppleMachineState *vms, MemoryRegion *mem,
+     sysbus_mmio_map(cfg, 0, vms->memmap[VMAPPLE_CONFIG].base);
+ 
+     qemu_guest_getrandom_nofail(&rnd, sizeof(rnd));
++    if (vms->has_rnd) {
++        rnd = vms->rnd;
++    }
+ 
+     qdev_prop_set_uint32(vms->cfg, "nr-cpus", machine->smp.cpus);
+     qdev_prop_set_uint64(vms->cfg, "ecid", vms->uuid);
+@@ -1338,6 +1344,24 @@ static void vmapple_set_run_installer(Object *obj, bool value, Error **errp)
+     VMAPPLE_MACHINE(obj)->run_installer = value;
+ }
+ 
++static void vmapple_get_rnd(Object *obj, Visitor *v, const char *name,
++                            void *opaque, Error **errp)
++{
++    uint32_t value = VMAPPLE_MACHINE(obj)->rnd;
++
++    visit_type_uint32(v, name, &value, errp);
++}
++
++static void vmapple_set_rnd(Object *obj, Visitor *v, const char *name,
++                            void *opaque, Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++
++    if (visit_type_uint32(v, name, &vms->rnd, errp)) {
++        vms->has_rnd = true;
++    }
++}
++
+ static void vmapple_instance_init(Object *obj)
+ {
+     VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
+@@ -1354,6 +1378,13 @@ static void vmapple_instance_init(Object *obj)
+                                     "Machine layout for the Ambrosia "
+                                     "firmware: RAM at 4 GiB, avp-rtc, DMA "
+                                     "config doorbell, no SME (default off)");
++    object_property_add(obj, "rnd", "uint32", vmapple_get_rnd,
++                        vmapple_set_rnd, NULL, NULL);
++    object_property_set_description(obj, "rnd",
++                                    "The vmapple-cfg random value (Ambrosia's "
++                                    "boot-nonce source), default random per "
++                                    "start; a host that needs the AP nonce "
++                                    "before the boot sets it");
+     object_property_add_bool(obj, "run-installer",
+                              vmapple_get_run_installer,
+                              vmapple_set_run_installer);
+-- 
+2.53.0
+
