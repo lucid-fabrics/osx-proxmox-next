@@ -83,7 +83,11 @@ def test_good_optional_values_pass(change):
 def test_the_defaults_name_no_branch_and_a_checksum_is_mandatory():
     from osx_proxmox_next.arm64 import DEFAULT_SOURCE_REF, DEFAULT_SOURCE_SHA256
     assert DEFAULT_SOURCE_REF not in ("main", "master", "HEAD")
-    assert validate_arm64_config(Arm64Config(vmid=478, name="macos27-runner", storage="local-lvm")), "an unpinned config must be refused"
+    pinned = Arm64Config(vmid=478, name="macos27-runner", storage="local-lvm")
+    assert validate_arm64_config(pinned) == []
+    unpinned = Arm64Config(vmid=478, name="macos27-runner", storage="local-lvm",
+                           source_ref="", source_sha256="")
+    assert validate_arm64_config(unpinned), "an unpinned config must be refused"
     assert not DEFAULT_SOURCE_SHA256 or len(DEFAULT_SOURCE_SHA256) == 64
 
 
