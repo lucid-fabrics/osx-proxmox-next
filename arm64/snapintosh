@@ -286,7 +286,8 @@ cmd_install() {
   install_path_ok "$disk" || install_die "--disk: an absolute path of letters, digits and . _ + @ / - (no ..)"
   [ -f "$ipsw" ] || install_die "no such IPSW: $ipsw"
   [ -f "$aux" ] || install_die "no such aux image: $aux (the Mac step writes it, or pass --aux FILE)"
-  { [[ $ecid =~ ^[0-9]{1,20}$ ]] && [ "$ecid" != 0 ]; } || install_die "--ecid (ECID): decimal digits (at most 20), not 0"
+  { [[ $ecid =~ ^[0-9]{1,20}$ ]] && python3 -I -c 'import sys; raise SystemExit(not 0 < int(sys.argv[1]) < 2**64)' "$ecid"; } \
+    || install_die "--ecid (ECID): decimal digits (at most 20), not 0 and below 2^64"
   if [ -d "$disk" ]; then install_die "--disk is a directory: $disk"; fi
   if [ -n "$policy" ]; then
     install_path_ok "$policy" || install_die "--policy: an absolute path of letters, digits and . _ + @ / - (no ..)"

@@ -93,12 +93,17 @@ def test_the_defaults_name_no_branch_and_a_checksum_is_mandatory():
 
 def test_the_release_pin_is_set_or_the_test_says_wave_b_has_not_tagged_yet():
     """Wave B sets DEFAULT_SOURCE_REF and DEFAULT_SOURCE_SHA256; until then the pair is empty and this is skipped."""
-    from osx_proxmox_next.arm64 import DEFAULT_SOURCE_REF, DEFAULT_SOURCE_SHA256
+    from osx_proxmox_next.arm64 import DEFAULT_SOURCE_REF, DEFAULT_SOURCE_SHA256, DEFAULT_SOURCE_URL
     assert bool(DEFAULT_SOURCE_REF) == bool(DEFAULT_SOURCE_SHA256), "the two defaults are set together"
     if not DEFAULT_SOURCE_REF:
         pytest.skip("Wave B has not tagged the beta yet")
-    assert DEFAULT_SOURCE_REF[0] == "v" or len(DEFAULT_SOURCE_REF) == 40
-    assert len(DEFAULT_SOURCE_SHA256) == 64 and int(DEFAULT_SOURCE_SHA256, 16) >= 0
+    assert "{ref}" in DEFAULT_SOURCE_URL, "the archive URL must name the ref at download time"
+    assert DEFAULT_SOURCE_REF.startswith("v") or len(DEFAULT_SOURCE_REF) == 40, DEFAULT_SOURCE_REF
+    assert len(DEFAULT_SOURCE_SHA256) == 64, DEFAULT_SOURCE_SHA256
+    assert int(DEFAULT_SOURCE_SHA256, 16) > 0, "an all-zero sha256 pins nothing"
+    cfg = Arm64Config(vmid=478, name="macos27-runner", storage="local-lvm")
+    assert validate_arm64_config(cfg) == [], "the default ref must pass the release tag or commit check"
+    assert cfg.source_ref in cfg.archive_url and "{ref}" not in cfg.archive_url
 
 
 def test_the_config_is_a_plain_dataclass():

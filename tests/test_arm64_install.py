@@ -40,6 +40,7 @@ def test_the_dry_run_prints_the_plan_and_the_qemu_command_and_writes_nothing(tmp
     assert result.returncode == 0, result.stderr
     assert "restore plan (dry run, nothing is written)" in result.stdout
     assert "vmapple-virtio-usb-pci" in result.stdout
+    assert r"memory-backend-memfd\,id=ram0\,size=8G\,share=on" in result.stdout
     assert f"uuid={ECID}" in result.stdout
     assert "restore.cpio" in result.stdout and "restore-ramdisk.im4p" in result.stdout
     after = {p.relative_to(tmp_path) for p in tmp_path.rglob("*")}
@@ -52,6 +53,17 @@ def test_a_bad_ecid_is_named_and_exits_2(tmp_path, inputs):
     result = run(tmp_path, ["install", "--dry-run", "--ipsw", str(ipsw), "--aux", str(aux),
                             "--ecid", "12x", "--disk", str(tmp_path / "d.raw")])
     assert result.returncode == 2 and "ECID" in result.stderr
+
+
+def test_an_ecid_of_2_to_the_64_is_refused_and_the_maximum_64_bit_value_is_accepted(tmp_path, inputs):
+    ipsw, aux = inputs
+    over = run(tmp_path, ["install", "--dry-run", "--ipsw", str(ipsw), "--aux", str(aux),
+                          "--ecid", str(2 ** 64), "--disk", str(tmp_path / "d.raw")])
+    assert over.returncode == 2 and "ECID" in over.stderr
+    top = run(tmp_path, ["install", "--dry-run", "--ipsw", str(ipsw), "--aux", str(aux),
+                         "--ecid", str(2 ** 64 - 1), "--disk", str(tmp_path / "d.raw")])
+    assert top.returncode == 0, top.stderr
+    assert f"uuid={2 ** 64 - 1}" in top.stdout
 
 
 def test_a_relative_disk_is_refused(tmp_path, inputs):

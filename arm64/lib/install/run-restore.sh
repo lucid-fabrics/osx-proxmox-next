@@ -40,7 +40,7 @@ case $ECID in ''|*[!0-9]*) echo "run-restore.sh: ECID must be decimal digits" >&
 cmd=("$QEMU" -accel "tcg,tb-size=2047"
   -machine "vmapple,uuid=$ECID,memory-backend=ram0,ambrosia=on${RND:+,rnd=$RND}"
   -cpu max -smp "$CPUS" -m "$RAM"
-  -object "memory-backend-ram,id=ram0,size=$RAM"
+  -object "memory-backend-memfd,id=ram0,size=$RAM,share=on"
   -display none -monitor none -parallel none
   -serial "file:$R/serial.log" -qmp "unix:$R/qmp.sock,server=on,wait=off"
   -bios "$AMBROSIA"

@@ -33,7 +33,7 @@ import vusbhost as V  # noqa: E402
 from vusbhost import log  # noqa: E402
 
 ASR_PORT = 12345
-KEY_HOSTS = ("wkms-public.apple.com",)  # the AEA key service restored used
+KEY_HOSTS = ("wkms-public.apple.com", "fcs-keys-pub-prod.cdn-apple.com")  # the AEA key service; Apple now 301s to its CDN
 ASR_CHUNK = 128 * 1024
 
 
@@ -365,19 +365,24 @@ class Host:
         body = args.get("RequestBody")
         hdrs = dict(args.get("RequestAdditionalHeaders", {}))
         rec = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "what": kind, "method": method, "url": url}
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *a, **k):
-                return None
+        class CheckedRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                u = urllib.parse.urlsplit(newurl)
+                if u.scheme != "https" or u.hostname not in KEY_HOSTS:
+                    return None
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-        opener = urllib.request.build_opener(NoRedirect)
+        opener = urllib.request.build_opener(CheckedRedirect)
         req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
         t0 = time.time()
         try:
             with opener.open(req, timeout=60) as r:
+                final_url = r.geturl()
                 data, code, rh = r.read(), r.status, dict(r.headers)
         except urllib.error.HTTPError as e:
+            final_url = e.geturl()
             data, code, rh = e.read(), e.code, dict(e.headers)
-        rec.update(final_url=url, http_status=code, response_bytes=len(data), seconds=round(time.time() - t0, 2))
+        rec.update(final_url=final_url, http_status=code, response_bytes=len(data), seconds=round(time.time() - t0, 2))
         with open(os.path.join(self.out, "apple-requests.jsonl"), "a") as f:
             f.write(json.dumps(rec) + "\n")
         log("HTTP %s %s -> %d (%d bytes)" % (method, url, code, len(data)))

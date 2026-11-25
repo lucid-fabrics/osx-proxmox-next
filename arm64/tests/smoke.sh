@@ -8,7 +8,7 @@ export SNAPINTOSH_HOME=$T/home XDG_CONFIG_HOME=$T/cfg
 fail=0
 t() { local name=$1; shift; if "$@" >"$T/out" 2>&1; then echo "pass  $name"; else echo "FAIL  $name"; sed 's/^/      /' "$T/out" | head -20; fail=1; fi; }
 
-t shellcheck shellcheck -x "$S" "$HERE/tests/smoke.sh"
+t shellcheck shellcheck -x -P "$HERE" "$S" "$HERE/tests/smoke.sh"
 t shellcheck-guest shellcheck -s sh "$HERE/lib/guest/apply-sshd-interactive.sh"
 t vkparse-radv bash -c "python3 -I '$HERE/lib/vkparse.py' VK_EXT_fragment_shader_interlock VK_EXT_external_memory_host < '$HERE/tests/fixtures/vulkaninfo-radv.txt' | grep -q '0x1002	\$'"
 t vkparse-anv bash -c "python3 -I '$HERE/lib/vkparse.py' VK_EXT_fragment_shader_interlock VK_EXT_external_memory_host < '$HERE/tests/fixtures/vulkaninfo-anv.txt' | grep -q '0x8086	\$'"
@@ -36,10 +36,16 @@ t build-deps-cross bash -c "'$S' build --deps | grep -q aarch64-unknown-none"
 t sshd-interactive-note bash -c "'$S' make-disk sshd-interactive | grep -q ProcessType; sh -n '$HERE/lib/guest/apply-sshd-interactive.sh'"
 t quiet-note bash -c "'$S' make-disk quiet | grep -q apply-quiet.sh"
 t install-dry-run bash -c "printf i > '$T/ipsw'; printf a > '$T/aux'; '$S' install --dry-run --ipsw '$T/ipsw' --aux '$T/aux' --ecid 4533301000242790675 --disk '$T/d.raw' | grep -q -- 'vmapple-virtio-usb-pci'"
+t install-dry-run-memfd bash -c "'$S' install --dry-run --ipsw '$T/ipsw' --aux '$T/aux' --ecid 4533301000242790675 --disk '$T/d.raw' | grep -q -- 'memory-backend-memfd.*share=on'"
+t install-ecid-max bash -c "'$S' install --dry-run --ipsw '$T/ipsw' --aux '$T/aux' --ecid 18446744073709551615 --disk '$T/d.raw' | grep -q 'uuid=18446744073709551615'"
+t install-ecid-over-2-64 bash -c "! '$S' install --dry-run --ipsw '$T/ipsw' --aux '$T/aux' --ecid 18446744073709551616 --disk '$T/d.raw'"
 t install-dry-run-nothing bash -c "H=$T/nw; mkdir -p \$H; printf i > '$T/ipsw'; printf a > '$T/aux'; SNAPINTOSH_HOME=\$H XDG_CONFIG_HOME=$T/cfg3 '$S' install --dry-run --ipsw '$T/ipsw' --aux '$T/aux' --ecid 1 --disk '$T/d.raw' >/dev/null; [ -z \"\$(find \$H -mindepth 1)\" ]"
 t install-bad-ecid bash -c "! '$S' install --dry-run --ipsw '$T/ipsw' --aux '$T/aux' --ecid abc --disk '$T/d.raw'"
 t install-bad-disk bash -c "! '$S' install --dry-run --ipsw '$T/ipsw' --aux '$T/aux' --ecid 1 --disk relative.raw"
 t install-help bash -c "'$S' --help | grep -q -- 'install --ipsw F --aux F --ecid N --disk F'"
+t m2bhost-cdn-allowlist bash -c "grep -q 'fcs-keys-pub-prod.cdn-apple.com' '$HERE/lib/install/m2bhost.py' && grep -q 'class CheckedRedirect' '$HERE/lib/install/m2bhost.py' && grep -q 'final_url = r.geturl()' '$HERE/lib/install/m2bhost.py'"
+t go-kills-qemu-with-pkill bash -c "[ \$(grep -c 'pkill -x qemu-system-aar' '$HERE/lib/install/go.sh') -eq 2 ]"
+t install-readme-patch-path bash -c "grep -q 'git am ../arm64/patches/qemu/' '$HERE/lib/install/README.md' && ! grep -q '\\.\\./\\.\\./arm64/patches' '$HERE/lib/install/README.md'"
 t build-needs-repo bash -c "! '$S' build --only qemu 2>&1 | grep -q 'unexpected'; REIMS_REPO=file:///nonexistent M2V_REPO=file:///nonexistent '$S' build --only reims 2>&1 | grep -q 'is not in'"
 t renderer-pin bash -c ". '$HERE/pins.env'; [ -z \"\$REIMS_REPO\" ] && [ -z \"\$M2V_REPO\" ] && [ \${#RENDERER_SHA256} -eq 64 ] && case \$RENDERER_URL in https://*) ;; *) exit 1 ;; esac && [ ! -e '$HERE/vendor' ] && grep -q \"\$REIMS_REF\" '$HERE/docs/RENDERER.md' && grep -q \"\$M2V_REF\" '$HERE/docs/RENDERER.md'"
 

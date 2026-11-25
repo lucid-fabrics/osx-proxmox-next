@@ -45,7 +45,7 @@ build` does not apply them yet, so its release-v2 md5s stay the same. To get the
 
 ```sh
 git clone "$QEMU_REPO" qemu && cd qemu && git checkout "$QEMU_REF"
-git am ../../arm64/patches/qemu/*.patch ../../arm64/patches/qemu-m2b/*.patch
+git am ../arm64/patches/qemu/*.patch ../arm64/patches/qemu-m2b/*.patch
 ./configure --target-list=aarch64-softmmu --enable-pvg --enable-slirp ... && make -j"$(nproc)"
 ```
 

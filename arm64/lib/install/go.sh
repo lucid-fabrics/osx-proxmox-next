@@ -23,12 +23,12 @@ bash "$HERE/run-restore.sh" "$TAG" "${SECS:-7500}" "${CPUS:-6}" >/dev/null || { 
 for _ in $(seq 1 100); do [ -S "$R/vusb.sock" ] && break; sleep 0.1; done
 if [ ! -S "$R/vusb.sock" ]; then
   echo "go.sh: the guest never opened $R/vusb.sock (see $R/qemu.out)" >&2
-  kill "$(cat "$R/qemu.pid" 2>/dev/null)" 2>/dev/null
+  pkill -x qemu-system-aar 2>/dev/null
   exit 4
 fi
 python3 -I "$HERE/m2bhost.py" "$R/vusb.sock" "$R/qmp.sock" "$IPSW" "$R/host" --ecid "$ECID" --rnd "$RND" "$@" > "$R/host.out" 2>&1
 rc=$?
 echo "host rc=$rc" >> "$R/host.out"
-kill "$(cat "$R/qemu.pid" 2>/dev/null)" 2>/dev/null
+pkill -x qemu-system-aar 2>/dev/null
 grep -a "REQUEST\|WALL\|STATUS\|TSS\|TIME\|rc=" "$R/host.out" | cut -c1-400 | tail -"${TAILN:-30}"
 exit $rc
