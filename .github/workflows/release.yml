@@ -3,13 +3,31 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.38.4-beta.1"
+        required: true
+      renderer_asset_url:
+        description: "URL of arm64-renderer-1.tar.gz (optional)"
+        required: false
+        default: ""
+      renderer_sha256:
+        description: "Expected sha256 of the renderer tarball (optional)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -175,3 +193,54 @@ jobs:
             --notes-file "${{ steps.notes.outputs.notes_file }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  beta-release:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+
+      - name: Run tests
+        run: |
+          pip install -e ".[dev]" 2>/dev/null || pip install -e .
+          pip install pytest pytest-cov 2>/dev/null || true
+          pytest tests/ -v --tb=short
+
+      - name: Create the prerelease for the given tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+          else
+            gh release create "$TAG" --title "$TAG" --prerelease \
+              --latest=false --generate-notes
+          fi
+
+      - name: Upload the renderer tarball as arm64-renderer-1
+        if: inputs.renderer_asset_url != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fL "${{ inputs.renderer_asset_url }}" -o /tmp/arm64-renderer-1.tar.gz
+          if [ -n "${{ inputs.renderer_sha256 }}" ]; then
+            echo "${{ inputs.renderer_sha256 }}  /tmp/arm64-renderer-1.tar.gz" | sha256sum -c -
+          fi
+          if gh release view arm64-renderer-1 >/dev/null 2>&1; then
+            echo "release arm64-renderer-1 already exists"
+          else
+            gh release create arm64-renderer-1 --title "arm64 renderer 1" \
+              --prerelease --latest=false \
+              --notes "Pinned renderer sources for the macOS 27 arm64 beta (RENDERER_URL in arm64/pins.env)."
+          fi
+          gh release upload arm64-renderer-1 /tmp/arm64-renderer-1.tar.gz --clobber
