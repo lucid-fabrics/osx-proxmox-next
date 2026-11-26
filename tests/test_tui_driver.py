@@ -87,6 +87,12 @@ async def open_driver(pilot, app):
     return app.screen
 
 
+def drawn(screen) -> bool:
+    """No view is being built: `_show` stores the mode before it mounts the view and refreshes the footer, so the
+    mode and `working` alone are true on the way to the view. Its worker ends after the footer is refreshed."""
+    return all(w.is_finished for w in screen.workers if w.group == "drv-mode")
+
+
 async def laid_out(pilot, screen, *rows):
     """Wait until every row in *rows* has been given a place on screen.
 
@@ -187,7 +193,7 @@ async def test_an_up_to_date_nvidia_mac_offers_a_reinstall_once_the_version_row_
         assert "✓ up to date" in text(app, "#d-status") and "Update driver" not in footer(app) and "Reinstall" not in footer(app)
         assert not screen.query("#d-go") and "Nothing to update. ←→ picks another release" in text(app, "#g-note")
         await pilot.press("right")
-        await F.settle(pilot, lambda: screen.touched and screen.mode == "attached" and not screen.working)
+        await F.settle(pilot, lambda: screen.touched and screen.mode == "attached" and not screen.working and drawn(screen))
         await pilot.press("left")
         await F.settle(pilot, lambda: not screen.working and screen.query("#d-go"))
         assert "Reinstall" in footer(app) and screen.query_one("#d-go").label.plain == "Reinstall"
@@ -199,7 +205,7 @@ async def test_picking_another_release_makes_a_new_plan(host):
     async with app.run_test(size=SIZE) as pilot:
         screen = await open_driver(pilot, app)
         await pilot.press("right")
-        await F.settle(pilot, lambda: len(host["views"]) >= 2 and not screen.working and screen.mode == "attached")
+        await F.settle(pilot, lambda: len(host["views"]) >= 2 and not screen.working and screen.mode == "attached" and drawn(screen))
         await pilot.pause(0.2)
         assert host["views"][-1] == Choice(nullmoth="v2.9-rc1")
         assert "v2.9-rc1 available" in text(app, "#d-status")
@@ -542,7 +548,7 @@ async def test_the_undo_shows_its_steps_from_the_first_second(host, monkeypatch)
         await pilot.pause(0.1)
         assert screen.mode == "undo"
         gate.set()
-        await F.settle(pilot, lambda: screen.mode == "attached" and not screen.working, what="the screen to come back")
+        await F.settle(pilot, lambda: screen.mode == "attached" and not screen.working and drawn(screen), what="the screen to come back")
 
 
 @F.tui
@@ -554,12 +560,12 @@ async def test_a_put_back_that_fails_shows_an_error_screen_and_enter_goes_back(h
         screen = await open_driver(pilot, app)
         await confirm_undo(pilot, screen)
         gate.set()
-        await F.settle(pilot, lambda: screen.undo_error and "The undo did not finish" in text(app, "#g-box-title"), what="the error screen")
+        await F.settle(pilot, lambda: screen.undo_error and "The undo did not finish" in text(app, "#g-box-title") and drawn(screen), what="the error screen")
         assert "dmsetup remove x" in text(app, "#g-box-text") and "✗ Release the disks" in text(app, "#g-timeline")
         assert "Enter" not in footer(app) and "Back" in footer(app) and screen.query_one("#g-box").has_class("fail")
         before = len(host["views"])
         await pilot.press("enter")
-        await F.settle(pilot, lambda: len(host["views"]) > before and screen.mode == "attached" and not screen.working)
+        await F.settle(pilot, lambda: len(host["views"]) > before and screen.mode == "attached" and not screen.working and drawn(screen))
         assert not screen.undo_error
 
 
