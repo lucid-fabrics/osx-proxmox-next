@@ -258,7 +258,7 @@ install_path_ok() { [[ $1 =~ ^/[A-Za-z0-9._@+/-]+$ ]] && [[ $1 != *..* ]]; }
 # once mkpolicy-hack.py made it), 2 is a bad input and anything else is the pipeline's own status. The first boot
 # still needs the policy and the Ambrosia patch, see lib/install/README.md.
 cmd_install() {
-  local ipsw="" aux="" ecid="" disk="" policy="" dry=0 tss=0 f w runs R qemu bundle ramdisk ambrosia rc
+  local ipsw="" aux="" ecid="" disk="" policy="" cache="" dry=0 tss=0 f w runs R qemu bundle ramdisk ambrosia rc
   while [ $# -gt 0 ]; do
     case $1 in
       --ipsw) ipsw=${2:-}; shift ;;
@@ -266,10 +266,11 @@ cmd_install() {
       --ecid) ecid=${2:-}; shift ;;
       --disk) disk=${2:-}; shift ;;
       --policy) policy=${2:-}; shift ;;
+      --cache) cache=${2:-}; shift ;;
       --tss) tss=1 ;;
       --dry-run) dry=1 ;;
       -h|--help) usage; return 0 ;;
-      *) install_die "unknown option $1 (install takes --ipsw --aux --ecid --disk [--policy] [--tss] [--dry-run])" ;;
+      *) install_die "unknown option $1 (install takes --ipsw --aux --ecid --disk [--policy] [--cache] [--tss] [--dry-run])" ;;
     esac
     shift
   done
@@ -293,6 +294,9 @@ cmd_install() {
     install_path_ok "$policy" || install_die "--policy: an absolute path of letters, digits and . _ + @ / - (no ..)"
     [ -f "$policy" ] || install_die "no such policy image: $policy"
   fi
+  if [ -n "$cache" ]; then
+    install_path_ok "$cache" || install_die "--cache: an absolute path of letters, digits and . _ + @ / - (no ..)"
+  fi
   w=${SNAPINTOSH_INSTALL_BUNDLE:-$HOME_DIR/install/bundle}
   runs=${SNAPINTOSH_INSTALL_RUNS:-$HOME_DIR/install/runs}
   R=$runs/install
@@ -300,7 +304,8 @@ cmd_install() {
   bundle=${BUNDLE:-$w/restore.cpio}
   ramdisk=${RAMDISK:-$w/restore-ramdisk.im4p}
   ambrosia=${AMBROSIA:-$w/ambrosia-r4.bin}
-  local extra="-chardev socket,id=vusb,path=$R/vusb.sock,server=on,wait=off -device vmapple-virtio-usb-pci,chardev=vusb"
+  local usbv="-chardev socket,id=vusb,path=$R/vusb.sock,server=on,wait=off -device vmapple-virtio-usb-pci,chardev=vusb"
+  local extra=${EXTRA:-}
   if [ "$dry" = 1 ]; then
     echo "restore plan (dry run, nothing is written)"
     echo "  ipsw:   $ipsw"
@@ -315,7 +320,7 @@ cmd_install() {
     echo "  4. answer the data requests from the IPSW and Apple's TSS, stop QEMU at the guest's StatusMsg"
     echo "QEMU command:"
     QEMU=$qemu AUX=$aux DISK=$disk ECID=$ecid BUNDLE=$bundle RAMDISK=$ramdisk AMBROSIA=$ambrosia \
-      SNAPINTOSH_INSTALL_RUNS=$runs EXTRA=$extra bash "$LIB/install/run-restore.sh" --print install
+      SNAPINTOSH_INSTALL_RUNS=$runs EXTRA="$usbv $extra" bash "$LIB/install/run-restore.sh" --print install
     return 0
   fi
   [ -x "$qemu" ] || install_die "QEMU not built: snapintosh build (with the qemu-m2b patches, see pins.env)"
@@ -332,6 +337,7 @@ cmd_install() {
   export SNAPINTOSH_INSTALL_RUNS=$runs EXTRA=$extra
   local -a targs=()
   if [ "$tss" = 1 ]; then targs+=(--tss); fi
+  if [ -n "$cache" ]; then targs+=(--cache "$cache"); fi
   rc=0
   bash "$LIB/install/go.sh" install "${targs[@]}" || rc=$?
   if [ "$rc" = 0 ] && [ -z "$policy" ]; then
@@ -383,7 +389,7 @@ usage: snapintosh <command> [options]
   run [options]              boot the guest with the default settings (Ambrosia, 12 vCPUs, IOFence patch, DSB skips, ARP seed)
   snapshot NAME [options]    boot, wait for ssh, save a snapshot, quit
   resume NAME [options]      restore a snapshot
-  install --ipsw F --aux F --ecid N --disk F [--policy F] [--tss] [--dry-run]
+  install --ipsw F --aux F --ecid N --disk F [--policy F] [--cache D] [--tss] [--dry-run]
                              restore macOS into a raw disk with no Mac, over the virtio USB restore host (lib/install).
                              --dry-run prints the restore plan and the QEMU command and writes nothing. 0 is installed,
                              3 is install-pending (restore done, first-boot LocalPolicy still needed: --policy),
