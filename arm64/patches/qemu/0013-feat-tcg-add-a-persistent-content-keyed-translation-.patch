@@ -1,0 +1,3494 @@
+From 8176a21e579be850d62de835ce5d658225fc41da Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(tcg): add a persistent, content keyed translation pack
+
+Translated blocks are stored in a pack file keyed by the guest code
+content, so a second boot of the same guest loads translations instead
+of generating them.
+
+- accel/tcg/pcache.c: the pack store; pcache-tcg.c: load and store of
+  TBs through it, a constant pool sorted by image offset, lookup
+  without a lock, no proving for a read-only pack or a full pack.
+- Verification of loaded translations against a fresh one in tests.
+- tests/unit/test-pcache.c and the system tests pcache-run, pcache-ptr
+  and pcache-bytes, including mutants for mode and pool order.
+---
+ accel/tcg/meson.build                   |   2 +
+ accel/tcg/pcache-tcg.c                  | 888 ++++++++++++++++++++++++
+ accel/tcg/pcache-tcg.h                  |  88 +++
+ accel/tcg/pcache.c                      | 865 +++++++++++++++++++++++
+ accel/tcg/pcache.h                      | 140 ++++
+ accel/tcg/tb-internal.h                 |   1 +
+ accel/tcg/tb-maint.c                    |   5 +
+ accel/tcg/tcg-all.c                     | 101 +++
+ accel/tcg/translate-all.c               | 169 ++++-
+ include/accel/tcg/cpu-ops.h             |  10 +
+ include/tcg/tcg.h                       |  26 +
+ target/arm/cpu.c                        |  47 ++
+ tcg/tcg.c                               |  34 +-
+ tcg/x86_64/tcg-target.c.inc             |   1 +
+ tests/tcg/aarch64/system/pcache-bytes.c |  49 ++
+ tests/tcg/aarch64/system/pcache-ptr.c   |  46 ++
+ tests/tcg/aarch64/system/pcache-run.sh  | 127 ++++
+ tests/unit/meson.build                  |  15 +
+ tests/unit/test-pcache.c                | 559 +++++++++++++++
+ 19 files changed, 3171 insertions(+), 2 deletions(-)
+ create mode 100644 accel/tcg/pcache-tcg.c
+ create mode 100644 accel/tcg/pcache-tcg.h
+ create mode 100644 accel/tcg/pcache.c
+ create mode 100644 accel/tcg/pcache.h
+ create mode 100644 tests/tcg/aarch64/system/pcache-bytes.c
+ create mode 100644 tests/tcg/aarch64/system/pcache-ptr.c
+ create mode 100755 tests/tcg/aarch64/system/pcache-run.sh
+ create mode 100644 tests/unit/test-pcache.c
+
+diff --git a/accel/tcg/meson.build b/accel/tcg/meson.build
+index 002aa8f458..fc18a486fb 100644
+--- a/accel/tcg/meson.build
++++ b/accel/tcg/meson.build
+@@ -36,4 +36,6 @@ system_ss.add(files(
+   'tcg-accel-ops-mttcg.c',
+   'tcg-accel-ops-rr.c',
+   'watchpoint.c',
++  'pcache.c',
++  'pcache-tcg.c',
+ ))
+diff --git a/accel/tcg/pcache-tcg.c b/accel/tcg/pcache-tcg.c
+new file mode 100644
+index 0000000000..44c5649875
+--- /dev/null
++++ b/accel/tcg/pcache-tcg.c
+@@ -0,0 +1,888 @@
++/*
++ * Persistent translation cache: the glue between the pack (pcache.c) and
++ * tb_gen_code().
++ *
++ * What a stored translation is. The guest bytes of a block, the host code
++ * emitted for it, its unwind data, and the list of fields of that code that
++ * depend on where it was emitted. A translation is only stored when it is
++ * proven relocatable: tb_gen_code() emits the block a second time at another
++ * address, and every byte that differs must be a rel32 field to a fixed
++ * address (the epilogue, the executable image) or an absolute pointer into
++ * the TB's own struct. Absolute pointers into the executable (helper
++ * addresses in the constant pool) cannot differ between two emissions in one
++ * process, so the backend notes each helper address it emits
++ * (tcg_pcache_note_ptr) and those are recorded as image relative. Anything
++ * else that looks like a host pointer (heap pointers such as ARMCPRegInfo
++ * constants) fails the scan and the block is simply not stored.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/timer.h"
++#include "qemu/error-report.h"
++#include "qemu/target-info.h"
++#include "qemu/cacheinfo.h"
++#include "qapi/error.h"
++#include "exec/cpu-common.h"
++#include "exec/target_page.h"
++#include "exec/icount.h"
++#include "accel/tcg/cpu-ops.h"
++#include "semihosting/semihost.h"
++#include "host/cpuinfo.h"
++#include "qemu/plugin.h"
++#include "qemu/config-file.h"
++#include "qemu/option.h"
++#include "pcache.h"
++#include "pcache-tcg.h"
++#include "internal-common.h"
++
++#if defined(HOST_X86_64) && defined(CONFIG_LINUX)
++#include <link.h>
++
++bool tb_pcache_on;
++
++#define PT_MAX_RELOCS 1024
++#define PT_PTR_LO 0x400000000000ull
++#define PT_PTR_HI 0x800000000000ull
++#define PT_NO_FLAGS (CF_COUNT_MASK | CF_SINGLE_STEP | CF_MEMI_ONLY | \
++                     CF_USE_ICOUNT | CF_INVALID | CF_NOIRQ | CF_BP_PAGE | \
++                     CF_NO_GOTO_TB | CF_NO_GOTO_PTR)
++
++enum {
++    R_NOPROOF_SPAN,
++    R_NOPROOF_SPACE,
++    R_NOPROOF_TWIN,
++    R_SIZE,
++    R_FIELDS,
++    R_SEARCH,
++    R_PTRSET,
++    R_DIFF,
++    R_TARGET,
++    R_PTR,
++    R_TOOMANY,
++    R_STORE_FAIL,
++    R_COUNT
++};
++
++static const char *const reason_names[R_COUNT] = {
++    "noproof_span", "noproof_space", "noproof_twin", "size", "fields",
++    "search", "ptrset", "diff", "target", "ptr", "toomany", "storefail",
++};
++
++static struct {
++    char *dir;
++    bool rw;
++    uint64_t cap;
++    int state;                  /* 0 not opened, 1 open, 2 unusable */
++    QemuMutex lock;
++    PCache *c;
++    uintptr_t img_lo, img_hi;   /* the executable's image */
++    int64_t t0_ns;
++    int64_t t0_ticks;
++    uint64_t lookups, hits, misses;
++    uint64_t load_ticks, miss_ticks, translate_ticks, proof_ticks;
++    uint64_t hit_cycles;        /* what the hits would have cost to translate */
++    uint64_t hit_bytes;         /* guest bytes of the hits */
++    uint64_t stored_bytes;
++    uint64_t reloc_fail;
++    uint64_t reject[R_COUNT];
++    uint64_t relocs;
++    uint64_t ineligible;
++    uint64_t verify_ok, verify_bad;
++    unsigned interval_ms;
++} pt;
++
++#ifdef PCACHE_TEST_HOOKS
++static int pt_mutant(void)
++{
++    static int m = -1;
++    if (m < 0) {
++        const char *e = getenv("PCACHE_MUTANT");
++        m = e ? atoi(e) : 0;
++    }
++    return m;
++}
++#else
++#define pt_mutant() 0
++#endif
++
++enum {
++    MUT_NO_PTR_SCAN = 7,
++    MUT_NO_RELOC = 8,
++    MUT_NO_DIFF = 9,
++    MUT_POOL_ORDER = 10,
++    MUT_LIVE_TWIN = 11,
++};
++
++#ifdef PCACHE_TEST_HOOKS
++/* PCACHE_ABA=1: the guest bytes change while a block is recorded and back */
++bool tb_pcache_test_aba(void)
++{
++    static int a = -1;
++    if (a < 0) {
++        a = getenv("PCACHE_ABA") != NULL;
++    }
++    return a;
++}
++/* mutant 11: the second emission reads the guest page, not the snapshot */
++bool tb_pcache_test_live_twin(void)
++{
++    return pt_mutant() == MUT_LIVE_TWIN;
++}
++#endif
++
++uint64_t tb_pcache_ticks(void)
++{
++    return cpu_get_host_ticks();
++}
++
++void tb_pcache_add_translate_ticks(uint64_t t)
++{
++    qatomic_add(&pt.translate_ticks, t);
++}
++
++void tb_pcache_add_record_ticks(uint64_t t)
++{
++    qatomic_add(&pt.proof_ticks, t);
++}
++
++void tb_pcache_note_noproof(int why)
++{
++    qatomic_inc(&pt.reject[why == PCACHE_NOPROOF_SPAN ? R_NOPROOF_SPAN :
++                           why == PCACHE_NOPROOF_SPACE ? R_NOPROOF_SPACE :
++                           R_NOPROOF_TWIN]);
++}
++
++static void pt_add(void *opaque, const void *data, size_t len)
++{
++    g_checksum_update(opaque, data, len);
++}
++
++static int pt_cmp_str(gconstpointer a, gconstpointer b)
++{
++    return strcmp(*(char *const *)a, *(char *const *)b);
++}
++
++/*
++ * The executable's identity: its read-only loaded segments (code and rodata;
++ * the segments that are writable at load time hold relocated pointers and
++ * would differ between runs). Hashing the loaded image rather than the file
++ * keeps debug info out of it.
++ */
++static int pt_phdr_cb(struct dl_phdr_info *info, size_t size, void *data)
++{
++    for (int i = 0; i < info->dlpi_phnum; i++) {
++        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
++
++        if (ph->p_type == PT_LOAD && !(ph->p_flags & PF_W)) {
++            g_checksum_update(data, (const guchar *)(info->dlpi_addr +
++                                                     ph->p_vaddr),
++                              ph->p_filesz);
++        }
++    }
++    return 1;   /* the main program only */
++}
++
++static void pt_feed_exe(GChecksum *ck)
++{
++    dl_iterate_phdr(pt_phdr_cb, ck);
++}
++
++/* The extent of the executable's mappings, for what is image relative. */
++static int pt_extent_cb(struct dl_phdr_info *info, size_t size, void *data)
++{
++    uintptr_t *ext = data;
++
++    ext[0] = UINTPTR_MAX;
++    for (int i = 0; i < info->dlpi_phnum; i++) {
++        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
++
++        if (ph->p_type == PT_LOAD) {
++            ext[0] = MIN(ext[0], info->dlpi_addr + ph->p_vaddr);
++            ext[1] = MAX(ext[1], info->dlpi_addr + ph->p_vaddr + ph->p_memsz);
++        }
++    }
++    return 1;
++}
++
++/*
++ * The translator id: everything that changes the code or the unwind data the
++ * translator emits for the same guest bytes and the same TB flags.
++ */
++static void pt_compute_id(CPUState *cpu, uint8_t id[PCACHE_ID_LEN])
++{
++    GChecksum *ck = g_checksum_new(G_CHECKSUM_SHA256);
++    gsize len = PCACHE_ID_LEN;
++    GPtrArray *envs = g_ptr_array_new();
++    unsigned ci = cpuinfo;
++    int pb = qemu_target_page_bits();
++    size_t cl = qemu_icache_linesize;
++    size_t tbsz = sizeof(TranslationBlock);
++    int oi = qatomic_read(&one_insn_per_tb);
++
++    g_checksum_update(ck, (const guchar *)"snapintosh-pcache-1", 19);
++#ifdef PCACHE_TEST_HOOKS
++    if (getenv("PCACHE_BUILD_ID")) {
++        g_checksum_update(ck, (const guchar *)getenv("PCACHE_BUILD_ID"),
++                          strlen(getenv("PCACHE_BUILD_ID")));
++    } else
++#endif
++    {
++        pt_feed_exe(ck);
++    }
++    pt_add(ck, &ci, sizeof(ci));
++    pt_add(ck, &pb, sizeof(pb));
++    pt_add(ck, &cl, sizeof(cl));
++    pt_add(ck, &tbsz, sizeof(tbsz));
++    pt_add(ck, &oi, sizeof(oi));
++    pt_add(ck, target_name(), strlen(target_name()));
++    for (char **e = environ; e && *e; e++) {
++        if (g_str_has_prefix(*e, "P26_") || g_str_has_prefix(*e, "P35_") ||
++            g_str_has_prefix(*e, "P43_") || g_str_has_prefix(*e, "P46_") ||
++            g_str_has_prefix(*e, "P47_")) {
++            g_ptr_array_add(envs, *e);
++        }
++    }
++    g_ptr_array_sort(envs, pt_cmp_str);
++    for (guint i = 0; i < envs->len; i++) {
++        const char *e = g_ptr_array_index(envs, i);
++        g_checksum_update(ck, (const guchar *)e, strlen(e) + 1);
++    }
++    g_ptr_array_free(envs, true);
++    {
++        /* the translators ask these while translating */
++        bool sh[2] = { semihosting_enabled(false), semihosting_enabled(true) };
++
++        pt_add(ck, sh, sizeof(sh));
++    }
++    cpu->cc->tcg_ops->pcache_hash_cpu(cpu, pt_add, ck);
++    g_checksum_get_digest(ck, id, &len);
++    g_checksum_free(ck);
++}
++
++static void pt_exit(void);
++static void *pt_stats_thread(void *opaque);
++
++void tb_pcache_configure(const char *dir, const char *mode, uint64_t cap,
++                         unsigned interval_s, Error **errp)
++{
++    if (!dir || !*dir) {
++        return;
++    }
++    if (mode && strcmp(mode, "rw") && strcmp(mode, "ro")) {
++        error_setg(errp, "pcache-mode must be rw or ro");
++        return;
++    }
++    qemu_mutex_init(&pt.lock);
++    pt.dir = g_strdup(dir);
++    {
++        uintptr_t ext[2] = { 0, 0 };
++
++        dl_iterate_phdr(pt_extent_cb, ext);
++        pt.img_lo = ext[0];
++        pt.img_hi = ext[1];
++        /* mutant 10: sort the pool by raw value, as upstream does */
++        tcg_pcache_img_base = pt_mutant() == MUT_POOL_ORDER ? 0 : ext[0];
++    }
++    pt.rw = !mode || !strcmp(mode, "rw");
++    pt.cap = cap ? cap : 8ull << 30;
++    pt.t0_ns = get_clock();
++    pt.t0_ticks = cpu_get_host_ticks();
++    tb_pcache_on = true;
++    atexit(pt_exit);
++    pt.interval_ms = interval_s * 1000;
++    if (pt.interval_ms) {
++        static QemuThread th;
++
++        qemu_thread_create(&th, "pcache-stats", pt_stats_thread, NULL,
++                           QEMU_THREAD_DETACHED);
++    }
++}
++
++/*
++ * A hit skips plugin_gen_tb_start(), so a plugin that watches translation or
++ * instruments blocks would see nothing of them: no pack with plugins.
++ */
++static bool pt_plugins_active(CPUState *cpu)
++{
++#ifdef CONFIG_PLUGIN
++    /* -plugin on the command line, or a plugin that has events set */
++    return !QTAILQ_EMPTY(&qemu_find_opts("plugin")->head) ||
++           (cpu->plugin_state &&
++            !bitmap_empty(cpu->plugin_state->event_mask, QEMU_PLUGIN_EV_MAX));
++#else
++    return false;
++#endif
++}
++
++/*
++ * The pointer scan of the proof looks for values at or above PT_PTR_LO: a
++ * host mapping below it (a legacy mmap layout, ulimit -s unlimited) would
++ * go unseen, so such a process does not use the pack.
++ */
++static bool pt_layout_ok(void)
++{
++    void *m = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE,
++                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    bool ok;
++
++    if (m == MAP_FAILED) {
++        return false;
++    }
++    ok = (uintptr_t)m >= PT_PTR_LO;
++    munmap(m, 1 << 20);
++    return ok;
++}
++
++static PCache *pt_get(CPUState *cpu)
++{
++    int st = qatomic_load_acquire(&pt.state);
++
++    if (st == 1) {
++        return pt.c;
++    }
++    if (st == 2) {
++        return NULL;
++    }
++    qemu_mutex_lock(&pt.lock);
++    if (pt.state == 0) {
++        uint8_t id[PCACHE_ID_LEN];
++        Error *err = NULL;
++        PCache *c = NULL;
++        int64_t t0 = get_clock();
++
++        if (icount_enabled() || tcg_splitwx_diff != 0 ||
++            qatomic_read(&one_insn_per_tb) ||
++            !cpu->cc->tcg_ops->pcache_hash_cpu || pt.img_lo < PT_PTR_LO ||
++            pt_plugins_active(cpu) || !pt_layout_ok()) {
++            warn_report("pcache: disabled (icount, split-wx, "
++                        "one-insn-per-tb, plugins, a target without a cpu "
++                        "hash, a non-PIE executable or a low mmap layout)");
++        } else {
++            pt_compute_id(cpu, id);
++            c = pcache_open(pt.dir, id, pt.rw, pt.cap, &err);
++        }
++        if (c) {
++            PCacheStats cs;
++
++            pcache_stats(c, &cs);
++            info_report("pcache: %s, %s, boot %u, %" PRIu64
++                        " records, %" PRIu64 " MiB, opened in %" PRId64
++                        " ms", pcache_path(c), cs.rw ? "rw" : "ro",
++                        cs.boot_no, cs.records, cs.end >> 20,
++                        (get_clock() - t0) / SCALE_MS);
++        } else if (err) {
++            warn_report_err(err);
++        }
++        pt.c = c;
++        qatomic_store_release(&pt.state, c ? 1 : 2);
++    }
++    qemu_mutex_unlock(&pt.lock);
++    return pt.c;
++}
++
++bool tb_pcache_recording(void)
++{
++    PCache *c = pt.c;
++
++    return c && pcache_is_rw(c);
++}
++
++bool tb_pcache_eligible(const TCGTBCPUState *s, tb_page_addr_t phys_pc)
++{
++    return phys_pc != (tb_page_addr_t)-1 && (s->cflags & CF_PCREL) &&
++           !(s->cflags & PT_NO_FLAGS);
++}
++
++static inline uint64_t ld64(const uint8_t *p)
++{
++    uint64_t v;
++    memcpy(&v, p, 8);
++    return v;
++}
++
++static inline uint32_t ld32(const uint8_t *p)
++{
++    uint32_t v;
++    memcpy(&v, p, 4);
++    return v;
++}
++
++static inline void st64(uint8_t *p, uint64_t v)
++{
++    memcpy(p, &v, 8);
++}
++
++static inline void st32(uint8_t *p, uint32_t v)
++{
++    memcpy(p, &v, 4);
++}
++
++static bool pt_apply(uint8_t *rw, uintptr_t rx, uintptr_t tb,
++                     const PCacheReloc *r, uint32_t n, uint32_t code_len)
++{
++    uintptr_t img = pt.img_lo;
++    uintptr_t epi = (uintptr_t)tcg_code_gen_epilogue;
++
++    if (pt_mutant() == MUT_NO_RELOC) {
++        return true;
++    }
++    for (uint32_t i = 0; i < n; i++) {
++        uint32_t off = r[i].off;
++        uintptr_t t;
++        intptr_t d;
++
++        switch (r[i].kind) {
++        case PCACHE_RELOC_ABS_IMG:
++            if (off + 8 > code_len) {
++                return false;
++            }
++            st64(rw + off, img + r[i].addend);
++            break;
++        case PCACHE_RELOC_ABS_TB:
++            if (off + 8 > code_len) {
++                return false;
++            }
++            st64(rw + off, tb + r[i].addend);
++            break;
++        case PCACHE_RELOC_PCREL_BUF:
++        case PCACHE_RELOC_PCREL_IMG:
++            if (off + 4 > code_len) {
++                return false;
++            }
++            t = (r[i].kind == PCACHE_RELOC_PCREL_BUF ? epi : img) +
++                r[i].addend;
++            d = (intptr_t)t - (intptr_t)(rx + off + 4);
++            if (d != (int32_t)d) {
++                return false;
++            }
++            st32(rw + off, (uint32_t)d);
++            break;
++        default:
++            return false;
++        }
++    }
++    return true;
++}
++
++static __thread PCacheView pt_last;
++static __thread bool pt_last_ok;
++
++bool tb_pcache_verify_on(void)
++{
++#ifdef PCACHE_TEST_HOOKS
++    static int on = -1;
++
++    if (on < 0) {
++        on = getenv("PCACHE_VERIFY") != NULL;
++    }
++    return on && pt_last_ok;
++#else
++    return false;
++#endif
++}
++
++bool tb_pcache_load(CPUState *cpu, TranslationBlock *tb,
++                    const TCGTBCPUState *s, void *host_pc,
++                    int *code_size, int *search_size)
++{
++    PCache *c = pt_get(cpu);
++    PCacheKey key;
++    PCacheView v;
++    uint64_t t0, t1;
++    uint8_t *rw;
++    uint32_t avail0;
++
++    pt_last_ok = false;
++    if (!c) {
++        return false;
++    }
++    t0 = cpu_get_host_ticks();
++    qatomic_inc(&pt.lookups);
++    key.pc = s->pc;
++    key.cs_base = s->cs_base;
++    key.flags = s->flags;
++    key.cflags = s->cflags;
++    key.entry_off = s->pc & ~TARGET_PAGE_MASK;
++    avail0 = TARGET_PAGE_SIZE - key.entry_off;
++    if (!pcache_lookup(c, &key, host_pc, avail0, &v)) {
++        qatomic_inc(&pt.misses);
++        qatomic_add(&pt.miss_ticks, cpu_get_host_ticks() - t0);
++        return false;
++    }
++    rw = (uint8_t *)tcg_splitwx_to_rw((void *)tb->tc.ptr);
++    if (rw + v.hdr->code_len + v.hdr->search_len >
++        (uint8_t *)tcg_ctx->code_gen_highwater) {
++        qatomic_inc(&pt.misses);
++        return false;
++    }
++    memcpy(rw, v.code, v.hdr->code_len);
++    if (!pt_apply(rw, (uintptr_t)tb->tc.ptr, (uintptr_t)tb, v.relocs,
++                  v.hdr->nreloc, v.hdr->code_len)) {
++        qatomic_inc(&pt.reloc_fail);
++        return false;
++    }
++    memcpy(rw + v.hdr->code_len, v.search, v.hdr->search_len);
++    tb->size = v.hdr->guest_len;
++    tb->icount = v.hdr->icount;
++    tb->jmp_reset_offset[0] = v.hdr->jmp_reset[0];
++    tb->jmp_reset_offset[1] = v.hdr->jmp_reset[1];
++    tb->jmp_insn_offset[0] = v.hdr->jmp_insn[0];
++    tb->jmp_insn_offset[1] = v.hdr->jmp_insn[1];
++    *code_size = v.hdr->code_len;
++    *search_size = v.hdr->search_len;
++    pt_last = v;
++    pt_last_ok = true;
++    t1 = cpu_get_host_ticks();
++    qatomic_inc(&pt.hits);
++    qatomic_add(&pt.hit_cycles, v.hdr->cycles);
++    qatomic_add(&pt.hit_bytes, v.hdr->guest_len);
++    qatomic_add(&pt.load_ticks, t1 - t0);
++    return true;
++}
++
++/* The scan for a host pointer in the code of a block. */
++static inline bool pt_ptr_like(uint64_t v)
++{
++    return v >= PT_PTR_LO && v < PT_PTR_HI;
++}
++
++static bool pt_in_image(uintptr_t v)
++{
++    return v >= pt.img_lo && v < pt.img_hi;
++}
++
++static inline uint32_t pt_rsz(uint32_t kind)
++{
++    return kind == PCACHE_RELOC_PCREL_BUF || kind == PCACHE_RELOC_PCREL_IMG ?
++           4 : 8;
++}
++
++static int pt_prove(const PCacheTwin *t, PCacheReloc *rel, uint32_t *nrel)
++{
++    const uint8_t *a = t->code_a, *b = t->code_b;
++    uint32_t n = t->code_len_a, i = 0, nr = 0;
++    uintptr_t rx_a = (uintptr_t)t->tb_a->tc.ptr;
++    uintptr_t rx_b = (uintptr_t)t->tb_b->tc.ptr;
++    uint64_t delta = rx_b - rx_a;
++    uint64_t tb_delta = (uintptr_t)t->tb_b - (uintptr_t)t->tb_a;
++    uintptr_t img = pt.img_lo;
++    uintptr_t epi = (uintptr_t)tcg_code_gen_epilogue;
++
++    while (i < n) {
++        if (a[i] == b[i]) {
++            i++;
++            continue;
++        }
++        if (nr + 1 >= PT_MAX_RELOCS) {
++            return R_TOOMANY;
++        }
++        if (pt_mutant() == MUT_NO_DIFF) {
++            i++;
++            continue;
++        }
++        if (i + 8 <= n && ld64(b + i) - ld64(a + i) == tb_delta) {
++            int64_t k = (int64_t)(ld64(a + i) - (uintptr_t)t->tb_a);
++
++            if (k > -(1 << 20) && k < (1 << 20)) {
++                rel[nr++] = (PCacheReloc){ i, PCACHE_RELOC_ABS_TB, k };
++                i += 8;
++                continue;
++            }
++        }
++        /* only a branch has a rel32 to a fixed address; a lea of a guest
++         * constant that happens to be near the code is not one */
++        if (i + 4 <= n &&
++            (uint32_t)(ld32(b + i) - ld32(a + i)) == (uint32_t)(-delta) &&
++            i >= 1 && (a[i - 1] == 0xe8 || a[i - 1] == 0xe9 ||
++                       (i >= 2 && a[i - 2] == 0x0f &&
++                        (a[i - 1] & 0xf0) == 0x80))) {
++            uintptr_t tgt = rx_a + i + 4 + (int32_t)ld32(a + i);
++
++            if (in_code_gen_buffer((void *)tgt)) {
++                rel[nr++] = (PCacheReloc){ i, PCACHE_RELOC_PCREL_BUF,
++                                           (intptr_t)tgt - (intptr_t)epi };
++            } else if (pt_in_image(tgt)) {
++                rel[nr++] = (PCacheReloc){ i, PCACHE_RELOC_PCREL_IMG,
++                                           (intptr_t)tgt - (intptr_t)img };
++            } else {
++                return R_TARGET;
++            }
++            i += 4;
++            continue;
++        }
++        return R_DIFF;
++    }
++
++    if (n >= 8) {
++        uint32_t k = 0;     /* first diff reloc that may still cover @off */
++        uint32_t ndiff = nr;
++
++        for (uint32_t off = 0; off + 8 <= n; off++) {
++            uint64_t v = ld64(a + off);
++            bool noted = false;
++            bool cand;
++
++            /* an imm64 of a movabs, or an entry of the constant pool */
++            cand = (off >= 2 && (a[off - 2] == 0x48 || a[off - 2] == 0x49) &&
++                    (a[off - 1] & 0xf8) == 0xb8) ||
++                   (t->pool_off_a >= 0 && off >= (uint32_t)t->pool_off_a &&
++                    !((off - t->pool_off_a) & 7));
++            if (!cand) {
++                continue;
++            }
++            while (k < ndiff && rel[k].off + pt_rsz(rel[k].kind) <= off) {
++                k++;
++            }
++            if (k < ndiff && off >= rel[k].off) {
++                continue;
++            }
++            if (!pt_ptr_like(v)) {
++                continue;
++            }
++            for (unsigned p = 0; p < t->nptrs_a; p++) {
++                if (t->ptrs_a[p] == v) {
++                    noted = true;
++                    break;
++                }
++            }
++            if (noted) {
++                if (!pt_in_image(v)) {
++                    return R_TARGET;
++                }
++                if (nr + 1 >= PT_MAX_RELOCS) {
++                    return R_TOOMANY;
++                }
++                rel[nr++] = (PCacheReloc){ off, PCACHE_RELOC_ABS_IMG,
++                                           (intptr_t)(v - img) };
++                off += 7;
++            } else if (pt_mutant() != MUT_NO_PTR_SCAN) {
++                return R_PTR;
++            }
++        }
++    }
++    *nrel = nr;
++    return -1;
++}
++
++/*
++ * Verify mode: the block that was loaded, relocated to where the fresh
++ * emission sits, must equal that emission byte for byte.
++ */
++void tb_pcache_verify(const PCacheTwin *t)
++{
++    const PCacheView *v = &pt_last;
++    uint32_t n = v->hdr->code_len;
++    uint8_t *tmp = g_malloc(n + 8);
++    uint32_t bad = 0, first = 0;
++
++    memcpy(tmp, v->code, n);
++    if (!pt_apply(tmp, (uintptr_t)t->tb_b->tc.ptr, (uintptr_t)t->tb_b,
++                  v->relocs, v->hdr->nreloc, n) ||
++        t->code_len_b != (int)n || t->search_len_b != v->hdr->search_len ||
++        t->tb_b->size != v->hdr->guest_len ||
++        t->tb_b->icount != v->hdr->icount) {
++        bad = 1;
++    } else {
++        for (uint32_t i = 0; i < n; i++) {
++            if (tmp[i] != t->code_b[i]) {
++                if (!bad) {
++                    first = i;
++                }
++                bad++;
++            }
++        }
++        if (memcmp(v->search, t->code_b + n, v->hdr->search_len)) {
++            bad++;
++        }
++    }
++    if (bad) {
++        qatomic_inc(&pt.verify_bad);
++        if (qatomic_read(&pt.verify_bad) <= 20) {
++            fprintf(stderr, "PCACHE-VERIFY-BAD pc=%#" PRIx64 " flags=%#x "
++                    "cs_base=%#" PRIx64 " len=%u/%d diffs=%u first=%u "
++                    "stored=%02x fresh=%02x\n", (uint64_t)t->s->pc,
++                    t->s->flags, t->s->cs_base, n, t->code_len_b, bad, first,
++                    tmp[first], t->code_b[first]);
++            for (uint32_t r = 0; r < v->hdr->nreloc; r++) {
++                if (v->relocs[r].off + 8 > first &&
++                    v->relocs[r].off <= first) {
++                    fprintf(stderr, "  reloc off=%u kind=%u addend=%" PRId64
++                            "\n", v->relocs[r].off, v->relocs[r].kind,
++                            v->relocs[r].addend);
++                }
++            }
++            fprintf(stderr, "  stored:");
++            for (uint32_t q = first > 4 ? first - 4 : 0; q < MIN(n, first + 12);
++                 q++) {
++                fprintf(stderr, " %02x", tmp[q]);
++            }
++            fprintf(stderr, "\n  fresh: ");
++            for (uint32_t q = first > 4 ? first - 4 : 0; q < MIN(n, first + 12);
++                 q++) {
++                fprintf(stderr, " %02x", t->code_b[q]);
++            }
++            fprintf(stderr, "\n  tb_b=%p code_b=%p\n", (void *)t->tb_b,
++                    (void *)t->tb_b->tc.ptr);
++        }
++    } else {
++        qatomic_inc(&pt.verify_ok);
++    }
++    g_free(tmp);
++}
++
++void tb_pcache_commit(const PCacheTwin *t)
++{
++    PCacheReloc rel[PT_MAX_RELOCS];
++    uint32_t nrel = 0;
++    PCache *c = pt_get(t->cpu);
++    PCacheNew nw;
++    int why;
++
++    if (!c) {
++        return;
++    }
++    if (t->code_len_a != t->code_len_b || t->search_len_a != t->search_len_b ||
++        t->code_len_a <= 0 || t->code_len_a > UINT16_MAX) {
++        qatomic_inc(&pt.reject[R_SIZE]);
++        return;
++    }
++    if (t->tb_a->size != t->tb_b->size || t->tb_a->icount != t->tb_b->icount ||
++        memcmp(t->tb_a->jmp_reset_offset, t->tb_b->jmp_reset_offset,
++               sizeof(t->tb_a->jmp_reset_offset)) ||
++        memcmp(t->tb_a->jmp_insn_offset, t->tb_b->jmp_insn_offset,
++               sizeof(t->tb_a->jmp_insn_offset))) {
++        qatomic_inc(&pt.reject[R_FIELDS]);
++        return;
++    }
++    if (memcmp(t->code_a + t->code_len_a, t->code_b + t->code_len_b,
++               t->search_len_a)) {
++        qatomic_inc(&pt.reject[R_SEARCH]);
++        return;
++    }
++    if (t->ptr_ovf || t->nptrs_a != t->nptrs_b ||
++        memcmp(t->ptrs_a, t->ptrs_b, t->nptrs_a * sizeof(uintptr_t))) {
++        qatomic_inc(&pt.reject[R_PTRSET]);
++        return;
++    }
++    why = pt_prove(t, rel, &nrel);
++    if (why >= 0) {
++        qatomic_inc(&pt.reject[why]);
++        return;
++    }
++    memset(&nw, 0, sizeof(nw));
++    nw.key.pc = t->s->pc;
++    nw.key.cs_base = t->s->cs_base;
++    nw.key.flags = t->s->flags;
++    nw.key.cflags = t->s->cflags;
++    nw.key.entry_off = t->s->pc & ~TARGET_PAGE_MASK;
++    nw.guest = t->guest;
++    nw.guest_len = t->tb_a->size;
++    nw.code = t->code_a;
++    nw.code_len = t->code_len_a;
++    nw.search = t->code_a + t->code_len_a;
++    nw.search_len = t->search_len_a;
++    nw.relocs = rel;
++    nw.nreloc = nrel;
++    nw.icount = t->tb_a->icount;
++    memcpy(nw.jmp_reset, t->tb_a->jmp_reset_offset, sizeof(nw.jmp_reset));
++    memcpy(nw.jmp_insn, t->tb_a->jmp_insn_offset, sizeof(nw.jmp_insn));
++    nw.cycles = MIN(t->cycles, (uint64_t)UINT32_MAX);
++    if (pcache_store(c, &nw)) {
++        qatomic_add(&pt.stored_bytes, nw.code_len + nw.guest_len);
++        qatomic_add(&pt.relocs, nrel);
++    } else {
++        qatomic_inc(&pt.reject[R_STORE_FAIL]);
++    }
++}
++
++static void pt_print(const char *tag)
++{
++    PCache *c = pt.c;
++    PCacheStats st;
++    double hz;
++    int64_t ns = get_clock() - pt.t0_ns;
++    GString *s = g_string_new(NULL);
++
++    if (!c) {
++        return;
++    }
++    hz = ns > 0 ? (double)(cpu_get_host_ticks() - pt.t0_ticks) * 1e9 / ns : 1;
++    pcache_stats(c, &st);
++    g_string_append_printf(s, "%s t=%.3f rw=%d boot=%u records=%" PRIu64
++        " end_mib=%" PRIu64 " lookups=%" PRIu64 " hits=%" PRIu64
++        " misses=%" PRIu64 " mismatch=%" PRIu64 " crc_bad=%" PRIu64
++        " stores=%" PRIu64 " dups=%" PRIu64 " full=%" PRIu64
++        " reloc_fail=%" PRIu64 " relocs=%" PRIu64
++        " load_s=%.3f miss_s=%.3f translate_s=%.3f proof_s=%.3f"
++        " hit_xlate_s=%.3f hit_guest_mib=%.1f verify_ok=%" PRIu64
++        " verify_bad=%" PRIu64,
++        tag, (double)qemu_clock_get_ns(QEMU_CLOCK_HOST) / 1e9, st.rw,
++        st.boot_no, st.records, st.end >> 20, pt.lookups, pt.hits,
++        pt.misses, st.mismatch, st.crc_bad, st.stores, st.dups, st.full,
++        pt.reloc_fail, pt.relocs,
++        pt.load_ticks / hz, pt.miss_ticks / hz, pt.translate_ticks / hz,
++        pt.proof_ticks / hz, pt.hit_cycles / hz,
++        pt.hit_bytes / 1048576.0, pt.verify_ok, pt.verify_bad);
++    for (int i = 0; i < R_COUNT; i++) {
++        g_string_append_printf(s, " rej_%s=%" PRIu64, reason_names[i],
++                               pt.reject[i]);
++    }
++    fprintf(stderr, "%s\n", s->str);
++    g_string_free(s, true);
++}
++
++static void *pt_stats_thread(void *opaque)
++{
++    for (;;) {
++        g_usleep(pt.interval_ms * 1000);
++        pt_print("PCACHE-TICK");
++    }
++    return NULL;
++}
++
++static void pt_exit(void)
++{
++    PCache *c = pt.c;
++
++    if (!c) {
++        return;
++    }
++    pt_print("PCACHE-STATS");
++    pcache_close(c, false);
++}
++
++#else /* !HOST_X86_64 */
++
++bool tb_pcache_on;
++void tb_pcache_configure(const char *dir, const char *mode, uint64_t cap,
++                         unsigned interval_s, Error **errp)
++{
++    if (dir && *dir) {
++        error_setg(errp, "pcache is only supported on x86_64 hosts");
++    }
++}
++bool tb_pcache_recording(void)
++{
++    return false;
++}
++bool tb_pcache_eligible(const TCGTBCPUState *s, tb_page_addr_t phys_pc)
++{
++    return false;
++}
++bool tb_pcache_load(CPUState *cpu, TranslationBlock *tb,
++                    const TCGTBCPUState *s, void *host_pc,
++                    int *code_size, int *search_size)
++{
++    return false;
++}
++void tb_pcache_commit(const PCacheTwin *t) { }
++bool tb_pcache_verify_on(void) { return false; }
++void tb_pcache_verify(const PCacheTwin *t) { }
++void tb_pcache_note_noproof(int why) { }
++uint64_t tb_pcache_ticks(void) { return 0; }
++void tb_pcache_add_translate_ticks(uint64_t t) { }
++void tb_pcache_add_record_ticks(uint64_t t) { }
++
++#endif
+diff --git a/accel/tcg/pcache-tcg.h b/accel/tcg/pcache-tcg.h
+new file mode 100644
+index 0000000000..570de19aed
+--- /dev/null
++++ b/accel/tcg/pcache-tcg.h
+@@ -0,0 +1,88 @@
++/*
++ * Persistent translation cache: the glue between the pack (pcache.c) and
++ * tb_gen_code().
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef ACCEL_TCG_PCACHE_TCG_H
++#define ACCEL_TCG_PCACHE_TCG_H
++
++#include "exec/translation-block.h"
++#include "accel/tcg/tb-cpu-state.h"
++#include "tcg/tcg.h"
++
++#ifndef CONFIG_USER_ONLY
++
++/* Set once by the accelerator; nothing else is touched while it is false. */
++extern bool tb_pcache_on;
++
++/*
++ * Configure from -accel tcg,pcache=DIR[,pcache-mode=rw|ro][,pcache-max=N].
++ * The pack itself is opened on the first translation, when the CPU, and so
++ * the translator id, is known.
++ */
++void tb_pcache_configure(const char *dir, const char *mode, uint64_t cap,
++                         unsigned interval_s, Error **errp);
++
++/* Can a translation of this block be loaded from or stored in the pack? */
++bool tb_pcache_eligible(const TCGTBCPUState *s, tb_page_addr_t phys_pc);
++
++/* Is the pack open for appending? Only then is a translation worth proving. */
++bool tb_pcache_recording(void);
++
++/*
++ * Replace the translation: copy a stored one to @tb's code buffer and relocate
++ * it. On success @tb is complete except for what tb_gen_code() sets after
++ * translating.
++ */
++bool tb_pcache_load(CPUState *cpu, TranslationBlock *tb,
++                    const TCGTBCPUState *s, void *host_pc,
++                    int *code_size, int *search_size);
++
++/* One translation emitted twice, at two addresses. */
++typedef struct PCacheTwin {
++    CPUState *cpu;
++    const TCGTBCPUState *s;
++    const uint8_t *guest;           /* the guest bytes, tb->size of them */
++    const TranslationBlock *tb_a, *tb_b;
++    const uint8_t *code_a, *code_b; /* rw addresses of the emitted code */
++    int code_len_a, code_len_b;
++    int search_len_a, search_len_b; /* unwind data right behind the code */
++    uintptr_t ptrs_a[TCG_PCACHE_MAX_PTRS], ptrs_b[TCG_PCACHE_MAX_PTRS];
++    unsigned nptrs_a, nptrs_b;
++    bool ptr_ovf;
++    int pool_off_a;                 /* constant pool offset in code_a, or -1 */
++    uint64_t cycles;                /* ticks of the first translation */
++} PCacheTwin;
++
++/* Prove @t relocatable and store it. Counts why it did not, when it did not. */
++void tb_pcache_commit(const PCacheTwin *t);
++
++/* Test hook: compare the block just loaded with a fresh translation. */
++bool tb_pcache_verify_on(void);
++#ifdef PCACHE_TEST_HOOKS
++bool tb_pcache_test_aba(void);
++bool tb_pcache_test_live_twin(void);
++#else
++#define tb_pcache_test_aba() false
++#define tb_pcache_test_live_twin() false
++#endif
++void tb_pcache_verify(const PCacheTwin *t);
++
++/* Counters for the failure paths of the caller. */
++void tb_pcache_note_noproof(int why);
++enum { PCACHE_NOPROOF_SPAN = 1, PCACHE_NOPROOF_SPACE, PCACHE_NOPROOF_TWIN };
++
++uint64_t tb_pcache_ticks(void);
++void tb_pcache_add_translate_ticks(uint64_t t);
++void tb_pcache_add_record_ticks(uint64_t t);
++
++#else
++#define tb_pcache_on false
++#define tb_pcache_verify_on() false
++#define tb_pcache_test_aba() false
++#define tb_pcache_test_live_twin() false
++#endif
++
++#endif
+diff --git a/accel/tcg/pcache.c b/accel/tcg/pcache.c
+new file mode 100644
+index 0000000000..d15af6b956
+--- /dev/null
++++ b/accel/tcg/pcache.c
+@@ -0,0 +1,865 @@
++/*
++ * Persistent, content keyed store of translated code (the pack).
++ * See pcache.h for the design.
++ *
++ * File layout: a 4 KiB header (magic, version, translator id, boot counter),
++ * then records, each 8 byte aligned, until the first slot whose magic is not
++ * valid. The file is mapped shared at its cap size and records are appended
++ * through the mapping, so a killed process loses nothing the kernel has not
++ * dropped, and a torn tail is found by the scan at the next open. Every
++ * record has its own crc32c, checked on first use.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#ifdef CONFIG_LINUX
++#include "qemu/crc32c.h"
++#include "qemu/thread.h"
++#include "qemu/atomic.h"
++#include "qemu/error-report.h"
++#include "qapi/error.h"
++#include "pcache.h"
++#include <sys/file.h>
++
++#define PC_FILE_MAGIC   "SNAPPC01"
++#define PC_VERSION      1
++#define PC_HDR_SIZE     4096
++#define PC_REC_MAGIC    0x31524350u     /* "PCR1" */
++#define PC_KIND_TB      1
++#define PC_KIND_USE     2
++#define PC_GROW         (64ull << 20)
++#define PC_KEEP_BOOTS   5
++
++typedef struct PCacheFileHdr {
++    char magic[8];
++    uint32_t version;
++    uint32_t hdr_size;
++    uint8_t id[PCACHE_ID_LEN];
++    uint32_t boot_no;
++    uint32_t pad;
++} PCacheFileHdr;
++
++/* The hash table: readers load the pointer and never take the lock. */
++typedef struct PCTab {
++    uint32_t n;             /* buckets, a power of two */
++    uint32_t b[];           /* rid + 1; 0 is empty */
++} PCTab;
++
++struct PCache {
++    QemuMutex lock;
++    char *path;
++    char *dir;
++    uint8_t id[PCACHE_ID_LEN];
++    int fd;
++    bool rw;
++    bool full;
++    uint8_t *map;
++    uint64_t cap;
++    uint64_t file_size;     /* bytes of the file that are allocated */
++    uint64_t end;           /* next append offset */
++    PCacheFileHdr *fh;
++    uint32_t boot_no;
++    uint32_t maxrec;
++    uint32_t nrec;
++    PCTab *tab;             /* bucket heads, read without the lock */
++    GPtrArray *old_tabs;    /* superseded tables, freed with the pack */
++    uint32_t *hash32;       /* the index hash of each record */
++    uint32_t *off8;         /* record offset in 8 byte units */
++    uint32_t *next;         /* chain, rid + 1 */
++    uint32_t *lastboot;
++    uint32_t *uses;
++    uint8_t *state;         /* 0 unchecked, 1 crc ok, 2 bad */
++    uint64_t *mut_pc;       /* test mutant 3 only */
++    PCacheStats st;
++};
++
++#ifdef PCACHE_TEST_HOOKS
++static int pc_mutant(void)
++{
++    static int m = -1;
++    if (m < 0) {
++        const char *e = getenv("PCACHE_MUTANT");
++        m = e ? atoi(e) : 0;
++    }
++    return m;
++}
++#else
++#define pc_mutant() 0
++#endif
++
++enum {
++    MUT_IGNORE_FLAGS = 1,
++    MUT_SKIP_COMPARE = 2,
++    MUT_VA_IN_KEY = 3,
++    MUT_IGNORE_ID = 4,
++    MUT_TRUST_LENGTHS = 5,
++    MUT_SKIP_CRC = 6,
++    MUT_COMPACT_FORGETS = 12,
++    MUT_DUP_BAD = 13,
++    MUT_NO_REPAIR = 14,
++};
++
++static inline uint32_t pc_align8(uint32_t v)
++{
++    return (v + 7u) & ~7u;
++}
++
++static uint32_t pc_e4(const uint8_t *p, uint32_t avail)
++{
++    uint32_t v = 0;
++    memcpy(&v, p, MIN(4u, avail));
++    return v;
++}
++
++static uint32_t pc_hash(uint64_t cs_base, uint32_t flags, uint32_t cflags,
++                        uint32_t entry_off, uint32_t e4, uint32_t e8)
++{
++    uint64_t h = cs_base * 0x9E3779B97F4A7C15ull;
++
++    if (pc_mutant() == MUT_IGNORE_FLAGS) {
++        flags = 0;
++    }
++    h ^= (((uint64_t)flags << 32) | cflags) * 0xC2B2AE3D27D4EB4Full;
++    h ^= (((uint64_t)entry_off << 32) | e4) * 0x165667B19E3779F9ull;
++    h ^= (uint64_t)e8 * 0xD6E8FEB86659FD93ull;
++    h ^= h >> 29;
++    h *= 0xBF58476D1CE4E5B9ull;
++    h ^= h >> 32;
++    return (uint32_t)h;
++}
++
++static void *pc_anon(size_t n)
++{
++    void *p = mmap(NULL, n, PROT_READ | PROT_WRITE,
++                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    return p == MAP_FAILED ? NULL : p;
++}
++
++static const PCacheRecHdr *pc_rec(PCache *c, uint32_t rid)
++{
++    return (const PCacheRecHdr *)(c->map + ((uint64_t)c->off8[rid] << 3));
++}
++
++static PCTab *pc_tab_new(uint32_t n)
++{
++    PCTab *t = g_malloc0(sizeof(*t) + (size_t)n * sizeof(uint32_t));
++
++    t->n = n;
++    return t;
++}
++
++/*
++ * Called with the lock held or before the cache is shared. Readers walking
++ * the chains of the old table while next[] is rewritten may skip records,
++ * which is a miss, never a wrong hit: every rid they reach is valid.
++ */
++static void pc_rehash(PCache *c, uint32_t n)
++{
++    PCTab *nt = pc_tab_new(n);
++    PCTab *old = c->tab;
++
++    for (uint32_t rid = 0; rid < c->nrec; rid++) {
++        uint32_t b = c->hash32[rid] & (n - 1);
++
++        qatomic_set(&c->next[rid], nt->b[b]);
++        nt->b[b] = rid + 1;
++    }
++    qatomic_store_release(&c->tab, nt);
++    g_ptr_array_add(c->old_tabs, old);
++}
++
++static void pc_index_add(PCache *c, uint64_t off, uint32_t boot)
++{
++    const PCacheRecHdr *h = (const PCacheRecHdr *)(c->map + off);
++    uint32_t rid = c->nrec++;
++    uint32_t hv = pc_hash(h->cs_base, h->flags, h->cflags, h->entry_off,
++                          h->e4, h->e8);
++
++    c->off8[rid] = off >> 3;
++    c->hash32[rid] = hv;
++    c->lastboot[rid] = boot & 0xffff;
++    if (c->nrec * 2 > c->tab->n) {
++        /* the rehash covers rid too, as nrec counts it */
++        pc_rehash(c, c->tab->n * 2);
++    } else {
++        uint32_t b = hv & (c->tab->n - 1);
++
++        qatomic_set(&c->next[rid], c->tab->b[b]);
++        qatomic_store_release(&c->tab->b[b], rid + 1);
++    }
++}
++
++static uint32_t pc_find_rid(PCache *c, uint32_t off8)
++{
++    uint32_t lo = 0, hi = c->nrec;
++
++    while (lo < hi) {
++        uint32_t mid = (lo + hi) / 2;
++        if (c->off8[mid] < off8) {
++            lo = mid + 1;
++        } else {
++            hi = mid;
++        }
++    }
++    return lo < c->nrec && c->off8[lo] == off8 ? lo : UINT32_MAX;
++}
++
++static void pc_scan(PCache *c, uint64_t st_size)
++{
++    uint64_t pos = PC_HDR_SIZE;
++
++    madvise(c->map, MIN(st_size, c->cap), MADV_SEQUENTIAL);
++    while (pos + sizeof(PCacheRecHdr) <= st_size) {
++        const PCacheRecHdr *h = (const PCacheRecHdr *)(c->map + pos);
++        uint32_t total = h->total;
++
++        if (h->magic != PC_REC_MAGIC) {
++            break;
++        }
++        if (pc_mutant() != MUT_TRUST_LENGTHS &&
++            (total < sizeof(PCacheRecHdr) || (total & 7) ||
++             pos + total > st_size)) {
++            break;
++        }
++        if (h->kind == PC_KIND_TB) {
++            if (c->nrec >= c->maxrec) {
++                break;
++            }
++            if (pc_mutant() != MUT_TRUST_LENGTHS &&
++                sizeof(*h) + pc_align8(h->guest_len) +
++                pc_align8(h->code_len) + pc_align8(h->search_len) +
++                (uint64_t)h->nreloc * sizeof(PCacheReloc) != total) {
++                break;
++            }
++            pc_index_add(c, pos, h->pad);
++        } else if (h->kind == PC_KIND_USE) {
++            const uint32_t *p = (const uint32_t *)(h + 1);
++            uint32_t n = p[1];
++
++            if (crc32c(0xffffffff, (const uint8_t *)h + 16, total - 16) !=
++                h->crc) {
++                /* a bad use record says nothing: skip it, keep scanning */
++            } else if ((uint64_t)n * 8 + 8 + sizeof(*h) <= total) {
++                for (uint32_t i = 0; i < n; i++) {
++                    uint32_t rid = pc_find_rid(c, p[2 + 2 * i]);
++                    /* stamps are 16 bit and wrap: newer is a small step on */
++                    if (rid != UINT32_MAX &&
++                        (uint16_t)(p[0] - c->lastboot[rid]) - 1u < 0x7fffu) {
++                        c->lastboot[rid] = p[0] & 0xffff;
++                    }
++                }
++            }
++        } else {
++            break;
++        }
++        pos += total;
++    }
++    /*
++     * The records are read in an order nobody knows: ask for no read ahead,
++     * a multi GiB pack must not push the guest RAM out of the page cache.
++     */
++    madvise(c->map, MIN(st_size, c->cap), MADV_RANDOM);
++    c->end = pos;
++    c->st.scanned_bytes = pos;
++}
++
++static bool pc_grow(PCache *c, uint64_t need)
++{
++    uint64_t want;
++    int r;
++
++    if (need <= c->file_size) {
++        return true;
++    }
++    want = MIN(c->cap, ROUND_UP(need, PC_GROW));
++    if (want < need) {
++        return false;
++    }
++    r = posix_fallocate(c->fd, c->file_size, want - c->file_size);
++    if (r) {
++        return false;
++    }
++    c->file_size = want;
++    return true;
++}
++
++static void pc_free(PCache *c)
++{
++    if (c->map) {
++        munmap(c->map, c->cap);
++    }
++    if (c->fd >= 0) {
++        close(c->fd);
++    }
++    for (int i = 0; i < 7; i++) {
++        void *arrs[7] = { c->off8, c->next, c->lastboot, c->uses, c->state,
++                          c->mut_pc, c->hash32 };
++        size_t sz[7] = { 4, 4, 4, 4, 1, 8, 4 };
++        if (arrs[i]) {
++            munmap(arrs[i], (size_t)c->maxrec * sz[i]);
++        }
++    }
++    g_free(c->tab);
++    if (c->old_tabs) {
++        g_ptr_array_free(c->old_tabs, true);
++    }
++    g_free(c->path);
++    g_free(c->dir);
++    qemu_mutex_destroy(&c->lock);
++    g_free(c);
++}
++
++/*
++ * Rewrite the pack without the records unused for PC_KEEP_BOOTS boots, and
++ * further, oldest first, until it is at most half the cap. The last use of
++ * each record that is kept is written back as use records so that it is not
++ * taken for new. A pack with little to drop is left alone.
++ * Returns true when the new pack replaced the old one.
++ */
++#define PC_AGES 64
++static bool pc_compact(PCache *c)
++{
++    char *tmp = g_strdup_printf("%s.tmp", c->path);
++    int fd = -1;
++    uint8_t *buf = g_malloc(1 << 20);
++    size_t fill = 0;
++    bool ok;
++    uint64_t kept, by_age[PC_AGES] = { 0 };
++    uint32_t *koff, *kboot, nk = 0, limit = PC_KEEP_BOOTS;
++
++    for (uint32_t rid = 0; rid < c->nrec; rid++) {
++        uint32_t age = (uint16_t)(c->boot_no - c->lastboot[rid]);
++        if (age < PC_AGES) {
++            by_age[age] += pc_rec(c, rid)->total;
++        }
++    }
++    for (;;) {
++        kept = 0;
++        for (uint32_t a = 0; a <= limit; a++) {
++            kept += by_age[a];
++        }
++        if (kept <= c->cap / 2 || limit == 0) {
++            break;
++        }
++        limit--;
++    }
++    if (kept + (c->end - PC_HDR_SIZE) / 8 > c->end - PC_HDR_SIZE) {
++        /* under an eighth would go: not worth rewriting the pack */
++        g_free(buf);
++        g_free(tmp);
++        return false;
++    }
++    fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++    koff = g_new(uint32_t, c->nrec + 1);
++    kboot = g_new(uint32_t, c->nrec + 1);
++    ok = fd >= 0;
++    kept = 0;
++    if (ok) {
++        memcpy(buf, c->map, PC_HDR_SIZE);
++        ok = write(fd, buf, PC_HDR_SIZE) == PC_HDR_SIZE;
++    }
++    for (uint32_t rid = 0; ok && rid < c->nrec; rid++) {
++        const PCacheRecHdr *h = pc_rec(c, rid);
++        if ((uint16_t)(c->boot_no - c->lastboot[rid]) > limit) {
++            continue;
++        }
++        koff[nk] = (PC_HDR_SIZE + kept) >> 3;
++        kboot[nk++] = c->lastboot[rid];
++        if (fill + h->total > (1 << 20)) {
++            ok = write(fd, buf, fill) == (ssize_t)fill;
++            fill = 0;
++        }
++        if (h->total > (1 << 20)) {
++            ok = ok && write(fd, h, h->total) == (ssize_t)h->total;
++        } else {
++            memcpy(buf + fill, h, h->total);
++            fill += h->total;
++        }
++        kept += h->total;
++    }
++    /* one use record per distinct last use */
++    for (uint32_t a = 1; ok && a <= limit && pc_mutant() != MUT_COMPACT_FORGETS;
++         a++) {
++        uint16_t boot = c->boot_no - a;
++        uint32_t n = 0;
++        uint64_t total;
++        PCacheRecHdr *h;
++        uint32_t *p;
++
++        for (uint32_t k = 0; k < nk; k++) {
++            n += kboot[k] == boot;
++        }
++        if (!n) {
++            continue;
++        }
++        total = sizeof(PCacheRecHdr) + 8 + (uint64_t)n * 8;
++        h = g_malloc0(total);
++        p = (uint32_t *)(h + 1);
++        h->magic = PC_REC_MAGIC;
++        h->total = total;
++        h->kind = PC_KIND_USE;
++        p[0] = boot;
++        p[1] = n;
++        p += 2;
++        for (uint32_t k = 0; k < nk; k++) {
++            if (kboot[k] == boot) {
++                *p++ = koff[k];
++                *p++ = 1;
++            }
++        }
++        h->crc = crc32c(0xffffffff, (const uint8_t *)h + 16, total - 16);
++        if (fill) {
++            ok = write(fd, buf, fill) == (ssize_t)fill;
++            fill = 0;
++        }
++        ok = ok && write(fd, h, total) == (ssize_t)total;
++        kept += total;
++        g_free(h);
++    }
++    if (ok && fill) {
++        ok = write(fd, buf, fill) == (ssize_t)fill;
++    }
++    g_free(buf);
++    g_free(koff);
++    g_free(kboot);
++    if (fd >= 0) {
++        close(fd);
++    }
++    if (ok && rename(tmp, c->path) == 0) {
++        info_report("pcache: compacted %s, %" PRIu64 " of %" PRIu64
++                    " bytes kept", c->path, kept, c->end);
++        g_free(tmp);
++        return true;
++    }
++    unlink(tmp);
++    g_free(tmp);
++    return false;
++}
++
++static PCache *pc_open_file(const char *dir, const uint8_t id[PCACHE_ID_LEN],
++                            bool want_rw, uint64_t cap, bool may_compact,
++                            Error **errp)
++{
++    PCache *c = g_new0(PCache, 1);
++    struct stat sb;
++    char hex[PCACHE_ID_LEN * 2 + 1];
++    PCacheFileHdr fh;
++    bool created = false;
++
++    c->fd = -1;
++    c->cap = ROUND_UP(MIN(cap, 32ull << 30), 1 << 20);
++    c->maxrec = MIN(c->cap / 96, (uint64_t)UINT32_MAX / 2);
++    memcpy(c->id, id, PCACHE_ID_LEN);
++    qemu_mutex_init(&c->lock);
++    for (int i = 0; i < PCACHE_ID_LEN; i++) {
++        snprintf(hex + 2 * i, 3, "%02x", id[i]);
++    }
++    c->dir = g_strdup(dir);
++    c->path = g_strdup_printf("%s/%s.pack", dir, hex);
++
++    if (want_rw) {
++        if (g_mkdir_with_parents(dir, 0755) < 0) {
++            error_setg_errno(errp, errno, "pcache: cannot create %s", dir);
++            goto fail;
++        }
++        c->fd = open(c->path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
++        if (c->fd >= 0 && flock(c->fd, LOCK_EX | LOCK_NB) == 0) {
++            c->rw = true;
++        } else if (c->fd >= 0) {
++            /* another process appends to it: read it, never write */
++            close(c->fd);
++            c->fd = open(c->path, O_RDONLY | O_CLOEXEC);
++        }
++    } else {
++        c->fd = open(c->path, O_RDONLY | O_CLOEXEC);
++    }
++    if (c->fd < 0) {
++        error_setg_errno(errp, errno, "pcache: cannot open %s", c->path);
++        goto fail;
++    }
++    if (fstat(c->fd, &sb) < 0) {
++        error_setg_errno(errp, errno, "pcache: cannot stat %s", c->path);
++        goto fail;
++    }
++    /*
++     * A new pack, or one whose creator died between the allocation and the
++     * header: with the lock held nobody else writes, and a header with no
++     * magic cannot have records behind it.
++     */
++    if (c->rw && (sb.st_size == 0 || (pc_mutant() != MUT_NO_REPAIR &&
++                  (pread(c->fd, &fh, sizeof(fh), 0) == sizeof(fh) &&
++                   !memcmp(fh.magic, "\0\0\0\0\0\0\0\0", 8))))) {
++        memset(&fh, 0, sizeof(fh));
++        memcpy(fh.magic, PC_FILE_MAGIC, 8);
++        fh.version = PC_VERSION;
++        fh.hdr_size = PC_HDR_SIZE;
++        memcpy(fh.id, id, PCACHE_ID_LEN);
++        if (posix_fallocate(c->fd, 0, PC_GROW) ||
++            pwrite(c->fd, &fh, sizeof(fh), 0) != sizeof(fh)) {
++            error_setg(errp, "pcache: cannot initialise %s", c->path);
++            goto fail;
++        }
++        if (fstat(c->fd, &sb) < 0) {
++            goto fail;
++        }
++        created = true;
++    }
++    if (sb.st_size < PC_HDR_SIZE) {
++        error_setg(errp, "pcache: %s is truncated inside its header, ignored",
++                   c->path);
++        goto fail;
++    }
++    c->map = mmap(NULL, c->cap, c->rw ? PROT_READ | PROT_WRITE : PROT_READ,
++                  MAP_SHARED, c->fd, 0);
++    if (c->map == MAP_FAILED) {
++        c->map = NULL;
++        error_setg_errno(errp, errno, "pcache: cannot map %s", c->path);
++        goto fail;
++    }
++    c->fh = (PCacheFileHdr *)c->map;
++    if (memcmp(c->fh->magic, PC_FILE_MAGIC, 8) ||
++        c->fh->version != PC_VERSION || c->fh->hdr_size != PC_HDR_SIZE) {
++        error_setg(errp, "pcache: %s is not a pack of this version, ignored",
++                   c->path);
++        goto fail;
++    }
++    if (pc_mutant() != MUT_IGNORE_ID &&
++        memcmp(c->fh->id, id, PCACHE_ID_LEN)) {
++        error_setg(errp, "pcache: %s belongs to another translator, ignored",
++                   c->path);
++        goto fail;
++    }
++    if ((uint64_t)sb.st_size > c->cap) {
++        error_setg(errp, "pcache: %s is larger than pcache-max, ignored",
++                   c->path);
++        goto fail;
++    }
++    c->file_size = sb.st_size;
++    c->off8 = pc_anon((size_t)c->maxrec * 4);
++    c->next = pc_anon((size_t)c->maxrec * 4);
++    c->lastboot = pc_anon((size_t)c->maxrec * 4);
++    c->uses = pc_anon((size_t)c->maxrec * 4);
++    c->state = pc_anon((size_t)c->maxrec);
++    c->hash32 = pc_anon((size_t)c->maxrec * 4);
++    if (pc_mutant() == MUT_VA_IN_KEY) {
++        c->mut_pc = pc_anon((size_t)c->maxrec * 8);
++    }
++    if (!c->off8 || !c->next || !c->lastboot || !c->uses || !c->state ||
++        !c->hash32) {
++        error_setg(errp, "pcache: out of address space for the index");
++        goto fail;
++    }
++    c->tab = pc_tab_new(1 << 16);
++    c->old_tabs = g_ptr_array_new_with_free_func(g_free);
++    c->boot_no = c->fh->boot_no;
++    pc_scan(c, sb.st_size);
++    c->st.records = c->nrec;
++    if (c->rw) {
++        c->boot_no++;
++        c->fh->boot_no = c->boot_no;
++        if (may_compact && !created && c->end > c->cap / 4 * 3 &&
++            pc_compact(c)) {
++            pc_free(c);
++            return pc_open_file(dir, id, want_rw, cap, false, errp);
++        }
++        if (c->file_size < c->end) {
++            c->file_size = c->end;
++        }
++        /* cut off whatever torn tail the scan stopped at */
++        if (c->end + 8 <= c->file_size) {
++            memset(c->map + c->end, 0, 8);
++        }
++    }
++    c->st.rw = c->rw;
++    c->st.boot_no = c->boot_no;
++    return c;
++
++fail:
++    pc_free(c);
++    return NULL;
++}
++
++PCache *pcache_open(const char *dir, const uint8_t id[PCACHE_ID_LEN],
++                    bool want_rw, uint64_t cap, Error **errp)
++{
++    return pc_open_file(dir, id, want_rw, cap, true, errp);
++}
++
++const char *pcache_path(PCache *c)
++{
++    return c->path;
++}
++
++static bool pc_key_match(PCache *c, uint32_t rid, const PCacheKey *k,
++                         uint32_t e4, uint32_t e8)
++{
++    const PCacheRecHdr *h = pc_rec(c, rid);
++
++    if (h->entry_off != k->entry_off || h->e4 != e4 || h->e8 != e8 ||
++        h->cs_base != k->cs_base || h->cflags != k->cflags) {
++        return false;
++    }
++    if (pc_mutant() != MUT_IGNORE_FLAGS && h->flags != k->flags) {
++        return false;
++    }
++    if (pc_mutant() == MUT_VA_IN_KEY && c->mut_pc[rid] != k->pc) {
++        return false;
++    }
++    return true;
++}
++
++static void pc_view(PCache *c, uint32_t rid, PCacheView *v)
++{
++    const PCacheRecHdr *h = pc_rec(c, rid);
++    const uint8_t *p = (const uint8_t *)(h + 1);
++
++    v->hdr = h;
++    v->rid = rid;
++    v->guest = p;
++    p += pc_align8(h->guest_len);
++    v->code = p;
++    p += pc_align8(h->code_len);
++    v->search = p;
++    p += pc_align8(h->search_len);
++    v->relocs = (const PCacheReloc *)p;
++}
++
++bool pcache_lookup(PCache *c, const PCacheKey *key, const uint8_t *p0,
++                   uint32_t avail0, PCacheView *out)
++{
++    uint32_t e4, e8;
++
++    if (avail0 < 4) {
++        return false;
++    }
++    e4 = pc_e4(p0, avail0);
++    /* a block of more than one word is indexed by its second word too */
++    e8 = avail0 >= 8 ? pc_e4(p0 + 4, avail0 - 4) : 0;
++    qatomic_inc(&c->st.lookups);
++
++    for (;;) {
++        uint32_t found = UINT32_MAX;
++
++        /* no lock: the table and the chains only ever gain valid rids */
++        PCTab *tab = qatomic_load_acquire(&c->tab);
++
++        for (int probe = 0; probe < 2 && found == UINT32_MAX; probe++) {
++            /* second probe: blocks of one word, which have no second word */
++            uint32_t w = probe ? 0 : e8;
++
++            if (probe && !e8) {
++                break;
++            }
++            for (uint32_t r = qatomic_load_acquire(&tab->b[
++                     pc_hash(key->cs_base, key->flags, key->cflags,
++                             key->entry_off, e4, w) & (tab->n - 1)]);
++                 r; r = qatomic_read(&c->next[r - 1])) {
++                const PCacheRecHdr *h = pc_rec(c, r - 1);
++                PCacheView v;
++
++                if (!pc_key_match(c, r - 1, key, e4, w) ||
++                    qatomic_read(&c->state[r - 1]) == 2) {
++                    continue;
++                }
++                qatomic_inc(&c->st.cands);
++                if (pc_mutant() != MUT_SKIP_COMPARE) {
++                    pc_view(c, r - 1, &v);
++                    /* a block that runs into the next page is not found here */
++                    if (h->guest_len > avail0 ||
++                        memcmp(p0, v.guest, h->guest_len)) {
++                        qatomic_inc(&c->st.mismatch);
++                        continue;
++                    }
++                }
++                found = r - 1;
++                break;
++            }
++        }
++        if (found == UINT32_MAX) {
++            return false;
++        }
++        if (qatomic_read(&c->state[found]) == 0) {
++            const PCacheRecHdr *h = pc_rec(c, found);
++            bool ok = pc_mutant() == MUT_SKIP_CRC ||
++                      crc32c(0xffffffff, (const uint8_t *)h + 16,
++                             h->total - 16) == h->crc;
++
++            qatomic_set(&c->state[found], ok ? 1 : 2);
++            if (!ok) {
++                /* skip it, and look at the rest of the chain again */
++                qatomic_inc(&c->st.crc_bad);
++                continue;
++            }
++        }
++        pc_view(c, found, out);
++        qatomic_inc(&c->uses[found]);
++        qatomic_inc(&c->st.hits);
++        return true;
++    }
++}
++
++bool pcache_store(PCache *c, const PCacheNew *n)
++{
++    uint32_t glen = pc_align8(n->guest_len);
++    uint32_t clen = pc_align8(n->code_len);
++    uint32_t slen = pc_align8(n->search_len);
++    uint64_t total = sizeof(PCacheRecHdr) + glen + clen + slen +
++                     (uint64_t)n->nreloc * sizeof(PCacheReloc);
++    uint32_t e4, e8;
++    PCacheRecHdr *h;
++    uint8_t *p;
++    bool ret = false;
++
++    if (!c->rw || n->guest_len < 4 || n->guest_len > UINT16_MAX ||
++        n->code_len > UINT16_MAX || n->search_len > UINT16_MAX ||
++        n->nreloc > UINT16_MAX || total > UINT32_MAX / 2) {
++        return false;
++    }
++    e4 = pc_e4(n->guest, n->guest_len);
++    e8 = n->guest_len >= 8 ? pc_e4(n->guest + 4, n->guest_len - 4) : 0;
++
++    qemu_mutex_lock(&c->lock);
++    if (c->full || c->nrec >= c->maxrec || c->end + total + 8 > c->cap) {
++        if (!c->full) {
++            c->full = true;
++        }
++        qatomic_inc(&c->st.full);
++        goto out;
++    }
++    /* the same block again, translated by two vCPUs at once or after a flush */
++    for (uint32_t r = c->tab->b[pc_hash(n->key.cs_base, n->key.flags,
++                                        n->key.cflags, n->key.entry_off, e4,
++                                        e8) & (c->tab->n - 1)];
++         r; r = c->next[r - 1]) {
++        const PCacheRecHdr *o = pc_rec(c, r - 1);
++        PCacheView v;
++
++        if ((c->state[r - 1] == 2 && pc_mutant() != MUT_DUP_BAD) ||
++            !pc_key_match(c, r - 1, &n->key, e4, e8) ||
++            o->guest_len != n->guest_len) {
++            continue;
++        }
++        pc_view(c, r - 1, &v);
++        if (!memcmp(v.guest, n->guest, n->guest_len)) {
++            qatomic_inc(&c->st.dups);
++            ret = true;
++            goto out;
++        }
++    }
++    if (!pc_grow(c, c->end + total + 8)) {
++        c->full = true;
++        c->rw = false;
++        qatomic_inc(&c->st.full);
++        goto out;
++    }
++    h = (PCacheRecHdr *)(c->map + c->end);
++    memset(h, 0, total);
++    h->total = total;
++    h->kind = PC_KIND_TB;
++    h->cs_base = n->key.cs_base;
++    h->flags = n->key.flags;
++    h->cflags = n->key.cflags;
++    h->entry_off = n->key.entry_off;
++    h->e4 = e4;
++    h->e8 = e8;
++    h->guest_len = n->guest_len;
++    h->icount = n->icount;
++    h->code_len = n->code_len;
++    h->search_len = n->search_len;
++    memcpy(h->jmp_reset, n->jmp_reset, sizeof(h->jmp_reset));
++    memcpy(h->jmp_insn, n->jmp_insn, sizeof(h->jmp_insn));
++    h->nreloc = n->nreloc;
++    h->pad = c->boot_no;
++    h->cycles = n->cycles;
++    p = (uint8_t *)(h + 1);
++    memcpy(p, n->guest, n->guest_len);
++    p += glen;
++    memcpy(p, n->code, n->code_len);
++    p += clen;
++    memcpy(p, n->search, n->search_len);
++    p += slen;
++    if (n->nreloc) {
++        memcpy(p, n->relocs, (size_t)n->nreloc * sizeof(PCacheReloc));
++    }
++    h->crc = crc32c(0xffffffff, (const uint8_t *)h + 16, total - 16);
++    if (c->mut_pc) {
++        c->mut_pc[c->nrec] = n->key.pc;
++    }
++    pc_index_add(c, c->end, c->boot_no);
++    c->state[c->nrec - 1] = 1;
++    c->end += total;
++    memset(c->map + c->end, 0, 8);
++    /* the magic last: a reader of the file never sees half a record */
++    qatomic_store_release(&h->magic, PC_REC_MAGIC);
++    qatomic_inc(&c->st.stores);
++    ret = true;
++out:
++    qemu_mutex_unlock(&c->lock);
++    return ret;
++}
++
++bool pcache_is_rw(PCache *c)
++{
++    /* a full pack takes no more records: do not prove blocks for it */
++    return qatomic_read(&c->rw) && !qatomic_read(&c->full);
++}
++
++void pcache_stats(PCache *c, PCacheStats *st)
++{
++    *st = c->st;
++    st->records = c->nrec;
++    st->end = c->end;
++}
++
++void pcache_close(PCache *c, bool unmap)
++{
++    if (!c) {
++        return;
++    }
++    qemu_mutex_lock(&c->lock);
++    if (c->rw) {
++        uint32_t n = 0;
++
++        for (uint32_t rid = 0; rid < c->nrec; rid++) {
++            n += c->uses[rid] != 0;
++        }
++        if (n) {
++            uint64_t total = sizeof(PCacheRecHdr) + 8 + (uint64_t)n * 8;
++
++            if (c->end + total + 8 <= c->cap &&
++                pc_grow(c, c->end + total + 8)) {
++                PCacheRecHdr *h = (PCacheRecHdr *)(c->map + c->end);
++                uint32_t *p = (uint32_t *)(h + 1);
++
++                memset(h, 0, total);
++                h->total = total;
++                h->kind = PC_KIND_USE;
++                p[0] = c->boot_no;
++                p[1] = n;
++                p += 2;
++                for (uint32_t rid = 0; rid < c->nrec; rid++) {
++                    if (c->uses[rid]) {
++                        *p++ = c->off8[rid];
++                        *p++ = c->uses[rid];
++                    }
++                }
++                h->crc = crc32c(0xffffffff, (const uint8_t *)h + 16,
++                                total - 16);
++                c->end += total;
++                memset(c->map + c->end, 0, 8);
++                qatomic_store_release(&h->magic, PC_REC_MAGIC);
++            }
++        }
++        msync(c->map, c->end, MS_ASYNC);
++        if (unmap && ftruncate(c->fd, c->end) < 0) {
++            /* a padded file is fine, the scan stops at the zero magic */
++        }
++        c->rw = false;
++    }
++    qemu_mutex_unlock(&c->lock);
++    if (unmap) {
++        pc_free(c);
++    }
++}
++#endif /* CONFIG_LINUX */
+diff --git a/accel/tcg/pcache.h b/accel/tcg/pcache.h
+new file mode 100644
+index 0000000000..48c9b29399
+--- /dev/null
++++ b/accel/tcg/pcache.h
+@@ -0,0 +1,140 @@
++/*
++ * Persistent, content keyed store of translated code (the pack).
++ *
++ * One pack file per translator id, mmap'd, append-only. A record holds the
++ * guest bytes a translation was made from, the host code (with the list of
++ * fields that must be fixed up when it is placed at another address) and the
++ * unwind data. Lookup is by (entry offset in its page, TB flags, cs_base,
++ * cflags, first guest word) and is always confirmed by comparing the whole
++ * guest byte range, so the physical or virtual address of the code is never
++ * part of the key.
++ *
++ * This file knows nothing about TCG; accel/tcg/pcache-tcg.c does the glue.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef ACCEL_TCG_PCACHE_H
++#define ACCEL_TCG_PCACHE_H
++
++#define PCACHE_ID_LEN 32
++
++typedef struct PCache PCache;
++
++typedef enum PCacheRelocKind {
++    /* rel32 to a fixed address in the code buffer; addend from the epilogue */
++    PCACHE_RELOC_PCREL_BUF = 1,
++    /* rel32 to a fixed address in the executable image; addend from anchor */
++    PCACHE_RELOC_PCREL_IMG = 2,
++    /* 64 bit absolute address in the executable image; addend from anchor */
++    PCACHE_RELOC_ABS_IMG = 3,
++    /* 64 bit absolute address inside the TB's own struct; addend from TB */
++    PCACHE_RELOC_ABS_TB = 4,
++} PCacheRelocKind;
++
++typedef struct PCacheReloc {
++    uint32_t off;       /* byte offset in the code */
++    uint32_t kind;
++    int64_t addend;
++} PCacheReloc;
++
++typedef struct PCacheKey {
++    uint64_t pc;        /* virtual pc; diagnostics, not part of the key */
++    uint64_t cs_base;
++    uint32_t flags;
++    uint32_t cflags;
++    uint32_t entry_off; /* pc & (page_size - 1) */
++} PCacheKey;
++
++typedef struct PCacheNew {
++    PCacheKey key;
++    const uint8_t *guest;
++    uint32_t guest_len;
++    const uint8_t *code;
++    uint32_t code_len;
++    const uint8_t *search;
++    uint32_t search_len;
++    const PCacheReloc *relocs;
++    uint32_t nreloc;
++    uint16_t icount;
++    uint16_t jmp_reset[2];
++    uint16_t jmp_insn[2];
++    uint32_t cycles;    /* host cycles the translation took, saturated */
++} PCacheNew;
++
++/* On-disk record header, 72 bytes, followed by the payload. */
++typedef struct PCacheRecHdr {
++    uint32_t magic;
++    uint32_t total;     /* header and payload, a multiple of 8 */
++    uint32_t crc;       /* crc32c of bytes [16, total) */
++    uint32_t kind;
++    uint64_t cs_base;
++    uint32_t flags;
++    uint32_t cflags;
++    uint32_t entry_off;
++    uint32_t e4;        /* first four guest bytes */
++    uint16_t guest_len;
++    uint16_t icount;
++    uint16_t code_len;
++    uint16_t search_len;
++    uint16_t jmp_reset[2];
++    uint16_t jmp_insn[2];
++    uint16_t nreloc;
++    uint16_t pad;
++    uint32_t cycles;
++    uint32_t e8;        /* the second guest word, 0 for a one word block */
++    uint32_t spare;
++} PCacheRecHdr;
++
++typedef struct PCacheView {
++    const PCacheRecHdr *hdr;
++    const uint8_t *guest;
++    const uint8_t *code;
++    const uint8_t *search;
++    const PCacheReloc *relocs;
++    uint32_t rid;
++} PCacheView;
++
++typedef struct PCacheStats {
++    uint64_t records;       /* records in the index */
++    uint64_t scanned_bytes;
++    uint64_t lookups;
++    uint64_t cands;         /* key matches inspected */
++    uint64_t hits;
++    uint64_t mismatch;      /* key matched, guest bytes did not */
++    uint64_t crc_bad;
++    uint64_t stores;
++    uint64_t dups;
++    uint64_t full;
++    uint64_t end;           /* append offset */
++    uint32_t boot_no;
++    bool rw;
++} PCacheStats;
++
++/*
++ * Open (creating it when @want_rw) the pack for @id in @dir. Returns NULL,
++ * with @errp set, when the pack must not be used: a file with a bad header or
++ * another translator id is never trusted and never modified. @cap bounds the
++ * pack size in bytes. Read-only when the pack is locked by another process.
++ */
++PCache *pcache_open(const char *dir, const uint8_t id[PCACHE_ID_LEN],
++                    bool want_rw, uint64_t cap, Error **errp);
++/* @unmap false: at exit, threads may still look things up */
++void pcache_close(PCache *c, bool unmap);
++const char *pcache_path(PCache *c);
++
++/*
++ * Find the record for @key whose guest bytes equal the code at @p0, of which
++ * @avail0 bytes are readable, up to the end of the page. A record that runs
++ * into the next page is never found.
++ */
++bool pcache_lookup(PCache *c, const PCacheKey *key, const uint8_t *p0,
++                   uint32_t avail0, PCacheView *out);
++
++/* Append a record. False when the pack is read-only, full, or has it. */
++bool pcache_store(PCache *c, const PCacheNew *n);
++
++void pcache_stats(PCache *c, PCacheStats *st);
++bool pcache_is_rw(PCache *c);
++
++#endif
+diff --git a/accel/tcg/tb-internal.h b/accel/tcg/tb-internal.h
+index bbec773daf..98a888141b 100644
+--- a/accel/tcg/tb-internal.h
++++ b/accel/tcg/tb-internal.h
+@@ -50,6 +50,7 @@ void tb_unlock_pages(TranslationBlock *);
+  * see tb_gen_code() and notdirty_write_post().
+  */
+ unsigned tb_smc_gen_read(void);
++bool tb_smc_gen_changed(void);
+ void tb_smc_gen_bump(void);
+ void tb_smc_gen_begin(void);
+ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t ram_addr,
+diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
+index 3827f3a3a5..b49ad9be85 100644
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -1002,6 +1002,11 @@ unsigned tb_smc_gen_read(void)
+     return qatomic_load_acquire(&tb_smc_gen);
+ }
+ 
++bool tb_smc_gen_changed(void)
++{
++    return qatomic_load_acquire(&tb_smc_gen) != tb_smc_gen_seen;
++}
++
+ void tb_smc_gen_bump(void)
+ {
+     /* Sequentially consistent: a full barrier */
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+index 7186c10cf0..f168d3cab3 100644
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -45,6 +45,7 @@
+ #include "accel/accel-cpu-ops.h"
+ #include "accel/tcg/cpu-ops.h"
+ #include "internal-common.h"
++#include "pcache-tcg.h"
+ 
+ 
+ struct TCGState {
+@@ -54,6 +55,10 @@ struct TCGState {
+     bool one_insn_per_tb;
+     int splitwx_enabled;
+     unsigned long tb_size;
++    char *pcache_dir;
++    char *pcache_mode;
++    uint64_t pcache_max;
++    uint32_t pcache_stats;
+ };
+ typedef struct TCGState TCGState;
+ 
+@@ -166,6 +171,18 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
+     page_init();
+     tb_htable_init();
+     tcg_init(s->tb_size * MiB, s->splitwx_enabled, max_threads);
++#if defined(CONFIG_SOFTMMU)
++    if (s->pcache_dir) {
++        Error *err = NULL;
++
++        tb_pcache_configure(s->pcache_dir, s->pcache_mode, s->pcache_max,
++                            s->pcache_stats, &err);
++        if (err) {
++            error_report_err(err);
++            exit(1);
++        }
++    }
++#endif
+ 
+ #if defined(CONFIG_SOFTMMU)
+     /*
+@@ -230,6 +247,72 @@ static void tcg_set_tb_size(Object *obj, Visitor *v,
+     s->tb_size = value;
+ }
+ 
++static char *tcg_get_pcache(Object *obj, Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    return g_strdup(s->pcache_dir ? s->pcache_dir : "");
++}
++
++static void tcg_set_pcache(Object *obj, const char *value, Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    g_free(s->pcache_dir);
++    s->pcache_dir = g_strdup(value);
++}
++
++static char *tcg_get_pcache_mode(Object *obj, Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    return g_strdup(s->pcache_mode ? s->pcache_mode : "rw");
++}
++
++static void tcg_set_pcache_mode(Object *obj, const char *value, Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    g_free(s->pcache_mode);
++    s->pcache_mode = g_strdup(value);
++}
++
++static void tcg_get_pcache_max(Object *obj, Visitor *v, const char *name,
++                               void *opaque, Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    uint64_t value = s->pcache_max;
++
++    visit_type_size(v, name, &value, errp);
++}
++
++static void tcg_set_pcache_max(Object *obj, Visitor *v, const char *name,
++                               void *opaque, Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    uint64_t value;
++
++    if (visit_type_size(v, name, &value, errp)) {
++        s->pcache_max = value;
++    }
++}
++
++static void tcg_get_pcache_stats(Object *obj, Visitor *v, const char *name,
++                                 void *opaque, Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    uint32_t value = s->pcache_stats;
++
++    visit_type_uint32(v, name, &value, errp);
++}
++
++static void tcg_set_pcache_stats(Object *obj, Visitor *v, const char *name,
++                                 void *opaque, Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    uint32_t value;
++
++    if (visit_type_uint32(v, name, &value, errp)) {
++        s->pcache_stats = value;
++    }
++}
++
+ static bool tcg_get_splitwx(Object *obj, Error **errp)
+ {
+     TCGState *s = TCG_STATE(obj);
+@@ -276,6 +359,24 @@ static void tcg_accel_class_init(ObjectClass *oc, const void *data)
+     object_class_property_set_description(oc, "tb-size",
+         "TCG translation block cache size");
+ 
++    object_class_property_add_str(oc, "pcache",
++                                  tcg_get_pcache, tcg_set_pcache);
++    object_class_property_set_description(oc, "pcache",
++        "Directory of the persistent translation cache (off when unset)");
++    object_class_property_add_str(oc, "pcache-mode",
++                                  tcg_get_pcache_mode, tcg_set_pcache_mode);
++    object_class_property_set_description(oc, "pcache-mode",
++        "rw (read and append, default) or ro (read only)");
++    object_class_property_add(oc, "pcache-max", "size",
++        tcg_get_pcache_max, tcg_set_pcache_max, NULL, NULL);
++    object_class_property_set_description(oc, "pcache-max",
++        "Size limit of the persistent translation cache (default 8G)");
++
++    object_class_property_add(oc, "pcache-stats", "uint32",
++        tcg_get_pcache_stats, tcg_set_pcache_stats, NULL, NULL);
++    object_class_property_set_description(oc, "pcache-stats",
++        "Print the persistent translation cache counters every N seconds");
++
+     object_class_property_add_bool(oc, "split-wx",
+         tcg_get_splitwx, tcg_set_splitwx);
+     object_class_property_set_description(oc, "split-wx",
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index 11fdfec635..2da75154a1 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -38,6 +38,7 @@
+ #include "internal-common.h"
+ #include "tcg/perf.h"
+ #include "tcg/insn-start-words.h"
++#include "pcache-tcg.h"
+ 
+ TBContext tb_ctx;
+ 
+@@ -258,6 +259,133 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
+     return tcg_gen_code(tcg_ctx, tb, pc);
+ }
+ 
++#ifndef CONFIG_USER_ONLY
++/*
++ * Persistent cache: emit the block just translated into @tb once more, in
++ * scratch space behind it, so that tb_pcache_commit() can tell which bytes of
++ * the code depend on where it sits. Called with the first emission complete
++ * and the buffer pointer not yet advanced past it.
++ */
++static void tb_pcache_record(CPUState *cpu, CPUArchState *env,
++                             TranslationBlock *tb, const TCGTBCPUState *s,
++                             tb_page_addr_t phys_pc, void *host_pc,
++                             uint8_t *code_a, int len_a, int search_a,
++                             uint64_t cycles, bool verify)
++{
++    PCacheTwin t;
++    uint8_t gsnap[2048 + 64];
++    TranslationBlock *tb2;
++    void *save = tcg_ctx->code_gen_ptr;
++    void *data_a = tcg_ctx->data_gen_ptr;
++    uintptr_t end_a, t2;
++    int len_b, search_b, max_insns = tb->icount;
++    int64_t ti;
++
++    if (tb_page_addr1(tb) != -1 || tb->size > sizeof(gsnap)) {
++        tb_pcache_note_noproof(PCACHE_NOPROOF_SPAN);
++        return;
++    }
++    /*
++     * The bytes that are stored are copied before the second emission, which
++     * reads them again: a write in between makes the two emissions differ
++     * and the proof fail, so the code stored always belongs to the bytes.
++     */
++    memset(gsnap, 0, sizeof(gsnap));
++    if (tb_pcache_test_aba()) {
++        /* test hook: the first word is another one while it is copied */
++        ((uint32_t *)host_pc)[0] ^= 0x80000000u;
++    }
++    memcpy(gsnap, host_pc, tb->size);
++    if (tb_pcache_test_aba()) {
++        ((uint32_t *)host_pc)[0] ^= 0x80000000u;
++    }
++    memset(&t, 0, sizeof(t));
++    t.nptrs_a = tcg_ctx->pcache_nptrs;
++    memcpy(t.ptrs_a, tcg_ctx->pcache_ptrs, sizeof(t.ptrs_a));
++    t.ptr_ovf = tcg_ctx->pcache_ptr_ovf;
++    t.pool_off_a = tcg_ctx->data_gen_ptr ?
++                   (uint8_t *)tcg_ctx->data_gen_ptr - code_a : -1;
++
++    /*
++     * The second TB struct goes at an address that differs from the first
++     * by 64 modulo 256, so that the low byte of every address field changes.
++     */
++    end_a = ROUND_UP((uintptr_t)code_a + len_a + search_a, 256);
++    t2 = end_a + ((((uintptr_t)tb + 64) - end_a) & 255);
++    if ((uint8_t *)t2 + 2 * len_a + 2 * search_a + 8192 >
++        (uint8_t *)tcg_ctx->code_gen_highwater) {
++        tb_pcache_note_noproof(PCACHE_NOPROOF_SPACE);
++        return;
++    }
++    qatomic_set(&tcg_ctx->code_gen_ptr, (void *)t2);
++    tb2 = tcg_tb_alloc(tcg_ctx);
++    if (!tb2 || (uintptr_t)tb2 != t2) {
++        qatomic_set(&tcg_ctx->code_gen_ptr, save);
++        tb_pcache_note_noproof(PCACHE_NOPROOF_SPACE);
++        return;
++    }
++    *tb2 = *tb;
++    tb2->tc.ptr = tcg_splitwx_to_rx(tcg_ctx->code_gen_ptr);
++    tb_set_page_addr0(tb2, phys_pc);
++    tb_set_page_addr1(tb2, -1);
++    tcg_ctx->gen_tb = tb2;
++    /*
++     * The second emission reads the snapshot, not the guest page: bytes that
++     * changed and changed back between the two emissions cannot make them
++     * agree on code that does not belong to the bytes stored.
++     */
++    len_b = setjmp_gen_code(env, tb2, s->pc,
++                            tb_pcache_test_live_twin() ? host_pc : gsnap,
++                            &max_insns, &ti);
++    tcg_ctx->gen_tb = NULL;
++    if (tb_page_addr1(tb2) != -1) {
++        /*
++         * It read the next page after all, which takes a lock on it that
++         * the caller does not know about: release it, drop the block.
++         */
++        tb_unlock_page1(phys_pc, tb_page_addr1(tb2));
++        len_b = -1;
++    }
++    if (len_b >= 0 && tb_smc_gen_changed()) {
++        len_b = -1;
++    }
++    if (len_b < 0) {
++        qatomic_set(&tcg_ctx->code_gen_ptr, save);
++        tb_pcache_note_noproof(PCACHE_NOPROOF_TWIN);
++        return;
++    }
++    search_b = encode_search(tb2, (uint8_t *)tcg_splitwx_to_rw(
++                                 (void *)tb2->tc.ptr) + len_b);
++    if (search_b < 0) {
++        qatomic_set(&tcg_ctx->code_gen_ptr, save);
++        tb_pcache_note_noproof(PCACHE_NOPROOF_TWIN);
++        return;
++    }
++    t.cpu = cpu;
++    t.s = s;
++    t.guest = gsnap;
++    t.tb_a = tb;
++    t.tb_b = tb2;
++    t.code_a = code_a;
++    t.code_b = tcg_splitwx_to_rw((void *)tb2->tc.ptr);
++    t.code_len_a = len_a;
++    t.code_len_b = len_b;
++    t.search_len_a = search_a;
++    t.search_len_b = search_b;
++    t.nptrs_b = tcg_ctx->pcache_nptrs;
++    memcpy(t.ptrs_b, tcg_ctx->pcache_ptrs, sizeof(t.ptrs_b));
++    t.ptr_ovf |= tcg_ctx->pcache_ptr_ovf;
++    t.cycles = cycles;
++    qatomic_set(&tcg_ctx->code_gen_ptr, save);
++    tcg_ctx->data_gen_ptr = data_a;
++    if (verify) {
++        tb_pcache_verify(&t);
++    } else {
++        tb_pcache_commit(&t);
++    }
++}
++#endif
++
+ /* Called with mmap_lock held for user mode emulation.  */
+ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+ {
+@@ -268,6 +396,11 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+     int gen_code_size, search_size, max_insns;
+     int64_t ti;
+     void *host_pc;
++    bool pc_hit = false;
++#ifndef CONFIG_USER_ONLY
++    bool pc_eligible;
++    uint64_t pc_t0 = 0;
++#endif
+ #ifdef CONFIG_SOFTMMU
+     /* Before the code is read, see tb_link_page() */
+     tb_smc_gen_begin();
+@@ -326,6 +459,19 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+  restart_translate:
+     trace_translate_block(tb, s.pc, tb->tc.ptr);
+ 
++#ifndef CONFIG_USER_ONLY
++    pc_eligible = tb_pcache_on && tb_pcache_eligible(&s, phys_pc);
++    if (pc_eligible) {
++        if (tb_pcache_load(cpu, tb, &s, host_pc, &gen_code_size,
++                           &search_size)) {
++            tcg_ctx->gen_tb = NULL;
++            tcg_ctx->data_gen_ptr = NULL;
++            pc_hit = true;
++            goto code_ready;
++        }
++        pc_t0 = tb_pcache_ticks();
++    }
++#endif
+     gen_code_size = setjmp_gen_code(env, tb, s.pc, host_pc, &max_insns, &ti);
+     if (unlikely(gen_code_size < 0)) {
+         switch (gen_code_size) {
+@@ -399,6 +545,27 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+         tb_unlock_pages(tb);
+         goto buffer_overflow;
+     }
++#ifndef CONFIG_USER_ONLY
++    if (pc_eligible) {
++        uint64_t xl = tb_pcache_ticks() - pc_t0;
++
++        tb_pcache_add_translate_ticks(xl);
++        if (tb_pcache_recording()) {
++            uint64_t rt = tb_pcache_ticks();
++
++            tb_pcache_record(cpu, env, tb, &s, phys_pc, host_pc, gen_code_buf,
++                             gen_code_size, search_size, xl, false);
++            tb_pcache_add_record_ticks(tb_pcache_ticks() - rt);
++        }
++    }
++ code_ready:
++    if (pc_hit && tb_pcache_verify_on() && tb_page_addr1(tb) == -1) {
++        /* a diagnostic: translate it again and compare with what was loaded */
++        tb->tc.size = gen_code_size;
++        tb_pcache_record(cpu, env, tb, &s, phys_pc, host_pc, gen_code_buf,
++                         gen_code_size, search_size, 0, true);
++    }
++#endif
+     tb->tc.size = gen_code_size;
+ 
+     /*
+@@ -407,7 +574,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+      */
+     perf_report_code(s.pc, tb, tcg_splitwx_to_rx(gen_code_buf));
+ 
+-    if (qemu_loglevel_mask(CPU_LOG_TB_OUT_ASM) &&
++    if (qemu_loglevel_mask(CPU_LOG_TB_OUT_ASM) && !pc_hit &&
+         qemu_log_in_addr_range(s.pc)) {
+         FILE *logfile = qemu_log_trylock();
+         if (logfile) {
+diff --git a/include/accel/tcg/cpu-ops.h b/include/accel/tcg/cpu-ops.h
+index 03e0d8509c..0aace0c017 100644
+--- a/include/accel/tcg/cpu-ops.h
++++ b/include/accel/tcg/cpu-ops.h
+@@ -52,6 +52,16 @@ struct TCGCPUOps {
+      * Called when the first CPU is realized.
+      */
+     void (*initialize)(void);
++
++    /**
++     * @pcache_hash_cpu: feed the persistent translation cache's translator
++     * id: everything about this CPU's configuration that changes the code
++     * the translator emits for the same guest bytes and TB flags.
++     */
++    void (*pcache_hash_cpu)(CPUState *cs,
++                            void (*add)(void *opaque, const void *data,
++                                        size_t len),
++                            void *opaque);
+     /**
+      * @translate_code: Translate guest instructions to TCGOps
+      * @cpu: cpu context
+diff --git a/include/tcg/tcg.h b/include/tcg/tcg.h
+index 5324ec2f99..2a3e8f8163 100644
+--- a/include/tcg/tcg.h
++++ b/include/tcg/tcg.h
+@@ -292,6 +292,8 @@ typedef struct TCGTemp {
+     void *state_ptr;
+ } TCGTemp;
+ 
++#define TCG_PCACHE_MAX_PTRS 64
++
+ typedef struct TCGContext TCGContext;
+ 
+ typedef struct TCGTempSet {
+@@ -458,8 +460,31 @@ struct TCGContext {
+ 
+     /* Exit to translator on overflow. */
+     sigjmp_buf jmp_trans;
++
++    /*
++     * Host addresses of the executable image that the backend put into the
++     * code of the TB being generated (helper calls). The persistent cache
++     * records them as image relative.
++     */
++    uintptr_t pcache_ptrs[TCG_PCACHE_MAX_PTRS];
++    unsigned pcache_nptrs;
++    bool pcache_ptr_ovf;
+ };
+ 
++static inline void tcg_pcache_note_ptr(TCGContext *s, const void *p)
++{
++    for (unsigned i = 0; i < s->pcache_nptrs; i++) {
++        if (s->pcache_ptrs[i] == (uintptr_t)p) {
++            return;
++        }
++    }
++    if (s->pcache_nptrs < TCG_PCACHE_MAX_PTRS) {
++        s->pcache_ptrs[s->pcache_nptrs++] = (uintptr_t)p;
++    } else {
++        s->pcache_ptr_ovf = true;
++    }
++}
++
+ static inline bool temp_readonly(TCGTemp *ts)
+ {
+     return ts->kind >= TEMP_FIXED;
+@@ -467,6 +492,7 @@ static inline bool temp_readonly(TCGTemp *ts)
+ 
+ extern __thread TCGContext *tcg_ctx;
+ extern const void *tcg_code_gen_epilogue;
++extern uintptr_t tcg_pcache_img_base;
+ extern ptrdiff_t tcg_splitwx_diff;
+ extern TCGv_env tcg_env;
+ 
+diff --git a/target/arm/cpu.c b/target/arm/cpu.c
+index b56e3359cd..159bdccc63 100644
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -2665,8 +2665,55 @@ static vaddr aprofile_pointer_wrap(CPUState *cs, int mmu_idx,
+ }
+ #endif /* !CONFIG_USER_ONLY */
+ 
++#ifndef CONFIG_USER_ONLY
++static int arm_pcache_cmp_key(const void *a, const void *b)
++{
++    uint32_t x = GPOINTER_TO_UINT(*(gpointer const *)a);
++    uint32_t y = GPOINTER_TO_UINT(*(gpointer const *)b);
++
++    return x < y ? -1 : x > y;
++}
++
++static void arm_pcache_hash_cpu(CPUState *cs,
++                                void (*add)(void *, const void *, size_t),
++                                void *opaque)
++{
++    ARMCPU *cpu = ARM_CPU(cs);
++    uint32_t misc[8] = {
++        cpu->sve_max_vq, cpu->sme_max_vq, cpu->pauth_impdef_compat,
++        cpu->pauth_inline_ok, cpu->gm_blocksize, get_dczid_bs(cpu),
++        cpu->x_page_bits, cpu->prop_pauth_original,
++    };
++
++    /* what aarch64_tr_init_disas_context() and the translator read */
++    guint nkeys;
++    gpointer *keys = g_hash_table_get_keys_as_array(cpu->cp_regs, &nkeys);
++
++    qsort(keys, nkeys, sizeof(*keys), arm_pcache_cmp_key);
++    for (guint i = 0; i < nkeys; i++) {
++        const ARMCPRegInfo *ri = g_hash_table_lookup(cpu->cp_regs, keys[i]);
++        uint64_t d[8] = {
++            GPOINTER_TO_UINT(keys[i]), ri->type, ri->state, ri->access,
++            ri->fieldoffset, ri->resetvalue,
++            (ri->accessfn != NULL) | (ri->readfn != NULL) << 1 |
++            (ri->writefn != NULL) << 2 | (uint64_t)ri->secure << 8,
++            (uint64_t)ri->crn << 32 | ri->crm << 16 | ri->opc0 << 8 |
++            ri->opc1 << 4 | ri->opc2,
++        };
++        add(opaque, d, sizeof(d));
++    }
++    g_free(keys);
++    add(opaque, &cpu->isar, sizeof(cpu->isar));
++    add(opaque, &cpu->env.features, sizeof(cpu->env.features));
++    add(opaque, misc, sizeof(misc));
++}
++#endif
++
+ static const TCGCPUOps arm_tcg_ops = {
+     .mttcg_supported = true,
++#ifndef CONFIG_USER_ONLY
++    .pcache_hash_cpu = arm_pcache_hash_cpu,
++#endif
+     /* ARM processors have a weak memory model */
+     .guest_default_memory_order = 0,
+ 
+diff --git a/tcg/tcg.c b/tcg/tcg.c
+index f294480d5e..12369cf1d4 100644
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -666,9 +666,26 @@ typedef struct TCGLabelPoolData {
+     intptr_t addend;
+     int rtype;
+     unsigned nlong;
++    bool img_rel;   /* a helper address: ordered by its offset in the image */
+     tcg_target_ulong data[];
+ } TCGLabelPoolData;
+ 
++/*
++ * The persistent cache stores code that must lay out its constant pool the
++ * same in every process, but the pool is sorted by value and the helper
++ * addresses in it move with the load address of the executable. When the
++ * cache is on, those entries are sorted by their offset in the image.
++ */
++uintptr_t tcg_pcache_img_base;
++
++static void pool_key(const TCGLabelPoolData *n, tcg_target_ulong *key)
++{
++    memcpy(key, n->data, sizeof(tcg_target_ulong) * n->nlong);
++    if (n->img_rel) {
++        key[0] -= tcg_pcache_img_base;
++    }
++}
++
+ static TCGLabelPoolData *new_pool_alloc(TCGContext *s, int nlong, int rtype,
+                                         tcg_insn_unit *label, intptr_t addend)
+ {
+@@ -679,6 +696,7 @@ static TCGLabelPoolData *new_pool_alloc(TCGContext *s, int nlong, int rtype,
+     n->addend = addend;
+     n->rtype = rtype;
+     n->nlong = nlong;
++    n->img_rel = false;
+     return n;
+ }
+ 
+@@ -695,7 +713,16 @@ static void new_pool_insert(TCGContext *s, TCGLabelPoolData *n)
+         if (nlong < i->nlong) {
+             continue;
+         }
+-        if (memcmp(n->data, i->data, sizeof(tcg_target_ulong) * nlong) >= 0) {
++        if (tcg_pcache_img_base) {
++            tcg_target_ulong kn[4], ki[4];
++
++            pool_key(n, kn);
++            pool_key(i, ki);
++            if (memcmp(kn, ki, sizeof(tcg_target_ulong) * nlong) >= 0) {
++                break;
++            }
++        } else if (memcmp(n->data, i->data,
++                          sizeof(tcg_target_ulong) * nlong) >= 0) {
+             break;
+         }
+     }
+@@ -710,6 +737,9 @@ static void new_pool_label(TCGContext *s, tcg_target_ulong d, int rtype,
+ {
+     TCGLabelPoolData *n = new_pool_alloc(s, 1, rtype, label, addend);
+     n->data[0] = d;
++    for (unsigned k = 0; tcg_pcache_img_base && k < s->pcache_nptrs; k++) {
++        n->img_rel |= s->pcache_ptrs[k] == d;
++    }
+     new_pool_insert(s, n);
+ }
+ 
+@@ -1946,6 +1976,8 @@ void tcg_func_start(TCGContext *s)
+     s->nb_ops = 0;
+     s->nb_labels = 0;
+     s->current_frame_offset = s->frame_start;
++    s->pcache_nptrs = 0;
++    s->pcache_ptr_ovf = false;
+ 
+ #ifdef CONFIG_DEBUG_TCG
+     s->goto_tb_issue_mask = 0;
+diff --git a/tcg/x86_64/tcg-target.c.inc b/tcg/x86_64/tcg-target.c.inc
+index b0758f9534..4a543784f6 100644
+--- a/tcg/x86_64/tcg-target.c.inc
++++ b/tcg/x86_64/tcg-target.c.inc
+@@ -1729,6 +1729,7 @@ static void tcg_out_branch(TCGContext *s, int call, const tcg_insn_unit *dest)
+            be able to re-use the pool constant for more calls.  */
+         tcg_out_opc(s, OPC_GRP5, 0, 0, 0);
+         tcg_out8(s, (call ? EXT5_CALLN_Ev : EXT5_JMPN_Ev) << 3 | 5);
++        tcg_pcache_note_ptr(s, dest);
+         new_pool_label(s, (uintptr_t)dest, R_386_PC32, s->code_ptr, -4);
+         tcg_out32(s, 0);
+     }
+diff --git a/tests/tcg/aarch64/system/pcache-bytes.c b/tests/tcg/aarch64/system/pcache-bytes.c
+new file mode 100644
+index 0000000000..05fae5d627
+--- /dev/null
++++ b/tests/tcg/aarch64/system/pcache-bytes.c
+@@ -0,0 +1,49 @@
++/*
++ * Persistent translation cache: the guest bytes are part of the key.
++ *
++ * pcb_fn sits at the start of a page of its own and does "mov w0, #VARIANT;
++ * ret". The kernel is built twice, VARIANT 1 and VARIANT 2, so that the two
++ * images differ in one byte of one instruction and are otherwise laid out
++ * the same: the page offset, the TB flags and the cs_base of pcb_fn are the
++ * same in both boots. Run the first image to fill a pack and then the
++ * second against that pack: a translation found by anything but the bytes
++ * would make it return 1.
++ *
++ * Copyright (c) 2026 Snapintosh contributors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include <stdint.h>
++#include <minilib.h>
++
++#ifndef VARIANT
++#define VARIANT 1
++#endif
++#define STR_(x) #x
++#define STR(x) STR_(x)
++
++asm(".text\n"
++    ".balign 16384\n"
++    "pcb_fn:\n"
++    "    nop\n"
++    "    nop\n"
++    "    mov w0, #" STR(VARIANT) "\n"
++    "    ret\n"
++    ".balign 16384\n");
++
++int main(void)
++{
++    uint64_t (*fn)(void);
++    uint64_t r;
++
++    asm("adr %0, pcb_fn" : "=r"(fn));
++
++    ml_printf("Persistent cache bytes test, variant %d\n", VARIANT);
++    r = fn();
++    if (r != VARIANT) {
++        ml_printf("FAIL: pcb_fn returned %d, expected %d\n", (int)r, VARIANT);
++        return 1;
++    }
++    ml_printf("OK\n");
++    return 0;
++}
+diff --git a/tests/tcg/aarch64/system/pcache-ptr.c b/tests/tcg/aarch64/system/pcache-ptr.c
+new file mode 100644
+index 0000000000..fa4120aec3
+--- /dev/null
++++ b/tests/tcg/aarch64/system/pcache-ptr.c
+@@ -0,0 +1,46 @@
++/*
++ * Persistent translation cache: a 64 bit constant that looks like a host
++ * pointer is not stored.
++ *
++ * The code of a stored block is copied to another process, where a host
++ * address inside it would be wrong. The relocations the backend knows (rel32
++ * to the epilogue, helper addresses) are recorded; anything else in a movabs
++ * or constant pool slot that falls in the range of user space addresses of
++ * the host is taken for a pointer and the block is not stored. This kernel
++ * runs blocks with such constants, and the harness checks that the cache
++ * rejected them (rej_ptr) while the results stay right across two boots.
++ *
++ * Copyright (c) 2026 Snapintosh contributors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include <stdint.h>
++#include <minilib.h>
++
++#define K1 0x00006a5a5a5a5a5aull
++#define K2 0x00007f1234567890ull
++
++static uint64_t __attribute__((noinline)) mix(uint64_t x)
++{
++    uint64_t a = K1, b = K2;
++
++    asm volatile("" : "+r"(a), "+r"(b));
++    return (x ^ K1) + (x & K2) + (a ^ b);
++}
++
++int main(void)
++{
++    uint64_t v = 1, w = 1;
++
++    ml_printf("Persistent cache pointer-like constant test\n");
++    for (int i = 0; i < 100; i++) {
++        v = mix(v);
++        w = (w ^ K1) + (w & K2) + (K1 ^ K2);
++    }
++    if (v != w) {
++        ml_printf("FAIL: %lx != %lx\n", v, w);
++        return 1;
++    }
++    ml_printf("OK\n");
++    return 0;
++}
+diff --git a/tests/tcg/aarch64/system/pcache-run.sh b/tests/tcg/aarch64/system/pcache-run.sh
+new file mode 100755
+index 0000000000..193ab9eb82
+--- /dev/null
++++ b/tests/tcg/aarch64/system/pcache-run.sh
+@@ -0,0 +1,127 @@
++#!/bin/bash
++# pcache-run.sh QEMU QEMU_HOOKS OUT.csv [BUILD_DIR]
++#
++# End to end tests of the persistent translation cache on aarch64 system
++# kernels, and the mutants that each must break:
++#
++#   bytes   one changed byte of a function between two boots of one pack
++#   ptr     blocks holding a host pointer like constant are not stored
++#   pan     TB flags change while a pack fills (tests/.../ret-stack)
++#   reloc   a stored block runs again at another address (ret-stack, warm)
++#
++# QEMU is the normal build; QEMU_HOOKS is the same source built with
++# -DPCACHE_TEST_HOOKS, which honours PCACHE_MUTANT=n:
++#   1 ignore TB flags in the key        2 skip the guest byte compare
++#   7 store blocks with host pointers   8 do not relocate on load
++#   9 do not look for relocations when proving
++#   10 sort the constant pool by raw address (needs PCACHE_VERIFY=1 to show)
++#   11 the second emission of the proof reads the guest page, not the
++#      snapshot (shows under PCACHE_ABA=1, which changes the first word of
++#      every block while its snapshot is taken and back after)
++set -u
++Q=$1; QH=$2; OUT=$3
++S=${QEMU_SRC:-/home/snap/s1/qemu}
++B=${4:-/home/snap/s1/matrix/t}
++T=$S/tests/tcg/aarch64/system
++W=$(mktemp -d /tmp/pcache-run.XXXXXX)
++CF="--target=aarch64-none-elf -ffreestanding -nostdlib -fno-stack-protector -fno-builtin -ggdb -O0 -isystem $S/tests/tcg/minilib -march=armv8.5-a+memtag"
++RUN="-L $S/pc-bios -display none -m 512M -M virt -cpu max -smp 2 -monitor none -serial none -chardev stdio,id=output -semihosting-config enable=on,target=native,chardev=output"
++
++build() { # name variant
++  clang $CF -DVARIANT=${2:-1} -c $T/$1.c -o $W/$1-$2.o || exit 1
++  ld.lld -static -nostdlib -T $T/kernel.ld $B/boot.o $W/$1-$2.o $B/printf.o -o $W/$1-$2 || exit 1
++}
++build pcache-bytes 1
++build pcache-bytes 2
++build pcache-ptr 0
++
++# boot BIN KERNEL PACKDIR [ENV...]: prints "rc status stats"
++boot() {
++  local bin=$1 k=$2 dir=$3; shift 3
++  local o=$W/out.$$.$RANDOM
++  env "$@" timeout 120 $bin $RUN -accel tcg,pcache=$dir -kernel $k </dev/null >$o 2>&1
++  local rc=$?
++  local ok=0; grep -q '^OK' $o && ok=1
++  local st; st=$(grep -o 'hits=[0-9]* \|stores=[0-9]* \|rej_ptr=[0-9]*\|rej_size=[0-9]*\|verify_ok=[0-9]*\|verify_bad=[0-9]*' $o | tr -d '\n')
++  # NEED=regex: the stats must show it, else the boot counts as failed
++  if [ -n "${NEED:-}" ] && ! echo "$st" | grep -q "$NEED"; then ok=0; fi
++  echo "$rc $ok $st"
++  rm -f $o
++}
++
++echo "mutant,test,expect,rc,ok,stats,verdict" > $OUT
++row() { # mutant test expect(pass|fail) result...
++  local m=$1 t=$2 e=$3; shift 3
++  local rc=$1 ok=$2; shift 2
++  local v
++  if [ "$e" = pass ]; then [ "$rc" = 0 ] && [ "$ok" = 1 ] && v=ok || v=WRONG
++  else { [ "$rc" != 0 ] || [ "$ok" != 1 ]; } && v=ok || v=WRONG; fi
++  echo "$m,$t,$e,$rc,$ok,\"$*\",$v" >> $OUT
++}
++
++# no mutant: both boots of the bytes test pass, the second one used the pack
++P=$W/p1
++row none bytes-boot1 pass $(boot $Q $W/pcache-bytes-1 $P)
++r=$(boot $Q $W/pcache-bytes-2 $P)
++row none bytes-boot2 pass $r
++# and the pack really was used by it
++case "$r" in *hits=[1-9]*) row none bytes-boot2-used-pack pass 0 1;;
++             *) row none bytes-boot2-used-pack pass 1 0;; esac
++# ptr test: pass, and the blocks with pointer like constants were rejected
++P=$W/p2
++row none ptr-boot1 pass $(NEED='rej_ptr=[1-9]' boot $Q $W/pcache-ptr-0 $P)
++row none ptr-boot2 pass $(boot $Q $W/pcache-ptr-0 $P)
++# ret-stack changes PAN and ZCR in one boot, then again against its pack
++P=$W/p3
++row none retstack-fill pass $(boot $Q $B/ret-stack $P)
++row none retstack-warm pass $(boot $Q $B/ret-stack $P)
++
++# mutants
++P=$W/m2; boot $QH $W/pcache-bytes-1 $P >/dev/null
++row 2 bytes-boot2 fail $(boot $QH $W/pcache-bytes-2 $P PCACHE_MUTANT=2)
++P=$W/m7
++row 7 ptr-boot1 fail $(NEED='rej_ptr=[1-9]' boot $QH $W/pcache-ptr-0 $P PCACHE_MUTANT=7)
++P=$W/m1
++row 1 retstack-fill fail $(boot $QH $B/ret-stack $P PCACHE_MUTANT=1)
++P=$W/m8; boot $QH $B/ret-stack $P >/dev/null
++row 8 retstack-warm fail $(boot $QH $B/ret-stack $P PCACHE_MUTANT=8)
++P=$W/m9; boot $QH $B/ret-stack $P PCACHE_MUTANT=9 >/dev/null
++row 9 retstack-warm fail $(boot $QH $B/ret-stack $P PCACHE_MUTANT=9)
++# verify mode (test hooks): every block loaded equals a fresh translation
++P=$W/v1
++row none verify-fill pass $(NEED='verify_bad=0' boot $QH $B/ret-stack $P PCACHE_VERIFY=1)
++row none verify-warm pass $(NEED='verify_ok=[1-9][0-9]*verify_bad=0' boot $QH $B/ret-stack $P PCACHE_VERIFY=1)
++# 10: sort the constant pool by raw address: the order moves with ASLR, but
++# only where two values tie in their low bytes, so one boot may not show it:
++# up to 12 boots with fresh packs, each one a fill then a verified warm boot
++bad10=0
++for i in $(seq 12); do
++  P=$W/m10; rm -rf $P
++  boot $QH $B/ret-stack $P PCACHE_MUTANT=10 >/dev/null
++  r=$(boot $QH $B/ret-stack $P PCACHE_MUTANT=10 PCACHE_VERIFY=1)
++  case "$r" in *verify_bad=0*) ;; *) bad10=1; break;; esac
++done
++row 10 verify-warm fail $([ $bad10 = 1 ] && echo "1 0 tries=$i" || echo "0 1 tries=12")
++# the bytes of a block change while it is recorded and change back (ABA): the
++# proof must reject every block whose code depends on the changed word, and the
++# mutant that reads the live page stores them
++P=$W/aba
++row none aba-fill pass $(NEED='rej_size=[1-9]' boot $QH $B/ret-stack $P PCACHE_ABA=1)
++P=$W/m11
++row 11 aba-fill fail $(NEED='rej_size=[1-9]' boot $QH $B/ret-stack $P PCACHE_ABA=1 PCACHE_MUTANT=11)
++# a plugin sees no translation of a block loaded from the pack: with -plugin
++# the pack must stay off (no hits, no stores) and the guest still passes
++PL=${PLUGIN_SO:-$(dirname $Q)/contrib/plugins/libbbv.so}
++if [ -f $PL ]; then
++  P=$W/plug2
++  o=$W/plug.out
++  timeout 120 $Q $RUN -accel tcg,pcache=$P -plugin $PL,interval=100,outfile=$W/bbv -kernel $B/ret-stack </dev/null >$o 2>&1
++  rc=$?
++  if grep -q '^OK' $o && grep -q 'pcache: disabled' $o && ! ls $P/*.pack >/dev/null 2>&1; then
++    row none plugin-disables-pack pass $rc 1
++  else
++    row none plugin-disables-pack pass 1 0
++  fi
++fi
++rm -rf $W
++! grep -q ',WRONG$' $OUT
+diff --git a/tests/unit/meson.build b/tests/unit/meson.build
+index dc3fb954c0..a201c3a8f0 100644
+--- a/tests/unit/meson.build
++++ b/tests/unit/meson.build
+@@ -207,3 +207,18 @@ foreach test_name, extra: tests
+        priority: slow_tests.get(test_name, 30),
+        suite: ['unit'])
+ endforeach
++
++if host_machine.system() == 'linux' and host_machine.cpu_family() == 'x86_64'
++  # The persistent translation cache pack. test-pcache compiles pcache.c with
++  # test hooks, and the mutants each break one rule that a test must notice.
++  pcache_exe = executable('test-pcache', ['test-pcache.c'], genh,
++                          dependencies: [qemuutil],
++                          c_args: ['-DPCACHE_TEST_HOOKS'])
++  test('test-pcache', pcache_exe, env: test_env, suite: ['unit'])
++  foreach mutant : [1, 2, 3, 4, 5, 6, 12, 13, 14]
++    mutant_env = environment()
++    mutant_env.set('PCACHE_MUTANT', '@0@'.format(mutant))
++    test('test-pcache-mutant-@0@'.format(mutant), pcache_exe,
++         env: mutant_env, should_fail: true, suite: ['unit', 'pcache-mutants'])
++  endforeach
++endif
+diff --git a/tests/unit/test-pcache.c b/tests/unit/test-pcache.c
+new file mode 100644
+index 0000000000..66c8e67acd
+--- /dev/null
++++ b/tests/unit/test-pcache.c
+@@ -0,0 +1,559 @@
++/*
++ * Tests of the persistent translation cache pack (accel/tcg/pcache.c): the
++ * key (entry offset, TB flags, cs_base, cflags, guest bytes, never the
++ * address), the translator id, and what happens to a truncated, corrupt or
++ * foreign pack.
++ *
++ * pcache.c is compiled into this test with PCACHE_TEST_HOOKS, so that
++ * PCACHE_MUTANT=n breaks one rule on purpose. Every test below must fail
++ * under the mutant that breaks the rule it checks (tests/unit/meson.build runs
++ * the mutants with should_fail).
++ *
++ * Copyright (c) 2026 Snapintosh contributors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "../../accel/tcg/pcache.c"
++
++#define CAP (64ull << 20)
++
++static uint8_t id_a[PCACHE_ID_LEN];
++static uint8_t id_b[PCACHE_ID_LEN];
++
++static char *make_dir(void)
++{
++    GError *err = NULL;
++    char *d = g_dir_make_tmp("pcache-XXXXXX", &err);
++
++    g_assert_no_error(err);
++    return d;
++}
++
++static void rm_dir(char *d)
++{
++    char *cmd = g_strdup_printf("rm -rf %s", d);
++
++    g_assert(system(cmd) == 0);
++    g_free(cmd);
++    g_free(d);
++}
++
++static char *hex_path(const char *dir, const uint8_t id[PCACHE_ID_LEN])
++{
++    GString *s = g_string_new(dir);
++
++    g_string_append(s, "/");
++    for (int i = 0; i < PCACHE_ID_LEN; i++) {
++        g_string_append_printf(s, "%02x", id[i]);
++    }
++    g_string_append(s, ".pack");
++    return g_string_free(s, false);
++}
++
++#define ENTRY_OFF 0x120u
++#define PAGE      0x4000u
++
++/* a record of @n guest bytes derived from @seed, at ENTRY_OFF in its page */
++static void fill_guest(uint8_t *g, unsigned n, unsigned seed)
++{
++    for (unsigned i = 0; i < n; i++) {
++        g[i] = (uint8_t)(seed * 31 + i * 7 + 1);
++    }
++}
++
++static bool store_one(PCache *c, uint64_t pc, uint32_t flags, uint64_t cs_base,
++                      const uint8_t *guest, unsigned glen, unsigned seed)
++{
++    uint8_t code[80], search[8];
++    PCacheReloc rel[2] = {
++        { 4, PCACHE_RELOC_PCREL_BUF, -0x40 },
++        { 24, PCACHE_RELOC_ABS_IMG, 0x1234 },
++    };
++    PCacheNew n = {
++        .key = { .pc = pc, .cs_base = cs_base, .flags = flags,
++                 .cflags = 0x20000, .entry_off = pc & (PAGE - 1) },
++        .guest = guest, .guest_len = glen,
++        .code = code, .code_len = sizeof(code),
++        .search = search, .search_len = sizeof(search),
++        .relocs = rel, .nreloc = 2,
++        .icount = glen / 4,
++        .jmp_reset = { 12, 0xffff }, .jmp_insn = { 8, 0xffff },
++        .cycles = 1000,
++    };
++
++    memset(code, seed, sizeof(code));
++    memset(search, seed + 1, sizeof(search));
++    return pcache_store(c, &n);
++}
++
++static bool find_one(PCache *c, uint64_t pc, uint32_t flags, uint64_t cs_base,
++                     const uint8_t *guest, PCacheView *v)
++{
++    /* the guest page: guest bytes at ENTRY_OFF, room to the page end */
++    PCacheKey k = { .pc = pc, .cs_base = cs_base, .flags = flags,
++                    .cflags = 0x20000, .entry_off = pc & (PAGE - 1) };
++
++    return pcache_lookup(c, &k, guest, PAGE - k.entry_off, v);
++}
++
++static PCache *open_rw(const char *dir, const uint8_t *id)
++{
++    Error *err = NULL;
++    PCache *c = pcache_open(dir, id, true, CAP, &err);
++
++    g_assert_null(err);
++    g_assert_nonnull(c);
++    return c;
++}
++
++static void test_roundtrip(void)
++{
++    char *dir = make_dir();
++    uint8_t g[64];
++    PCacheView v;
++    PCache *c;
++
++    fill_guest(g, sizeof(g), 1);
++    c = open_rw(dir, id_a);
++    g_assert_true(store_one(c, 0x180000000ull + ENTRY_OFF, 0x1234, 0x77, g,
++                            sizeof(g), 5));
++    g_assert_true(find_one(c, 0x180000000ull + ENTRY_OFF, 0x1234, 0x77, g, &v));
++    g_assert_cmpuint(v.hdr->code_len, ==, 80);
++    g_assert_cmpuint(v.code[0], ==, 5);
++    g_assert_cmpuint(v.hdr->nreloc, ==, 2);
++    g_assert_cmpint(v.relocs[1].addend, ==, 0x1234);
++    g_assert_cmpuint(v.hdr->jmp_reset[0], ==, 12);
++    pcache_close(c, true);
++
++    /* and again from the file */
++    c = open_rw(dir, id_a);
++    g_assert_true(find_one(c, 0x180000000ull + ENTRY_OFF, 0x1234, 0x77, g, &v));
++    g_assert_cmpuint(v.hdr->icount, ==, 16);
++    pcache_close(c, true);
++    rm_dir(dir);
++}
++
++/* The same bytes at another virtual address are the same block. */
++static void test_other_va(void)
++{
++    char *dir = make_dir();
++    uint8_t g[64];
++    PCacheView v;
++    PCache *c;
++
++    fill_guest(g, sizeof(g), 2);
++    c = open_rw(dir, id_a);
++    g_assert_true(store_one(c, 0x180000000ull + ENTRY_OFF, 0x40, 0, g,
++                            sizeof(g), 6));
++    g_assert_true(find_one(c, 0xfffffe0012340000ull + ENTRY_OFF, 0x40, 0, g,
++                           &v));
++    g_assert_cmpuint(v.code[0], ==, 6);
++    pcache_close(c, true);
++    rm_dir(dir);
++}
++
++/* One changed byte, anywhere in the block, is another block. */
++static void test_changed_byte(void)
++{
++    char *dir = make_dir();
++    uint8_t g[64], h[64];
++    PCacheView v;
++    PCache *c;
++
++    fill_guest(g, sizeof(g), 3);
++    c = open_rw(dir, id_a);
++    g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, g, sizeof(g), 7));
++    for (unsigned i = 0; i < sizeof(g); i++) {
++        memcpy(h, g, sizeof(g));
++        h[i] ^= 1;
++        /* the first word is part of the index, the rest of the compare */
++        g_assert_false(find_one(c, ENTRY_OFF, 0x40, 0, h, &v));
++    }
++    g_assert_true(find_one(c, ENTRY_OFF, 0x40, 0, g, &v));
++    pcache_close(c, true);
++    rm_dir(dir);
++}
++
++/* TB flags, cs_base and cflags are part of the key. */
++static void test_changed_flags(void)
++{
++    char *dir = make_dir();
++    uint8_t g[64];
++    PCacheView v;
++    PCache *c;
++
++    fill_guest(g, sizeof(g), 4);
++    c = open_rw(dir, id_a);
++    g_assert_true(store_one(c, ENTRY_OFF, 0x1000, 0x5, g, sizeof(g), 8));
++    g_assert_false(find_one(c, ENTRY_OFF, 0x1001, 0x5, g, &v));
++    g_assert_false(find_one(c, ENTRY_OFF, 0x1000 | (1u << 31), 0x5, g, &v));
++    g_assert_false(find_one(c, ENTRY_OFF, 0x1000, 0x6, g, &v));
++    g_assert_true(find_one(c, ENTRY_OFF, 0x1000, 0x5, g, &v));
++    /* another flag word keeps its own translation next to the first */
++    g_assert_true(store_one(c, ENTRY_OFF, 0x1001, 0x5, g, sizeof(g), 9));
++    g_assert_true(find_one(c, ENTRY_OFF, 0x1001, 0x5, g, &v));
++    g_assert_cmpuint(v.code[0], ==, 9);
++    g_assert_true(find_one(c, ENTRY_OFF, 0x1000, 0x5, g, &v));
++    g_assert_cmpuint(v.code[0], ==, 8);
++    pcache_close(c, true);
++    rm_dir(dir);
++}
++
++/*
++ * Blocks that share the entry offset, the flags and the first word, and those
++ * of one word, are told apart by their bytes, and each is found.
++ */
++static void test_shared_prefix(void)
++{
++    char *dir = make_dir();
++    uint8_t g[40][64], one[8];
++    PCacheView v;
++    PCache *c;
++
++    c = open_rw(dir, id_a);
++    for (int i = 0; i < 40; i++) {
++        fill_guest(g[i], 64, 1);
++        g[i][8 + i % 50] ^= i + 1;      /* the same two words, then another */
++        g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, g[i], 64, 100 + i));
++    }
++    memset(one, 0, sizeof(one));
++    memcpy(one, g[0], 4);
++    g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, one, 4, 200));
++    for (int i = 0; i < 40; i++) {
++        g_assert_true(find_one(c, ENTRY_OFF, 0x40, 0, g[i], &v));
++        g_assert_cmpuint(v.code[0], ==, 100 + i);
++    }
++    /* the one word block is found when the bytes after it are the first
++     * block's, and its own bytes are what is compared */
++    g_assert_true(find_one(c, ENTRY_OFF, 0x40, 0, one, &v));
++    pcache_close(c, true);
++    rm_dir(dir);
++}
++
++/* A pack of another translator (another build id) is never used. */
++static void test_build_id(void)
++{
++    char *dir = make_dir();
++    uint8_t g[64];
++    PCacheView v;
++    PCache *c;
++    Error *err = NULL;
++    char *pa = hex_path(dir, id_a);
++    char *pb = hex_path(dir, id_b);
++
++    fill_guest(g, sizeof(g), 5);
++    c = open_rw(dir, id_a);
++    g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, g, sizeof(g), 10));
++    pcache_close(c, true);
++
++    /* the same file under the name of another translator */
++    g_assert_cmpint(rename(pa, pb), ==, 0);
++    c = pcache_open(dir, id_b, true, CAP, &err);
++    g_assert_null(c);
++    g_assert_nonnull(err);
++    error_free(err);
++    err = NULL;
++    c = pcache_open(dir, id_b, false, CAP, &err);
++    g_assert_null(c);
++    error_free(err);
++
++    /* the pack was not touched by the refusals */
++    g_assert_cmpint(rename(pb, pa), ==, 0);
++    c = open_rw(dir, id_a);
++    g_assert_true(find_one(c, ENTRY_OFF, 0x40, 0, g, &v));
++    pcache_close(c, true);
++    g_free(pa);
++    g_free(pb);
++    rm_dir(dir);
++}
++
++/* A pack cut in the middle of a record loses that record, not the rest. */
++static void test_truncated(void)
++{
++    char *dir = make_dir();
++    uint8_t g[3][64];
++    PCacheView v;
++    PCache *c;
++    char *p = hex_path(dir, id_a);
++    struct stat sb;
++    PCacheStats st;
++
++    c = open_rw(dir, id_a);
++    for (int i = 0; i < 3; i++) {
++        fill_guest(g[i], 64, 20 + i);
++        g_assert_true(store_one(c, ENTRY_OFF + 0x100 * i, 0x40, 0, g[i], 64,
++                                30 + i));
++    }
++    pcache_close(c, true);
++    g_assert_cmpint(stat(p, &sb), ==, 0);
++    g_assert_cmpint(truncate(p, sb.st_size - 40), ==, 0);
++
++    c = open_rw(dir, id_a);
++    pcache_stats(c, &st);
++    g_assert_cmpuint(st.records, ==, 2);
++    g_assert_true(find_one(c, ENTRY_OFF, 0x40, 0, g[0], &v));
++    g_assert_true(find_one(c, ENTRY_OFF + 0x100, 0x40, 0, g[1], &v));
++    g_assert_false(find_one(c, ENTRY_OFF + 0x200, 0x40, 0, g[2], &v));
++    /* and it can append again over the torn tail */
++    g_assert_true(store_one(c, ENTRY_OFF + 0x300, 0x40, 0, g[2], 64, 40));
++    pcache_close(c, true);
++    c = open_rw(dir, id_a);
++    g_assert_true(find_one(c, ENTRY_OFF + 0x300, 0x40, 0, g[2], &v));
++    g_assert_cmpuint(v.code[0], ==, 40);
++    pcache_close(c, true);
++
++    /* cut inside the header of the pack: ignored, not trusted */
++    g_assert_cmpint(truncate(p, 100), ==, 0);
++    {
++        Error *err = NULL;
++
++        c = pcache_open(dir, id_a, false, CAP, &err);
++        g_assert_null(c);
++        error_free(err);
++    }
++    g_free(p);
++    rm_dir(dir);
++}
++
++/* A record whose bytes changed on disk is skipped, the others are not. */
++static void test_corrupt(void)
++{
++    char *dir = make_dir();
++    uint8_t g[3][64];
++    PCacheView v;
++    PCache *c;
++    char *p = hex_path(dir, id_a);
++    PCacheStats st;
++    int fd;
++    uint8_t x;
++
++    c = open_rw(dir, id_a);
++    for (int i = 0; i < 3; i++) {
++        fill_guest(g[i], 64, 50 + i);
++        g_assert_true(store_one(c, ENTRY_OFF + 0x100 * i, 0x40, 0, g[i], 64,
++                                60 + i));
++    }
++    pcache_close(c, true);
++
++    /* flip a byte of the host code of the second record */
++    fd = open(p, O_RDWR);
++    g_assert_cmpint(fd, >=, 0);
++    {
++        /* record = header + guest(64) + code(80) + search(8) + relocs(32) */
++        off_t hdr = sizeof(PCacheRecHdr);
++        off_t rec = 4096 + hdr + 64 + 80 + 8 + 32;
++        off_t at = rec + hdr + 64 + 10;
++
++        g_assert_cmpint(pread(fd, &x, 1, at), ==, 1);
++        x ^= 0x40;
++        g_assert_cmpint(pwrite(fd, &x, 1, at), ==, 1);
++    }
++    close(fd);
++
++    c = open_rw(dir, id_a);
++    g_assert_true(find_one(c, ENTRY_OFF, 0x40, 0, g[0], &v));
++    g_assert_false(find_one(c, ENTRY_OFF + 0x100, 0x40, 0, g[1], &v));
++    g_assert_true(find_one(c, ENTRY_OFF + 0x200, 0x40, 0, g[2], &v));
++    pcache_stats(c, &st);
++    g_assert_cmpuint(st.crc_bad, ==, 1);
++    pcache_close(c, true);
++    g_free(p);
++    rm_dir(dir);
++}
++
++/* A file that is not a pack is neither used nor overwritten. */
++static void test_foreign_file(void)
++{
++    char *dir = make_dir();
++    char *p = hex_path(dir, id_a);
++    Error *err = NULL;
++    char junk[8192];
++    char back[8192];
++    PCache *c;
++    FILE *f;
++
++    memset(junk, 0x5a, sizeof(junk));
++    f = fopen(p, "wb");
++    g_assert_nonnull(f);
++    g_assert_cmpuint(fwrite(junk, 1, sizeof(junk), f), ==, sizeof(junk));
++    fclose(f);
++    c = pcache_open(dir, id_a, true, CAP, &err);
++    g_assert_null(c);
++    g_assert_nonnull(err);
++    error_free(err);
++    f = fopen(p, "rb");
++    g_assert_cmpuint(fread(back, 1, sizeof(back), f), ==, sizeof(back));
++    fclose(f);
++    g_assert_cmpint(memcmp(junk, back, sizeof(junk)), ==, 0);
++    g_free(p);
++    rm_dir(dir);
++}
++
++/* The same block twice is stored once; a read-only open does not append. */
++static void test_dups_and_ro(void)
++{
++    char *dir = make_dir();
++    uint8_t g[64];
++    PCacheView v;
++    PCache *c;
++    Error *err = NULL;
++    PCacheStats st;
++
++    fill_guest(g, sizeof(g), 6);
++    c = open_rw(dir, id_a);
++    g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, g, sizeof(g), 11));
++    g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, g, sizeof(g), 11));
++    pcache_stats(c, &st);
++    g_assert_cmpuint(st.stores, ==, 1);
++    g_assert_cmpuint(st.dups, ==, 1);
++    pcache_close(c, true);
++
++    c = pcache_open(dir, id_a, false, CAP, &err);
++    g_assert_null(err);
++    g_assert_nonnull(c);
++    g_assert_true(find_one(c, ENTRY_OFF, 0x40, 0, g, &v));
++    g_assert_false(store_one(c, ENTRY_OFF + 0x40, 0x40, 0, g, sizeof(g), 12));
++    pcache_close(c, true);
++    rm_dir(dir);
++}
++
++/* A pack bigger than pcache-max is ignored, not read past the mapping. */
++static void test_oversize(void)
++{
++    char *dir = make_dir();
++    uint8_t g[64];
++    PCache *c;
++    Error *err = NULL;
++
++    fill_guest(g, sizeof(g), 7);
++    c = open_rw(dir, id_a);
++    g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, g, sizeof(g), 13));
++    /* closed without trimming the file: it stays at its allocated 64 MiB */
++    pcache_close(c, false);
++    /* 64 MiB were allocated for the first record: the cap is below that */
++    c = pcache_open(dir, id_a, true, 1ull << 20, &err);
++    g_assert_null(c);
++    g_assert_nonnull(err);
++    error_free(err);
++    rm_dir(dir);
++}
++
++/* Store @n records "seed0 .. seed0 + n" at distinct entry offsets. */
++static void store_range(PCache *c, unsigned seed0, unsigned n)
++{
++    uint8_t g[64];
++
++    for (unsigned i = 0; i < n; i++) {
++        fill_guest(g, sizeof(g), seed0 + i);
++        g_assert_true(store_one(c, 0x180000000ull + 4 * (seed0 + i), 0x40, 0, g,
++                                sizeof(g), seed0 + i));
++    }
++}
++static bool find_range(PCache *c, unsigned seed)
++{
++    uint8_t g[64];
++    PCacheView v;
++
++    fill_guest(g, sizeof(g), seed);
++    return find_one(c, 0x180000000ull + 4 * seed, 0x40, 0, g, &v);
++}
++/*
++ * Compaction drops the records that nobody used for a while and keeps the
++ * others with the boot of their last use, so that the next compaction does
++ * not take them for records of the boot that stored them (mutant 12).
++ */
++static void test_compact_keeps_use(void)
++{
++    char *dir = make_dir();
++    PCache *c;
++
++    c = open_rw(dir, id_a);
++    store_range(c, 0, 100);         /* 0..49 hot, 50..99 cold */
++    pcache_close(c, true);
++    for (int boot = 2; boot <= 6; boot++) {
++        c = open_rw(dir, id_a);
++        for (unsigned i = 0; i < 50; i++) {
++            g_assert_true(find_range(c, i));
++        }
++        pcache_close(c, true);
++    }
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->boot_no, ==, 7);
++    g_assert_true(pc_compact(c));
++    pcache_close(c, true);
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->nrec, ==, 50);
++    g_assert_true(find_range(c, 10));
++    g_assert_false(find_range(c, 60));
++    /* the hot records were last used in boot 6, not stored in boot 1 */
++    g_assert_cmpuint(c->lastboot[0], ==, 6);
++    /* nothing to drop: no rewrite of the pack */
++    g_assert_false(pc_compact(c));
++    pcache_close(c, true);
++    rm_dir(dir);
++}
++/* A record that failed its crc does not keep a good copy from being stored. */
++static void test_bad_crc_restore(void)
++{
++    char *dir = make_dir();
++    uint8_t g[64];
++    PCacheView v;
++    PCache *c;
++
++    fill_guest(g, sizeof(g), 3);
++    c = open_rw(dir, id_a);
++    g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, g, sizeof(g), 21));
++    pcache_close(c, true);
++    /* a record is checked at its first use, so after a reopen */
++    c = open_rw(dir, id_a);
++    c->map[((uint64_t)c->off8[0] << 3) + 150] ^= 0xff;    /* the host code */
++    g_assert_false(find_one(c, ENTRY_OFF, 0x40, 0, g, &v));
++    g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, g, sizeof(g), 21));
++    g_assert_true(find_one(c, ENTRY_OFF, 0x40, 0, g, &v));
++    pcache_close(c, true);
++    rm_dir(dir);
++}
++/* A pack whose creator died before the header was written is rebuilt. */
++static void test_half_created(void)
++{
++    char *dir = make_dir();
++    char *path = hex_path(dir, id_a);
++    uint8_t g[64];
++    PCacheView v;
++    PCache *c;
++    int fd = open(path, O_RDWR | O_CREAT, 0644);
++
++    g_assert_cmpint(fd, >=, 0);
++    g_assert_cmpint(posix_fallocate(fd, 0, PC_GROW), ==, 0);
++    close(fd);
++    fill_guest(g, sizeof(g), 4);
++    c = open_rw(dir, id_a);
++    g_assert_true(store_one(c, ENTRY_OFF, 0x40, 0, g, sizeof(g), 22));
++    g_assert_true(find_one(c, ENTRY_OFF, 0x40, 0, g, &v));
++    pcache_close(c, true);
++    g_free(path);
++    rm_dir(dir);
++}
++int main(int argc, char **argv)
++{
++    memset(id_a, 0xa1, sizeof(id_a));
++    memset(id_b, 0xb2, sizeof(id_b));
++    g_test_init(&argc, &argv, NULL);
++    g_test_add_func("/pcache/roundtrip", test_roundtrip);
++    g_test_add_func("/pcache/key/other-va", test_other_va);
++    g_test_add_func("/pcache/key/changed-byte", test_changed_byte);
++    g_test_add_func("/pcache/key/shared-prefix", test_shared_prefix);
++    g_test_add_func("/pcache/key/changed-flags", test_changed_flags);
++    g_test_add_func("/pcache/id/changed-build-id", test_build_id);
++    g_test_add_func("/pcache/file/truncated", test_truncated);
++    g_test_add_func("/pcache/file/corrupt", test_corrupt);
++    g_test_add_func("/pcache/file/foreign", test_foreign_file);
++    g_test_add_func("/pcache/file/oversize", test_oversize);
++    g_test_add_func("/pcache/dups-and-ro", test_dups_and_ro);
++    g_test_add_func("/pcache/compact/keeps-use", test_compact_keeps_use);
++    g_test_add_func("/pcache/file/bad-crc-restore", test_bad_crc_restore);
++    g_test_add_func("/pcache/file/half-created", test_half_created);
++    return g_test_run();
++}

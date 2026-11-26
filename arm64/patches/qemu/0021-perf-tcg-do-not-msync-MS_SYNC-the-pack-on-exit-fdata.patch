@@ -1,0 +1,44 @@
+From 2651013065c9987a93fed98ed675d16b8cf64e7b Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 19:47:20 -0500
+Subject: [PATCH] perf(tcg): do not msync(MS_SYNC) the pack on exit; fdatasync
+ it in qemu-pcache-compact (P97)
+
+---
+ accel/tcg/pcache.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/accel/tcg/pcache.c b/accel/tcg/pcache.c
+index 20f15080fe..1ea24a6bd2 100644
+--- a/accel/tcg/pcache.c
++++ b/accel/tcg/pcache.c
+@@ -1287,7 +1287,14 @@ static void pc_p89_exit(PCache *c, uint32_t nhit)
+             dead += pc_rec(c, rid)->total;
+         }
+     }
+-    msync(c->map, c->end, MS_SYNC);
++    /*
++     * P97: do not wait for the writeback here. A pack that was just copied
++     * has GBs of dirty pages and MS_SYNC held the exit for all of them
++     * (11.7 s). The pages are in the page cache, so a killed QEMU loses
++     * nothing; qemu-pcache-compact fdatasyncs the pack under its lock
++     * afterwards. P97_EXIT_SYNC=1 restores the old wait.
++     */
++    msync(c->map, c->end, getenv("P97_EXIT_SYNC") ? MS_SYNC : MS_ASYNC);
+     if (p89_mode() == P89_ON &&
+         (dead >= MAX(256ull << 20, end / 8) || end >= trig ||
+          c->use_v1_bytes >= (64ull << 20))) {
+@@ -1464,6 +1471,13 @@ PCacheCompactRc pcache_compact_file(const char *path,
+             rc = PCACHE_COMPACT_ERROR;
+         }
+     }
++    if (rc == PCACHE_COMPACT_NOTHING) {
++        /* P97: the exit no longer syncs; make the pack durable here, under
++         * the lock, off the exit path (a rewrite already did fdatasync) */
++        if (fdatasync(c->fd) < 0) {
++            warn_report("pcache: fdatasync %s: %s", c->path, strerror(errno));
++        }
++    }
+     pc_free(c);
+     return rc;
+ }

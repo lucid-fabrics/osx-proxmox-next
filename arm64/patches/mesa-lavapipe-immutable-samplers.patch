@@ -1,0 +1,136 @@
+6b727a58ffd9f893b3d68de1c17fdd950406a2a6
+wmehanna
+lavapipe: keep immutable samplers in push descriptor sets
+
+ .../frontends/lavapipe/lvp_descriptor_set.c        | 41 ++++++++++++++--------
+ src/gallium/frontends/lavapipe/lvp_execute.c       | 13 +++++--
+ src/gallium/frontends/lavapipe/lvp_private.h       |  3 ++
+ 3 files changed, 41 insertions(+), 16 deletions(-)
+0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4
+6b727a58ffd9f893b3d68de1c17fdd950406a2a6
+From 6b727a58ffd9f893b3d68de1c17fdd950406a2a6 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Tue, 10 Nov 2026 06:45:06 +0000
+Subject: [PATCH] lavapipe: keep immutable samplers in push descriptor sets
+
+A push descriptor set starts as a fresh set, which holds the layout's
+immutable samplers, and then gets the previously bound set of that index
+copied over it so that pushes can update it incrementally. That copy also
+replaces the immutable samplers with whatever the previous set held at
+their offsets, and no descriptor write restores them, since a sampler in
+an immutable binding is never written.
+
+Shaders then sample through bytes of another descriptor: a different
+sampler (wrong filtering or addressing), or, when the previous layout had
+an image there, a sampler_index that indexes far past the sampler matrix
+table, so the JIT shader loads a null function table and faults at 0x100.
+
+Write the immutable samplers again after the copy, in both the plain and
+the template push paths, through a helper shared with set creation.
+
+diff --git a/src/gallium/frontends/lavapipe/lvp_descriptor_set.c b/src/gallium/frontends/lavapipe/lvp_descriptor_set.c
+index 03b0435..055a5ce 100644
+--- a/src/gallium/frontends/lavapipe/lvp_descriptor_set.c
++++ b/src/gallium/frontends/lavapipe/lvp_descriptor_set.c
+@@ -351,6 +351,32 @@ get_image_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_t
+    return *handle;
+ }
+ 
++/* Write the layout's immutable samplers into the set's memory. Descriptor
++ * writes never touch these slots, so anything that overwrites the set's
++ * memory wholesale (the push descriptor paths copy the previously bound set
++ * over a new one) has to call this again afterwards.
++ */
++void
++lvp_descriptor_set_write_immutable_samplers(struct lvp_descriptor_set *set)
++{
++   const struct lvp_descriptor_set_layout *layout = set->layout;
++
++   for (uint32_t binding_index = 0; binding_index < layout->binding_count; binding_index++) {
++      const struct lvp_descriptor_set_binding_layout *bind_layout = &layout->binding[binding_index];
++      if (!bind_layout->immutable_samplers)
++         continue;
++
++      uint8_t *desc = set->map + bind_layout->offset;
++      for (uint32_t sampler_index = 0; sampler_index < bind_layout->array_size; sampler_index++) {
++         for (uint32_t s = 0; s < bind_layout->max_plane_count; s++)  {
++            memcpy(desc + sampler_index * bind_layout->stride + s * lvp_get_descriptor_size(bind_layout->type) +
++                   lvp_get_sampler_descriptor_offset(bind_layout->type),
++                   &bind_layout->immutable_samplers[sampler_index], sizeof(struct lp_sampler_descriptor));
++         }
++      }
++   }
++}
++
+ VkResult
+ lvp_descriptor_set_create(struct lvp_device *device,
+                           struct lvp_descriptor_set_layout *layout,
+@@ -393,20 +419,7 @@ lvp_descriptor_set_create(struct lvp_device *device,
+ 
+    device->pscreen->resource_bind_backing(device->pscreen, set->bo, set->pmem, 0, 0, 0);
+ 
+-   for (uint32_t binding_index = 0; binding_index < layout->binding_count; binding_index++) {
+-      const struct lvp_descriptor_set_binding_layout *bind_layout = &set->layout->binding[binding_index];
+-      if (!bind_layout->immutable_samplers)
+-         continue;
+-
+-      uint8_t *desc = set->map + bind_layout->offset;
+-      for (uint32_t sampler_index = 0; sampler_index < bind_layout->array_size; sampler_index++) {
+-         for (uint32_t s = 0; s < bind_layout->max_plane_count; s++)  {
+-            memcpy(desc + sampler_index * bind_layout->stride + s * lvp_get_descriptor_size(bind_layout->type) +
+-                   lvp_get_sampler_descriptor_offset(bind_layout->type),
+-                   &bind_layout->immutable_samplers[sampler_index], sizeof(struct lp_sampler_descriptor));
+-         }
+-      }
+-   }
++   lvp_descriptor_set_write_immutable_samplers(set);
+ 
+    *out_set = set;
+ 
+diff --git a/src/gallium/frontends/lavapipe/lvp_execute.c b/src/gallium/frontends/lavapipe/lvp_execute.c
+index 9fba115..b2a68cf 100644
+--- a/src/gallium/frontends/lavapipe/lvp_execute.c
++++ b/src/gallium/frontends/lavapipe/lvp_execute.c
+@@ -3716,8 +3716,14 @@ static void handle_push_descriptor_set(struct vk_cmd_queue_entry *cmd,
+    uint32_t types = lvp_pipeline_types_from_shader_stages(pds->stageFlags);
+    u_foreach_bit(pipeline_type, types) {
+       struct lvp_descriptor_set *base = state->desc_sets[pipeline_type][pds->set];
+-      if (base)
++      if (base) {
+          memcpy(set->map, base->map, MIN2(set->bo->width0, base->bo->width0));
++         /* The copy also replaced this layout's immutable samplers with
++          * whatever the previous set held at their offsets, and no
++          * descriptor write puts them back.
++          */
++         lvp_descriptor_set_write_immutable_samplers(set);
++      }
+ 
+       VkDescriptorSet set_handle = lvp_descriptor_set_to_handle(set);
+ 
+@@ -3752,8 +3758,11 @@ static void handle_push_descriptor_set_with_template(struct vk_cmd_queue_entry *
+    util_dynarray_append(&state->push_desc_sets, set);
+ 
+    struct lvp_descriptor_set *base = state->desc_sets[lvp_pipeline_type_from_bind_point(templ->bind_point)][pds->set];
+-   if (base)
++   if (base) {
+       memcpy(set->map, base->map, MIN2(set->bo->width0, base->bo->width0));
++      /* See handle_push_descriptor_set(). */
++      lvp_descriptor_set_write_immutable_samplers(set);
++   }
+ 
+    VkDescriptorSet set_handle = lvp_descriptor_set_to_handle(set);
+    lvp_descriptor_set_update_with_template(lvp_device_to_handle(state->device), set_handle,
+diff --git a/src/gallium/frontends/lavapipe/lvp_private.h b/src/gallium/frontends/lavapipe/lvp_private.h
+index 2eb279d..0cd2be3 100644
+--- a/src/gallium/frontends/lavapipe/lvp_private.h
++++ b/src/gallium/frontends/lavapipe/lvp_private.h
+@@ -407,6 +407,9 @@ void
+ lvp_descriptor_set_destroy(struct lvp_device *device,
+                            struct lvp_descriptor_set *set);
+ 
++void
++lvp_descriptor_set_write_immutable_samplers(struct lvp_descriptor_set *set);
++
+ void
+ lvp_descriptor_set_update_with_template(VkDevice _device, VkDescriptorSet descriptorSet,
+                                         VkDescriptorUpdateTemplate descriptorUpdateTemplate,

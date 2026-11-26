@@ -1,0 +1,57 @@
+release-v2 against release-v1, and release-v2 built with --pgo (R30, 2026-11-21)
+
+Host: a 6-core VM (6 vCPUs and 4 GiB for the guest, lavapipe, translation pack opened read-only with one pack per binary, 30 s settle, 10 s drag,
+default environment, the release CLI's own `snapintosh bench`). Arms: REL = release-v1 (md5 455899b7...), V2 = release-v2 (md5 c36556f3..., clean build
+from pins.env), PGO = release-v2 built with `snapintosh build --pgo` (md5 4d198906..., built in 49 minutes). REL and V2: 10 interleaved rounds, PGO: the first
+5 rounds. Order rotates with the round and reverses on even rounds. Two warm-up boots per binary came first. Seconds, medians; CI = 95 % bootstrap of
+the difference of medians (20000 resamples, seed 130); U = pairs where the first arm is lower; host CPU = QEMU user+system CPU seconds of the whole launch.
+All 25 launches reached the Dock, drew Safari and dragged with 0 fatals.
+
+Verdict: release-v2 is no worse than release-v1 in any metric (the gate is the 4 % noise floor): boot to Dock -7.6 % (CI excludes zero), Safari open to draw
+-13.4 % (CI [-21.0,+1.0], lower in 7 of 10 rounds), host CPU -6.1 % (CI excludes zero), drag unchanged. The PGO build is inside the noise of release-v2 on every
+metric at n=5 (Safari draw +3.8 %, CI [-7.9,+15.6]; Dock -2.6 %; CPU 0 %), so it stays opt-in.
+
+n per arm: REL 10, V2 10, PGO 5
+metric                   arm       n   median     mean     sd
+boot to ssh              REL      10    66.65    67.89  10.83
+boot to ssh              V2       10    60.35    63.45   9.50
+boot to ssh              PGO       5    50.10    53.98   5.94
+boot to Dock             REL      10    92.35    91.79   2.58
+boot to Dock             V2       10    85.35    84.69   4.79
+boot to Dock             PGO       5    83.10    81.56   3.11
+Safari open to draw      REL      10    93.60    90.61   6.45
+Safari open to draw      V2       10    81.10    82.12   8.93
+Safari open to draw      PGO       5    84.20    84.78   4.82
+Safari open to GET       REL      10    84.22    81.67   6.70
+Safari open to GET       V2       10    72.73    73.85   8.93
+Safari open to GET       PGO       5    76.25    77.01   4.68
+drag fps                 REL      10     9.93     9.89   1.09
+drag fps                 V2       10     9.99     9.88   1.13
+drag fps                 PGO       5    11.09    10.54   1.17
+host CPU-s per launch    REL      10  1419.74  1400.71  41.28
+host CPU-s per launch    V2       10  1333.30  1327.30  47.17
+host CPU-s per launch    PGO       5  1332.95  1327.32  39.30
+
+== V2 - REL (difference of medians, 95 % bootstrap CI; U = pairs where V2 is lower; paired = same round)
+boot to ssh              median -6.30 (-9.5 %) CI [-18.30,+7.80] U 61.0/100 | mean -4.44 CI [-13.36,+4.53] | paired n=10 med -10.10 CI [-16.10,+6.15] lower in 7
+boot to Dock             median -7.00 (-7.6 %) CI [-10.45,-2.60] U 91.0/100 | mean -7.10 CI [-10.66,-3.90] | paired n=10 med -7.55 CI [-11.70,-1.95] lower in 8
+Safari open to draw      median -12.50 (-13.4 %) CI [-21.00,+1.00] U 74.5/100 | mean -8.49 CI [-15.11,-1.57] | paired n=10 med -11.00 CI [-20.00,+0.50] lower in 7
+Safari open to GET       median -11.48 (-13.6 %) CI [-19.51,+1.75] U 73.5/100 | mean -7.82 CI [-14.51,-0.85] | paired n=10 med -9.02 CI [-18.41,+0.78] lower in 7
+drag fps                 median +0.06 (+0.7 %) CI [-1.08,+1.11] U 52.0/100 | mean -0.01 CI [-0.99,+0.98] | paired n=10 med +0.04 CI [-1.26,+1.06] lower in 5
+host CPU-s per launch    median -86.45 (-6.1 %) CI [-130.23,-15.88] U 86.0/100 | mean -73.40 CI [-112.60,-34.74] | paired n=10 med -89.27 CI [-127.70,-9.59] lower in 8
+
+== PGO - REL (difference of medians, 95 % bootstrap CI; U = pairs where PGO is lower; paired = same round)
+boot to ssh              median -16.55 (-24.8 %) CI [-24.50,-1.10] U 44.0/50 | mean -13.91 CI [-22.19,-5.14] | paired n=5 med -15.40 CI [-37.50,+7.10] lower in 4
+boot to Dock             median -9.25 (-10.0 %) CI [-16.45,-5.90] U 50.0/50 | mean -10.23 CI [-13.60,-7.32] | paired n=5 med -10.10 CI [-13.50,-5.40] lower in 5
+Safari open to draw      median -9.40 (-10.0 %) CI [-15.90,+3.00] U 38.0/50 | mean -5.83 CI [-11.44,+0.10] | paired n=5 med -8.00 CI [-15.90,+1.10] lower in 4
+Safari open to GET       median -7.97 (-9.5 %) CI [-14.16,+4.59] U 37.0/50 | mean -4.66 CI [-10.46,+1.28] | paired n=5 med -8.07 CI [-14.19,+1.50] lower in 4
+drag fps                 median +1.16 (+11.7 %) CI [-1.60,+1.78] U 16.0/50 | mean +0.66 CI [-0.64,+1.80] | paired n=5 med +0.49 CI [-1.50,+1.51] lower in 2
+host CPU-s per launch    median -86.79 (-6.1 %) CI [-159.20,-11.53] U 44.0/50 | mean -73.39 CI [-117.12,-31.49] | paired n=5 med -62.86 CI [-182.57,+2.03] lower in 4
+
+== PGO - V2 (difference of medians, 95 % bootstrap CI; U = pairs where PGO is lower; paired = same round)
+boot to ssh              median -10.25 (-17.0 %) CI [-20.20,+5.05] U 42.0/50 | mean -9.47 CI [-17.08,-1.44] | paired n=5 med -6.00 CI [-18.30,+9.30] lower in 4
+boot to Dock             median -2.25 (-2.6 %) CI [-9.60,+0.85] U 39.0/50 | mean -3.13 CI [-7.18,+0.89] | paired n=5 med -1.50 CI [-13.50,+9.40] lower in 4
+Safari open to draw      median +3.10 (+3.8 %) CI [-7.90,+15.60] U 18.0/50 | mean +2.66 CI [-4.34,+9.57] | paired n=5 med -2.90 CI [-16.00,+18.10] lower in 3
+Safari open to GET       median +3.52 (+4.8 %) CI [-7.08,+16.06] U 18.0/50 | mean +3.16 CI [-3.69,+9.88] | paired n=5 med -1.63 CI [-14.97,+19.96] lower in 3
+drag fps                 median +1.10 (+11.0 %) CI [-1.71,+2.09] U 16.0/50 | mean +0.66 CI [-0.65,+1.84] | paired n=5 med +0.61 CI [-2.89,+2.20] lower in 1
+host CPU-s per launch    median -0.35 (-0.0 %) CI [-77.08,+59.23] U 27.0/50 | mean +0.01 CI [-45.27,+44.86] | paired n=5 med -19.46 CI [-129.45,+123.84] lower in 4

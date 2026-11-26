@@ -1,0 +1,514 @@
+From d66b98dfca795112b43323f654f7f075b2980765 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 07:54:04 -0500
+Subject: [PATCH 1/3] feat(vmapple): add vmapple-virtio-usb-pci device port
+ (106b:1a01)
+
+Model the virtio function behind macOS's AppleVirtIOUSBDeviceController,
+written from the guest driver's observed behaviour in the 26B131 kernel
+collection: queue 0 carries host requests (le32 length, endpoint, type,
+payload) into 128 KiB guest buffers, queue 1 carries the guest's
+responses (type, endpoint, data). Both streams go to a chardev with a
+small length-prefixed framing, so a userspace USB host can enumerate
+the guest as a USB device and run usbmux over its bulk pipes.
+---
+ hw/vmapple/Kconfig      |   5 +
+ hw/vmapple/meson.build  |   1 +
+ hw/vmapple/trace-events |   6 +
+ hw/vmapple/virtio-usb.c | 440 ++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 452 insertions(+)
+ create mode 100644 hw/vmapple/virtio-usb.c
+
+diff --git a/hw/vmapple/Kconfig b/hw/vmapple/Kconfig
+index ed055c561a..1350844085 100644
+--- a/hw/vmapple/Kconfig
++++ b/hw/vmapple/Kconfig
+@@ -17,6 +17,10 @@ config VMAPPLE_RTC
+ config VMAPPLE_VIRTIO_BLK
+     bool
+ 
++config VMAPPLE_VIRTIO_USB
++    bool
++    depends on VIRTIO_PCI
++
+ config VMAPPLE
+     bool
+     depends on AARCH64
+@@ -40,3 +44,4 @@ config VMAPPLE
+     select UNIMP
+     imply MAC_PVG_MMIO
+     select VMAPPLE_VIRTIO_BLK
++    select VMAPPLE_VIRTIO_USB
+diff --git a/hw/vmapple/meson.build b/hw/vmapple/meson.build
+index 99a6c8801b..6f5c577680 100644
+--- a/hw/vmapple/meson.build
++++ b/hw/vmapple/meson.build
+@@ -6,4 +6,5 @@ system_ss.add(when: 'CONFIG_VMAPPLE_CFG',  if_true: files('cfg.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_MSI_FRAME', if_true: files('msi-frame.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_RTC',  if_true: files('rtc.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_VIRTIO_BLK',  if_true: files('virtio-blk.c'))
++system_ss.add(when: 'CONFIG_VMAPPLE_VIRTIO_USB',  if_true: files('virtio-usb.c'))
+ specific_ss.add(when: 'CONFIG_VMAPPLE',     if_true: files('vmapple.c', 'iofence-patch.c', 'iofence-match.c'))
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index 4340e71162..ab90c37498 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -27,3 +27,9 @@ vmapple_msi_frame_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0
+ # rtc.c
+ vmapple_rtc_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ vmapple_rtc_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
++
++# virtio-usb.c
++vmapple_vusb_request(uint8_t ep, uint8_t type, uint32_t len) "ep=0x%02x type=%u len=%u"
++vmapple_vusb_response(uint8_t type, uint8_t ep, size_t len) "type=%u ep=0x%02x len=%zu"
++vmapple_vusb_status(uint8_t status) "status=0x%02x"
++vmapple_vusb_drop_tx(uint8_t kind, size_t len) "not connected, dropped kind=0x%02x len=%zu"
+diff --git a/hw/vmapple/virtio-usb.c b/hw/vmapple/virtio-usb.c
+new file mode 100644
+index 0000000000..325d29f6fd
+--- /dev/null
++++ b/hw/vmapple/virtio-usb.c
+@@ -0,0 +1,440 @@
++/*
++ * VMApple VirtIO USB device port (PCI 106b:1a01)
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ *
++ * The macOS guest driver for this function is the USB *device* controller
++ * AppleVirtIOUSBDeviceController: the guest is the USB device (usbmux, NCM,
++ * ...) and something outside the VM plays the USB host. This model does not
++ * implement any USB itself; it only moves the two message streams the guest
++ * driver uses between the virtqueues and a chardev, where a userspace USB
++ * host (tools/r9m2a/vusbhost.py in the snapintosh lab) speaks to it.
++ *
++ * Written from the observed behaviour of the guest driver in the 26B131
++ * kernel collection. Guest-visible contract:
++ *
++ *  - Apple virtio-pci transport, PCI vendor 0x106b device 0x1a01 (the
++ *    transport takes the PCI device ID as the virtio ID when the vendor is
++ *    not 0x1af4). Modern virtio only: the driver requires VIRTIO_F_VERSION_1.
++ *    No device configuration space is read.
++ *  - Queue 0, "request queue": the driver posts device-writable buffers of
++ *    128 KiB. The host fills one buffer per message:
++ *        le32 length; u8 endpoint; u8 type; u8 payload[length]
++ *    type 1 = transfer: on endpoint 0 the payload is an 8 byte SETUP packet
++ *             followed by the OUT data stage, if any; on an OUT endpoint it
++ *             is the OUT data; on an IN endpoint there is no payload and
++ *             length is the size the host is ready to receive (an IN token).
++ *    type 2 = bus reset (the driver answers with a type 4 response).
++ *    type 3 = pause endpoint: drop pending host requests (answered by 5).
++ *  - Queue 1, "response queue": the driver posts device-readable chains:
++ *        u8 type; u8 endpoint; u8 data[]   (data length = chain length - 2)
++ *    type 1 = transfer done: endpoint 0 carries the IN data stage, or no
++ *             data as the status stage of OUT/no-data requests; an IN
++ *             endpoint carries the IN data; an OUT endpoint has no data and
++ *             acknowledges the OUT transfer.
++ *    type 2 = endpoint stalled, 3 = endpoint aborted, 4 = reset done,
++ *    5 = pause done.
++ *
++ * Chardev framing (ours): every frame is le32 n followed by n bytes, the
++ * first of which is the kind:
++ *    host -> QEMU  0x01 + request message (above), copied verbatim
++ *                  0x02 (no body) = ask for a status frame
++ *    QEMU -> host  0x81 + response chain bytes (above)
++ *                  0x82 + u8 virtio device status
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu/iov.h"
++#include "qemu/error-report.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/queue.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/core/qdev-properties-system.h"
++#include "hw/pci/pci_ids.h"
++#include "hw/virtio/virtio.h"
++#include "hw/virtio/virtio-pci.h"
++#include "standard-headers/linux/virtio_ids.h"
++#include "chardev/char-fe.h"
++#include "migration/vmstate.h"
++#include "trace.h"
++
++#define TYPE_VMAPPLE_VIRTIO_USB      "vmapple-virtio-usb"
++#define TYPE_VMAPPLE_VIRTIO_USB_PCI  "vmapple-virtio-usb-pci"
++OBJECT_DECLARE_SIMPLE_TYPE(VMAppleVirtIOUSB, VMAPPLE_VIRTIO_USB)
++OBJECT_DECLARE_SIMPLE_TYPE(VMAppleVirtIOUSBPCI, VMAPPLE_VIRTIO_USB_PCI)
++
++#define PCI_DEVICE_ID_APPLE_VIRTIO_USB  0x1a01
++
++#define VUSB_QUEUE_SIZE      64
++#define VUSB_FRAME_MAX       (256 * 1024)
++
++#define VUSB_KIND_REQUEST    0x01
++#define VUSB_KIND_QUERY      0x02
++#define VUSB_KIND_RESPONSE   0x81
++#define VUSB_KIND_STATUS     0x82
++
++typedef struct VUSBMsg {
++    QSIMPLEQ_ENTRY(VUSBMsg) next;
++    size_t len;
++    uint8_t data[];
++} VUSBMsg;
++
++struct VMAppleVirtIOUSB {
++    VirtIODevice parent_obj;
++
++    CharFrontend chr;
++    VirtQueue *reqq;    /* queue 0: host -> guest requests */
++    VirtQueue *rspq;    /* queue 1: guest -> host responses */
++
++    GByteArray *rx;     /* partial frames from the chardev */
++    QSIMPLEQ_HEAD(, VUSBMsg) pending;
++    unsigned npending;
++    bool connected;
++};
++
++struct VMAppleVirtIOUSBPCI {
++    VirtIOPCIProxy parent_obj;
++    VMAppleVirtIOUSB vdev;
++};
++
++static void vusb_send_frame(VMAppleVirtIOUSB *s, uint8_t kind,
++                            const uint8_t *body, size_t len)
++{
++    uint8_t hdr[5];
++
++    if (!s->connected) {
++        trace_vmapple_vusb_drop_tx(kind, len);
++        return;
++    }
++    stl_le_p(hdr, len + 1);
++    hdr[4] = kind;
++    qemu_chr_fe_write_all(&s->chr, hdr, sizeof(hdr));
++    if (len) {
++        qemu_chr_fe_write_all(&s->chr, body, len);
++    }
++}
++
++static void vusb_send_status(VMAppleVirtIOUSB *s)
++{
++    uint8_t st = VIRTIO_DEVICE(s)->status;
++
++    vusb_send_frame(s, VUSB_KIND_STATUS, &st, 1);
++}
++
++/* Move queued host requests into the guest's request buffers. */
++static void vusb_flush_requests(VMAppleVirtIOUSB *s)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(s);
++    bool pushed = false;
++
++    if (!(vdev->status & VIRTIO_CONFIG_S_DRIVER_OK) ||
++        !virtio_queue_ready(s->reqq)) {
++        return;
++    }
++    while (!QSIMPLEQ_EMPTY(&s->pending)) {
++        VUSBMsg *m = QSIMPLEQ_FIRST(&s->pending);
++        VirtQueueElement *elem = virtqueue_pop(s->reqq,
++                                               sizeof(VirtQueueElement));
++        size_t room, n;
++
++        if (!elem) {
++            break;
++        }
++        room = iov_size(elem->in_sg, elem->in_num);
++        if (m->len > room) {
++            error_report("vmapple-virtio-usb: request of %zu bytes does not "
++                         "fit a %zu byte guest buffer, dropped", m->len, room);
++            virtqueue_unpop(s->reqq, elem, 0);
++            g_free(elem);
++            QSIMPLEQ_REMOVE_HEAD(&s->pending, next);
++            s->npending--;
++            g_free(m);
++            continue;
++        }
++        n = iov_from_buf(elem->in_sg, elem->in_num, 0, m->data, m->len);
++        virtqueue_push(s->reqq, elem, n);
++        g_free(elem);
++        trace_vmapple_vusb_request(m->data[4], m->data[5], ldl_le_p(m->data));
++        QSIMPLEQ_REMOVE_HEAD(&s->pending, next);
++        s->npending--;
++        g_free(m);
++        pushed = true;
++    }
++    if (pushed) {
++        virtio_notify(vdev, s->reqq);
++    }
++}
++
++static void vusb_handle_request_queue(VirtIODevice *vdev, VirtQueue *vq)
++{
++    vusb_flush_requests(VMAPPLE_VIRTIO_USB(vdev));
++}
++
++static void vusb_handle_response_queue(VirtIODevice *vdev, VirtQueue *vq)
++{
++    VMAppleVirtIOUSB *s = VMAPPLE_VIRTIO_USB(vdev);
++    VirtQueueElement *elem;
++    bool pushed = false;
++
++    while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
++        size_t len = iov_size(elem->out_sg, elem->out_num);
++        g_autofree uint8_t *buf = g_malloc(len ? len : 1);
++
++        iov_to_buf(elem->out_sg, elem->out_num, 0, buf, len);
++        if (len >= 2) {
++            trace_vmapple_vusb_response(buf[0], buf[1], len - 2);
++        }
++        vusb_send_frame(s, VUSB_KIND_RESPONSE, buf, len);
++        virtqueue_push(vq, elem, 0);
++        g_free(elem);
++        pushed = true;
++    }
++    if (pushed) {
++        virtio_notify(vdev, vq);
++    }
++}
++
++static void vusb_handle_frame(VMAppleVirtIOUSB *s, const uint8_t *f, size_t n)
++{
++    VUSBMsg *m;
++
++    switch (f[0]) {
++    case VUSB_KIND_REQUEST:
++        /*
++         * The length field is the payload size, except for an IN token
++         * (type 1 on an IN endpoint), where it is the size the host can
++         * take and there is no payload.
++         */
++        if (n < 7 || (!((f[5] & 0x80) && f[6] == 1) &&
++                      ldl_le_p(f + 1) != n - 7)) {
++            error_report("vmapple-virtio-usb: malformed request frame "
++                         "(%zu bytes), dropped", n);
++            return;
++        }
++        m = g_malloc(sizeof(*m) + n - 1);
++        m->len = n - 1;
++        memcpy(m->data, f + 1, n - 1);
++        QSIMPLEQ_INSERT_TAIL(&s->pending, m, next);
++        s->npending++;
++        vusb_flush_requests(s);
++        break;
++    case VUSB_KIND_QUERY:
++        vusb_send_status(s);
++        break;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "vmapple-virtio-usb: unknown frame kind 0x%02x\n", f[0]);
++    }
++}
++
++static int vusb_can_receive(void *opaque)
++{
++    return 64 * 1024;
++}
++
++static void vusb_receive(void *opaque, const uint8_t *buf, int size)
++{
++    VMAppleVirtIOUSB *s = opaque;
++
++    g_byte_array_append(s->rx, buf, size);
++    while (s->rx->len >= 4) {
++        uint32_t n = ldl_le_p(s->rx->data);
++
++        if (n == 0 || n > VUSB_FRAME_MAX) {
++            qemu_log_mask(LOG_GUEST_ERROR,
++                          "vmapple-virtio-usb: bad frame length %u, "
++                          "dropping the connection\n", n);
++            g_byte_array_set_size(s->rx, 0);
++            qemu_chr_fe_disconnect(&s->chr);
++            return;
++        }
++        if (s->rx->len < 4 + n) {
++            break;
++        }
++        vusb_handle_frame(s, s->rx->data + 4, n);
++        g_byte_array_remove_range(s->rx, 0, 4 + n);
++    }
++}
++
++static void vusb_drop_pending(VMAppleVirtIOUSB *s)
++{
++    while (!QSIMPLEQ_EMPTY(&s->pending)) {
++        VUSBMsg *m = QSIMPLEQ_FIRST(&s->pending);
++
++        QSIMPLEQ_REMOVE_HEAD(&s->pending, next);
++        g_free(m);
++    }
++    s->npending = 0;
++}
++
++static void vusb_event(void *opaque, QEMUChrEvent event)
++{
++    VMAppleVirtIOUSB *s = opaque;
++
++    switch (event) {
++    case CHR_EVENT_OPENED:
++        s->connected = true;
++        g_byte_array_set_size(s->rx, 0);
++        vusb_send_status(s);
++        break;
++    case CHR_EVENT_CLOSED:
++        s->connected = false;
++        g_byte_array_set_size(s->rx, 0);
++        vusb_drop_pending(s);
++        break;
++    default:
++        break;
++    }
++}
++
++static uint64_t vusb_get_features(VirtIODevice *vdev, uint64_t f,
++                                  Error **errp)
++{
++    return f;
++}
++
++static int vusb_set_status(VirtIODevice *vdev, uint8_t status)
++{
++    VMAppleVirtIOUSB *s = VMAPPLE_VIRTIO_USB(vdev);
++    bool changed = vdev->status != status;
++
++    vdev->status = status;
++    trace_vmapple_vusb_status(status);
++    if (changed) {
++        vusb_send_status(s);
++    }
++    vusb_flush_requests(s);
++    return 0;
++}
++
++static void vusb_reset(VirtIODevice *vdev)
++{
++    vusb_drop_pending(VMAPPLE_VIRTIO_USB(vdev));
++}
++
++static void vusb_realize(DeviceState *dev, Error **errp)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++    VMAppleVirtIOUSB *s = VMAPPLE_VIRTIO_USB(dev);
++
++    if (!qemu_chr_fe_backend_connected(&s->chr)) {
++        error_setg(errp, "vmapple-virtio-usb needs a chardev");
++        return;
++    }
++    /*
++     * The guest matches on the PCI IDs only, so the virtio device ID is
++     * not guest visible; QEMU needs a known one for its own naming.
++     */
++    virtio_init(vdev, VIRTIO_ID_RPROC_SERIAL, 0);
++    s->reqq = virtio_add_queue(vdev, VUSB_QUEUE_SIZE,
++                               vusb_handle_request_queue);
++    s->rspq = virtio_add_queue(vdev, VUSB_QUEUE_SIZE,
++                               vusb_handle_response_queue);
++    s->rx = g_byte_array_new();
++    QSIMPLEQ_INIT(&s->pending);
++    qemu_chr_fe_set_handlers(&s->chr, vusb_can_receive, vusb_receive,
++                             vusb_event, NULL, s, NULL, true);
++}
++
++static void vusb_unrealize(DeviceState *dev)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++    VMAppleVirtIOUSB *s = VMAPPLE_VIRTIO_USB(dev);
++
++    qemu_chr_fe_deinit(&s->chr, false);
++    vusb_drop_pending(s);
++    g_byte_array_free(s->rx, true);
++    virtio_delete_queue(s->reqq);
++    virtio_delete_queue(s->rspq);
++    virtio_cleanup(vdev);
++}
++
++static const VMStateDescription vmstate_vusb = {
++    .name = "vmapple-virtio-usb",
++    .unmigratable = 1,
++};
++
++static const Property vusb_properties[] = {
++    DEFINE_PROP_CHR("chardev", VMAppleVirtIOUSB, chr),
++};
++
++static void vusb_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
++
++    device_class_set_props(dc, vusb_properties);
++    dc->vmsd = &vmstate_vusb;
++    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
++    vdc->realize = vusb_realize;
++    vdc->unrealize = vusb_unrealize;
++    vdc->get_features = vusb_get_features;
++    vdc->set_status = vusb_set_status;
++    vdc->reset = vusb_reset;
++}
++
++static const TypeInfo vusb_info = {
++    .name          = TYPE_VMAPPLE_VIRTIO_USB,
++    .parent        = TYPE_VIRTIO_DEVICE,
++    .instance_size = sizeof(VMAppleVirtIOUSB),
++    .class_init    = vusb_class_init,
++};
++
++static const Property vusb_pci_properties[] = {
++    DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags,
++                    VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT, true),
++    DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, 3),
++};
++
++static void vusb_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
++{
++    VMAppleVirtIOUSBPCI *dev = VMAPPLE_VIRTIO_USB_PCI(vpci_dev);
++
++    if (!qdev_realize(DEVICE(&dev->vdev), BUS(&vpci_dev->bus), errp)) {
++        return;
++    }
++    /* virtio-pci rewrote the IDs for a modern device; restore Apple's. */
++    pci_config_set_vendor_id(vpci_dev->pci_dev.config, PCI_VENDOR_ID_APPLE);
++    pci_config_set_device_id(vpci_dev->pci_dev.config,
++                             PCI_DEVICE_ID_APPLE_VIRTIO_USB);
++}
++
++static void vusb_pci_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    VirtioPCIClass *k = VIRTIO_PCI_CLASS(klass);
++    PCIDeviceClass *pcidev_k = PCI_DEVICE_CLASS(klass);
++
++    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
++    device_class_set_props(dc, vusb_pci_properties);
++    k->realize = vusb_pci_realize;
++    pcidev_k->vendor_id = PCI_VENDOR_ID_APPLE;
++    pcidev_k->device_id = PCI_DEVICE_ID_APPLE_VIRTIO_USB;
++    pcidev_k->revision = VIRTIO_PCI_ABI_VERSION;
++    pcidev_k->class_id = PCI_CLASS_SERIAL_USB;
++}
++
++static void vusb_pci_instance_init(Object *obj)
++{
++    VMAppleVirtIOUSBPCI *dev = VMAPPLE_VIRTIO_USB_PCI(obj);
++
++    virtio_instance_init_common(obj, &dev->vdev, sizeof(dev->vdev),
++                                TYPE_VMAPPLE_VIRTIO_USB);
++}
++
++static const VirtioPCIDeviceTypeInfo vusb_pci_info = {
++    .generic_name  = TYPE_VMAPPLE_VIRTIO_USB_PCI,
++    .instance_size = sizeof(VMAppleVirtIOUSBPCI),
++    .instance_init = vusb_pci_instance_init,
++    .class_init    = vusb_pci_class_init,
++};
++
++static void vusb_register_types(void)
++{
++    type_register_static(&vusb_info);
++    virtio_pci_types_register(&vusb_pci_info);
++}
++
++type_init(vusb_register_types)
+-- 
+2.53.0
+

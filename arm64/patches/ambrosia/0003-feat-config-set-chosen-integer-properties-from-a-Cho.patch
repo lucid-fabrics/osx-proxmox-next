@@ -1,0 +1,163 @@
+From cc1c55eeb506a27f5af1d17c0f5821004bcd2aff Mon Sep 17 00:00:00 2001
+From: snaplab <snaplab@localhost>
+Date: Tue, 17 Nov 2026 13:37:33 -0500
+Subject: [PATCH 3/4] feat(config): set /chosen integer properties from a
+ Chosen dict
+
+---
+ crates/ambrosia/src/config.rs    | 13 +++++++++++++
+ crates/ambrosia/src/tree.rs      | 11 +++++++++++
+ crates/ambrosia/tests/boot.rs    |  1 +
+ crates/ambrosia/tests/restore.rs |  1 +
+ crates/firmware/src/main.rs      |  2 ++
+ 5 files changed, 28 insertions(+)
+
+diff --git a/crates/ambrosia/src/config.rs b/crates/ambrosia/src/config.rs
+index 6928f68..6099c09 100644
+--- a/crates/ambrosia/src/config.rs
++++ b/crates/ambrosia/src/config.rs
+@@ -138,6 +138,10 @@ pub struct Config<'a> {
+     /// `gfx` and `iosurface-mapper` nodes, for a machine that has Apple's
+     /// paravirtual display (apple-gfx) behind its own renderer.
+     pub keep_apple_gfx: bool,
++    /// Integer properties of `/chosen` the configuration sets after Ambrosia
++    /// fills them, from `Chosen`, in order (for example
++    /// `internal-use-only-unit` to 1). Each value is 32 bits.
++    pub chosen_u32: Vec<(String, u32)>,
+     /// The donor vtable symbols of `Kernel` > `ExportVtableDiscriminators`,
+     /// whose per-slot PAC discriminators Ambrosia hands over for injected code.
+     pub export_vtable_disc: Vec<String>,
+@@ -360,6 +364,15 @@ impl<'a> Config<'a> {
+             });
+         }
+ 
++        if let Some(Value::Dict(chosen)) = root.get("Chosen") {
++            for (name, v) in chosen {
++                let n = v
++                    .as_u64()
++                    .and_then(|n| u32::try_from(n).ok())
++                    .ok_or_else(|| config_key(format!("Chosen.{name}")))?;
++                config.chosen_u32.push((name.clone(), n));
++            }
++        }
+         let graphics = optional(&root, &top, "Graphics", dict)?.unwrap_or(&empty);
+         if let Some(path) = optional(graphics, &graphics_at, "Driver", Value::as_str)? {
+             let elf = bundle
+diff --git a/crates/ambrosia/src/tree.rs b/crates/ambrosia/src/tree.rs
+index 06a8197..8337579 100644
+--- a/crates/ambrosia/src/tree.rs
++++ b/crates/ambrosia/src/tree.rs
+@@ -52,6 +52,8 @@ pub struct Machine {
+     /// Keep the `gfx` and `iosurface-mapper` nodes (`Graphics` >
+     /// `KeepAppleGfx`), for a machine that has the apple-gfx display.
+     pub keep_gfx: bool,
++    /// `/chosen` integer properties to set after the defaults (`Chosen`).
++    pub chosen_u32: Vec<(String, u32)>,
+     /// Whether the machine has avp-rtc, the clock macOS keeps its offset to
+     /// calendar time with: its ID register reads 0xf001, which is how iBoot
+     /// tells.
+@@ -581,6 +583,9 @@ fn chosen(
+     for &(name, v) in CHOSEN_U32 {
+         c.set_u32(name, v);
+     }
++    for (name, v) in &m.chosen_u32 {
++        c.set_u32(name, *v);
++    }
+     for &(name, [a, b]) in CHOSEN_U32_PAIRS {
+         let mut v = [0u8; 8];
+         v[..4].copy_from_slice(&a.to_le_bytes());
+@@ -981,6 +986,7 @@ mod tests {
+             display: None,
+             display_nodes: Vec::new(),
+             keep_gfx: false,
++            chosen_u32: Vec::new(),
+             avp_rtc: true,
+         }
+     }
+@@ -1222,6 +1228,7 @@ mod tests {
+         let named = Machine {
+             display_nodes: vec!["display0".into()],
+             keep_gfx: false,
++            chosen_u32: Vec::new(),
+             ..machine()
+         };
+         let mut io = arm_io();
+@@ -1243,6 +1250,7 @@ mod tests {
+         let unnamed = Machine {
+             display_nodes: Vec::new(),
+             keep_gfx: false,
++            chosen_u32: Vec::new(),
+             ..m.clone()
+         };
+         super::arm_io(&mut io, &unnamed, false).unwrap();
+@@ -1252,6 +1260,7 @@ mod tests {
+         let pcie = Machine {
+             display_nodes: vec!["pcie".into()],
+             keep_gfx: false,
++            chosen_u32: Vec::new(),
+             ..m
+         };
+         assert_eq!(
+@@ -1277,6 +1286,7 @@ mod tests {
+             }),
+             display_nodes: names[..n].to_vec(),
+             keep_gfx: false,
++            chosen_u32: Vec::new(),
+             ..machine()
+         };
+         let added = |m: &Machine| {
+@@ -1318,6 +1328,7 @@ mod tests {
+         let m = Machine {
+             display_nodes: vec!["d0".into(), "pcie".into()],
+             keep_gfx: false,
++            chosen_u32: Vec::new(),
+             ..with(2, 0)
+         };
+         assert_eq!(
+diff --git a/crates/ambrosia/tests/boot.rs b/crates/ambrosia/tests/boot.rs
+index 570377a..ce88370 100644
+--- a/crates/ambrosia/tests/boot.rs
++++ b/crates/ambrosia/tests/boot.rs
+@@ -58,6 +58,7 @@ fn prepares_a_guest() {
+         display: None,
+         display_nodes: Vec::new(),
+         keep_gfx: false,
++        chosen_u32: Vec::new(),
+         avp_rtc: true,
+     };
+     let files = Files {
+diff --git a/crates/ambrosia/tests/restore.rs b/crates/ambrosia/tests/restore.rs
+index fb20b63..ae4c9a5 100644
+--- a/crates/ambrosia/tests/restore.rs
++++ b/crates/ambrosia/tests/restore.rs
+@@ -50,6 +50,7 @@ fn machine() -> Machine {
+         display: None,
+         display_nodes: Vec::new(),
+         keep_gfx: false,
++        chosen_u32: Vec::new(),
+         avp_rtc: true,
+     }
+ }
+diff --git a/crates/firmware/src/main.rs b/crates/firmware/src/main.rs
+index 41012f1..6fede79 100644
+--- a/crates/firmware/src/main.rs
++++ b/crates/firmware/src/main.rs
+@@ -258,6 +258,7 @@ extern "C" fn main() -> ! {
+         display: framebuffer,
+         display_nodes: config.display_nodes.clone(),
+         keep_gfx: config.keep_apple_gfx,
++        chosen_u32: config.chosen_u32.clone(),
+         avp_rtc: avp_rtc(),
+     };
+ 
+@@ -352,6 +353,7 @@ fn restore_boot(
+         display: None,
+         display_nodes: alloc::vec::Vec::new(),
+         keep_gfx: false,
++        chosen_u32: alloc::vec::Vec::new(),
+         avp_rtc: avp_rtc(),
+     };
+     // The guest's NVRAM, from the aux disk, which the restore device tree
+-- 
+2.53.0
+

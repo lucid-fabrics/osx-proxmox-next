@@ -83,3 +83,6 @@ max-complexity = 25
 # Rules that only make sense for shipped code. Tests re-import names inside test bodies (F811), use short
 # throwaway names (E741), assign lambdas for fakes (E731) and keep long literals and expected strings on one line (E501).
 "tests/**" = ["E501", "F811", "E741", "E731"]
+# The arm64 host tree is ported lab code with its own long-standing style; it ships as host
+# scripts, not as the Python package, so the package rules would be a mass rewrite.
+"arm64/**" = ["E501", "E701", "E702", "E401", "E402", "E741", "E731", "B007", "B023", "B904", "C901", "BLE001", "F401"]

@@ -1,0 +1,57 @@
+From 606c91b5ce579fd562b90fe82f0bc526b03bcdb8 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(vmapple): add VMState for avp-rtc
+
+Save the tick offset and the CTRL and INT_EN registers so the
+AppleVirtualPlatformRTC driver finds its clock enabled after a
+snapshot load.
+---
+ hw/vmapple/rtc.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/hw/vmapple/rtc.c b/hw/vmapple/rtc.c
+index 0a4f880913..57f67325ae 100644
+--- a/hw/vmapple/rtc.c
++++ b/hw/vmapple/rtc.c
+@@ -42,6 +42,7 @@
+ #include "qemu/log.h"
+ #include "qemu/module.h"
+ #include "qemu/timer.h"
++#include "migration/vmstate.h"
+ #include "system/rtc.h"
+ #include "system/system.h"
+ 
+@@ -171,12 +172,32 @@ static void vmapple_rtc_init(Object *obj)
+         qemu_clock_get_ns(rtc_clock) / NANOSECONDS_PER_SECOND;
+ }
+ 
++/*
++ * What a snapshot keeps: the enables the driver wrote and the offset from the
++ * rtc clock. The counter itself is not state: after a load it reads the rtc
++ * clock again, so with the default clock=host the guest's clock jumps to the
++ * host's time of the load, as a Mac's RTC does across a sleep, and the
++ * driver's offset in NVRAM stays right.
++ */
++static const VMStateDescription vmstate_vmapple_rtc = {
++    .name = "vmapple-rtc",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_INT64(tick_offset, VMAppleRTCState),
++        VMSTATE_UINT64(ctrl, VMAppleRTCState),
++        VMSTATE_UINT64(int_en, VMAppleRTCState),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ static void vmapple_rtc_class_init(ObjectClass *klass, const void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+     ResettableClass *rc = RESETTABLE_CLASS(klass);
+ 
+     dc->desc = "VMApple RTC";
++    dc->vmsd = &vmstate_vmapple_rtc;
+     rc->phases.hold = vmapple_rtc_reset;
+ }
+ 

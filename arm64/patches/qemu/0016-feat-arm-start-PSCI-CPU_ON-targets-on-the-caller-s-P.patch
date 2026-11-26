@@ -1,0 +1,114 @@
+From 38aaa62ac5aa70607966daec9e5f3e7086f4b62e Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(arm): start PSCI CPU_ON targets on the caller's PAuth
+ keys
+
+Ambrosia writes five derived pointer authentication keys on the boot
+CPU and XNU never writes them, so secondary CPUs came up with zero
+keys. CPU_ON copies the caller's keys when ambrosia=on is set.
+---
+ hw/vmapple/vmapple.c      |  9 +++++++++
+ target/arm/arm-powerctl.c | 15 +++++++++++++++
+ target/arm/cpu.c          |  2 ++
+ target/arm/cpu.h          |  7 +++++++
+ 4 files changed, 33 insertions(+)
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 057696ad09..56b83b1772 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -1139,6 +1139,15 @@ static void mach_vmapple_init(MachineState *machine)
+                                      &error_fatal);
+         }
+ 
++        if (vms->ambrosia) {
++            /*
++             * Ambrosia sets pointer authentication keys on the boot CPU only,
++             * and XNU never writes them: start each CPU the guest powers on
++             * with the keys of the CPU that powers it on.
++             */
++            object_property_set_bool(cpu, "cpu-on-copies-pauth-keys", true,
++                                     &error_fatal);
++        }
+         if (vms->ambrosia && tcg_enabled() && object_property_find(cpu, "sme")) {
+             /* TCG's max CPU offers 2048-bit SME vectors, which oversize a
+              * zone element in macOS 14 and later; an M1 to M3 has none. */
+diff --git a/target/arm/arm-powerctl.c b/target/arm/arm-powerctl.c
+index a06be5cc99..603b422951 100644
+--- a/target/arm/arm-powerctl.c
++++ b/target/arm/arm-powerctl.c
+@@ -15,6 +15,7 @@
+ #include "arm-powerctl.h"
+ #include "qemu/log.h"
+ #include "qemu/main-loop.h"
++#include "system/hw_accel.h"
+ #include "system/tcg.h"
+ #include "target/arm/multiprocessing.h"
+ #include "trace.h"
+@@ -43,6 +44,8 @@ struct CpuOnInfo {
+     uint64_t context_id;
+     uint32_t target_el;
+     bool target_aa64;
++    bool copy_pauth_keys;
++    typeof_field(CPUARMState, keys) pauth_keys;
+ };
+ 
+ 
+@@ -57,6 +60,10 @@ static void arm_set_cpu_on_async_work(CPUState *target_cpu_state,
+     arm_emulate_firmware_reset(target_cpu_state, info->target_el);
+     target_cpu_state->halted = 0;
+ 
++    if (info->copy_pauth_keys) {
++        target_cpu->env.keys = info->pauth_keys;
++    }
++
+     /* We check if the started CPU is now at the correct level */
+     assert(info->target_el == arm_current_el(&target_cpu->env));
+ 
+@@ -168,6 +175,14 @@ int arm_set_cpu_on(uint64_t cpuid, uint64_t entry, uint64_t context_id,
+     info->target_el = target_el;
+     info->target_aa64 = target_aa64;
+ 
++    /* Take the keys of the CPU making the call, as they are now. */
++    info->copy_pauth_keys = target_cpu->cpu_on_copies_pauth_keys &&
++                            current_cpu;
++    if (info->copy_pauth_keys) {
++        cpu_synchronize_state(current_cpu);
++        info->pauth_keys = ARM_CPU(current_cpu)->env.keys;
++    }
++
+     async_run_on_cpu(target_cpu_state, arm_set_cpu_on_async_work,
+                      RUN_ON_CPU_HOST_PTR(info));
+ 
+diff --git a/target/arm/cpu.c b/target/arm/cpu.c
+index 159bdccc63..114d56566e 100644
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -2567,6 +2567,8 @@ static ObjectClass *arm_cpu_class_by_name(const char *cpu_model)
+ }
+ 
+ static const Property arm_cpu_properties[] = {
++    DEFINE_PROP_BOOL("cpu-on-copies-pauth-keys", ARMCPU,
++                     cpu_on_copies_pauth_keys, false),
+     DEFINE_PROP_UINT64("midr", ARMCPU, midr, 0),
+     DEFINE_PROP_UINT64("mp-affinity", ARMCPU,
+                         mp_affinity, ARM64_AFFINITY_INVALID),
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index ed0a952a93..d67eca1277 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -1086,6 +1086,13 @@ struct ArchCPU {
+      */
+     uint32_t psci_conduit;
+ 
++    /*
++     * If true, when another CPU powers this one on (PSCI CPU_ON), this
++     * CPU starts with that CPU's pointer authentication keys instead of
++     * the reset value: for platforms that give every CPU the same keys.
++     */
++    bool cpu_on_copies_pauth_keys;
++
+     /* For v8M, initial value of the Secure VTOR */
+     uint32_t init_svtor;
+     /* For v8M, initial value of the Non-secure VTOR */

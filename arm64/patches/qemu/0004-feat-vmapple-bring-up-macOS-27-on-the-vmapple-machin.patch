@@ -1,0 +1,1742 @@
+From 81ac7c7aa0f2deb85f3e6f5660fa95f39c21b42d Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(vmapple): bring up macOS 27 on the vmapple machine
+
+Brings the machine up to the point where a macOS 27 installed system
+boots to userspace under TCG.
+
+- 1 MiB config blob, unknown MMIO window and the 0xC1 hypercall stub.
+- MSI frame device and sorted PCI capability lists.
+- AES engine model uses the QEMU AES block code.
+- Handoff properties written for XNU: internal-use-only-unit, the SIP
+  policy (lp-sip0) and the command line.
+- 16 KiB target pages, as macOS maps nothing smaller.
+- Do not offer the virtio-net control queue.
+- Handoff and hypercall/MSI boot tests (tests/27on86 and the qtest).
+---
+ gdbstub/gdbstub.c                       |   8 +-
+ hw/core/machine.c                       |  16 +
+ hw/vmapple/Kconfig                      |   3 +
+ hw/vmapple/aes.c                        |  84 +++--
+ hw/vmapple/cfg.c                        |   2 +-
+ hw/vmapple/meson.build                  |   1 +
+ hw/vmapple/msi-frame.c                  | 138 ++++++++
+ hw/vmapple/trace-events                 |   4 +
+ hw/vmapple/vmapple.c                    | 446 +++++++++++++++++++++++-
+ include/hw/vmapple/msi-frame.h          |  17 +
+ scripts/27on86/check-vmapple-handoff.sh |  66 ++++
+ scripts/27on86/check-vmapple-hvc-msi.sh |  51 +++
+ scripts/27on86/run-vmapple-tcg.sh       |  12 +
+ system/vl.c                             |  13 +
+ target/arm/cpu.c                        |  10 +
+ target/arm/cpu.h                        |   2 +
+ target/arm/tcg/psci.c                   |   5 +
+ target/arm/tcg/tlb_helper.c             |  14 +
+ tests/27on86/vmapple-handoff.S          | 198 +++++++++++
+ tests/27on86/vmapple-hvc-msi.S          | 113 ++++++
+ tests/qtest/meson.build                 |   2 +
+ tests/qtest/vmapple-net-test.c          | 104 ++++++
+ 22 files changed, 1274 insertions(+), 35 deletions(-)
+ create mode 100644 hw/vmapple/msi-frame.c
+ create mode 100644 include/hw/vmapple/msi-frame.h
+ create mode 100755 scripts/27on86/check-vmapple-handoff.sh
+ create mode 100755 scripts/27on86/check-vmapple-hvc-msi.sh
+ create mode 100644 tests/27on86/vmapple-handoff.S
+ create mode 100644 tests/27on86/vmapple-hvc-msi.S
+ create mode 100644 tests/qtest/vmapple-net-test.c
+
+diff --git a/gdbstub/gdbstub.c b/gdbstub/gdbstub.c
+index 0a328b0dd4..7fc2014ed4 100644
+--- a/gdbstub/gdbstub.c
++++ b/gdbstub/gdbstub.c
+@@ -2315,7 +2315,13 @@ static int gdb_handle_packet(const char *line_buf)
+ 
+ void gdb_set_stop_cpu(CPUState *cpu)
+ {
+-    GDBProcess *p = gdb_get_cpu_process(cpu);
++    GDBProcess *p;
++
++    if (!gdbserver_state.init) {
++        /* A machine-internal breakpoint stopped the VM; no debugger. */
++        return;
++    }
++    p = gdb_get_cpu_process(cpu);
+ 
+     if (!p->attached) {
+         /*
+diff --git a/hw/core/machine.c b/hw/core/machine.c
+index 73b4d82b4a..6762952f85 100644
+--- a/hw/core/machine.c
++++ b/hw/core/machine.c
+@@ -304,6 +304,17 @@ static void machine_set_dtb(Object *obj, const char *value, Error **errp)
+     ms->dtb = g_strdup(value);
+ }
+ 
++static char *machine_get_x_page_bits(Object *obj, Error **errp)
++{
++    return g_strdup("");
++}
++
++static void machine_set_x_page_bits(Object *obj, const char *value,
++                                    Error **errp)
++{
++    /* Consumed by qemu_create_machine() before the machine exists. */
++}
++
+ static char *machine_get_dumpdtb(Object *obj, Error **errp)
+ {
+     MachineState *ms = MACHINE(obj);
+@@ -1103,6 +1114,11 @@ static void machine_class_init(ObjectClass *oc, const void *data)
+     object_class_property_set_description(oc, "dtb",
+         "Linux kernel device tree file");
+ 
++    object_class_property_add_str(oc, "x-page-bits",
++        machine_get_x_page_bits, machine_set_x_page_bits);
++    object_class_property_set_description(oc, "x-page-bits",
++        "Raise the target page size to 2^N bytes (tests)");
++
+     object_class_property_add_str(oc, "dumpdtb",
+         machine_get_dumpdtb, machine_set_dumpdtb);
+     object_class_property_set_description(oc, "dumpdtb",
+diff --git a/hw/vmapple/Kconfig b/hw/vmapple/Kconfig
+index af66355a88..2aa1a9b8ca 100644
+--- a/hw/vmapple/Kconfig
++++ b/hw/vmapple/Kconfig
+@@ -9,6 +9,8 @@ config VMAPPLE_BDIF
+ config VMAPPLE_CFG
+     bool
+ 
++config VMAPPLE_MSI_FRAME
++    bool
+ config VMAPPLE_VIRTIO_BLK
+     bool
+ 
+@@ -30,5 +32,6 @@ config VMAPPLE
+     select VMAPPLE_AES
+     select VMAPPLE_BDIF
+     select VMAPPLE_CFG
++    select VMAPPLE_MSI_FRAME
+     imply MAC_PVG_MMIO
+     select VMAPPLE_VIRTIO_BLK
+diff --git a/hw/vmapple/aes.c b/hw/vmapple/aes.c
+index 2f88866f33..40178ac37e 100644
+--- a/hw/vmapple/aes.c
++++ b/hw/vmapple/aes.c
+@@ -264,6 +264,50 @@ static void dump_data(const char *desc, const void *p, size_t len)
+     trace_aes_dump_data(desc, hex);
+ }
+ 
++/*
++ * ECB or CBC (iv != NULL) over whole blocks, using QEMU's own AES block
++ * code so the device works without a host crypto library.
++ */
++static void aes_crypt(const uint8_t *key, int bits, const uint8_t *iv,
++                      bool encrypt, const uint8_t *in, uint8_t *out,
++                      size_t len)
++{
++    AES_KEY k;
++    uint8_t prev[AES_BLOCK_SIZE];
++    uint8_t blk[AES_BLOCK_SIZE];
++    size_t off;
++    int i;
++
++    if (encrypt) {
++        AES_set_encrypt_key(key, bits, &k);
++    } else {
++        AES_set_decrypt_key(key, bits, &k);
++    }
++    if (iv) {
++        memcpy(prev, iv, AES_BLOCK_SIZE);
++    }
++    for (off = 0; off < len; off += AES_BLOCK_SIZE) {
++        if (encrypt) {
++            for (i = 0; i < AES_BLOCK_SIZE; i++) {
++                blk[i] = in[off + i] ^ (iv ? prev[i] : 0);
++            }
++            AES_encrypt(blk, out + off, &k);
++            if (iv) {
++                memcpy(prev, out + off, AES_BLOCK_SIZE);
++            }
++        } else {
++            AES_decrypt(in + off, blk, &k);
++            for (i = 0; i < AES_BLOCK_SIZE; i++) {
++                blk[i] ^= iv ? prev[i] : 0;
++            }
++            if (iv) {
++                memcpy(prev, in + off, AES_BLOCK_SIZE);
++            }
++            memcpy(out + off, blk, AES_BLOCK_SIZE);
++        }
++    }
++}
++
+ static bool cmd_data(AESState *s)
+ {
+     uint32_t cmd = s->fifo[0];
+@@ -272,8 +316,6 @@ static bool cmd_data(AESState *s)
+     uint32_t len = cmd & CMD_DATA_LEN_MASK;
+     uint64_t src_addr = s->fifo[2];
+     uint64_t dst_addr = s->fifo[3];
+-    QCryptoCipherAlgo alg;
+-    g_autoptr(QCryptoCipher) cipher = NULL;
+     g_autoptr(GByteArray) src = NULL;
+     g_autoptr(GByteArray) dst = NULL;
+     MemTxResult r;
+@@ -312,45 +354,23 @@ static bool cmd_data(AESState *s)
+ 
+     switch (s->key[ctxt_key].key_len) {
+     case 128 / 8:
+-        alg = QCRYPTO_CIPHER_ALGO_AES_128;
+-        break;
+     case 192 / 8:
+-        alg = QCRYPTO_CIPHER_ALGO_AES_192;
+-        break;
+     case 256 / 8:
+-        alg = QCRYPTO_CIPHER_ALGO_AES_256;
+         break;
+     default:
+         qemu_log_mask(LOG_GUEST_ERROR, "%s: Invalid key length\n", __func__);
+         return false;
+     }
+-    cipher = qcrypto_cipher_new(alg, s->block_mode,
+-                                s->key[ctxt_key].key,
+-                                s->key[ctxt_key].key_len, NULL);
+-    if (!cipher) {
+-        qemu_log_mask(LOG_GUEST_ERROR, "%s: Failed to create cipher object\n",
+-                      __func__);
++    if (len % AES_BLOCK_SIZE) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: Length %" PRIu32
++                      " is not a multiple of the AES block size\n",
++                      __func__, len);
+         return false;
+     }
+-    if (s->block_mode != QCRYPTO_CIPHER_MODE_ECB) {
+-        if (qcrypto_cipher_setiv(cipher, (void *)s->iv[ctxt_iv].iv,
+-                                 sizeof(s->iv[ctxt_iv].iv), NULL) != 0) {
+-            qemu_log_mask(LOG_GUEST_ERROR, "%s: Failed to set IV\n", __func__);
+-            return false;
+-        }
+-    }
+-    if (s->is_encrypt) {
+-        if (qcrypto_cipher_encrypt(cipher, src->data, dst->data, len, NULL) != 0) {
+-            qemu_log_mask(LOG_GUEST_ERROR, "%s: Encryption failed\n", __func__);
+-            return false;
+-        }
+-    } else {
+-        if (qcrypto_cipher_decrypt(cipher, src->data, dst->data, len, NULL) != 0) {
+-            qemu_log_mask(LOG_GUEST_ERROR, "%s: Decryption failed\n", __func__);
+-            return false;
+-        }
+-    }
+-
++    aes_crypt(s->key[ctxt_key].key, s->key[ctxt_key].key_len * 8,
++              s->block_mode == QCRYPTO_CIPHER_MODE_CBC ?
++              (const uint8_t *)s->iv[ctxt_iv].iv : NULL,
++              s->is_encrypt, src->data, dst->data, len);
+     dump_data("cmd_data(): dst_data=", dst->data, len);
+     r = dma_memory_write(s->as, dst_addr, dst->data, len, MEMTXATTRS_UNSPECIFIED);
+     if (r != MEMTX_OK) {
+diff --git a/hw/vmapple/cfg.c b/hw/vmapple/cfg.c
+index 2a3204f0ec..65c5617554 100644
+--- a/hw/vmapple/cfg.c
++++ b/hw/vmapple/cfg.c
+@@ -19,7 +19,7 @@
+ 
+ OBJECT_DECLARE_SIMPLE_TYPE(VMAppleCfgState, VMAPPLE_CFG)
+ 
+-#define VMAPPLE_CFG_SIZE 0x00010000
++#define VMAPPLE_CFG_SIZE 0x00100000
+ 
+ typedef struct VMAppleCfg {
+     uint32_t version;         /* 0x000 */
+diff --git a/hw/vmapple/meson.build b/hw/vmapple/meson.build
+index 23bc4c999e..eba03490b4 100644
+--- a/hw/vmapple/meson.build
++++ b/hw/vmapple/meson.build
+@@ -3,5 +3,6 @@
+ system_ss.add(when: 'CONFIG_VMAPPLE_AES',  if_true: files('aes.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_BDIF', if_true: files('bdif.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_CFG',  if_true: files('cfg.c'))
++system_ss.add(when: 'CONFIG_VMAPPLE_MSI_FRAME', if_true: files('msi-frame.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_VIRTIO_BLK',  if_true: files('virtio-blk.c'))
+ specific_ss.add(when: 'CONFIG_VMAPPLE',     if_true: files('vmapple.c'))
+diff --git a/hw/vmapple/msi-frame.c b/hw/vmapple/msi-frame.c
+new file mode 100644
+index 0000000000..1f7dbab584
+--- /dev/null
++++ b/hw/vmapple/msi-frame.c
+@@ -0,0 +1,138 @@
++/*
++ * Apple vmapple MSI frame
++ *
++ * The macOS 27 AppleVirtualPlatformPCIEMSIController reads a capability word
++ * from GIC register frame 2 (0x1fff0000) and then signals MSIs by writing the
++ * interrupt ID to a doorbell register. The layout is GICv2m-like:
++ *
++ *   0x08  RO  bit 31 valid, bits 28:16 base INTID, bits 12:0 vector count
++ *   0x40  WO  doorbell, write an INTID in [base, base + count) to raise it
++ *
++ * Each vector is wired to one GIC SPI by the board.
++ *
++ * Copyright (c) 2026 the 27on86 project
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "hw/core/irq.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/core/sysbus.h"
++#include "hw/vmapple/msi-frame.h"
++#include "migration/vmstate.h"
++#include "qapi/error.h"
++#include "trace.h"
++
++#define MSI_FRAME_TYPER      0x08
++#define MSI_FRAME_SETSPI     0x40
++#define MSI_FRAME_SIZE       0x10000
++#define MSI_TYPER_VALID      (1u << 31)
++#define MSI_TYPER_BASE_SHIFT 16
++#define MSI_TYPER_BASE_MASK  0x1fffu
++#define MSI_TYPER_COUNT_MASK 0x1fffu
++
++struct VMAppleMSIFrameState {
++    SysBusDevice parent_obj;
++
++    MemoryRegion iomem;
++    qemu_irq spi[VMAPPLE_MSI_MAX_VECTORS];
++    uint32_t base_intid;
++    uint32_t num_vectors;
++};
++
++static uint64_t msi_frame_read(void *opaque, hwaddr offset, unsigned size)
++{
++    VMAppleMSIFrameState *s = opaque;
++    uint64_t val = 0;
++
++    if (offset == MSI_FRAME_TYPER) {
++        val = MSI_TYPER_VALID |
++              ((uint64_t)(s->base_intid & MSI_TYPER_BASE_MASK)
++               << MSI_TYPER_BASE_SHIFT) |
++              (s->num_vectors & MSI_TYPER_COUNT_MASK);
++    }
++    trace_vmapple_msi_frame_read(offset, val);
++    return val;
++}
++
++static void msi_frame_write(void *opaque, hwaddr offset, uint64_t val,
++                            unsigned size)
++{
++    VMAppleMSIFrameState *s = opaque;
++
++    trace_vmapple_msi_frame_write(offset, val);
++    if (offset != MSI_FRAME_SETSPI) {
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "vmapple-msi-frame: write to unknown offset 0x%"
++                      HWADDR_PRIx "\n", offset);
++        return;
++    }
++    if (val < s->base_intid || val >= s->base_intid + s->num_vectors) {
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "vmapple-msi-frame: doorbell INTID %" PRIu64
++                      " out of range\n", val);
++        return;
++    }
++    qemu_irq_pulse(s->spi[val - s->base_intid]);
++}
++
++static const MemoryRegionOps msi_frame_ops = {
++    .read = msi_frame_read,
++    .write = msi_frame_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++};
++
++static void msi_frame_realize(DeviceState *dev, Error **errp)
++{
++    VMAppleMSIFrameState *s = VMAPPLE_MSI_FRAME(dev);
++
++    if (s->num_vectors == 0 || s->num_vectors > VMAPPLE_MSI_MAX_VECTORS) {
++        error_setg(errp, "num-vectors must be between 1 and %d",
++                   VMAPPLE_MSI_MAX_VECTORS);
++        return;
++    }
++    if (s->base_intid > MSI_TYPER_BASE_MASK) {
++        error_setg(errp, "base-intid does not fit in 13 bits");
++        return;
++    }
++    memory_region_init_io(&s->iomem, OBJECT(dev), &msi_frame_ops, s,
++                          "vmapple-msi-frame", MSI_FRAME_SIZE);
++    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
++    qdev_init_gpio_out_named(dev, s->spi, "spi", s->num_vectors);
++}
++
++static const Property msi_frame_properties[] = {
++    DEFINE_PROP_UINT32("base-intid", VMAppleMSIFrameState, base_intid, 128),
++    DEFINE_PROP_UINT32("num-vectors", VMAppleMSIFrameState, num_vectors, 64),
++};
++
++static void msi_frame_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = msi_frame_realize;
++    dc->desc = "Apple vmapple MSI frame";
++    device_class_set_props(dc, msi_frame_properties);
++    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
++}
++
++static const TypeInfo msi_frame_info = {
++    .name = TYPE_VMAPPLE_MSI_FRAME,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(VMAppleMSIFrameState),
++    .class_init = msi_frame_class_init,
++};
++
++static void msi_frame_register_types(void)
++{
++    type_register_static(&msi_frame_info);
++}
++
++type_init(msi_frame_register_types)
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index 93380ede14..62680bcbcf 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -19,3 +19,7 @@ aes_dump_data(const char *desc, const char *hex) "%s%s"
+ bdif_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d"
++
++# msi-frame.c
++vmapple_msi_frame_read(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
++vmapple_msi_frame_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 747a022e83..f52bbd8e14 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -15,7 +15,9 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "hw/misc/unimp.h"
+ #include "qemu/bitops.h"
++#include "qemu/cutils.h"
+ #include "qemu/datadir.h"
+ #include "qemu/error-report.h"
+ #include "qemu/guest-random.h"
+@@ -26,6 +28,9 @@
+ #include "qemu/timer.h"
+ #include "qemu/units.h"
+ #include "exec/icount.h"
++#include "exec/breakpoint.h"
++#include "exec/target_page.h"
++#include "qemu/bswap.h"
+ #include "monitor/qdev.h"
+ #include "hw/core/boards.h"
+ #include "hw/core/irq.h"
+@@ -36,11 +41,13 @@
+ #include "hw/arm/boot.h"
+ #include "hw/arm/machines-qom.h"
+ #include "hw/char/pl011.h"
++#include "hw/vmapple/msi-frame.h"
+ #include "hw/intc/arm_gic.h"
+ #include "hw/intc/arm_gicv3_common.h"
+ #include "hw/misc/pvpanic.h"
+ #include "hw/pci-host/gpex.h"
+ #include "hw/usb/hcd-xhci-pci.h"
++#include "hw/virtio/virtio-net.h"
+ #include "hw/virtio/virtio-pci.h"
+ #include "hw/vmapple/vmapple.h"
+ #include "net/net.h"
+@@ -49,6 +56,7 @@
+ #include "qapi/qapi-visit-common.h"
+ #include "qobject/qlist.h"
+ #include "standard-headers/linux/input.h"
++#include "system/address-spaces.h"
+ #include "system/reset.h"
+ #include "system/runstate.h"
+ #include "system/system.h"
+@@ -80,6 +88,14 @@ struct VMAppleMachineState {
+     int64_t tcg_smp_final_shift;
+     QEMUTimer *tcg_smp_shift_timer;
+     bool tcg_smp_all_powered;
++    /* XNU handoff hook, see vmapple_handoff_state() */
++    bool internal_use_only_unit;
++    uint64_t xnu_handoff_pc;
++    char *xnu_boot_args;
++    int64_t csr_config;
++    CPUBreakpoint *handoff_bp;
++    bool handoff_stepping;
++    VMChangeStateEntry *handoff_vmsh;
+ };
+ 
+ #define TYPE_VMAPPLE_MACHINE   MACHINE_TYPE_NAME("vmapple")
+@@ -109,6 +125,7 @@ enum {
+     VMAPPLE_AES_1,
+     VMAPPLE_AES_2,
+     VMAPPLE_BDOOR,
++    VMAPPLE_MSIF,
+     VMAPPLE_MEMMAP_LAST,
+ };
+ 
+@@ -128,6 +145,7 @@ static const MemMapEntry memmap[] = {
+     [VMAPPLE_APV_IOSFC] =          { 0x30210000, 0x00010000 },
+     [VMAPPLE_AES_1] =              { 0x30220000, 0x00004000 },
+     [VMAPPLE_AES_2] =              { 0x30230000, 0x00004000 },
++    [VMAPPLE_MSIF] =          { 0x1fff0000, 0x00010000 },
+     [VMAPPLE_PCIE_ECAM] =          { 0x40000000, 0x10000000 },
+     [VMAPPLE_PCIE_MMIO] =          { 0x50000000, 0x1fff0000 },
+ 
+@@ -143,6 +161,7 @@ static const int irqmap[] = {
+     [VMAPPLE_APV_GFX] = 0x11,
+     [VMAPPLE_AES_1] = 0x12,
+     [VMAPPLE_PCIE] = 0x20,
++    [VMAPPLE_MSIF] = 0x60, /* first SPI, INTID 128 */
+ };
+ 
+ #define GPEX_NUM_IRQS 16
+@@ -277,6 +296,69 @@ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+ #endif
+ }
+ 
++#define VMAPPLE_MSI_VECTORS 64
++
++static void create_msi_frame(VMAppleMachineState *vms)
++{
++    DeviceState *dev = qdev_new(TYPE_VMAPPLE_MSI_FRAME);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
++    int spi = vms->irqmap[VMAPPLE_MSIF];
++    int i;
++
++    /* Doorbell INTIDs are GIC INTIDs: SPI n is INTID n + 32 */
++    qdev_prop_set_uint32(dev, "base-intid", spi + 32);
++    qdev_prop_set_uint32(dev, "num-vectors", VMAPPLE_MSI_VECTORS);
++    sysbus_realize_and_unref(sbd, &error_fatal);
++    sysbus_mmio_map(sbd, 0, vms->memmap[VMAPPLE_MSIF].base);
++    for (i = 0; i < VMAPPLE_MSI_VECTORS; i++) {
++        qdev_connect_gpio_out_named(dev, "spi", i,
++                                    qdev_get_gpio_in(vms->gic, spi + i));
++    }
++}
++
++/*
++ * macOS 27 IOPCIFamily walks the capability list as if it were laid out in
++ * ascending offset order. QEMU links new capabilities at the head of the list,
++ * so devices such as virtio-pci come out in descending order and the guest
++ * loops forever in AppleVirtIO's vendor capability scan. Relink every
++ * function's list in ascending order once all devices exist.
++ */
++static void vmapple_pci_sort_caps(PCIBus *bus, PCIDevice *dev, void *opaque)
++{
++    uint8_t *conf = dev->config;
++    uint8_t offs[64];
++    int n = 0;
++    uint8_t pos;
++    int i, j;
++
++    if (!(conf[PCI_STATUS] & PCI_STATUS_CAP_LIST)) {
++        return;
++    }
++    for (pos = conf[PCI_CAPABILITY_LIST]; pos && n < ARRAY_SIZE(offs);
++         pos = conf[pos + PCI_CAP_LIST_NEXT]) {
++        offs[n++] = pos;
++    }
++    for (i = 1; i < n; i++) {
++        uint8_t v = offs[i];
++        for (j = i - 1; j >= 0 && offs[j] > v; j--) {
++            offs[j + 1] = offs[j];
++        }
++        offs[j + 1] = v;
++    }
++    conf[PCI_CAPABILITY_LIST] = n ? offs[0] : 0;
++    for (i = 0; i < n; i++) {
++        conf[offs[i] + PCI_CAP_LIST_NEXT] = i + 1 < n ? offs[i + 1] : 0;
++    }
++}
++
++static void vmapple_machine_done(Notifier *notifier, void *data)
++{
++    VMAppleMachineState *vms =
++        container_of(notifier, VMAppleMachineState, machine_done);
++
++    pci_for_each_device(vms->bus, 0, vmapple_pci_sort_caps, vms);
++}
++
+ static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)
+ {
+     int irq = vms->irqmap[VMAPPLE_AES_1];
+@@ -287,6 +369,7 @@ static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)
+     sysbus_mmio_map(aes, 1, vms->memmap[VMAPPLE_AES_2].base);
+     sysbus_connect_irq(aes, 0, qdev_get_gpio_in(vms->gic, irq));
+     sysbus_realize_and_unref(aes, &error_fatal);
++    create_unimplemented_device("vmapple-unk", 0x30240000, 0x0fdc0000);
+ }
+ 
+ static int arm_gic_ppi_index(int cpu_nr, int ppi_index)
+@@ -566,6 +649,306 @@ static void vmapple_set_tcg_smp_final_shift(Object *obj, Visitor *v,
+     vms->tcg_smp_final_shift = value;
+ }
+ 
++/*
++ * XNU handoff hook.
++ *
++ * iBoot builds the Apple device tree and then enters a small trampoline
++ * (xnu-handoff-pc, 0xe0a00000 for macOS 27) twice per boot: once for its
++ * second stage and once for XNU, with x1 pointing at XNU's boot_args.  XNU
++ * derives csr_config from /chosen/internal-use-only-unit when the local
++ * policy has no lp-sip0, and the unencrypted Data volume of a guest without
++ * a SEP only mounts when CSR_ALLOW_APPLE_INTERNAL is set.  We stop the boot
++ * CPU on the trampoline, set that property in the final device tree, and
++ * resume.  No guest-visible device or register is involved.
++ */
++#define BOOT_ARGS_VERSION_OFF    2
++#define BOOT_ARGS_VIRT_BASE_OFF  8
++#define BOOT_ARGS_PHYS_BASE_OFF  16
++#define BOOT_ARGS_DT_OFF         96
++#define BOOT_ARGS_DT_LEN_OFF     104
++#define BOOT_ARGS_CMDLINE_OFF    108
++#define BOOT_ARGS_CMDLINE_SIZE   608
++#define ADT_NAME_SIZE            32
++#define ADT_LEN_MASK             0x00ffffffu
++#define ADT_MAX_SIZE             (16 * MiB)
++
++/*
++ * Find property @prop of the node reached through @path (child names below
++ * the root node) in a flattened Apple device tree.  Returns the offset and
++ * length of the value.
++ */
++static bool adt_node_find(const uint8_t *t, size_t len, size_t *pos,
++                          const char *const *path, int npath, int depth,
++                          bool parent_match, const char *prop,
++                          size_t *noff, size_t *voff, uint32_t *vlen)
++{
++    uint32_t nprops, nchildren;
++    char own_name[ADT_NAME_SIZE] = "";
++    bool match, found = false;
++    size_t pv_off = 0;
++    uint32_t pv_len = 0;
++    size_t node_start = *pos;
++    uint32_t i;
++
++    if (*pos + 8 > len) {
++        return false;
++    }
++    nprops = ldl_le_p(t + *pos);
++    nchildren = ldl_le_p(t + *pos + 4);
++    *pos += 8;
++
++    for (i = 0; i < nprops; i++) {
++        uint32_t plen;
++
++        if (*pos + ADT_NAME_SIZE + 4 > len) {
++            return false;
++        }
++        plen = ldl_le_p(t + *pos + ADT_NAME_SIZE) & ADT_LEN_MASK;
++        if (*pos + ADT_NAME_SIZE + 4 + plen > len) {
++            return false;
++        }
++        if (!strncmp((const char *)t + *pos, "name", ADT_NAME_SIZE)) {
++            strncpy(own_name, (const char *)t + *pos + ADT_NAME_SIZE + 4,
++                    MIN(plen, ADT_NAME_SIZE - 1));
++        } else if (!strncmp((const char *)t + *pos, prop, ADT_NAME_SIZE)) {
++            found = true;
++            pv_off = *pos + ADT_NAME_SIZE + 4;
++            pv_len = plen;
++        }
++        *pos += ADT_NAME_SIZE + 4 + ((plen + 3) & ~3u);
++    }
++
++    match = depth == 0 ||
++            (parent_match && depth <= npath &&
++             !strcmp(own_name, path[depth - 1]));
++    if (match && depth == npath && found) {
++        *noff = node_start;
++        *voff = pv_off;
++        *vlen = pv_len;
++        return true;
++    }
++    for (i = 0; i < nchildren; i++) {
++        if (adt_node_find(t, len, pos, path, npath, depth + 1, match, prop,
++                          noff, voff, vlen)) {
++            return true;
++        }
++        if (*pos > len) {
++            return false;
++        }
++    }
++    return false;
++}
++
++static bool vmapple_dt_set_internal_use(uint8_t *dt, size_t len)
++{
++    static const char *const path[] = { "chosen" };
++    size_t pos = 0, noff, voff;
++    uint32_t vlen;
++
++    if (!adt_node_find(dt, len, &pos, path, 1, 0, true,
++                       "internal-use-only-unit", &noff, &voff, &vlen) ||
++        vlen != sizeof(uint32_t)) {
++        return false;
++    }
++    stl_le_p(dt + voff, 1);
++    return true;
++}
++
++/*
++ * XNU reads the SIP policy from /chosen/asmb/lp-sip0 (8 bytes).  iBoot does
++ * not emit it for macOS 27 local policies, and the tree cannot grow in
++ * place, so turn the 48-byte lp-nsih (a hash only userspace looks at) into
++ * lp-sip0 followed by a 4-byte padding property.
++ */
++static bool vmapple_dt_set_csr_config(uint8_t *dt, size_t len, uint32_t csr)
++{
++    static const char *const path[] = { "chosen", "asmb" };
++    size_t pos = 0, noff, voff;
++    uint32_t vlen;
++
++    pos = 0;
++    if (adt_node_find(dt, len, &pos, path, 2, 0, true, "lp-sip0",
++                      &noff, &voff, &vlen)) {
++        if (vlen != sizeof(uint64_t)) {
++            return false;
++        }
++        stq_le_p(dt + voff, csr);
++        return true;
++    }
++    pos = 0;
++    if (!adt_node_find(dt, len, &pos, path, 2, 0, true, "lp-nsih",
++                       &noff, &voff, &vlen) ||
++        vlen != 48) {
++        return false;
++    }
++    stl_le_p(dt + noff, ldl_le_p(dt + noff) + 1);
++    memset(dt + voff - ADT_NAME_SIZE - 4, 0, ADT_NAME_SIZE);
++    memcpy(dt + voff - ADT_NAME_SIZE - 4, "lp-sip0", sizeof("lp-sip0"));
++    stl_le_p(dt + voff - 4, sizeof(uint64_t));
++    stq_le_p(dt + voff, csr);
++    memset(dt + voff + 8, 0, ADT_NAME_SIZE);
++    memcpy(dt + voff + 8, "lp-pad", sizeof("lp-pad"));
++    stl_le_p(dt + voff + 8 + ADT_NAME_SIZE, sizeof(uint32_t));
++    stl_le_p(dt + voff + 8 + ADT_NAME_SIZE + 4, 0);
++    return true;
++}
++
++static void vmapple_patch_boot_args(VMAppleMachineState *vms, uint64_t args)
++{
++    uint8_t hdr[BOOT_ARGS_DT_LEN_OFF + 4];
++    uint64_t virt_base, phys_base, dt_virt;
++    uint32_t dt_len;
++    hwaddr dt_pa;
++    uint8_t *dt;
++
++    if (address_space_read(&address_space_memory, args, MEMTXATTRS_UNSPECIFIED,
++                          hdr, sizeof(hdr)) != MEMTX_OK) {
++        return;
++    }
++    /* The first entry (second-stage loader) passes no boot_args. */
++    if (lduw_le_p(hdr + BOOT_ARGS_VERSION_OFF) != 2) {
++        return;
++    }
++    virt_base = ldq_le_p(hdr + BOOT_ARGS_VIRT_BASE_OFF);
++    phys_base = ldq_le_p(hdr + BOOT_ARGS_PHYS_BASE_OFF);
++    dt_virt = ldq_le_p(hdr + BOOT_ARGS_DT_OFF);
++    dt_len = ldl_le_p(hdr + BOOT_ARGS_DT_LEN_OFF);
++    if (dt_virt < virt_base || !dt_len || dt_len > ADT_MAX_SIZE) {
++        warn_report("vmapple: implausible boot_args at 0x%" PRIx64, args);
++        return;
++    }
++    if (vms->xnu_boot_args) {
++        /*
++         * iBoot drops everything but allowed-boot-args from the NVRAM
++         * boot-args under full security. Replace the whole command line.
++         */
++        uint8_t cmdline[BOOT_ARGS_CMDLINE_SIZE] = { 0 };
++
++        pstrcpy((char *)cmdline, sizeof(cmdline), vms->xnu_boot_args);
++        address_space_write(&address_space_memory,
++                            args + BOOT_ARGS_CMDLINE_OFF,
++                            MEMTXATTRS_UNSPECIFIED, cmdline, sizeof(cmdline));
++    }
++    if (!vms->internal_use_only_unit && vms->csr_config < 0) {
++        return;
++    }
++    dt_pa = dt_virt - virt_base + phys_base;
++    dt = g_malloc(dt_len);
++    if (address_space_read(&address_space_memory, dt_pa,
++                           MEMTXATTRS_UNSPECIFIED, dt, dt_len) != MEMTX_OK) {
++        warn_report("vmapple: cannot read the device tree at 0x%" PRIx64,
++                    (uint64_t)dt_pa);
++        g_free(dt);
++        return;
++    }
++    if (vms->internal_use_only_unit &&
++        !vmapple_dt_set_internal_use(dt, dt_len)) {
++        warn_report("vmapple: no /chosen/internal-use-only-unit in the "
++                    "device tree at 0x%" PRIx64, (uint64_t)dt_pa);
++    }
++    if (vms->csr_config >= 0 &&
++        !vmapple_dt_set_csr_config(dt, dt_len, vms->csr_config)) {
++        warn_report("vmapple: cannot set /chosen/asmb/lp-sip0 in the "
++                    "device tree at 0x%" PRIx64, (uint64_t)dt_pa);
++    }
++    address_space_write(&address_space_memory, dt_pa, MEMTXATTRS_UNSPECIFIED,
++                        dt, dt_len);
++    g_free(dt);
++}
++
++static void vmapple_handoff_resume(void *opaque)
++{
++    vm_start();
++}
++
++static void vmapple_handoff_state(void *opaque, bool running, RunState state)
++{
++    VMAppleMachineState *vms = opaque;
++    CPUState *cs = first_cpu;
++    ARMCPU *cpu = ARM_CPU(cs);
++    uint64_t pc = cpu->env.pc;
++
++    if (running || state != RUN_STATE_DEBUG) {
++        return;
++    }
++    if (!vms->handoff_stepping && pc == vms->xnu_handoff_pc) {
++        vmapple_patch_boot_args(vms, cpu->env.xregs[1]);
++        /*
++         * Step over the trampoline's first instruction with a second
++         * breakpoint, then arm the first one again for the next entry.
++         */
++        cpu_breakpoint_remove_by_ref(cs, vms->handoff_bp);
++        cpu_breakpoint_insert(cs, vms->xnu_handoff_pc + 4, BP_GDB,
++                              &vms->handoff_bp);
++        vms->handoff_stepping = true;
++    } else if (vms->handoff_stepping && pc == vms->xnu_handoff_pc + 4) {
++        cpu_breakpoint_remove_by_ref(cs, vms->handoff_bp);
++        cpu_breakpoint_insert(cs, vms->xnu_handoff_pc, BP_GDB,
++                              &vms->handoff_bp);
++        vms->handoff_stepping = false;
++    } else {
++        return;
++    }
++    aio_bh_schedule_oneshot(qemu_get_aio_context(), vmapple_handoff_resume,
++                            NULL);
++}
++
++static char *vmapple_get_xnu_boot_args(Object *obj, Error **errp)
++{
++    return g_strdup(VMAPPLE_MACHINE(obj)->xnu_boot_args);
++}
++
++static void vmapple_set_xnu_boot_args(Object *obj, const char *value,
++                                      Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++
++    if (strlen(value) >= BOOT_ARGS_CMDLINE_SIZE) {
++        error_setg(errp, "xnu-boot-args must be shorter than %d bytes",
++                   BOOT_ARGS_CMDLINE_SIZE);
++        return;
++    }
++    g_free(vms->xnu_boot_args);
++    vms->xnu_boot_args = g_strdup(value);
++}
++
++static void vmapple_get_csr_config(Object *obj, Visitor *v,
++                                   const char *name, void *opaque,
++                                   Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++
++    visit_type_int(v, name, &vms->csr_config, errp);
++}
++
++static void vmapple_set_csr_config(Object *obj, Visitor *v,
++                                   const char *name, void *opaque,
++                                   Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++    int64_t value;
++
++    if (!visit_type_int(v, name, &value, errp)) {
++        return;
++    }
++    if (value < -1 || value > UINT32_MAX) {
++        error_setg(errp, "%s must be -1 (unset) or a 32-bit value", name);
++        return;
++    }
++    vms->csr_config = value;
++}
++
++static bool vmapple_get_internal_use_only_unit(Object *obj, Error **errp)
++{
++    return VMAPPLE_MACHINE(obj)->internal_use_only_unit;
++}
++
++static void vmapple_set_internal_use_only_unit(Object *obj, bool value,
++                                               Error **errp)
++{
++    VMAPPLE_MACHINE(obj)->internal_use_only_unit = value;
++}
++
+ static void mach_vmapple_init(MachineState *machine)
+ {
+     VMAppleMachineState *vms = VMAPPLE_MACHINE(machine);
+@@ -610,6 +993,7 @@ static void mach_vmapple_init(MachineState *machine)
+                                     &error_fatal);
+         }
+ 
++        ARM_CPU(cpu)->x_page_bits = 14;
+         cs = CPU(cpu);
+         cs->cpu_index = n;
+ 
+@@ -647,6 +1031,7 @@ static void mach_vmapple_init(MachineState *machine)
+     create_uart(vms, VMAPPLE_UART, sysmem, serial_hd(0));
+     create_rtc(vms);
+     create_pcie(vms);
++    create_msi_frame(vms);
+ 
+     create_gpio_devices(vms, VMAPPLE_GPIO, sysmem);
+ 
+@@ -671,6 +1056,19 @@ static void mach_vmapple_init(MachineState *machine)
+     vms->bootinfo.loader_start = vms->memmap[VMAPPLE_MEM].base;
+     vms->bootinfo.skip_dtb_autoload = true;
+     vms->bootinfo.firmware_loaded = true;
++    vms->machine_done.notify = vmapple_machine_done;
++    qemu_add_machine_init_done_notifier(&vms->machine_done);
++    if (vms->internal_use_only_unit || vms->xnu_boot_args ||
++        vms->csr_config >= 0) {
++        if (!tcg_enabled()) {
++            error_report("vmapple: the XNU handoff hook needs TCG");
++            exit(1);
++        }
++        cpu_breakpoint_insert(first_cpu, vms->xnu_handoff_pc, BP_GDB,
++                              &vms->handoff_bp);
++        vms->handoff_vmsh = qemu_add_vm_change_state_handler(
++            vmapple_handoff_state, vms);
++    }
+     arm_load_kernel(ARM_CPU(first_cpu), machine, &vms->bootinfo);
+ 
+     qemu_register_reset(vmapple_reset, vms);
+@@ -723,6 +1121,26 @@ static GlobalProperty vmapple_compat_defaults[] = {
+      * mapping in the XHCI controller works around the problem.
+      */
+     { TYPE_XHCI_PCI, "conditional-intr-mapping", "on" },
++    /*
++     * macOS AppleVirtIO allocates each virtqueue's descriptor table and
++     * driver area in one buffer and reads the device area at the first
++     * 4 KiB boundary past the end of the driver area, but it tells the
++     * device the first boundary past the start of the driver area. The two
++     * differ when the driver area straddles a 4 KiB boundary, which only
++     * happens for small queues whose buffer is not page aligned: the 64-entry
++     * virtio-net control queue, about one boot in nine. The device then
++     * completes control commands where the guest never looks, the first
++     * receive-mode command never returns and en0 stays up without RUNNING
++     * and without an address. Do not offer the control queue (nor the
++     * features that need it) so the guest never sets one up.
++     */
++    { TYPE_VIRTIO_NET, "ctrl_vq", "off" },
++    { TYPE_VIRTIO_NET, "ctrl_rx", "off" },
++    { TYPE_VIRTIO_NET, "ctrl_vlan", "off" },
++    { TYPE_VIRTIO_NET, "ctrl_rx_extra", "off" },
++    { TYPE_VIRTIO_NET, "ctrl_mac_addr", "off" },
++    { TYPE_VIRTIO_NET, "ctrl_guest_offloads", "off" },
++    { TYPE_VIRTIO_NET, "guest_announce", "off" },
+ };
+ 
+ static const char *vmapple_get_default_cpu_type(const MachineState *ms)
+@@ -740,7 +1158,8 @@ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
+     mc->block_default_type = IF_VIRTIO;
+     mc->no_cdrom = 1;
+     mc->pci_allow_0_address = true;
+-    mc->minimum_page_bits = 12;
++    /* macOS only uses the 16K translation granule */
++    mc->minimum_page_bits = 14;
+     mc->possible_cpu_arch_ids = vmapple_possible_cpu_arch_ids;
+     mc->cpu_index_to_instance_props = vmapple_cpu_index_to_props;
+     mc->get_default_cpu_type = vmapple_get_default_cpu_type;
+@@ -778,6 +1197,31 @@ static void vmapple_instance_init(Object *obj)
+     object_property_set_description(obj, "run-installer",
+                                     "Boot the installer environment");
+ 
++    vms->xnu_handoff_pc = 0xe0a00000;
++    object_property_add_bool(obj, "internal-use-only-unit",
++                             vmapple_get_internal_use_only_unit,
++                             vmapple_set_internal_use_only_unit);
++    object_property_set_description(obj, "internal-use-only-unit",
++                                    "Set /chosen/internal-use-only-unit "
++                                    "at the iBoot handoff (TCG only)");
++    object_property_add_uint64_ptr(obj, "xnu-handoff-pc",
++                                   &vms->xnu_handoff_pc,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_str(obj, "xnu-boot-args", vmapple_get_xnu_boot_args,
++                            vmapple_set_xnu_boot_args);
++    vms->csr_config = -1;
++    object_property_add(obj, "csr-config", "int", vmapple_get_csr_config,
++                        vmapple_set_csr_config, NULL, NULL);
++    object_property_set_description(obj, "csr-config",
++                                    "SIP policy (lp-sip0) for XNU, set at "
++                                    "the iBoot handoff, -1 to leave it");
++    object_property_set_description(obj, "xnu-boot-args",
++                                    "XNU command line to put in boot_args "
++                                    "at the iBoot handoff (TCG only)");
++    object_property_set_description(obj, "xnu-handoff-pc",
++                                    "Address of the iBoot trampoline "
++                                    "that enters XNU");
++
+     object_property_add(obj, "tcg-smp-final-shift", "int",
+                         vmapple_get_tcg_smp_final_shift,
+                         vmapple_set_tcg_smp_final_shift, NULL, NULL);
+diff --git a/include/hw/vmapple/msi-frame.h b/include/hw/vmapple/msi-frame.h
+new file mode 100644
+index 0000000000..a9657ee24b
+--- /dev/null
++++ b/include/hw/vmapple/msi-frame.h
+@@ -0,0 +1,17 @@
++/*
++ * Apple vmapple MSI frame
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef HW_VMAPPLE_MSI_FRAME_H
++#define HW_VMAPPLE_MSI_FRAME_H
++
++#include "qom/object.h"
++
++#define TYPE_VMAPPLE_MSI_FRAME "vmapple-msi-frame"
++OBJECT_DECLARE_SIMPLE_TYPE(VMAppleMSIFrameState, VMAPPLE_MSI_FRAME)
++
++#define VMAPPLE_MSI_MAX_VECTORS 128
++
++#endif
+diff --git a/scripts/27on86/check-vmapple-handoff.sh b/scripts/27on86/check-vmapple-handoff.sh
+new file mode 100755
+index 0000000000..7a8ddb1549
+--- /dev/null
++++ b/scripts/27on86/check-vmapple-handoff.sh
+@@ -0,0 +1,66 @@
++#!/bin/sh
++# Boot test for the vmapple XNU handoff hook (internal-use-only-unit).
++set -eu
++script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++source_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
++build_dir=${QEMU_27ON86_BUILD_DIR:-"$source_root/build"}
++qemu=${QEMU_27ON86_QEMU:-"$build_dir/qemu-system-aarch64"}
++fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/27on86-handoff.XXXXXX")
++cleanup()
++{
++    rm -f "$fixture_dir"/*
++    rmdir "$fixture_dir"
++}
++trap cleanup EXIT HUP INT TERM
++if ! test -x "$qemu"; then
++    echo "missing emulator; run scripts/27on86/build-aarch64.sh" >&2
++    exit 1
++fi
++clang --target=aarch64-none-elf \
++    -c "$source_root/tests/27on86/vmapple-handoff.S" \
++    -o "$fixture_dir/firmware.o"
++llvm-objcopy -O binary -j .text.boot "$fixture_dir/firmware.o" \
++    "$fixture_dir/firmware"
++truncate -s 16384 "$fixture_dir/aux"
++truncate -s 16384 "$fixture_dir/root"
++
++run_fixture()
++{
++    machine=$1
++    status=0
++    timeout --signal=TERM 10s "$qemu" \
++        -machine "$machine" \
++        -cpu max \
++        -smp 1 \
++        -m 1G \
++        -nodefaults \
++        -display none \
++        -monitor none \
++        -serial stdio \
++        -no-reboot \
++        -bios "$fixture_dir/firmware" \
++        -drive file="$fixture_dir/aux",if=pflash,format=raw \
++        -drive file="$fixture_dir/root",if=pflash,format=raw \
++        >"$fixture_dir/log" 2>&1 || status=$?
++    if test "$status" -ne 0 && test "$status" -ne 124; then
++        cat "$fixture_dir/log" >&2
++        echo "VMApple handoff test exited unexpectedly: $status" >&2
++        exit 1
++    fi
++}
++
++# With the hook the property must be set on the valid entries only.
++run_fixture "vmapple,uuid=1,accel=tcg,internal-use-only-unit=on,xnu-handoff-pc=0x101000,csr-config=0x7f,xnu-boot-args=-s -v test"
++if ! grep -Fq 'VMAPPLE_HANDOFF_OK' "$fixture_dir/log"; then
++    cat "$fixture_dir/log" >&2
++    echo "VMApple handoff test failed" >&2
++    exit 1
++fi
++# Without the hook the same fixture has to fail, or it proves nothing.
++run_fixture "vmapple,uuid=1,accel=tcg"
++if ! grep -Fq 'VMAPPLE_HANDOFF_FAIL 2' "$fixture_dir/log"; then
++    cat "$fixture_dir/log" >&2
++    echo "VMApple handoff fixture passes without the hook" >&2
++    exit 1
++fi
++echo "VMApple handoff test passed"
+diff --git a/scripts/27on86/check-vmapple-hvc-msi.sh b/scripts/27on86/check-vmapple-hvc-msi.sh
+new file mode 100755
+index 0000000000..ce4171719d
+--- /dev/null
++++ b/scripts/27on86/check-vmapple-hvc-msi.sh
+@@ -0,0 +1,51 @@
++#!/bin/sh
++# Boot test for the vmapple Apple vendor hypercalls and the MSI frame.
++set -eu
++script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++source_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
++build_dir=${QEMU_27ON86_BUILD_DIR:-"$source_root/build"}
++qemu="$build_dir/qemu-system-aarch64"
++fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/27on86-hvc.XXXXXX")
++cleanup()
++{
++    rm -f "$fixture_dir"/*
++    rmdir "$fixture_dir"
++}
++trap cleanup EXIT HUP INT TERM
++if ! test -x "$qemu"; then
++    echo "missing emulator; run scripts/27on86/build-aarch64.sh" >&2
++    exit 1
++fi
++clang --target=aarch64-none-elf \
++    -c "$source_root/tests/27on86/vmapple-hvc-msi.S" \
++    -o "$fixture_dir/firmware.o"
++llvm-objcopy -O binary -j .text.boot "$fixture_dir/firmware.o" \
++    "$fixture_dir/firmware"
++truncate -s 16384 "$fixture_dir/aux"
++truncate -s 16384 "$fixture_dir/root"
++status=0
++timeout --signal=TERM 10s "$qemu" \
++    -machine vmapple,uuid=1,accel=tcg \
++    -cpu max \
++    -smp 1 \
++    -m 1G \
++    -nodefaults \
++    -display none \
++    -monitor none \
++    -serial stdio \
++    -no-reboot \
++    -bios "$fixture_dir/firmware" \
++    -drive file="$fixture_dir/aux",if=pflash,format=raw \
++    -drive file="$fixture_dir/root",if=pflash,format=raw \
++    >"$fixture_dir/log" 2>&1 || status=$?
++if test "$status" -ne 0 && test "$status" -ne 124; then
++    cat "$fixture_dir/log" >&2
++    echo "VMApple hypercall test exited unexpectedly: $status" >&2
++    exit 1
++fi
++if ! grep -Fq 'VMAPPLE_HVC_MSI_OK' "$fixture_dir/log"; then
++    cat "$fixture_dir/log" >&2
++    echo "VMApple hypercall/MSI test failed" >&2
++    exit 1
++fi
++echo "VMApple hypercall/MSI test passed"
+diff --git a/scripts/27on86/run-vmapple-tcg.sh b/scripts/27on86/run-vmapple-tcg.sh
+index 9e1a83a6ed..52815b0338 100755
+--- a/scripts/27on86/run-vmapple-tcg.sh
++++ b/scripts/27on86/run-vmapple-tcg.sh
+@@ -22,6 +22,7 @@ virtio_console_max_ports=${QEMU_27ON86_VIRTIO_CONSOLE_MAX_PORTS:-31}
+ gdb_port=${QEMU_27ON86_GDB_PORT:-}
+ pause_at_start=${QEMU_27ON86_PAUSE_AT_START:-off}
+ no_reboot=${QEMU_27ON86_NO_REBOOT:-on}
++internal_use=${QEMU_27ON86_INTERNAL_USE_ONLY_UNIT:-off}
+ 
+ : "${QEMU_27ON86_FIRMWARE:?set QEMU_27ON86_FIRMWARE}"
+ : "${QEMU_27ON86_AUX:?set QEMU_27ON86_AUX}"
+@@ -132,6 +133,17 @@ else
+     machine="vmapple,uuid=$QEMU_27ON86_ECID,accel=tcg,run-installer=$run_installer"
+ fi
+ 
++case "$internal_use" in
++    on)
++        machine="$machine,internal-use-only-unit=on"
++        ;;
++    off)
++        ;;
++    *)
++        echo "internal-use-only-unit selector must be on or off" >&2
++        exit 1
++        ;;
++esac
+ if test -n "$pcap"; then
+     set -- "$@" -object "filter-dump,id=netcap,netdev=net0,file=$pcap"
+ fi
+diff --git a/system/vl.c b/system/vl.c
+index 061cbdf860..672b6c0899 100644
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -2214,6 +2214,19 @@ static void qemu_create_machine(QDict *qdict)
+     object_property_add_child(machine_get_container("unattached"),
+                               "sysbus", OBJECT(sysbus_get_default()));
+ 
++    {
++        /*
++         * x-page-bits=N is for tests: it raises the target page size of a
++         * board that allows it, together with the CPU property of the same
++         * name.
++         */
++        const char *xpb = qdict_get_try_str(qdict, "x-page-bits");
++        int xbits = xpb ? atoi(xpb) : 0;
++
++        if (xbits > machine_class->minimum_page_bits && xbits <= 16) {
++            machine_class->minimum_page_bits = xbits;
++        }
++    }
+     if (machine_class->minimum_page_bits) {
+         if (!set_preferred_target_page_bits(machine_class->minimum_page_bits)) {
+             /* This would be a board error: specifying a minimum smaller than
+diff --git a/target/arm/cpu.c b/target/arm/cpu.c
+index 787e4dc7ab..6de4291968 100644
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -2130,6 +2130,15 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
+              * so we can use 4K pages.
+              */
+             pagebits = 12;
++            /*
++             * A board that only runs guests with a larger translation
++             * granule (macOS uses 16K) can ask for bigger target pages.
++             * Guest pages smaller than that are then never cached in the
++             * TLB, and a guest page is never larger than a target page.
++             */
++            if (cpu->x_page_bits > pagebits) {
++                pagebits = cpu->x_page_bits;
++            }
+         } else {
+             /*
+              * For CPUs which might have tiny 1K pages, or which have an
+@@ -2493,6 +2502,7 @@ static const Property arm_cpu_properties[] = {
+     DEFINE_PROP_INT32("core-count", ARMCPU, core_count, -1),
+     /* True to default to the backward-compat old CNTFRQ rather than 1Ghz */
+     DEFINE_PROP_BOOL("backcompat-cntfrq", ARMCPU, backcompat_cntfrq, false),
++    DEFINE_PROP_UINT8("x-page-bits", ARMCPU, x_page_bits, 0),
+     DEFINE_PROP_BOOL("backcompat-pauth-default-use-qarma5", ARMCPU,
+                       backcompat_pauth_default_use_qarma5, false),
+ };
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index 69633ba226..33e3a8aa7f 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -1127,6 +1127,8 @@ struct ArchCPU {
+     bool prop_pauth_qarma3;
+     bool prop_pauth_qarma5;
+     bool pauth_impdef_compat;
++    /* Minimum guest page size the board promises, log2; 0 for the default */
++    uint8_t x_page_bits;
+     bool prop_lpa2;
+ 
+     /* GM blocksize, in log_2(words), ie low 4 bits of GMID_EL0 */
+diff --git a/target/arm/tcg/psci.c b/target/arm/tcg/psci.c
+index 56754bde95..931095ca18 100644
+--- a/target/arm/tcg/psci.c
++++ b/target/arm/tcg/psci.c
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/log.h"
+ #include "cpu.h"
+ #include "helper.h"
+ #include "kvm-consts.h"
+@@ -92,6 +93,10 @@ void arm_handle_psci_call(ARMCPU *cpu)
+         CPUState *target_cpu_state;
+         ARMCPU *target_cpu;
+ 
++    case 0xC1000000 ... 0xC10000FF: /* Apple vendor hypercall from macOS 27 XNU early boot */
++        qemu_log_mask(LOG_UNIMP, "vmapple: HVC 0x%" PRIx64 " x1=%" PRIx64 " x2=%" PRIx64 " x3=%" PRIx64 "\n", param[0], param[1], param[2], param[3]);
++        ret = 0;
++        break;
+     case QEMU_PSCI_0_2_FN_PSCI_VERSION:
+         ret = QEMU_PSCI_VERSION_1_1;
+         break;
+diff --git a/target/arm/tcg/tlb_helper.c b/target/arm/tcg/tlb_helper.c
+index 4c3f16dc2a..b5591c8949 100644
+--- a/target/arm/tcg/tlb_helper.c
++++ b/target/arm/tcg/tlb_helper.c
+@@ -6,6 +6,7 @@
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+ #include "qemu/osdep.h"
++#include "exec/target_page.h"
+ #include "cpu.h"
+ #include "helper.h"
+ #include "accel/tcg/cpu-loop.h"
+@@ -389,6 +390,19 @@ bool arm_cpu_tlb_fill_align(CPUState *cs, CPUTLBEntryFull *out, vaddr address,
+     } else if (get_phys_addr(&cpu->env, address, access_type, memop,
+                              core_to_arm_mmu_idx(&cpu->env, mmu_idx),
+                              &res, fi)) {
++        /*
++         * The softmmu keeps one offset per TLB entry, so a guest page
++         * smaller than the target page cannot be mapped unless its virtual
++         * and physical offsets inside the target page agree.  Only boards
++         * that raise the target page size (x-page-bits) can get here, and
++         * they promise a guest granule that is at least as large.
++         */
++        if (TARGET_PAGE_BITS > 12 && res.f.lg_page_size < TARGET_PAGE_BITS) {
++            cpu_abort(cs, "guest page of 2^%d bytes at 0x%" VADDR_PRIx
++                      " is smaller than the 2^%d bytes target page "
++                      "(x-page-bits is for 16K granule guests only)\n",
++                      res.f.lg_page_size, address, TARGET_PAGE_BITS);
++        }
+         res.f.extra.arm.pte_attrs = res.cacheattrs.attrs;
+         res.f.extra.arm.shareability = res.cacheattrs.shareability;
+         *out = res.f;
+diff --git a/tests/27on86/vmapple-handoff.S b/tests/27on86/vmapple-handoff.S
+new file mode 100644
+index 0000000000..361137aa0d
+--- /dev/null
++++ b/tests/27on86/vmapple-handoff.S
+@@ -0,0 +1,198 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Boot test for the vmapple XNU handoff hook (internal-use-only-unit).
++ * Builds a boot_args structure and a one-node Apple device tree in RAM and
++ * enters a fake iBoot trampoline at 0x101000 three times:
++ *   1. with a boot_args that has the wrong version, the tree must not change;
++ *   2. with a valid boot_args, /chosen/internal-use-only-unit must become 1;
++ *   3. after resetting the property, again with a valid boot_args, to prove
++ *      that the breakpoint is armed again after stepping over the trampoline.
++ * The XNU command line given with xnu-boot-args is checked on the same
++ * entries. Prints VMAPPLE_HANDOFF_OK on the PL011, or VMAPPLE_HANDOFF_FAIL <n>.
++ */
++    .section .text.boot, "ax"
++    .global _start
++    .set    DT_RAM, 0x70200000
++    .set    ARGS_RAM, 0x70100000
++    .set    BAD_ARGS_RAM, 0x70110000
++_start:
++    movz    x20, #0x2001, lsl #16        /* PL011 */
++    mov     w3, #0x301
++    str     w3, [x20, #0x30]
++    /* copy the device tree to RAM */
++    ldr     x0, =DT_RAM
++    adr     x1, dt_start
++    adr     x2, dt_end
++1:  ldr     w3, [x1], #4
++    str     w3, [x0], #4
++    cmp     x1, x2
++    b.lo    1b
++    /* boot_args: revision 3, version 2, virt base 0x80000000, phys base
++     * 0x70000000, device tree at virt 0x80200000 */
++    ldr     x4, =ARGS_RAM
++    movz    w3, #3
++    movk    w3, #2, lsl #16
++    str     w3, [x4]
++    movz    x3, #0x8000, lsl #16
++    str     x3, [x4, #8]
++    movz    x3, #0x7000, lsl #16
++    str     x3, [x4, #16]
++    movz    x3, #0x8020, lsl #16
++    str     x3, [x4, #96]
++    adr     x3, dt_end
++    adr     x5, dt_start
++    sub     w3, w3, w5
++    str     w3, [x4, #104]
++    /* a boot_args with version 0 */
++    ldr     x6, =BAD_ARGS_RAM
++    str     xzr, [x6]
++    ldr     x21, =DT_RAM + (dt_value - dt_start)
++    ldr     x22, =DT_RAM + (dt_asmb - dt_start)
++    ldr     x23, =DT_RAM + (dt_nsih - dt_start)
++    /* 1: wrong version */
++    mov     x1, x6
++    bl      tramp_call
++    ldr     w0, [x21]
++    cbnz    w0, fail1
++    ldr     w0, [x6, #108]
++    ldr     w9, [x6, #112]
++    orr     w0, w0, w9
++    cbnz    w0, fail1
++    ldr     w0, [x22]
++    cmp     w0, #2
++    b.ne    fail1
++    ldr     w0, [x23]
++    ldr     w9, =0x6e2d706c              /* "lp-n" */
++    cmp     w0, w9
++    b.ne    fail1
++    /* 2: valid */
++    ldr     x1, =ARGS_RAM
++    bl      tramp_call
++    ldr     w0, [x21]
++    cmp     w0, #1
++    b.ne    fail2
++    ldr     x4, =ARGS_RAM
++    ldr     w0, [x4, #108]
++    ldr     w9, =0x2d20732d              /* "-s -" */
++    cmp     w0, w9
++    b.ne    fail2
++    ldr     w0, [x4, #112]
++    ldr     w9, =0x65742076              /* "v te" */
++    cmp     w0, w9
++    b.ne    fail2
++    bl      check_csr
++    /* 3: valid again after resetting the properties */
++    str     wzr, [x21]
++    str     wzr, [x23, #36]
++    ldr     x1, =ARGS_RAM
++    bl      tramp_call
++    ldr     w0, [x21]
++    cmp     w0, #1
++    b.ne    fail3
++    bl      check_csr
++    adr     x1, ok_msg
++    b       print
++check_csr:
++    /* lp-nsih became lp-sip0 plus lp-pad, exactly once */
++    mov     x24, x30
++    ldr     w0, [x22]
++    cmp     w0, #3
++    b.ne    fail4
++    ldr     w0, [x23]
++    ldr     w9, =0x732d706c              /* "lp-s" */
++    cmp     w0, w9
++    b.ne    fail4
++    ldr     w0, [x23, #36]
++    cmp     w0, #0x7f
++    b.ne    fail4
++    ldr     w0, [x23, #44]
++    ldr     w9, =0x702d706c              /* "lp-p" */
++    cmp     w0, w9
++    b.ne    fail4
++    ret     x24
++fail4:
++    mov     w19, #4
++    b       fail
++fail1:
++    mov     w19, #1
++    b       fail
++fail2:
++    mov     w19, #2
++    b       fail
++fail3:
++    mov     w19, #3
++fail:
++    adr     x1, fail_msg
++    bl      puts
++    add     w19, w19, #'0'
++    mov     w2, w19
++    bl      putc
++    mov     w2, #10
++    bl      putc
++    b       halt
++print:
++    bl      puts
++halt:
++    wfi
++    b       halt
++tramp_call:
++    mov     x25, x30
++    ldr     x9, =0x101000
++    blr     x9
++    ret     x25
++puts:
++    mov     x24, x30
++1:  ldrb    w2, [x1], #1
++    cbz     w2, 2f
++    bl      putc
++    b       1b
++2:  ret     x24
++putc:
++    ldr     w3, [x20, #0x18]
++    tbnz    w3, #5, putc
++    str     w2, [x20]
++    ret
++    .ltorg
++ok_msg:
++    .asciz  "VMAPPLE_HANDOFF_OK\n"
++fail_msg:
++    .asciz  "VMAPPLE_HANDOFF_FAIL "
++    .balign 4
++dt_start:
++    /* root node: one property (name), one child */
++    .long   1, 1
++    .asciz  "name"
++    .fill   27, 1, 0
++    .long   12
++    .asciz  "device-tree"
++    /* /chosen: two properties, one child (asmb) */
++    .long   2, 1
++    .asciz  "name"
++    .fill   27, 1, 0
++    .long   7
++    .asciz  "chosen"
++    .balign 4
++    .asciz  "internal-use-only-unit"
++    .fill   9, 1, 0
++    .long   4
++dt_value:
++    .long   0
++    /* /chosen/asmb: name and a 48-byte lp-nsih, no children */
++dt_asmb:
++    .long   2, 0
++    .asciz  "name"
++    .fill   27, 1, 0
++    .long   5
++    .asciz  "asmb"
++    .balign 4
++dt_nsih:
++    .asciz  "lp-nsih"
++    .fill   24, 1, 0
++    .long   48
++    .fill   48, 1, 0xa5
++dt_end:
++    /* the fake trampoline, 0x1000 into the firmware image */
++    .org    0x1000
++tramp:
++    msr     daifset, #15
++    ret
+diff --git a/tests/27on86/vmapple-hvc-msi.S b/tests/27on86/vmapple-hvc-msi.S
+new file mode 100644
+index 0000000000..fc9567be0a
+--- /dev/null
++++ b/tests/27on86/vmapple-hvc-msi.S
+@@ -0,0 +1,113 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Boot test for the Apple vendor hypercalls and the vmapple MSI frame.
++ * Prints VMAPPLE_HVC_MSI_OK on the PL011, or VMAPPLE_HVC_MSI_FAIL <n>.
++ */
++    .section .text.boot, "ax"
++    .global _start
++
++    .macro  hvc_call id
++    movz    x0, #((\id) >> 16) & 0xffff, lsl #16
++    movk    x0, #(\id) & 0xffff
++    mov     x1, #0
++    hvc     #0
++    .endm
++
++    .macro  expect_x0 val, n
++    mov     x9, #\val
++    cmp     x0, x9
++    mov     w19, #\n
++    b.ne    fail
++    .endm
++
++_start:
++    movz    x20, #0x2001, lsl #16        /* PL011 */
++    mov     w3, #0x301
++    str     w3, [x20, #0x30]
++
++    hvc_call 0xc1000000
++    expect_x0 0, 1
++
++    hvc_call 0xc1000001
++    expect_x0 0, 2
++    ldr     x9, =0x5250505250505250
++    cmp     x2, x9
++    mov     w19, #3
++    b.ne    fail
++    ldr     x9, =0x4a4f504a4f504a4f
++    cmp     x3, x9
++    mov     w19, #4
++    b.ne    fail
++
++    hvc_call 0xc1000003
++    expect_x0 0, 5
++    hvc_call 0xc1000004
++    expect_x0 0, 6
++    hvc_call 0xc1000005
++    expect_x0 0, 7
++
++    hvc_call 0xc10000f0
++    expect_x0 -1, 8
++    hvc_call 0x8300ff01
++    expect_x0 -1, 9
++    hvc_call 0xc3000003
++    expect_x0 -1, 10
++    hvc_call 0xc6000000
++    expect_x0 -1, 11
++
++    /* MSI frame: valid, base INTID 128, 64 vectors */
++    movz    x21, #0x1fff, lsl #16
++    ldr     w0, [x21, #8]
++    movz    w9, #0x8080, lsl #16
++    movk    w9, #0x0040
++    cmp     w0, w9
++    mov     w19, #12
++    b.ne    fail
++
++    /* Doorbell: SPI 96 (INTID 128) must become pending. Make it edge. */
++    movz    x22, #0x1000, lsl #16        /* GICD */
++    mov     w0, #0x52                    /* ARE_NS | EnableGrp1NS | EnableGrp0 */
++    str     w0, [x22]
++    add     x23, x22, #0xc00
++    mov     w0, #2
++    str     w0, [x23, #0x20]             /* ICFGR8: INTID 128 edge */
++    mov     w0, #0x80
++    str     w0, [x21, #0x40]
++    ldr     w0, [x22, #0x210]            /* ISPENDR4 bit 0 = INTID 128 */
++    tst     w0, #1
++    mov     w19, #13
++    b.eq    fail
++
++    adr     x1, ok_msg
++    b       print
++fail:
++    adr     x1, fail_msg
++    bl      puts
++    add     w19, w19, #'0'
++    mov     w2, w19
++    bl      putc
++    mov     w2, #10
++    bl      putc
++    b       halt
++print:
++    bl      puts
++halt:
++    wfi
++    b       halt
++puts:
++    mov     x24, x30
++1:  ldrb    w2, [x1], #1
++    cbz     w2, 2f
++    bl      putc
++    b       1b
++2:  ret     x24
++putc:
++    ldr     w3, [x20, #0x18]
++    tbnz    w3, #5, putc
++    str     w2, [x20]
++    ret
++    .ltorg
++ok_msg:
++    .asciz  "VMAPPLE_HVC_MSI_OK\n"
++fail_msg:
++    .asciz  "VMAPPLE_HVC_MSI_FAIL "
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index 3aec8d2174..2e8f3c377d 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -267,6 +267,8 @@ qtests_aarch64 = \
+   (config_all_devices.has_key('CONFIG_XLNX_ZYNQMP_ARM') ? ['xlnx-can-test', 'fuzz-xlnx-dp-test'] : []) + \
+   (config_all_devices.has_key('CONFIG_XLNX_VERSAL') ? ['xlnx-canfd-test', 'xlnx-versal-trng-test'] : []) + \
+   (config_all_devices.has_key('CONFIG_RASPI') ? ['bcm2835-dma-test', 'bcm2835-i2c-test'] : []) +  \
++  (config_all_devices.has_key('CONFIG_VMAPPLE') and
++   config_all_devices.has_key('CONFIG_VIRTIO_NET') ? ['vmapple-net-test'] : []) + \
+   (config_all_devices.has_key('CONFIG_USB_XHCI_PCI') and
+    config_all_devices.has_key('CONFIG_USB_HID') and
+    config_all_devices.has_key('CONFIG_ARM_VIRT') ? ['usb-hid-identity-test'] : []) + \
+diff --git a/tests/qtest/vmapple-net-test.c b/tests/qtest/vmapple-net-test.c
+new file mode 100644
+index 0000000000..42cd895b45
+--- /dev/null
++++ b/tests/qtest/vmapple-net-test.c
+@@ -0,0 +1,104 @@
++/*
++ * QTest testcase for the vmapple virtio-net defaults
++ *
++ * macOS AppleVirtIO tells the device a different device-area address than
++ * the one it polls when a small virtqueue's driver area straddles a 4 KiB
++ * boundary, which hangs the virtio-net control queue in about one boot in
++ * nine. The vmapple machine therefore does not offer the control queue or
++ * the features that depend on it. This checks those defaults and that a
++ * command line can still turn the control queue back on.
++ *
++ * This work is licensed under the terms of the GNU GPL, version 2 or later.
++ * See the COPYING file in the top-level directory.
++ */
++
++#include "qemu/osdep.h"
++#include "libqtest.h"
++#include "qobject/qdict.h"
++
++static const char *const ctrl_props[] = {
++    "ctrl_vq", "ctrl_rx", "ctrl_vlan", "ctrl_rx_extra", "ctrl_mac_addr",
++    "ctrl_guest_offloads", "guest_announce",
++};
++
++static bool get_bool(QTestState *qts, const char *path, const char *prop)
++{
++    QDict *resp = qtest_qmp(qts,
++        "{ 'execute': 'qom-get', 'arguments': "
++        "{ 'path': %s, 'property': %s } }", path, prop);
++    bool val;
++
++    g_assert(qdict_haskey(resp, "return"));
++    val = qdict_get_bool(resp, "return");
++    qobject_unref(resp);
++    return val;
++}
++
++/* Empty firmware, AUX and root images are enough to realize the board */
++static QTestState *start_vmapple(const char *netopts)
++{
++    g_autofree char *dir = g_dir_make_tmp("vmapple-net-test-XXXXXX", NULL);
++    g_autofree char *bios = g_build_filename(dir, "bios.bin", NULL);
++    g_autofree char *aux = g_build_filename(dir, "aux.img", NULL);
++    g_autofree char *root = g_build_filename(dir, "root.img", NULL);
++    QTestState *qts;
++
++    g_assert(dir);
++    g_assert(g_file_set_contents(bios, "", 0, NULL));
++    g_assert(truncate(bios, 64 * 1024) == 0);
++    g_assert(g_file_set_contents(aux, "", 0, NULL));
++    g_assert(truncate(aux, 1024 * 1024) == 0);
++    g_assert(g_file_set_contents(root, "", 0, NULL));
++    g_assert(truncate(root, 1024 * 1024) == 0);
++
++    qts = qtest_initf("-machine vmapple,uuid=1,memory-backend=m0 -cpu max "
++                      "-object memory-backend-memfd,share=on,id=m0,size=1G "
++                      "-m 1G -nodefaults -bios %s "
++                      "-drive if=pflash,format=raw,file=%s "
++                      "-drive if=pflash,format=raw,file=%s "
++                      "-device virtio-net-pci,id=n0%s",
++                      bios, aux, root, netopts);
++
++    unlink(bios);
++    unlink(aux);
++    unlink(root);
++    rmdir(dir);
++    return qts;
++}
++
++static void test_no_ctrl_vq(void)
++{
++    QTestState *qts = start_vmapple("");
++    size_t i;
++
++    for (i = 0; i < G_N_ELEMENTS(ctrl_props); i++) {
++        g_assert_false(get_bool(qts, "/machine/peripheral/n0/virtio-backend",
++                                ctrl_props[i]));
++    }
++    qtest_quit(qts);
++}
++
++static void test_ctrl_vq_override(void)
++{
++    QTestState *qts = start_vmapple(",ctrl_vq=on,ctrl_rx=on");
++
++    g_assert_true(get_bool(qts, "/machine/peripheral/n0/virtio-backend",
++                           "ctrl_vq"));
++    g_assert_true(get_bool(qts, "/machine/peripheral/n0/virtio-backend",
++                           "ctrl_rx"));
++    qtest_quit(qts);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++
++    if (!qtest_has_machine("vmapple") || !qtest_has_accel("tcg")) {
++        g_test_skip("vmapple machine or TCG not available");
++        return g_test_run();
++    }
++    qtest_add_func("/vmapple/virtio-net/no-ctrl-vq", test_no_ctrl_vq);
++    qtest_add_func("/vmapple/virtio-net/ctrl-vq-override",
++                   test_ctrl_vq_override);
++    return g_test_run();
++}

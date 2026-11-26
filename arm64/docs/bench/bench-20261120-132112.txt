@@ -1,0 +1,20 @@
+snapintosh bench  release c9939ff  QEMU md5 455899b7  3 runs
+host: 12th Gen Intel(R) Core(TM) i5-1240P, 6 threads, guest 6 vCPUs / 4G, GPU path ANV, translation cache ro
+seconds from QEMU start unless noted; spread is min to max and the standard deviation
+┌─────────────────────────────────────────────┬────────┬───────┬───────┬──────┬───┐
+│ metric                                      │ median │   min │   max │   sd │ n │
+├─────────────────────────────────────────────┼────────┼───────┼───────┼──────┼───┤
+│ boot to ssh (s)                             │  103.9 │  94.4 │ 107.2 │  6.7 │ 3 │
+│ boot to Dock (s)                            │  157.9 │ 142.9 │ 188.5 │ 23.2 │ 3 │
+│ Safari cold launch, open to first draw (s)  │  187.2 │ 146.2 │ 228.3 │ 41.0 │ 3 │
+│ Safari cold launch, open to GET at host (s) │  164.6 │ 128.4 │ 196.4 │ 34.0 │ 3 │
+│ Safari launch from resumed snapshot (s)     │      - │     - │     - │    - │ 0 │
+│ Safari from resume, open to GET at host (s) │      - │     - │     - │    - │ 0 │
+│ window drag (fps)                           │   6.09 │  5.94 │  6.69 │ 0.40 │ 3 │
+│ resume time (load to cont) (s)              │      - │     - │     - │    - │ 0 │
+│ ssh after resume (s)                        │      - │     - │     - │    - │ 0 │
+└─────────────────────────────────────────────┴────────┴───────┴───────┴──────┴───┘
+problems:
+  run 1: resume: no SETTIME line
+  run 2: resume: no SETTIME line
+  run 3: resume: no SETTIME line

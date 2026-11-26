@@ -1,0 +1,188 @@
+From cd7d1b017f7c78957ab3a96a40b87ee552194008 Mon Sep 17 00:00:00 2001
+From: snaplab <snaplab@localhost>
+Date: Tue, 17 Nov 2026 13:12:36 -0500
+Subject: [PATCH 2/4] feat(tree): keep the gfx and iosurface-mapper nodes with
+ Graphics.KeepAppleGfx
+
+---
+ crates/ambrosia/src/config.rs    |  7 +++++++
+ crates/ambrosia/src/tree.rs      | 34 ++++++++++++++++++++++++++++++--
+ crates/ambrosia/tests/boot.rs    |  1 +
+ crates/ambrosia/tests/restore.rs |  1 +
+ crates/firmware/src/main.rs      |  2 ++
+ 5 files changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/crates/ambrosia/src/config.rs b/crates/ambrosia/src/config.rs
+index 309032c..6928f68 100644
+--- a/crates/ambrosia/src/config.rs
++++ b/crates/ambrosia/src/config.rs
+@@ -134,6 +134,10 @@ pub struct Config<'a> {
+     /// `DisplayNode`, display 0's first: each not empty, without a `/`, and
+     /// different from the others. Empty when the key is absent.
+     pub display_nodes: Vec<String>,
++    /// Whether `Graphics` > `KeepAppleGfx` is true: the device tree keeps the
++    /// `gfx` and `iosurface-mapper` nodes, for a machine that has Apple's
++    /// paravirtual display (apple-gfx) behind its own renderer.
++    pub keep_apple_gfx: bool,
+     /// The donor vtable symbols of `Kernel` > `ExportVtableDiscriminators`,
+     /// whose per-slot PAC discriminators Ambrosia hands over for injected code.
+     pub export_vtable_disc: Vec<String>,
+@@ -366,6 +370,9 @@ impl<'a> Config<'a> {
+                 elf,
+             });
+         }
++        if let Some(keep) = optional(graphics, &graphics_at, "KeepAppleGfx", Value::as_bool)? {
++            config.keep_apple_gfx = keep;
++        }
+         if let Some(v) = graphics.get("DisplayNode") {
+             config.display_nodes = display_nodes(v)?;
+         }
+diff --git a/crates/ambrosia/src/tree.rs b/crates/ambrosia/src/tree.rs
+index 9ae3be8..06a8197 100644
+--- a/crates/ambrosia/src/tree.rs
++++ b/crates/ambrosia/src/tree.rs
+@@ -49,6 +49,9 @@ pub struct Machine {
+     /// the displays the device drives are written, and only with a display
+     /// ([`display_nodes`]).
+     pub display_nodes: Vec<String>,
++    /// Keep the `gfx` and `iosurface-mapper` nodes (`Graphics` >
++    /// `KeepAppleGfx`), for a machine that has the apple-gfx display.
++    pub keep_gfx: bool,
+     /// Whether the machine has avp-rtc, the clock macOS keeps its offset to
+     /// calendar time with: its ID register reads 0xf001, which is how iBoot
+     /// tells.
+@@ -849,9 +852,12 @@ fn arm_io(io: &mut Node, m: &Machine, keep_ctrr: bool) -> Result<(), Error> {
+     // stays, though the machine has none: without the node, 27.0.1 doesn't
+     // reach userspace's network.
+     let other_clock = if m.avp_rtc { "pl031-rtc" } else { "avp-rtc" };
+-    for name in ["gfx", "iosurface-mapper", other_clock] {
+-        io.remove_child(name);
++    if !m.keep_gfx {
++        for name in ["gfx", "iosurface-mapper"] {
++            io.remove_child(name);
++        }
+     }
++    io.remove_child(other_clock);
+     if !keep_ctrr {
+         io.remove_child("avp-ctrr");
+     }
+@@ -974,6 +980,7 @@ mod tests {
+             soc_name: "Apple M1 (Virtual)".into(),
+             display: None,
+             display_nodes: Vec::new(),
++            keep_gfx: false,
+             avp_rtc: true,
+         }
+     }
+@@ -1183,6 +1190,24 @@ mod tests {
+         );
+     }
+ 
++    /// `KeepAppleGfx` keeps the paravirtual display and its IOSurface mapper,
++    /// and still removes avp-ctrr.
++    #[test]
++    fn keep_gfx_keeps_the_paravirtual_display() {
++        let mut io = arm_io();
++        for name in ["gfx", "iosurface-mapper", "avp-ctrr"] {
++            let mut n = Node::default();
++            n.set_str("name", name);
++            io.children.push(n);
++        }
++        let mut m = machine();
++        m.keep_gfx = true;
++        super::arm_io(&mut io, &m, false).unwrap();
++        assert!(io.child("gfx").is_some());
++        assert!(io.child("iosurface-mapper").is_some());
++        assert!(io.child("avp-ctrr").is_none());
++    }
++
+     /// The display's node is added only when there is a display and the
+     /// configuration names one, and never over a node arm-io has.
+     #[test]
+@@ -1196,6 +1221,7 @@ mod tests {
+         };
+         let named = Machine {
+             display_nodes: vec!["display0".into()],
++            keep_gfx: false,
+             ..machine()
+         };
+         let mut io = arm_io();
+@@ -1216,6 +1242,7 @@ mod tests {
+         let mut io = arm_io();
+         let unnamed = Machine {
+             display_nodes: Vec::new(),
++            keep_gfx: false,
+             ..m.clone()
+         };
+         super::arm_io(&mut io, &unnamed, false).unwrap();
+@@ -1224,6 +1251,7 @@ mod tests {
+         let mut io = arm_io();
+         let pcie = Machine {
+             display_nodes: vec!["pcie".into()],
++            keep_gfx: false,
+             ..m
+         };
+         assert_eq!(
+@@ -1248,6 +1276,7 @@ mod tests {
+                 displays,
+             }),
+             display_nodes: names[..n].to_vec(),
++            keep_gfx: false,
+             ..machine()
+         };
+         let added = |m: &Machine| {
+@@ -1288,6 +1317,7 @@ mod tests {
+         // The second display's name is taken.
+         let m = Machine {
+             display_nodes: vec!["d0".into(), "pcie".into()],
++            keep_gfx: false,
+             ..with(2, 0)
+         };
+         assert_eq!(
+diff --git a/crates/ambrosia/tests/boot.rs b/crates/ambrosia/tests/boot.rs
+index 8f69dbf..570377a 100644
+--- a/crates/ambrosia/tests/boot.rs
++++ b/crates/ambrosia/tests/boot.rs
+@@ -57,6 +57,7 @@ fn prepares_a_guest() {
+         soc_name: "Apple M1 (Virtual)".into(),
+         display: None,
+         display_nodes: Vec::new(),
++        keep_gfx: false,
+         avp_rtc: true,
+     };
+     let files = Files {
+diff --git a/crates/ambrosia/tests/restore.rs b/crates/ambrosia/tests/restore.rs
+index 07fd215..fb20b63 100644
+--- a/crates/ambrosia/tests/restore.rs
++++ b/crates/ambrosia/tests/restore.rs
+@@ -49,6 +49,7 @@ fn machine() -> Machine {
+         soc_name: "Apple M1 (Virtual)".into(),
+         display: None,
+         display_nodes: Vec::new(),
++        keep_gfx: false,
+         avp_rtc: true,
+     }
+ }
+diff --git a/crates/firmware/src/main.rs b/crates/firmware/src/main.rs
+index cc60ab6..41012f1 100644
+--- a/crates/firmware/src/main.rs
++++ b/crates/firmware/src/main.rs
+@@ -257,6 +257,7 @@ extern "C" fn main() -> ! {
+         soc_name: cfg::soc_name(),
+         display: framebuffer,
+         display_nodes: config.display_nodes.clone(),
++        keep_gfx: config.keep_apple_gfx,
+         avp_rtc: avp_rtc(),
+     };
+ 
+@@ -350,6 +351,7 @@ fn restore_boot(
+         soc_name: cfg::soc_name(),
+         display: None,
+         display_nodes: alloc::vec::Vec::new(),
++        keep_gfx: false,
+         avp_rtc: avp_rtc(),
+     };
+     // The guest's NVRAM, from the aux disk, which the restore device tree
+-- 
+2.53.0
+

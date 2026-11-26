@@ -1,0 +1,3157 @@
+From 99cc3d27fe4451e5e5bfaf758eb8d417c88aef5e Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(vmapple): build apple-gfx-mmio on reims-vgpu for TCG
+ hosts
+
+The apple-gfx device model is built against reims-vgpu (--enable-pvg)
+instead of Apple's ParavirtualizedGraphics framework, so a non-Apple
+host can provide the paravirtual GPU. Adapts the device to this host
+(no KVM dirty source, wheel input, trace events) and includes the
+device config so create_gfx sees MAC_PVG_MMIO.
+---
+ hw/display/apple-gfx-activity-stub.c |   19 +
+ hw/display/apple-gfx-mmio.c          |  245 ++++++
+ hw/display/apple-gfx-mmio.m          |  285 ------
+ hw/display/apple-gfx-pci.m           |  157 ----
+ hw/display/apple-gfx.c               | 1221 ++++++++++++++++++++++++++
+ hw/display/apple-gfx.h               |  130 ++-
+ hw/display/apple-gfx.m               |  880 -------------------
+ hw/display/meson.build               |   11 +-
+ hw/display/trace-events              |   19 +-
+ hw/vmapple/vmapple.c                 |    1 +
+ meson.build                          |   15 +-
+ 11 files changed, 1602 insertions(+), 1381 deletions(-)
+ create mode 100644 hw/display/apple-gfx-activity-stub.c
+ create mode 100644 hw/display/apple-gfx-mmio.c
+ delete mode 100644 hw/display/apple-gfx-mmio.m
+ delete mode 100644 hw/display/apple-gfx-pci.m
+ create mode 100644 hw/display/apple-gfx.c
+ delete mode 100644 hw/display/apple-gfx.m
+
+diff --git a/hw/display/apple-gfx-activity-stub.c b/hw/display/apple-gfx-activity-stub.c
+new file mode 100644
+index 0000000000..6f1eef8807
+--- /dev/null
++++ b/hw/display/apple-gfx-activity-stub.c
+@@ -0,0 +1,19 @@
++/*
++ * apple-gfx's activity against App Nap, on hosts without App Nap
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ *
++ * Only macOS naps an application none of whose windows the person sees
++ * (apple-gfx-activity.m). Elsewhere a realized device's hold does nothing.
++ */
++
++#include "qemu/osdep.h"
++#include "apple-gfx.h"
++
++void apple_gfx_activity_begin(void)
++{
++}
++
++void apple_gfx_activity_end(void)
++{
++}
+diff --git a/hw/display/apple-gfx-mmio.c b/hw/display/apple-gfx-mmio.c
+new file mode 100644
+index 0000000000..d61afe2d5d
+--- /dev/null
++++ b/hw/display/apple-gfx-mmio.c
+@@ -0,0 +1,245 @@
++/*
++ * QEMU Apple paravirtualized graphics device, MMIO (arm64) variant
++ *
++ * Copyright © 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ *
++ * macOS guests drive a paravirtualized GPU, the device of Apple's
++ * ParavirtualizedGraphics.framework, which implements 3d graphics passthrough
++ * to the host as well as a proprietary guest communication channel. This
++ * device model drives reims-vgpu, a library that implements the host side of
++ * that device, from within QEMU as an MMIO-based system device for macOS on
++ * arm64 VMs. Its second MMIO region is the IOSurface device, which maps the
++ * guest's IOSurfaces.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu/main-loop.h"
++#include "hw/core/sysbus.h"
++#include "hw/core/irq.h"
++#include "apple-gfx.h"
++#include "trace.h"
++
++OBJECT_DECLARE_SIMPLE_TYPE(AppleGFXMMIOState, APPLE_GFX_MMIO)
++
++struct AppleGFXMMIOState {
++    SysBusDevice parent_obj;
++
++    AppleGFXState common;
++
++    qemu_irq irq_gfx;
++    qemu_irq irq_iosfc;
++    MemoryRegion iomem_iosfc;
++    RvgIOSurfaceDevice *pgiosfc;
++    /* log2 of the guest page size; arm64 guests use 16 KiB pages */
++    uint32_t guest_page_shift;
++    bool process_isolation;
++};
++
++/*
++ * The IOSurface device's registers are 64 bits wide, and QEMU reads and
++ * writes them as 32: a value read is truncated, then zero-extended, and a
++ * value written is truncated. The vCPU calls the library itself, as
++ * apple-gfx.c's accesses do: an access waits only on the IOSurface device's
++ * thread, whose one callback schedules a BH.
++ */
++static uint64_t iosfc_read(void *opaque, hwaddr offset, unsigned size)
++{
++    AppleGFXMMIOState *s = opaque;
++    uint64_t value = (uint32_t)rvg_iosurface_device_mmio_read(s->pgiosfc,
++                                                              offset);
++
++    trace_apple_gfx_mmio_iosfc_read(offset, value);
++    return value;
++}
++
++static void iosfc_write(void *opaque, hwaddr offset, uint64_t val,
++                        unsigned size)
++{
++    AppleGFXMMIOState *s = opaque;
++
++    rvg_iosurface_device_mmio_write(s->pgiosfc, offset, (uint32_t)val);
++    trace_apple_gfx_mmio_iosfc_write(offset, val);
++}
++
++static const MemoryRegionOps apple_iosfc_ops = {
++    .read = iosfc_read,
++    .write = iosfc_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++    .impl = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++};
++
++static void raise_irq_bh(void *opaque)
++{
++    qemu_irq *irq = opaque;
++
++    qemu_irq_pulse(*irq);
++}
++
++/* On the IOSurface device's own thread. */
++static void apple_gfx_mmio_iosfc_raise_interrupt_cb(void *ctx, uint32_t vector)
++{
++    AppleGFXMMIOState *s = ctx;
++
++    trace_apple_gfx_iosfc_raise_irq(vector);
++    aio_bh_schedule_oneshot(qemu_get_aio_context(),
++                            raise_irq_bh, &s->irq_iosfc);
++}
++
++static bool apple_gfx_mmio_create_iosurface_device(AppleGFXMMIOState *s,
++                                                   Error **errp)
++{
++    /* The library copies the ranges. */
++    g_autoptr(GArray) memory_ranges = apple_gfx_new_memory_ranges(NULL);
++    RvgMemoryMap memory_map = {
++        .ranges = (const RvgMemoryRange *)memory_ranges->data,
++        .range_count = memory_ranges->len,
++    };
++    RvgIOSurfaceCallbacks callbacks = {
++        .struct_size = sizeof(callbacks),
++        .ctx = s,
++        .raise_interrupt = apple_gfx_mmio_iosfc_raise_interrupt_cb,
++    };
++    RvgIOSurfaceDeviceConfig config = {
++        .struct_size = sizeof(config),
++        .memory_map = &memory_map,
++        .callbacks = &callbacks,
++        .guest_page_shift = s->guest_page_shift,
++    };
++    RvgStatus status;
++
++    status = rvg_iosurface_device_create(&config, &s->pgiosfc);
++    if (status != RVG_OK) {
++        error_setg(errp, "apple-gfx-mmio: rvg_iosurface_device_create: %s",
++                   rvg_status_message(status));
++        return false;
++    }
++    return true;
++}
++
++/*
++ * On a library thread (a FIFO's or the device's reporting thread), or inside
++ * a call that may call back: an MMIO access, on the vCPU's thread, or
++ * apple_gfx_mmio_reset's.
++ */
++static void apple_gfx_mmio_raise_interrupt_cb(void *ctx, uint32_t vector)
++{
++    AppleGFXMMIOState *s = ctx;
++
++    trace_apple_gfx_raise_irq(vector);
++    aio_bh_schedule_oneshot(qemu_get_aio_context(),
++                            raise_irq_bh, &s->irq_gfx);
++}
++
++static void apple_gfx_mmio_realize(DeviceState *dev, Error **errp)
++{
++    AppleGFXMMIOState *s = APPLE_GFX_MMIO(dev);
++    RvgHostCallbacks callbacks = {
++        .struct_size = sizeof(callbacks),
++        .ctx = s,
++        .raise_interrupt = apple_gfx_mmio_raise_interrupt_cb,
++    };
++    RvgDeviceConfig config = {
++        .struct_size = sizeof(config),
++        /* The IOSurface device made below maps the guest's IOSurfaces. */
++        .use_iosurface_mapper = true,
++        .process_isolation = s->process_isolation,
++        .callbacks = &callbacks,
++        .guest_page_shift = s->guest_page_shift,
++    };
++
++    if (!apple_gfx_common_realize(&s->common, dev, &config, errp)) {
++        return;
++    }
++
++    apple_gfx_mmio_create_iosurface_device(s, errp);
++}
++
++static void apple_gfx_mmio_init(Object *obj)
++{
++    AppleGFXMMIOState *s = APPLE_GFX_MMIO(obj);
++
++    apple_gfx_common_init(obj, &s->common, TYPE_APPLE_GFX_MMIO);
++
++    sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->common.iomem_gfx);
++    memory_region_init_io(&s->iomem_iosfc, obj, &apple_iosfc_ops, s,
++                          TYPE_APPLE_GFX_MMIO, 0x10000);
++    sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem_iosfc);
++    sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq_gfx);
++    sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq_iosfc);
++}
++
++static void apple_gfx_mmio_finalize(Object *obj)
++{
++    AppleGFXMMIOState *s = APPLE_GFX_MMIO(obj);
++
++    apple_gfx_common_finalize(&s->common);
++}
++
++static void apple_gfx_mmio_reset(Object *obj, ResetType type)
++{
++    AppleGFXMMIOState *s = APPLE_GFX_MMIO(obj);
++
++    rvg_device_reset(s->common.pgdev);
++}
++
++static const Property apple_gfx_mmio_properties[] = {
++    DEFINE_PROP_ARRAY("display-modes", AppleGFXMMIOState,
++                      common.num_display_modes, common.display_modes,
++                      qdev_prop_apple_gfx_display_mode, AppleGFXDisplayMode),
++    /* The guest's display ports, 1 to RVG_MAX_DISPLAY_PORTS. */
++    DEFINE_PROP_UINT32("displays", AppleGFXMMIOState, common.num_displays, 1),
++    /*
++     * In window mode, the mode the guest runs first, scaled by the window:
++     * "<width>x<height>" (default 1920x1080), at 1x or followed by "@<ppi>",
++     * the density the guest is told for it, or "host" for the host screen's
++     * own modes at its density.
++     */
++    DEFINE_PROP_STRING("resolution", AppleGFXMMIOState, common.resolution),
++    /*
++     * Each user task in its own host process, as on macOS.  On Linux that
++     * needs every guest RAM range mapped in whole guest pages; turn it off to
++     * run the tasks in QEMU's process.
++     */
++    DEFINE_PROP_BOOL("process-isolation", AppleGFXMMIOState,
++                     process_isolation, true),
++    /*
++     * log2 of the guest's page size.  The library's default is the host's
++     * page size, 4 KiB on x86-64, while this arm64 guest uses 16 KiB.
++     */
++    DEFINE_PROP_UINT32("guest-page-shift", AppleGFXMMIOState,
++                       guest_page_shift, 14),
++};
++
++static void apple_gfx_mmio_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++
++    rc->phases.hold = apple_gfx_mmio_reset;
++    dc->hotpluggable = false;
++    dc->realize = apple_gfx_mmio_realize;
++
++    device_class_set_props(dc, apple_gfx_mmio_properties);
++}
++
++static const TypeInfo apple_gfx_mmio_types[] = {
++    {
++        .name          = TYPE_APPLE_GFX_MMIO,
++        .parent        = TYPE_SYS_BUS_DEVICE,
++        .instance_size = sizeof(AppleGFXMMIOState),
++        .class_init    = apple_gfx_mmio_class_init,
++        .instance_init = apple_gfx_mmio_init,
++        .instance_finalize = apple_gfx_mmio_finalize,
++    }
++};
++DEFINE_TYPES(apple_gfx_mmio_types)
+diff --git a/hw/display/apple-gfx-mmio.m b/hw/display/apple-gfx-mmio.m
+deleted file mode 100644
+index 58beaadd1f..0000000000
+--- a/hw/display/apple-gfx-mmio.m
++++ /dev/null
+@@ -1,285 +0,0 @@
+-/*
+- * QEMU Apple ParavirtualizedGraphics.framework device, MMIO (arm64) variant
+- *
+- * Copyright © 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+- *
+- * SPDX-License-Identifier: GPL-2.0-or-later
+- *
+- * ParavirtualizedGraphics.framework is a set of libraries that macOS provides
+- * which implements 3d graphics passthrough to the host as well as a
+- * proprietary guest communication channel to drive it. This device model
+- * implements support to drive that library from within QEMU as an MMIO-based
+- * system device for macOS on arm64 VMs.
+- */
+-
+-#include "qemu/osdep.h"
+-#include "qemu/log.h"
+-#include "qemu/aio-wait.h"
+-#include "hw/core/sysbus.h"
+-#include "hw/core/irq.h"
+-#include "apple-gfx.h"
+-#include "trace.h"
+-
+-#import <ParavirtualizedGraphics/ParavirtualizedGraphics.h>
+-
+-OBJECT_DECLARE_SIMPLE_TYPE(AppleGFXMMIOState, APPLE_GFX_MMIO)
+-
+-/*
+- * ParavirtualizedGraphics.Framework only ships header files for the PCI
+- * variant which does not include IOSFC descriptors and host devices. We add
+- * their definitions here so that we can also work with the ARM version.
+- */
+-typedef bool(^IOSFCRaiseInterrupt)(uint32_t vector);
+-typedef bool(^IOSFCUnmapMemory)(void *, void *, void *, void *, void *, void *);
+-typedef bool(^IOSFCMapMemory)(uint64_t phys, uint64_t len, bool ro, void **va,
+-                              void *, void *);
+-
+-@interface PGDeviceDescriptor (IOSurfaceMapper)
+-@property (readwrite, nonatomic) bool usingIOSurfaceMapper;
+-@end
+-
+-@interface PGIOSurfaceHostDeviceDescriptor : NSObject
+--(PGIOSurfaceHostDeviceDescriptor *)init;
+-@property (readwrite, nonatomic, copy, nullable) IOSFCMapMemory mapMemory;
+-@property (readwrite, nonatomic, copy, nullable) IOSFCUnmapMemory unmapMemory;
+-@property (readwrite, nonatomic, copy, nullable) IOSFCRaiseInterrupt raiseInterrupt;
+-@end
+-
+-@interface PGIOSurfaceHostDevice : NSObject
+--(instancetype)initWithDescriptor:(PGIOSurfaceHostDeviceDescriptor *)desc;
+--(uint32_t)mmioReadAtOffset:(size_t)offset;
+--(void)mmioWriteAtOffset:(size_t)offset value:(uint32_t)value;
+-@end
+-
+-struct AppleGFXMapSurfaceMemoryJob;
+-struct AppleGFXMMIOState {
+-    SysBusDevice parent_obj;
+-
+-    AppleGFXState common;
+-
+-    qemu_irq irq_gfx;
+-    qemu_irq irq_iosfc;
+-    MemoryRegion iomem_iosfc;
+-    PGIOSurfaceHostDevice *pgiosfc;
+-};
+-
+-typedef struct AppleGFXMMIOJob {
+-    AppleGFXMMIOState *state;
+-    uint64_t offset;
+-    uint64_t value;
+-    bool completed;
+-} AppleGFXMMIOJob;
+-
+-static void iosfc_do_read(void *opaque)
+-{
+-    AppleGFXMMIOJob *job = opaque;
+-    job->value = [job->state->pgiosfc mmioReadAtOffset:job->offset];
+-    qatomic_set(&job->completed, true);
+-    aio_wait_kick();
+-}
+-
+-static uint64_t iosfc_read(void *opaque, hwaddr offset, unsigned size)
+-{
+-    AppleGFXMMIOJob job = {
+-        .state = opaque,
+-        .offset = offset,
+-        .completed = false,
+-    };
+-    dispatch_queue_t queue =
+-        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+-
+-    dispatch_async_f(queue, &job, iosfc_do_read);
+-    AIO_WAIT_WHILE(NULL, !qatomic_read(&job.completed));
+-
+-    trace_apple_gfx_mmio_iosfc_read(offset, job.value);
+-    return job.value;
+-}
+-
+-static void iosfc_do_write(void *opaque)
+-{
+-    AppleGFXMMIOJob *job = opaque;
+-    [job->state->pgiosfc mmioWriteAtOffset:job->offset value:job->value];
+-    qatomic_set(&job->completed, true);
+-    aio_wait_kick();
+-}
+-
+-static void iosfc_write(void *opaque, hwaddr offset, uint64_t val,
+-                        unsigned size)
+-{
+-    AppleGFXMMIOJob job = {
+-        .state = opaque,
+-        .offset = offset,
+-        .value = val,
+-        .completed = false,
+-    };
+-    dispatch_queue_t queue =
+-        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+-
+-    dispatch_async_f(queue, &job, iosfc_do_write);
+-    AIO_WAIT_WHILE(NULL, !qatomic_read(&job.completed));
+-
+-    trace_apple_gfx_mmio_iosfc_write(offset, val);
+-}
+-
+-static const MemoryRegionOps apple_iosfc_ops = {
+-    .read = iosfc_read,
+-    .write = iosfc_write,
+-    .endianness = DEVICE_LITTLE_ENDIAN,
+-    .valid = {
+-        .min_access_size = 4,
+-        .max_access_size = 8,
+-    },
+-    .impl = {
+-        .min_access_size = 4,
+-        .max_access_size = 8,
+-    },
+-};
+-
+-static void raise_irq_bh(void *opaque)
+-{
+-    qemu_irq *irq = opaque;
+-
+-    qemu_irq_pulse(*irq);
+-}
+-
+-static void *apple_gfx_mmio_map_surface_memory(uint64_t guest_physical_address,
+-                                               uint64_t length, bool read_only)
+-{
+-    void *mem;
+-    MemoryRegion *region = NULL;
+-
+-    RCU_READ_LOCK_GUARD();
+-    mem = apple_gfx_host_ptr_for_gpa_range(guest_physical_address,
+-                                           length, read_only, &region);
+-    if (mem) {
+-        memory_region_ref(region);
+-    }
+-    return mem;
+-}
+-
+-static bool apple_gfx_mmio_unmap_surface_memory(void *ptr)
+-{
+-    MemoryRegion *region;
+-    ram_addr_t offset = 0;
+-
+-    RCU_READ_LOCK_GUARD();
+-    region = memory_region_from_host(ptr, &offset);
+-    if (!region) {
+-        qemu_log_mask(LOG_GUEST_ERROR,
+-                      "%s: memory at %p to be unmapped not found.\n",
+-                      __func__, ptr);
+-        return false;
+-    }
+-
+-    trace_apple_gfx_iosfc_unmap_memory_region(ptr, region);
+-    memory_region_unref(region);
+-    return true;
+-}
+-
+-static PGIOSurfaceHostDevice *apple_gfx_prepare_iosurface_host_device(
+-    AppleGFXMMIOState *s)
+-{
+-    PGIOSurfaceHostDeviceDescriptor *iosfc_desc =
+-        [PGIOSurfaceHostDeviceDescriptor new];
+-    PGIOSurfaceHostDevice *iosfc_host_dev;
+-
+-    iosfc_desc.mapMemory =
+-        ^bool(uint64_t phys, uint64_t len, bool ro, void **va, void *e, void *f) {
+-            *va = apple_gfx_mmio_map_surface_memory(phys, len, ro);
+-
+-            trace_apple_gfx_iosfc_map_memory(phys, len, ro, va, e, f, *va);
+-
+-            return *va != NULL;
+-        };
+-
+-    iosfc_desc.unmapMemory =
+-        ^bool(void *va, void *b, void *c, void *d, void *e, void *f) {
+-            return apple_gfx_mmio_unmap_surface_memory(va);
+-        };
+-
+-    iosfc_desc.raiseInterrupt = ^bool(uint32_t vector) {
+-        trace_apple_gfx_iosfc_raise_irq(vector);
+-        aio_bh_schedule_oneshot(qemu_get_aio_context(),
+-                                raise_irq_bh, &s->irq_iosfc);
+-        return true;
+-    };
+-
+-    iosfc_host_dev =
+-        [[PGIOSurfaceHostDevice alloc] initWithDescriptor:iosfc_desc];
+-    [iosfc_desc release];
+-    return iosfc_host_dev;
+-}
+-
+-static void apple_gfx_mmio_realize(DeviceState *dev, Error **errp)
+-{
+-    @autoreleasepool {
+-        AppleGFXMMIOState *s = APPLE_GFX_MMIO(dev);
+-        PGDeviceDescriptor *desc = [PGDeviceDescriptor new];
+-
+-        desc.raiseInterrupt = ^(uint32_t vector) {
+-            trace_apple_gfx_raise_irq(vector);
+-            aio_bh_schedule_oneshot(qemu_get_aio_context(),
+-                                    raise_irq_bh, &s->irq_gfx);
+-        };
+-
+-        desc.usingIOSurfaceMapper = true;
+-        s->pgiosfc = apple_gfx_prepare_iosurface_host_device(s);
+-
+-        if (!apple_gfx_common_realize(&s->common, dev, desc, errp)) {
+-            [s->pgiosfc release];
+-            s->pgiosfc = nil;
+-        }
+-
+-        [desc release];
+-        desc = nil;
+-    }
+-}
+-
+-static void apple_gfx_mmio_init(Object *obj)
+-{
+-    AppleGFXMMIOState *s = APPLE_GFX_MMIO(obj);
+-
+-    apple_gfx_common_init(obj, &s->common, TYPE_APPLE_GFX_MMIO);
+-
+-    sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->common.iomem_gfx);
+-    memory_region_init_io(&s->iomem_iosfc, obj, &apple_iosfc_ops, s,
+-                          TYPE_APPLE_GFX_MMIO, 0x10000);
+-    sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem_iosfc);
+-    sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq_gfx);
+-    sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq_iosfc);
+-}
+-
+-static void apple_gfx_mmio_reset(Object *obj, ResetType type)
+-{
+-    AppleGFXMMIOState *s = APPLE_GFX_MMIO(obj);
+-    [s->common.pgdev reset];
+-}
+-
+-static const Property apple_gfx_mmio_properties[] = {
+-    DEFINE_PROP_ARRAY("display-modes", AppleGFXMMIOState,
+-                      common.num_display_modes, common.display_modes,
+-                      qdev_prop_apple_gfx_display_mode, AppleGFXDisplayMode),
+-};
+-
+-static void apple_gfx_mmio_class_init(ObjectClass *klass, const void *data)
+-{
+-    DeviceClass *dc = DEVICE_CLASS(klass);
+-    ResettableClass *rc = RESETTABLE_CLASS(klass);
+-
+-    rc->phases.hold = apple_gfx_mmio_reset;
+-    dc->hotpluggable = false;
+-    dc->realize = apple_gfx_mmio_realize;
+-
+-    device_class_set_props(dc, apple_gfx_mmio_properties);
+-}
+-
+-static const TypeInfo apple_gfx_mmio_types[] = {
+-    {
+-        .name          = TYPE_APPLE_GFX_MMIO,
+-        .parent        = TYPE_SYS_BUS_DEVICE,
+-        .instance_size = sizeof(AppleGFXMMIOState),
+-        .class_init    = apple_gfx_mmio_class_init,
+-        .instance_init = apple_gfx_mmio_init,
+-    }
+-};
+-DEFINE_TYPES(apple_gfx_mmio_types)
+diff --git a/hw/display/apple-gfx-pci.m b/hw/display/apple-gfx-pci.m
+deleted file mode 100644
+index b0694f4cb8..0000000000
+--- a/hw/display/apple-gfx-pci.m
++++ /dev/null
+@@ -1,157 +0,0 @@
+-/*
+- * QEMU Apple ParavirtualizedGraphics.framework device, PCI variant
+- *
+- * Copyright © 2023-2024 Phil Dennis-Jordan
+- *
+- * SPDX-License-Identifier: GPL-2.0-or-later
+- *
+- * ParavirtualizedGraphics.framework is a set of libraries that macOS provides
+- * which implements 3d graphics passthrough to the host as well as a
+- * proprietary guest communication channel to drive it. This device model
+- * implements support to drive that library from within QEMU as a PCI device
+- * aimed primarily at x86-64 macOS VMs.
+- */
+-
+-#include "qemu/osdep.h"
+-#include "hw/pci/pci_device.h"
+-#include "hw/pci/msi.h"
+-#include "apple-gfx.h"
+-#include "trace.h"
+-
+-#import <ParavirtualizedGraphics/ParavirtualizedGraphics.h>
+-
+-OBJECT_DECLARE_SIMPLE_TYPE(AppleGFXPCIState, APPLE_GFX_PCI)
+-
+-struct AppleGFXPCIState {
+-    PCIDevice parent_obj;
+-
+-    AppleGFXState common;
+-};
+-
+-static const char *apple_gfx_pci_option_rom_path = NULL;
+-
+-static void apple_gfx_init_option_rom_path(void)
+-{
+-    NSURL *option_rom_url = PGCopyOptionROMURL();
+-    const char *option_rom_path = option_rom_url.fileSystemRepresentation;
+-    apple_gfx_pci_option_rom_path = g_strdup(option_rom_path);
+-    [option_rom_url release];
+-}
+-
+-static void apple_gfx_pci_init(Object *obj)
+-{
+-    AppleGFXPCIState *s = APPLE_GFX_PCI(obj);
+-
+-    if (!apple_gfx_pci_option_rom_path) {
+-        /*
+-         * The following is done on device not class init to avoid running
+-         * ObjC code before fork() in -daemonize mode.
+-         */
+-        PCIDeviceClass *pci = PCI_DEVICE_CLASS(object_get_class(obj));
+-        apple_gfx_init_option_rom_path();
+-        pci->romfile = apple_gfx_pci_option_rom_path;
+-    }
+-
+-    apple_gfx_common_init(obj, &s->common, TYPE_APPLE_GFX_PCI);
+-}
+-
+-typedef struct AppleGFXPCIInterruptJob {
+-    PCIDevice *device;
+-    uint32_t vector;
+-} AppleGFXPCIInterruptJob;
+-
+-static void apple_gfx_pci_raise_interrupt(void *opaque)
+-{
+-    AppleGFXPCIInterruptJob *job = opaque;
+-
+-    if (msi_enabled(job->device)) {
+-        msi_notify(job->device, job->vector);
+-    }
+-    g_free(job);
+-}
+-
+-static void apple_gfx_pci_interrupt(PCIDevice *dev, uint32_t vector)
+-{
+-    AppleGFXPCIInterruptJob *job;
+-
+-    trace_apple_gfx_raise_irq(vector);
+-    job = g_malloc0(sizeof(*job));
+-    job->device = dev;
+-    job->vector = vector;
+-    aio_bh_schedule_oneshot(qemu_get_aio_context(),
+-                            apple_gfx_pci_raise_interrupt, job);
+-}
+-
+-static void apple_gfx_pci_realize(PCIDevice *dev, Error **errp)
+-{
+-    AppleGFXPCIState *s = APPLE_GFX_PCI(dev);
+-    int ret;
+-
+-    pci_register_bar(dev, PG_PCI_BAR_MMIO,
+-                     PCI_BASE_ADDRESS_SPACE_MEMORY, &s->common.iomem_gfx);
+-
+-    ret = msi_init(dev, 0x0 /* config offset; 0 = find space */,
+-                   PG_PCI_MAX_MSI_VECTORS, true /* msi64bit */,
+-                   false /* msi_per_vector_mask */, errp);
+-    if (ret != 0) {
+-        return;
+-    }
+-
+-    @autoreleasepool {
+-        PGDeviceDescriptor *desc = [PGDeviceDescriptor new];
+-        desc.raiseInterrupt = ^(uint32_t vector) {
+-            apple_gfx_pci_interrupt(dev, vector);
+-        };
+-
+-        apple_gfx_common_realize(&s->common, DEVICE(dev), desc, errp);
+-        [desc release];
+-        desc = nil;
+-    }
+-}
+-
+-static void apple_gfx_pci_reset(Object *obj, ResetType type)
+-{
+-    AppleGFXPCIState *s = APPLE_GFX_PCI(obj);
+-    [s->common.pgdev reset];
+-}
+-
+-static const Property apple_gfx_pci_properties[] = {
+-    DEFINE_PROP_ARRAY("display-modes", AppleGFXPCIState,
+-                      common.num_display_modes, common.display_modes,
+-                      qdev_prop_apple_gfx_display_mode, AppleGFXDisplayMode),
+-};
+-
+-static void apple_gfx_pci_class_init(ObjectClass *klass, const void *data)
+-{
+-    DeviceClass *dc = DEVICE_CLASS(klass);
+-    PCIDeviceClass *pci = PCI_DEVICE_CLASS(klass);
+-    ResettableClass *rc = RESETTABLE_CLASS(klass);
+-
+-    rc->phases.hold = apple_gfx_pci_reset;
+-    dc->desc = "macOS Paravirtualized Graphics PCI Display Controller";
+-    dc->hotpluggable = false;
+-    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
+-
+-    pci->vendor_id = PG_PCI_VENDOR_ID;
+-    pci->device_id = PG_PCI_DEVICE_ID;
+-    pci->class_id = PCI_CLASS_DISPLAY_OTHER;
+-    pci->realize = apple_gfx_pci_realize;
+-
+-    device_class_set_props(dc, apple_gfx_pci_properties);
+-}
+-
+-static const TypeInfo apple_gfx_pci_types[] = {
+-    {
+-        .name          = TYPE_APPLE_GFX_PCI,
+-        .parent        = TYPE_PCI_DEVICE,
+-        .instance_size = sizeof(AppleGFXPCIState),
+-        .class_init    = apple_gfx_pci_class_init,
+-        .instance_init = apple_gfx_pci_init,
+-        .interfaces = (const InterfaceInfo[]) {
+-            { INTERFACE_PCIE_DEVICE },
+-            { },
+-        },
+-    }
+-};
+-DEFINE_TYPES(apple_gfx_pci_types)
+-
+diff --git a/hw/display/apple-gfx.c b/hw/display/apple-gfx.c
+new file mode 100644
+index 0000000000..bbb69d4bae
+--- /dev/null
++++ b/hw/display/apple-gfx.c
+@@ -0,0 +1,1221 @@
++/*
++ * QEMU Apple paravirtualized graphics device
++ *
++ * Copyright © 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ *
++ * macOS guests drive a paravirtualized GPU, the device of Apple's
++ * ParavirtualizedGraphics.framework, which implements 3d graphics passthrough
++ * to the host as well as a proprietary guest communication channel. This
++ * device model drives reims-vgpu, a library that implements the host side of
++ * that device, from within QEMU.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/cutils.h"
++#include "qemu/error-report.h"
++#include "qemu/lockable.h"
++#include "qemu/log.h"
++#include "qemu/main-loop.h"
++#include "qemu/timer.h"
++#include "qapi/visitor.h"
++#include "qapi/error.h"
++#include "qapi/qapi-commands-ui.h"
++#include "system/address-spaces.h"
++#include "migration/blocker.h"
++#include "exec/target_page.h"
++#include "hw/core/boards.h"
++#include "hw/core/cpu.h"
++#include "system/kvm.h"
++#include "system/physmem.h"
++#include "system/memory.h"
++#include "system/ramblock.h"
++#include "system/runstate.h"
++#include "system/runstate-action.h"
++#include "ui/console.h"
++#include "ui/input.h"
++#include "apple-gfx.h"
++#include "trace.h"
++
++static const AppleGFXDisplayMode apple_gfx_default_modes[] = {
++    { 1920, 1080, 60 },
++    { 1440, 1080, 60 },
++    { 1280, 1024, 60 },
++};
++
++static Error *apple_gfx_mig_blocker;
++static uint32_t next_pgdisplay_serial_num = 1;
++
++/* ------ Rendering and frame management ------ */
++
++/*
++ * One frame: the display's current frame drawn into the frame target the
++ * surface had when the render started, read into pixels of the job's own,
++ * then copied into the surface.
++ */
++typedef struct AppleGFXRenderJob {
++    AppleGFXDisplay *d;
++    RvgFrameTarget *target;
++    /* The surface's size when the render started, which the target has. */
++    uint32_t width;
++    uint32_t height;
++    /* height rows of width * 4 bytes, in pixman's x8r8g8b8 layout */
++    uint8_t *pixels;
++    /* The frame was encoded and its pixels read */
++    bool encoded;
++} AppleGFXRenderJob;
++
++static void apple_gfx_render_frame_completed_bh(void *opaque);
++
++static int apple_gfx_do_render(void *opaque)
++{
++    AppleGFXRenderJob *job = opaque;
++    RvgFrame *frame;
++    RvgStatus status;
++
++    /*
++     * This runs on a pool thread, not under the BQL: the encode takes the
++     * display's lock, which a guest present holds while it waits, up to 2 s,
++     * for the command buffers of the frames in flight to complete. The read
++     * of the target's pixels runs here too, so that a slow one never holds
++     * the main loop, and with it the guest's other devices.
++     */
++    status = rvg_display_encode_frame(job->d->pgdisp, job->target, NULL,
++                                      &frame);
++    if (status == RVG_OK) {
++        size_t stride = (size_t)job->width * 4;
++
++        rvg_frame_commit(frame);
++        rvg_frame_wait(frame);
++        rvg_frame_release(frame);
++        job->pixels = g_malloc(stride * job->height);
++        status = rvg_frame_target_read_pixels(job->target, job->pixels, stride,
++                                              stride * job->height);
++        if (status != RVG_OK) {
++            qemu_log_mask(LOG_GUEST_ERROR,
++                          "%s: rvg_frame_target_read_pixels: %s\n", __func__,
++                          rvg_status_message(status));
++        }
++    } else {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: rvg_display_encode_frame: %s\n",
++                      __func__, rvg_status_message(status));
++    }
++    job->encoded = status == RVG_OK;
++
++    aio_bh_schedule_oneshot(qemu_get_aio_context(),
++                            apple_gfx_render_frame_completed_bh, job);
++    return 0;
++}
++
++/*
++ * How long gfx_update counts as a display change listener showing the
++ * surface: twice the slowest refresh, VNC's while nothing changes.
++ */
++#define APPLE_GFX_WATCH_MS (2 * GUI_REFRESH_INTERVAL_IDLE)
++
++/*
++ * Whether the surface follows the guest's frames as they come: a display
++ * change listener asked for it lately, and the display has no window of its
++ * own. Otherwise it is drawn only when gfx_update asks for it.
++ */
++static bool apple_gfx_watched(AppleGFXDisplay *d)
++{
++    return !d->state->window &&
++           qemu_clock_get_ms(QEMU_CLOCK_REALTIME) < d->watched_until_ms;
++}
++
++/*
++ * Starts a render of the display's newest frame into the surface, unless one
++ * is under way, the guest has presented no frame since the last one began,
++ * or the display has no mode or no target. Whether a render is under way.
++ */
++static bool apple_gfx_render_new_frame(AppleGFXDisplay *d)
++{
++    AppleGFXRenderJob *job;
++
++    assert(bql_locked());
++    if (d->rendering) {
++        return true;
++    }
++    if (!d->frame_dirty || d->surface == NULL || d->target == NULL) {
++        return false;
++    }
++    d->frame_dirty = false;
++    d->rendering = true;
++
++    job = g_new0(AppleGFXRenderJob, 1);
++    job->d = d;
++    job->target = rvg_frame_target_retain(d->target);
++    job->width = surface_width(d->surface);
++    job->height = surface_height(d->surface);
++
++    thread_pool_submit_immediate(d->state->pool, apple_gfx_do_render, job,
++                                 NULL);
++    return true;
++}
++
++static void apple_gfx_render_frame_completed_bh(void *opaque)
++{
++    AppleGFXRenderJob *job = opaque;
++    AppleGFXDisplay *d = job->d;
++    DisplaySurface *surface = d->surface;
++
++    assert(d->rendering);
++    d->rendering = false;
++
++    /* Only update display if mode hasn't changed since we started rendering. */
++    if (job->encoded &&
++        job->width == surface_width(surface) &&
++        job->height == surface_height(surface)) {
++        size_t stride = (size_t)job->width * 4;
++        uint8_t *dst = surface_data(surface);
++        uint32_t y;
++
++        /* The pixels have the surface's size and pixman's x8r8g8b8 layout. */
++        for (y = 0; y < job->height; y++) {
++            memcpy(dst + (size_t)y * surface_stride(surface),
++                   job->pixels + y * stride, stride);
++        }
++        qemu_console_update_full(d->con);
++    }
++    rvg_frame_target_release(job->target);
++    g_free(job->pixels);
++    g_free(job);
++
++    /*
++     * The render gfx_update asked for, if one did, drawn or not: an update
++     * that waits for it, a screendump's, never waits for another.
++     */
++    qemu_console_hw_update_done(d->con);
++    if (apple_gfx_watched(d)) {
++        /* A frame the guest presented while this one rendered. */
++        apple_gfx_render_new_frame(d);
++    }
++}
++
++/*
++ * A guest present. While a listener shows the surface, the frame is rendered
++ * now, or after the render under way, which then draws the newest frame: one
++ * render at a time, so frames the guest presents meanwhile are skipped.
++ * Otherwise nothing is rendered until gfx_update asks: each render reads the
++ * whole target back, and the guest's next present waits for the frame it
++ * encodes to complete.
++ */
++static void new_frame_handler_bh(void *opaque)
++{
++    AppleGFXDisplay *d = opaque;
++
++    d->frame_dirty = true;
++    if (apple_gfx_watched(d)) {
++        apple_gfx_render_new_frame(d);
++    }
++}
++
++/*
++ * QEMU's display system asks for the surface: a display change listener's
++ * refresh, or a screendump. The surface has the newest frame unless the guest
++ * has presented one since the last render began; then that render, or a new
++ * one, signals the update done.
++ */
++static bool apple_gfx_fb_update_display(void *opaque)
++{
++    AppleGFXDisplay *d = opaque;
++
++    assert(bql_locked());
++    d->watched_until_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
++                          APPLE_GFX_WATCH_MS;
++    return !apple_gfx_render_new_frame(d);
++}
++
++static const GraphicHwOps apple_gfx_fb_ops = {
++    .gfx_update = apple_gfx_fb_update_display,
++};
++
++/* ------ Mouse cursor and display mode setting ------ */
++
++static void set_mode(AppleGFXDisplay *d, uint32_t width, uint32_t height)
++{
++    RvgFrameTargetConfig target_config = {
++        .struct_size = sizeof(target_config),
++        .width = width,
++        .height = height,
++        /* The byte order of the surface's pixman x8r8g8b8. */
++        .format = RVG_PIXEL_FORMAT_BGRA8_UNORM,
++    };
++    RvgStatus status;
++
++    if (d->surface &&
++        width == surface_width(d->surface) &&
++        height == surface_height(d->surface)) {
++        return;
++    }
++
++    /* A render under way keeps its own reference. */
++    rvg_frame_target_release(d->target);
++    d->target = NULL;
++
++    d->surface = qemu_create_displaysurface(width, height);
++    /* The new surface is blank until a render draws the current frame. */
++    d->frame_dirty = true;
++
++    status = rvg_frame_target_create(d->state->pgdev, &target_config,
++                                     &d->target);
++    if (status != RVG_OK) {
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "%s: rvg_frame_target_create(%" PRIu32 "x%" PRIu32
++                      "): %s\n", __func__, width, height,
++                      rvg_status_message(status));
++    }
++
++    qemu_console_set_surface(d->con, d->surface);
++}
++
++static void update_cursor(AppleGFXDisplay *d)
++{
++    RvgDisplayCoord position;
++
++    assert(bql_locked());
++    position = rvg_display_cursor_position(d->pgdisp);
++    qemu_console_set_mouse(d->con, position.x, position.y, d->cursor_show);
++}
++
++/* A copy of the RvgCursorGlyph, which is borrowed for its callback. */
++typedef struct AppleGFXCursorGlyph {
++    uint8_t *rgba;
++    uint32_t width;
++    uint32_t height;
++    RvgDisplayCoord hot_spot;
++} AppleGFXCursorGlyph;
++
++static void set_cursor_glyph(AppleGFXDisplay *d,
++                             const AppleGFXCursorGlyph *glyph)
++{
++    const uint8_t *px_data = glyph->rgba;
++    uint32_t *dest_px;
++
++    /* An RvgCursorGlyph has 32 bits a pixel, and width * 4 bytes a row. */
++    trace_apple_gfx_cursor_set(32, glyph->width, glyph->height);
++
++    if (d->cursor) {
++        cursor_unref(d->cursor);
++        d->cursor = NULL;
++    }
++
++    d->cursor = cursor_alloc(glyph->width, glyph->height);
++    d->cursor->hot_x = glyph->hot_spot.x;
++    d->cursor->hot_y = glyph->hot_spot.y;
++
++    dest_px = d->cursor->data;
++    for (uint32_t y = 0; y < glyph->height; ++y) {
++        for (uint32_t x = 0; x < glyph->width; ++x) {
++            /*
++             * RvgCursorGlyph's red & blue channels are swapped compared to
++             * QEMUCursor's.
++             */
++            *dest_px =
++                (px_data[0] << 16u) |
++                (px_data[1] <<  8u) |
++                (px_data[2] <<  0u) |
++                (px_data[3] << 24u);
++            ++dest_px;
++            px_data += 4;
++        }
++    }
++    qemu_console_set_cursor(d->con, d->cursor);
++    update_cursor(d);
++}
++
++/* ------ Input from the displays' windows ------ */
++
++/* The most wheel notches one scroll event sends the guest, on each axis. */
++#define APPLE_GFX_WHEEL_MAX_NOTCHES 256
++
++static void apple_gfx_input_pointer(AppleGFXDisplay *d, uint16_t x,
++                                    uint16_t y, uint16_t width,
++                                    uint16_t height, uint32_t buttons)
++{
++    static uint32_t button_map[INPUT_BUTTON__MAX] = {
++        [INPUT_BUTTON_LEFT] = RVG_WINDOW_BUTTON_LEFT,
++        [INPUT_BUTTON_RIGHT] = RVG_WINDOW_BUTTON_RIGHT,
++        [INPUT_BUTTON_MIDDLE] = RVG_WINDOW_BUTTON_MIDDLE,
++        [INPUT_BUTTON_SIDE] = RVG_WINDOW_BUTTON_SIDE,
++        [INPUT_BUTTON_EXTRA] = RVG_WINDOW_BUTTON_EXTRA,
++    };
++    AppleGFXState *s = d->state;
++
++    /* QEMU's input layer does not clamp absolute axes. */
++    width = MAX(width, 1);
++    height = MAX(height, 1);
++    qemu_input_queue_abs(d->con, INPUT_AXIS_X, MIN(x, width - 1), 0, width);
++    qemu_input_queue_abs(d->con, INPUT_AXIS_Y, MIN(y, height - 1), 0, height);
++    qemu_input_update_buttons(d->con, button_map, s->input_buttons, buttons);
++    s->input_buttons = buttons;
++    qemu_input_event_sync();
++}
++
++/*
++ * @notches wheel notches on one axis: a press and release of @up for each
++ * notch above 0, of @down for each below.
++ */
++static void apple_gfx_input_wheel_axis(AppleGFXDisplay *d, int32_t notches,
++                                       InputButton up, InputButton down)
++{
++    InputButton button = notches > 0 ? up : down;
++    int64_t count = MIN(ABS((int64_t)notches), APPLE_GFX_WHEEL_MAX_NOTCHES);
++
++    for (int64_t i = 0; i < count; i++) {
++        qemu_input_queue_btn(d->con, button, true);
++        qemu_input_queue_btn(d->con, button, false);
++        qemu_input_event_sync();
++    }
++}
++
++/* A scroll event as wheel notches, up and left above 0. */
++static void apple_gfx_input_scroll(AppleGFXDisplay *d,
++                                   const RvgWindowScroll *scroll)
++{
++    apple_gfx_input_wheel_axis(d, scroll->notches_dy,
++                               INPUT_BUTTON_WHEEL_UP,
++                               INPUT_BUTTON_WHEEL_DOWN);
++    apple_gfx_input_wheel_axis(d, scroll->notches_dx,
++                               INPUT_BUTTON_WHEEL_LEFT,
++                               INPUT_BUTTON_WHEEL_RIGHT);
++}
++
++static void apple_gfx_input_key(AppleGFXDisplay *d, uint16_t usage,
++                                bool down)
++{
++    unsigned int lnx = 0;
++
++    if (usage < qemu_input_map_usb_to_linux_len) {
++        lnx = qemu_input_map_usb_to_linux[usage];
++    }
++    if (lnx == 0) {
++        return;
++    }
++    /*
++     * At once, as QEMU's cocoa, GTK and SDL displays send keys: no delay
++     * between them, which a person's keys, far apart, do not need to fit the
++     * USB keyboard's queue of 16 scancodes.
++     */
++    qemu_input_event_send_key_linux(d->con, lnx, down);
++}
++
++static void apple_gfx_input_close(void)
++{
++    /* As QEMU's own windows do: closing one powers the VM off. */
++    shutdown_action = SHUTDOWN_ACTION_POWEROFF;
++    qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_UI);
++}
++
++/* ------ Callbacks' work under the BQL ------ */
++
++typedef enum AppleGFXEventKind {
++    APPLE_GFX_EVENT_CURSOR_GLYPH,
++    APPLE_GFX_EVENT_CURSOR_SHOW,
++    APPLE_GFX_EVENT_CURSOR_MOVE,
++    APPLE_GFX_EVENT_POINTER,
++    APPLE_GFX_EVENT_SCROLL,
++    APPLE_GFX_EVENT_KEY,
++    APPLE_GFX_EVENT_CLOSE,
++} AppleGFXEventKind;
++
++struct AppleGFXEvent {
++    QSIMPLEQ_ENTRY(AppleGFXEvent) next;
++    AppleGFXDisplay *d;
++    AppleGFXEventKind kind;
++    union {
++        AppleGFXCursorGlyph glyph;
++        bool show;
++        struct {
++            uint16_t x;
++            uint16_t y;
++            uint16_t width;
++            uint16_t height;
++            uint32_t buttons;
++        } pointer;
++        RvgWindowScroll scroll;
++        struct {
++            uint16_t usage;
++            bool down;
++        } key;
++    };
++};
++
++static AppleGFXEvent *apple_gfx_event_new(AppleGFXDisplay *d,
++                                          AppleGFXEventKind kind)
++{
++    AppleGFXEvent *event = g_new0(AppleGFXEvent, 1);
++
++    event->d = d;
++    event->kind = kind;
++    return event;
++}
++
++/*
++ * Queues @event behind every earlier one, on any thread. One-shot BHs
++ * scheduled together run in the reverse order, so each device has one BH,
++ * which runs its events in the order they were queued.
++ */
++static void apple_gfx_event_push(AppleGFXEvent *event)
++{
++    AppleGFXState *s = event->d->state;
++
++    WITH_QEMU_LOCK_GUARD(&s->event_lock) {
++        QSIMPLEQ_INSERT_TAIL(&s->events, event, next);
++    }
++    qemu_bh_schedule(s->event_bh);
++}
++
++static void apple_gfx_event_run(AppleGFXEvent *event)
++{
++    AppleGFXDisplay *d = event->d;
++
++    switch (event->kind) {
++    case APPLE_GFX_EVENT_CURSOR_GLYPH:
++        set_cursor_glyph(d, &event->glyph);
++        g_free(event->glyph.rgba);
++        break;
++    case APPLE_GFX_EVENT_CURSOR_SHOW:
++        d->cursor_show = event->show;
++        update_cursor(d);
++        break;
++    case APPLE_GFX_EVENT_CURSOR_MOVE:
++        update_cursor(d);
++        break;
++    case APPLE_GFX_EVENT_POINTER:
++        apple_gfx_input_pointer(d, event->pointer.x, event->pointer.y,
++                                event->pointer.width, event->pointer.height,
++                                event->pointer.buttons);
++        break;
++    case APPLE_GFX_EVENT_SCROLL:
++        apple_gfx_input_scroll(d, &event->scroll);
++        break;
++    case APPLE_GFX_EVENT_KEY:
++        apple_gfx_input_key(d, event->key.usage, event->key.down);
++        break;
++    case APPLE_GFX_EVENT_CLOSE:
++        apple_gfx_input_close();
++        break;
++    default:
++        g_assert_not_reached();
++    }
++}
++
++static void apple_gfx_event_bh(void *opaque)
++{
++    AppleGFXState *s = opaque;
++    AppleGFXEvent *event;
++
++    assert(bql_locked());
++    /* One at a time, so a nested run still takes them in order. */
++    for (;;) {
++        WITH_QEMU_LOCK_GUARD(&s->event_lock) {
++            event = QSIMPLEQ_FIRST(&s->events);
++            if (event) {
++                QSIMPLEQ_REMOVE_HEAD(&s->events, next);
++            }
++        }
++        if (event == NULL) {
++            break;
++        }
++        apple_gfx_event_run(event);
++        g_free(event);
++    }
++}
++
++/* ------ Memory-mapped device I/O operations ------ */
++
++/*
++ * The vCPU calls the library itself. An access waits only on the library's
++ * own threads, and they never wait on QEMU: the device's one callback,
++ * raise_interrupt, schedules a BH and returns, and the display callback that
++ * takes the BQL, mode_change, runs on the library's display thread, which no
++ * access waits for. So an access may run under the BQL, and it needs none.
++ */
++static uint64_t apple_gfx_read(void *opaque, hwaddr offset, unsigned size)
++{
++    AppleGFXState *s = opaque;
++    uint64_t value = rvg_device_mmio_read(s->pgdev, offset);
++
++    trace_apple_gfx_read(offset, value);
++    return value;
++}
++
++static void apple_gfx_write(void *opaque, hwaddr offset, uint64_t val,
++                            unsigned size)
++{
++    AppleGFXState *s = opaque;
++
++    rvg_device_mmio_write(s->pgdev, offset, val);
++    trace_apple_gfx_write(offset, val);
++    /* Outside the library's call, as the hook may take the BQL */
++    if (s->mmio_written) {
++        s->mmio_written(s, offset, val);
++    }
++}
++
++static const MemoryRegionOps apple_gfx_ops = {
++    .read = apple_gfx_read,
++    .write = apple_gfx_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++    .impl = {
++        .min_access_size = 4,
++        .max_access_size = 4,
++    },
++};
++
++/* ------ Initialisation and startup ------ */
++
++void apple_gfx_common_init(Object *obj, AppleGFXState *s, const char *obj_name)
++{
++    trace_apple_gfx_common_init(obj_name, RVG_DEVICE_MMIO_SIZE);
++    memory_region_init_io(&s->iomem_gfx, obj, &apple_gfx_ops, s, obj_name,
++                          RVG_DEVICE_MMIO_SIZE);
++    /*
++     * An access needs no BQL (the accessors' comment), and the library takes
++     * accesses from several threads at once. Under KVM a vCPU makes the
++     * access without taking the BQL, and the reentrancy guard, which would
++     * refuse a second vCPU's access while one is in the library, is off.
++     * HVF takes the BQL at every exit, and TCG for every access to I/O
++     * (cputlb.c), so under them the accesses stay one at a time.
++     */
++    memory_region_enable_lockless_io(&s->iomem_gfx);
++
++    /*
++     * TODO: reims-vgpu can suspend and resume the device
++     * (rvg_device_will_suspend and the rest): integrate it!
++     */
++}
++
++typedef struct AppleGFXMemoryWalk {
++    GArray *ranges;
++    GArray *files; /* NULL when the caller wants none */
++} AppleGFXMemoryWalk;
++
++/*
++ * The file behind the guest RAM at @host in @mr's RAM block, for the
++ * library's views of guest pages: a shared mapping of a file, in pages of
++ * the host's size, which a view can map again. Any other RAM has none
++ * (fd -1): anonymous memory; a private mapping, whose pages the guest's
++ * writes copy away from the file; and huge pages, which a view of one guest
++ * page cannot map.
++ */
++static RvgMemoryRangeFile apple_gfx_memory_range_file(const MemoryRegion *mr,
++                                                      void *host)
++{
++    RAMBlock *rb = mr->ram_block;
++    RvgMemoryRangeFile file = { .fd = -1 };
++    int fd = memory_region_get_fd(mr);
++
++    if (fd >= 0 && qemu_ram_is_shared(rb) &&
++        qemu_ram_pagesize(rb) == qemu_real_host_page_size()) {
++        file.fd = fd;
++        file.offset = qemu_ram_block_host_offset(rb, host) +
++                      qemu_ram_get_fd_offset(rb);
++    }
++    return file;
++}
++
++static bool apple_gfx_add_memory_range(Int128 start, Int128 len,
++                                       const MemoryRegion *mr,
++                                       hwaddr offset_in_region, void *opaque)
++{
++    AppleGFXMemoryWalk *walk = opaque;
++
++    if (memory_access_is_direct(mr, true, MEMTXATTRS_UNSPECIFIED)) {
++        /*
++         * A range can begin partway into its region: q35's RAM above 4 GiB
++         * is an alias of the RAM block past the part below 4 GiB.
++         */
++        void *host = (uint8_t *)memory_region_get_ram_ptr(mr) +
++                     offset_in_region;
++        RvgMemoryRange range = {
++            .physical_address = int128_get64(start),
++            .physical_length = int128_get64(len),
++            .host_address = host,
++        };
++        RvgMemoryRangeFile file = { .fd = -1 };
++
++        if (walk->files) {
++            file = apple_gfx_memory_range_file(mr, host);
++            g_array_append_val(walk->files, file);
++        }
++        g_array_append_val(walk->ranges, range);
++        trace_apple_gfx_memory_range(range.physical_address,
++                                     range.physical_length, host, file.fd,
++                                     file.offset);
++    }
++    return false;
++}
++
++GArray *apple_gfx_new_memory_ranges(GArray **files)
++{
++    AppleGFXMemoryWalk walk = {
++        .ranges = g_array_new(false, false, sizeof(RvgMemoryRange)),
++    };
++    FlatView *fv = address_space_to_flatview(&address_space_memory);
++
++    if (files) {
++        walk.files = g_array_new(false, false, sizeof(RvgMemoryRangeFile));
++        *files = walk.files;
++    }
++    flatview_for_each_range(fv, apple_gfx_add_memory_range, &walk);
++    return walk.ranges;
++}
++
++/*
++ * The files the device's config names for the guest's RAM: all of them, or
++ * NULL when a range has none, as vmapple's anonymous RAM on macOS has none.
++ * On Linux the library builds its views of guest pages from these files, so
++ * there a range without one fails the realize.
++ */
++static bool apple_gfx_memory_files(GArray *ranges, GArray *files,
++                                   const RvgMemoryRangeFile **memory_files,
++                                   Error **errp)
++{
++    guint i;
++
++    for (i = 0; i < files->len; i++) {
++        if (g_array_index(files, RvgMemoryRangeFile, i).fd < 0) {
++#ifdef CONFIG_LINUX
++            error_setg(errp, "apple-gfx: guest RAM at 0x%" PRIx64 " is not a "
++                       "shared file mapping in pages of the host's size",
++                       g_array_index(ranges, RvgMemoryRange,
++                                     i).physical_address);
++            error_append_hint(errp, "Back the machine's RAM with -object "
++                              "memory-backend-memfd,share=on,id=<id> and "
++                              "-machine memory-backend=<id>, without "
++                              "hugetlb.\n");
++            return false;
++#else
++            *memory_files = NULL;
++            return true;
++#endif
++        }
++    }
++    *memory_files = (const RvgMemoryRangeFile *)files->data;
++    return true;
++}
++
++/*
++ * The display's callbacks. The library calls them on its display thread,
++ * one at a time, in the order the guest's display events came.
++ */
++static void apple_gfx_new_frame_cb(void *ctx)
++{
++    AppleGFXDisplay *d = ctx;
++
++    trace_apple_gfx_new_frame();
++    aio_bh_schedule_oneshot(qemu_get_aio_context(), new_frame_handler_bh, d);
++}
++
++static void apple_gfx_mode_change_cb(void *ctx, uint16_t width,
++                                     uint16_t height, uint32_t pixel_format)
++{
++    AppleGFXDisplay *d = ctx;
++
++    trace_apple_gfx_mode_change(width, height);
++
++    /*
++     * Synchronous, so that the surface is in place before any BH scheduled
++     * after it runs.
++     */
++    BQL_LOCK_GUARD();
++    set_mode(d, width, height);
++}
++
++static void apple_gfx_cursor_glyph_cb(void *ctx, const RvgCursorGlyph *glyph)
++{
++    AppleGFXDisplay *d = ctx;
++    AppleGFXEvent *event = apple_gfx_event_new(d,
++                                               APPLE_GFX_EVENT_CURSOR_GLYPH);
++    /* height rows of width * 4 bytes */
++    size_t length = (size_t)glyph->width * 4 * glyph->height;
++
++    event->glyph.width = glyph->width;
++    event->glyph.height = glyph->height;
++    event->glyph.hot_spot = glyph->hot_spot;
++    event->glyph.rgba = g_malloc0(length);
++    memcpy(event->glyph.rgba, glyph->rgba, MIN(glyph->rgba_length, length));
++    apple_gfx_event_push(event);
++}
++
++/* show is the guest's byte: any value but 0 shows the cursor. */
++static void apple_gfx_cursor_show_cb(void *ctx, uint8_t show)
++{
++    AppleGFXDisplay *d = ctx;
++    AppleGFXEvent *event = apple_gfx_event_new(d, APPLE_GFX_EVENT_CURSOR_SHOW);
++
++    trace_apple_gfx_cursor_show(show);
++    event->show = show != 0;
++    apple_gfx_event_push(event);
++}
++
++static void apple_gfx_cursor_move_cb(void *ctx)
++{
++    AppleGFXDisplay *d = ctx;
++
++    trace_apple_gfx_cursor_move();
++    apple_gfx_event_push(apple_gfx_event_new(d, APPLE_GFX_EVENT_CURSOR_MOVE));
++}
++
++/*
++ * The window's callbacks. The library calls them on its window thread, never
++ * one of QEMU's: on macOS the process's main thread, which QEMU leaves in its
++ * run loop under -display none, and on Linux the library's own
++ * reims-vgpu.ui thread. Neither holds the BQL, so they only queue the input
++ * under the event lock for the BH, which runs it under the BQL, and never
++ * block.
++ */
++static void apple_gfx_window_pointer_cb(void *ctx, uint16_t x, uint16_t y,
++                                        uint16_t width, uint16_t height,
++                                        uint32_t buttons)
++{
++    AppleGFXEvent *event = apple_gfx_event_new(ctx, APPLE_GFX_EVENT_POINTER);
++
++    event->pointer.x = x;
++    event->pointer.y = y;
++    event->pointer.width = width;
++    event->pointer.height = height;
++    event->pointer.buttons = buttons;
++    apple_gfx_event_push(event);
++}
++
++static void apple_gfx_window_scroll_cb(void *ctx,
++                                       const RvgWindowScroll *scroll)
++{
++    AppleGFXEvent *event = apple_gfx_event_new(ctx, APPLE_GFX_EVENT_SCROLL);
++
++    /* The fields the library's version has; the rest stay 0. */
++    memcpy(&event->scroll, scroll,
++           MIN(scroll->struct_size, sizeof(event->scroll)));
++    apple_gfx_event_push(event);
++}
++
++/* usage is a USB HID keyboard usage (page 0x07). */
++static void apple_gfx_window_key_cb(void *ctx, uint16_t usage, bool down)
++{
++    AppleGFXEvent *event = apple_gfx_event_new(ctx, APPLE_GFX_EVENT_KEY);
++
++    event->key.usage = usage;
++    event->key.down = down;
++    apple_gfx_event_push(event);
++}
++
++static void apple_gfx_window_close_cb(void *ctx)
++{
++    apple_gfx_event_push(apple_gfx_event_new(ctx, APPLE_GFX_EVENT_CLOSE));
++}
++
++static RvgDisplayMode *apple_gfx_new_display_modes(
++    const AppleGFXDisplayMode display_modes[], uint32_t display_mode_count)
++{
++    RvgDisplayMode *modes = g_new0(RvgDisplayMode, display_mode_count);
++
++    for (unsigned i = 0; i < display_mode_count; i++) {
++        const AppleGFXDisplayMode *mode = &display_modes[i];
++
++        trace_apple_gfx_display_mode(i, mode->width_px, mode->height_px);
++
++        modes[i] = (RvgDisplayMode) {
++            .width = mode->width_px,
++            .height = mode->height_px,
++            .refresh_rate_hz = mode->refresh_rate_hz,
++        };
++    }
++
++    return modes;
++}
++
++/*
++ * Window mode: under -display none, QEMU shows no display of its own, and the
++ * library opens a window for each, unless REIMS_VGPU_WINDOW is "0".
++ */
++static bool apple_gfx_window_wanted(void)
++{
++    static bool reported;
++    DisplayOptions *options = qmp_query_display_options(&error_abort);
++    bool window = options->type == DISPLAY_TYPE_NONE &&
++                  g_strcmp0(g_getenv("REIMS_VGPU_WINDOW"), "0") != 0;
++
++    qapi_free_DisplayOptions(options);
++    if (window && !reported) {
++        reported = true;
++        info_report("apple-gfx: -display none: each display opens a window "
++                    "of its own; REIMS_VGPU_WINDOW=0 keeps QEMU headless");
++    }
++    return window;
++}
++
++static void apple_gfx_events_free(AppleGFXState *s)
++{
++    AppleGFXEvent *event;
++
++    while ((event = QSIMPLEQ_FIRST(&s->events)) != NULL) {
++        QSIMPLEQ_REMOVE_HEAD(&s->events, next);
++        if (event->kind == APPLE_GFX_EVENT_CURSOR_GLYPH) {
++            g_free(event->glyph.rgba);
++        }
++        g_free(event);
++    }
++}
++
++/*
++ * The whole millimetres a macOS guest is told a mode @width pixels wide is
++ * across at @ppi pixels per inch: the library tells it width / (ppi /
++ * 25.46) millimetres, which the display's settings page holds as a float
++ * and in whole millimetres, rounded to nearest, in 16 bits.
++ */
++static uint64_t apple_gfx_guest_millimeters(int width, int ppi)
++{
++    float millimeters = width / (ppi / 25.46);
++
++    return (uint64_t)((double)millimeters + 0.5);
++}
++
++/*
++ * The whole centimetres a macOS guest reads a mode @width pixels wide as,
++ * told @ppi pixels per inch: its whole millimetres, rounded up to whole
++ * centimetres.
++ */
++static uint64_t apple_gfx_guest_centimeters(int width, int ppi)
++{
++    return (apple_gfx_guest_millimeters(width, ppi) + 9) / 10;
++}
++
++/*
++ * Whether the scale a macOS guest runs a mode @width pixels wide at, told
++ * @ppi pixels per inch, is not known from the density. Measured on macOS
++ * 13.6, the guest runs HiDPI from 2021 pixels across 35 whole centimetres
++ * (146.667 ppi), for modes from 1920 pixels wide and 29 cm, and 1x at up to
++ * 3811 pixels across 66 (146.666 ppi), for modes up to 3811 pixels wide.
++ * Modes of other widths need not follow it: a mode 5832 pixels wide ran
++ * HiDPI at 128.8 ppi, and 1280x800 ran 1x at 216.7 ppi across 15 cm. A
++ * width of more than 65535 millimetres, which the settings page's 16 bits
++ * do not hold, was not measured either.
++ */
++static bool apple_gfx_guest_scale_unknown(int width, int ppi)
++{
++    uint64_t cm = apple_gfx_guest_centimeters(width, ppi);
++    uint64_t w = width;
++
++    if (cm == 0 || apple_gfx_guest_millimeters(width, ppi) > UINT16_MAX) {
++        return true;
++    }
++    if (w * 35 >= 2021 * cm) {
++        return width < 1920 || cm < 29;
++    }
++    return width > 3811 || w * 66 > 3811 * cm;
++}
++
++/*
++ * The mode a window display offers the guest first, from the resolution
++ * property: NULL is 1920x1080, "host" is none (0x0: the host screen's own
++ * modes, at its density), else "<width>x<height>", each 1 to 65535 pixels,
++ * optionally followed by "@<ppi>", the density the guest is told for the
++ * mode, 1 to 65535 pixels per inch, refused where the scale the guest runs
++ * the mode at is not known from it. Without it *ppi is 0, which the library
++ * takes as its 1x density. Only this mode is checked: the smaller modes
++ * offered with it are told the same size.
++ */
++static bool apple_gfx_parse_resolution(const char *str, uint16_t *width,
++                                       uint16_t *height, double *ppi,
++                                       Error **errp)
++{
++    const char *endptr;
++    int w, h, p = 0;
++
++    *ppi = 0;
++    if (str == NULL) {
++        *width = 1920;
++        *height = 1080;
++        return true;
++    }
++    if (strcmp(str, "host") == 0) {
++        *width = 0;
++        *height = 0;
++        return true;
++    }
++    if (qemu_strtoi(str, &endptr, 10, &w) || w <= 0 || w > UINT16_MAX ||
++        *endptr != 'x' ||
++        qemu_strtoi(endptr + 1, &endptr, 10, &h) || h <= 0 ||
++        h > UINT16_MAX ||
++        (*endptr == '@' &&
++         (qemu_strtoi(endptr + 1, NULL, 10, &p) || p <= 0 ||
++          p > UINT16_MAX)) ||
++        (*endptr != '@' && *endptr != '\0')) {
++        error_setg(errp, "apple-gfx: resolution must be <width>x<height>, "
++                   "each 1 to 65535 pixels, optionally followed by @<ppi>, "
++                   "1 to 65535, or host, not '%s'", str);
++        return false;
++    }
++    if (p != 0 && apple_gfx_guest_scale_unknown(w, p)) {
++        error_setg(errp, "apple-gfx: resolution '%s' tells a macOS guest "
++                   "%d pixels across %" PRIu64 " cm, where the scale it runs "
++                   "is not known from the density; choose another density",
++                   str, w, apple_gfx_guest_centimeters(w, p));
++        return false;
++    }
++    *width = w;
++    *height = h;
++    *ppi = p;
++    return true;
++}
++
++bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
++                              RvgDeviceConfig *config, Error **errp)
++{
++    static const char display_name[] = "Reims vGPU";
++    g_autoptr(GArray) memory_ranges = NULL;
++    g_autoptr(GArray) memory_files = NULL;
++    g_autofree RvgDisplayMode *modes = NULL;
++    const AppleGFXDisplayMode *display_modes = apple_gfx_default_modes;
++    uint32_t num_display_modes = ARRAY_SIZE(apple_gfx_default_modes);
++    bool modes_property = s->display_modes != NULL &&
++                          s->num_display_modes > 0;
++    RvgMemoryMap memory_map;
++    RvgDisplayCallbacks display_callbacks = {
++        .struct_size = sizeof(display_callbacks),
++        .mode_change = apple_gfx_mode_change_cb,
++        .new_frame = apple_gfx_new_frame_cb,
++        .cursor_glyph = apple_gfx_cursor_glyph_cb,
++        .cursor_show = apple_gfx_cursor_show_cb,
++        .cursor_move = apple_gfx_cursor_move_cb,
++    };
++    RvgWindowCallbacks window_callbacks = {
++        .struct_size = sizeof(window_callbacks),
++        .pointer = apple_gfx_window_pointer_cb,
++        .key = apple_gfx_window_key_cb,
++        .close = apple_gfx_window_close_cb,
++        .scroll = apple_gfx_window_scroll_cb,
++    };
++    /*
++     * Unless display-modes names some, the library offers the resolution
++     * property's mode at 1x or at the density it names, or the host screen's
++     * own modes, at the host screen's refresh rate.
++     */
++    RvgWindowConfig window_config = {
++        .struct_size = sizeof(window_config),
++        .flags = modes_property ? 0 : RVG_WINDOW_MATCH_HOST_SCREEN,
++        .callbacks = &window_callbacks,
++    };
++    RvgDisplayConfig display_config = {
++        .struct_size = sizeof(display_config),
++        .name = display_name,
++        .name_length = sizeof(display_name) - 1,
++        .width_millimeters = 400., /* A 20" display */
++        .height_millimeters = 300.,
++        .callbacks = &display_callbacks,
++    };
++    RvgStatus status;
++    uint32_t i;
++
++    if (s->num_displays < 1 || s->num_displays > RVG_MAX_DISPLAY_PORTS) {
++        error_setg(errp, "apple-gfx: displays must be 1 to %u, not %" PRIu32,
++                   RVG_MAX_DISPLAY_PORTS, s->num_displays);
++        return false;
++    }
++    if (!apple_gfx_parse_resolution(s->resolution, &window_config.mode_width,
++                                    &window_config.mode_height,
++                                    &window_config.mode_pixels_per_inch,
++                                    errp)) {
++        return false;
++    }
++
++    if (apple_gfx_mig_blocker == NULL) {
++        error_setg(&apple_gfx_mig_blocker,
++                  "Migration state blocked by apple-gfx display device");
++        if (migrate_add_blocker(&apple_gfx_mig_blocker, errp) < 0) {
++            return false;
++        }
++    }
++
++    /* The library copies the ranges, and duplicates the files' descriptors. */
++    memory_ranges = apple_gfx_new_memory_ranges(&memory_files);
++    if (!apple_gfx_memory_files(memory_ranges, memory_files,
++                                &config->memory_files, errp)) {
++        return false;
++    }
++    memory_map = (RvgMemoryMap) {
++        .ranges = (const RvgMemoryRange *)memory_ranges->data,
++        .range_count = memory_ranges->len,
++    };
++    config->display_port_count = s->num_displays;
++    config->metal_registry_id = 0; /* the system's default Metal device */
++    config->memory_map = &memory_map;
++
++    s->pool = thread_pool_new();
++    qemu_mutex_init(&s->event_lock);
++    QSIMPLEQ_INIT(&s->events);
++    s->event_bh = qemu_bh_new(apple_gfx_event_bh, s);
++    s->window = apple_gfx_window_wanted();
++    for (i = 0; i < s->num_displays; i++) {
++        s->displays[i].state = s;
++        s->displays[i].cursor_show = true;
++    }
++
++    status = rvg_device_create(config, &s->pgdev);
++    if (status != RVG_OK) {
++        error_setg(errp, "apple-gfx: rvg_device_create: %s",
++                   rvg_status_message(status));
++        goto fail;
++    }
++
++    if (modes_property) {
++        trace_apple_gfx_common_realize_modes_property(s->num_display_modes);
++        display_modes = s->display_modes;
++        num_display_modes = s->num_display_modes;
++    }
++    if (!s->window || modes_property) {
++        modes = apple_gfx_new_display_modes(display_modes, num_display_modes);
++    }
++
++    for (i = 0; i < s->num_displays; i++) {
++        AppleGFXDisplay *d = &s->displays[i];
++
++        display_callbacks.ctx = d;
++        window_callbacks.ctx = d;
++        display_config.port = i;
++        display_config.window = s->window ? &window_config : NULL;
++        /*
++         * The macOS guest ignores displays that share a serial number, those
++         * of other instances of the device among them, so each display gets
++         * a unique one.
++         */
++        display_config.serial_number = next_pgdisplay_serial_num++;
++        status = rvg_display_create(s->pgdev, &display_config, &d->pgdisp);
++        if (status != RVG_OK) {
++            error_setg(errp, "apple-gfx: rvg_display_create: %s",
++                       rvg_status_message(status));
++            goto fail;
++        }
++
++        /* A window offers its own modes, unless display-modes names some. */
++        if (modes) {
++            rvg_display_set_modes(d->pgdisp, modes, num_display_modes);
++        }
++    }
++
++    for (i = 0; i < s->num_displays; i++) {
++        s->displays[i].con = qemu_graphic_console_create(dev, i,
++                                                         &apple_gfx_fb_ops,
++                                                         &s->displays[i]);
++    }
++
++    /* App Nap would slow the VM while no window of QEMU's is seen. */
++    apple_gfx_activity_begin();
++    s->holds_activity = true;
++    return true;
++
++fail:
++    for (i = s->num_displays; i-- > 0;) {
++        rvg_display_release(s->displays[i].pgdisp);
++        s->displays[i].pgdisp = NULL;
++    }
++    rvg_device_release(s->pgdev);
++    s->pgdev = NULL;
++    thread_pool_free(s->pool);
++    s->pool = NULL;
++    qemu_bh_delete(s->event_bh);
++    s->event_bh = NULL;
++    apple_gfx_events_free(s);
++    qemu_mutex_destroy(&s->event_lock);
++    return false;
++}
++
++void apple_gfx_common_finalize(AppleGFXState *s)
++{
++    if (s->holds_activity) {
++        s->holds_activity = false;
++        apple_gfx_activity_end();
++    }
++}
++
++/* ------ Display mode list device property ------ */
++
++static void apple_gfx_get_display_mode(Object *obj, Visitor *v,
++                                       const char *name, void *opaque,
++                                       Error **errp)
++{
++    Property *prop = opaque;
++    AppleGFXDisplayMode *mode = object_field_prop_ptr(obj, prop);
++    /* 3 uint16s (max 5 digits) + 2 separator characters + nul. */
++    char buffer[5 * 3 + 2 + 1];
++    char *pos = buffer;
++
++    int rc = snprintf(buffer, sizeof(buffer),
++                      "%"PRIu16"x%"PRIu16"@%"PRIu16,
++                      mode->width_px, mode->height_px,
++                      mode->refresh_rate_hz);
++    assert(rc < sizeof(buffer));
++
++    visit_type_str(v, name, &pos, errp);
++}
++
++static void apple_gfx_set_display_mode(Object *obj, Visitor *v,
++                                       const char *name, void *opaque,
++                                       Error **errp)
++{
++    Property *prop = opaque;
++    AppleGFXDisplayMode *mode = object_field_prop_ptr(obj, prop);
++    const char *endptr;
++    g_autofree char *str = NULL;
++    int ret;
++    int val;
++
++    if (!visit_type_str(v, name, &str, errp)) {
++        return;
++    }
++
++    endptr = str;
++
++    ret = qemu_strtoi(endptr, &endptr, 10, &val);
++    if (ret || val > UINT16_MAX || val <= 0) {
++        error_setg(errp, "width in '%s' must be a decimal integer number"
++                         " of pixels in the range 1..65535", name);
++        return;
++    }
++    mode->width_px = val;
++    if (*endptr != 'x') {
++        goto separator_error;
++    }
++
++    ret = qemu_strtoi(endptr + 1, &endptr, 10, &val);
++    if (ret || val > UINT16_MAX || val <= 0) {
++        error_setg(errp, "height in '%s' must be a decimal integer number"
++                         " of pixels in the range 1..65535", name);
++        return;
++    }
++    mode->height_px = val;
++    if (*endptr != '@') {
++        goto separator_error;
++    }
++
++    ret = qemu_strtoi(endptr + 1, &endptr, 10, &val);
++    if (ret || val > UINT16_MAX || val <= 0) {
++        error_setg(errp, "refresh rate in '%s'"
++                         " must be a positive decimal integer (Hertz)", name);
++        return;
++    }
++    mode->refresh_rate_hz = val;
++    return;
++
++separator_error:
++    error_setg(errp,
++               "Each display mode takes the format '<width>x<height>@<rate>'");
++}
++
++const PropertyInfo qdev_prop_apple_gfx_display_mode = {
++    .type  = "display_mode",
++    .description =
++        "Display mode in pixels and Hertz, as <width>x<height>@<refresh-rate> "
++        "Example: 3840x2160@60",
++    .get   = apple_gfx_get_display_mode,
++    .set   = apple_gfx_set_display_mode,
++};
+diff --git a/hw/display/apple-gfx.h b/hw/display/apple-gfx.h
+index 3197bd853d..928638a1bc 100644
+--- a/hw/display/apple-gfx.h
++++ b/hw/display/apple-gfx.h
+@@ -1,6 +1,6 @@
+ /*
+- * Data structures and functions shared between variants of the macOS
+- * ParavirtualizedGraphics.framework based apple-gfx display adapter.
++ * Data structures and functions shared between variants of the apple-gfx
++ * display adapter, which drives reims-vgpu's C API (reims_vgpu.h).
+  *
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+@@ -8,22 +8,17 @@
+ #ifndef QEMU_APPLE_GFX_H
+ #define QEMU_APPLE_GFX_H
+ 
+-#include "qemu/queue.h"
+ #include "system/memory.h"
+ #include "hw/core/qdev-properties.h"
+ #include "ui/surface.h"
++#include "block/thread-pool.h"
++#include "qemu/queue.h"
++#include "qemu/thread.h"
++#include <reims_vgpu.h>
+ 
+ #define TYPE_APPLE_GFX_MMIO         "apple-gfx-mmio"
+ #define TYPE_APPLE_GFX_PCI          "apple-gfx-pci"
+-
+-@class PGDeviceDescriptor;
+-@protocol PGDevice;
+-@protocol PGDisplay;
+-@protocol MTLDevice;
+-@protocol MTLTexture;
+-@protocol MTLCommandQueue;
+-
+-typedef QTAILQ_HEAD(, PGTask_s) PGTaskList;
++#define TYPE_APPLE_GFX_IOSURFACE_PCI "apple-gfx-iosurface-pci"
+ 
+ typedef struct AppleGFXDisplayMode {
+     uint16_t width_px;
+@@ -31,44 +26,99 @@ typedef struct AppleGFXDisplayMode {
+     uint16_t refresh_rate_hz;
+ } AppleGFXDisplayMode;
+ 
+-typedef struct AppleGFXState {
++typedef struct AppleGFXState AppleGFXState;
++
++/* One of the device's displays: the i-th is on port i, and console head i. */
++typedef struct AppleGFXDisplay {
++    /* Initialised on realize() */
++    AppleGFXState *state;
++    RvgDisplay *pgdisp;
++    QemuConsole *con;
++
++    /* Mutable state (BQL protected) */
++    QEMUCursor *cursor;
++    DisplaySurface *surface;
++    RvgFrameTarget *target; /* The surface's size, BGRA8; NULL if refused */
++    bool rendering; /* A render into the surface is under way */
++    /*
++     * The guest presented a frame, or the surface changed, since the last
++     * render began
++     */
++    bool frame_dirty;
++    /* Until then, on QEMU_CLOCK_REALTIME, a listener shows the surface */
++    int64_t watched_until_ms;
++    bool cursor_show;
++} AppleGFXDisplay;
++
++/* Callbacks' work for the BQL, in the order the callbacks came. */
++typedef struct AppleGFXEvent AppleGFXEvent;
++typedef QSIMPLEQ_HEAD(, AppleGFXEvent) AppleGFXEventQueue;
++
++struct AppleGFXState {
+     /* Initialised on init/realize() */
+     MemoryRegion iomem_gfx;
+-    id<PGDevice> pgdev;
+-    id<PGDisplay> pgdisp;
+-    QemuConsole *con;
+-    id<MTLDevice> mtl;
+-    id<MTLCommandQueue> mtl_queue;
++    RvgDevice *pgdev;
++    /* Called after the library takes a guest write; may take the BQL */
++    void (*mmio_written)(AppleGFXState *s, hwaddr offset, uint32_t value);
++    /*
++     * Runs the renders into the surfaces: each frame's encode, wait and read,
++     * off the main loop.
++     */
++    ThreadPool *pool;
+     AppleGFXDisplayMode *display_modes;
+     uint32_t num_display_modes;
++    uint32_t num_displays; /* 1 to RVG_MAX_DISPLAY_PORTS, on ports 0 up */
++    /*
++     * The mode a window display offers the guest first: "<width>x<height>",
++     * optionally followed by "@<ppi>", the density the guest is told for it,
++     * or "host" for the host screen's own modes; NULL is 1920x1080.
++     */
++    char *resolution;
++    /*
++     * Each display has a window of the library's, which draws its frames
++     * and sends its input (-display none, unless REIMS_VGPU_WINDOW=0).
++     */
++    bool window;
++    /* Realize began a hold on the activity against App Nap. */
++    bool holds_activity;
++    AppleGFXDisplay displays[RVG_MAX_DISPLAY_PORTS];
+ 
+-    /* List `tasks` is protected by task_mutex */
+-    QemuMutex task_mutex;
+-    PGTaskList tasks;
++    /*
++     * The display callbacks' cursor work and the windows' input, queued on
++     * the threads they come on and run under the BQL by event_bh.
++     */
++    QemuMutex event_lock;
++    AppleGFXEventQueue events; /* event_lock protected */
++    QEMUBH *event_bh;
+ 
+     /* Mutable state (BQL protected) */
+-    QEMUCursor *cursor;
+-    DisplaySurface *surface;
+-    id<MTLTexture> texture;
+-    int8_t pending_frames; /* # guest frames in the rendering pipeline */
+-    bool gfx_update_requested; /* QEMU display system wants a new frame */
+-    bool new_frame_ready; /* Guest has rendered a frame, ready to be used */
+-    bool using_managed_texture_storage;
+-    uint32_t rendering_frame_width;
+-    uint32_t rendering_frame_height;
++    uint32_t input_buttons; /* RVG_WINDOW_BUTTON_* bits the guest was sent */
++};
+ 
+-    /* Mutable state (atomic) */
+-    bool cursor_show;
+-} AppleGFXState;
+-
+-void apple_gfx_common_init(Object *obj, AppleGFXState *s, const char* obj_name);
++void apple_gfx_common_init(Object *obj, AppleGFXState *s, const char *obj_name);
++/*
++ * Makes the device from @config, which the bus variant fills in with its
++ * callbacks and flags, then its displays and their consoles.
++ */
+ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
+-                              PGDeviceDescriptor *desc, Error **errp);
+-void *apple_gfx_host_ptr_for_gpa_range(uint64_t guest_physical,
+-                                       uint64_t length, bool read_only,
+-                                       MemoryRegion **mapping_in_region);
++                              RvgDeviceConfig *config, Error **errp);
++/* Ends the hold on the activity against App Nap that realize began. */
++void apple_gfx_common_finalize(AppleGFXState *s);
++/*
++ * The process's user-initiated activity, which keeps App Nap from slowing
++ * the VM (apple-gfx-activity.m): begun at the first hold, ended at the last
++ * hold's end. Under the BQL. On hosts without App Nap they do nothing
++ * (apple-gfx-activity-stub.c).
++ */
++void apple_gfx_activity_begin(void);
++void apple_gfx_activity_end(void);
++/*
++ * The guest's RAM, as RvgMemoryRange elements: an RvgMemoryMap's ranges.
++ * Unless @files is NULL, it gets the file behind each range, as
++ * RvgMemoryRangeFile elements in the same order, fd -1 where there is none.
++ */
++GArray *apple_gfx_new_memory_ranges(GArray **files);
+ 
+ extern const PropertyInfo qdev_prop_apple_gfx_display_mode;
+ 
+ #endif
+-
+diff --git a/hw/display/apple-gfx.m b/hw/display/apple-gfx.m
+deleted file mode 100644
+index be0061b9db..0000000000
+--- a/hw/display/apple-gfx.m
++++ /dev/null
+@@ -1,880 +0,0 @@
+-/*
+- * QEMU Apple ParavirtualizedGraphics.framework device
+- *
+- * Copyright © 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+- *
+- * SPDX-License-Identifier: GPL-2.0-or-later
+- *
+- * ParavirtualizedGraphics.framework is a set of libraries that macOS provides
+- * which implements 3d graphics passthrough to the host as well as a
+- * proprietary guest communication channel to drive it. This device model
+- * implements support to drive that library from within QEMU.
+- */
+-
+-#include "qemu/osdep.h"
+-#include "qemu/lockable.h"
+-#include "qemu/cutils.h"
+-#include "qemu/log.h"
+-#include "qapi/visitor.h"
+-#include "qapi/error.h"
+-#include "qemu/aio-wait.h"
+-#include "system/address-spaces.h"
+-#include "system/dma.h"
+-#include "migration/blocker.h"
+-#include "ui/console.h"
+-#include "apple-gfx.h"
+-#include "trace.h"
+-
+-#include <mach/mach.h>
+-#include <mach/mach_vm.h>
+-#include <dispatch/dispatch.h>
+-
+-#import <ParavirtualizedGraphics/ParavirtualizedGraphics.h>
+-
+-static const AppleGFXDisplayMode apple_gfx_default_modes[] = {
+-    { 1920, 1080, 60 },
+-    { 1440, 1080, 60 },
+-    { 1280, 1024, 60 },
+-};
+-
+-static Error *apple_gfx_mig_blocker;
+-static uint32_t next_pgdisplay_serial_num = 1;
+-
+-static dispatch_queue_t get_background_queue(void)
+-{
+-    return dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+-}
+-
+-/* ------ PGTask and task operations: new/destroy/map/unmap ------ */
+-
+-/*
+- * This implements the type declared in <ParavirtualizedGraphics/PGDevice.h>
+- * which is opaque from the framework's point of view. It is used in callbacks
+- * in the form of its typedef PGTask_t, which also already exists in the
+- * framework headers.
+- *
+- * A "task" in PVG terminology represents a host-virtual contiguous address
+- * range which is reserved in a large chunk on task creation. The mapMemory
+- * callback then requests ranges of guest system memory (identified by their
+- * GPA) to be mapped into subranges of this reserved address space.
+- * This type of operation isn't well-supported by QEMU's memory subsystem,
+- * but it is fortunately trivial to achieve with Darwin's mach_vm_remap() call,
+- * which allows us to refer to the same backing memory via multiple virtual
+- * address ranges. The Mach VM APIs are therefore used throughout for managing
+- * task memory.
+- */
+-struct PGTask_s {
+-    QTAILQ_ENTRY(PGTask_s) node;
+-    AppleGFXState *s;
+-    mach_vm_address_t address;
+-    uint64_t len;
+-    /*
+-     * All unique MemoryRegions for which a mapping has been created in this
+-     * task, and on which we have thus called memory_region_ref(). There are
+-     * usually very few regions of system RAM in total, so we expect this array
+-     * to be very short. Therefore, no need for sorting or fancy search
+-     * algorithms, linear search will do.
+-     * Protected by AppleGFXState's task_mutex.
+-     */
+-    GPtrArray *mapped_regions;
+-};
+-
+-static PGTask_t *apple_gfx_new_task(AppleGFXState *s, uint64_t len)
+-{
+-    mach_vm_address_t task_mem;
+-    PGTask_t *task;
+-    kern_return_t r;
+-
+-    r = mach_vm_allocate(mach_task_self(), &task_mem, len, VM_FLAGS_ANYWHERE);
+-    if (r != KERN_SUCCESS) {
+-        return NULL;
+-    }
+-
+-    task = g_new0(PGTask_t, 1);
+-    task->s = s;
+-    task->address = task_mem;
+-    task->len = len;
+-    task->mapped_regions = g_ptr_array_sized_new(2 /* Usually enough */);
+-
+-    QEMU_LOCK_GUARD(&s->task_mutex);
+-    QTAILQ_INSERT_TAIL(&s->tasks, task, node);
+-
+-    return task;
+-}
+-
+-static void apple_gfx_destroy_task(AppleGFXState *s, PGTask_t *task)
+-{
+-    GPtrArray *regions = task->mapped_regions;
+-    MemoryRegion *region;
+-    size_t i;
+-
+-    for (i = 0; i < regions->len; ++i) {
+-        region = g_ptr_array_index(regions, i);
+-        memory_region_unref(region);
+-    }
+-    g_ptr_array_unref(regions);
+-
+-    mach_vm_deallocate(mach_task_self(), task->address, task->len);
+-
+-    QEMU_LOCK_GUARD(&s->task_mutex);
+-    QTAILQ_REMOVE(&s->tasks, task, node);
+-    g_free(task);
+-}
+-
+-void *apple_gfx_host_ptr_for_gpa_range(uint64_t guest_physical,
+-                                       uint64_t length, bool read_only,
+-                                       MemoryRegion **mapping_in_region)
+-{
+-    MemoryRegion *ram_region;
+-    char *host_ptr;
+-    hwaddr ram_region_offset = 0;
+-    hwaddr ram_region_length = length;
+-
+-    ram_region = address_space_translate(&address_space_memory,
+-                                         guest_physical,
+-                                         &ram_region_offset,
+-                                         &ram_region_length, !read_only,
+-                                         MEMTXATTRS_UNSPECIFIED);
+-
+-    if (!ram_region || ram_region_length < length ||
+-        !memory_access_is_direct(ram_region, !read_only,
+-				 MEMTXATTRS_UNSPECIFIED)) {
+-        return NULL;
+-    }
+-
+-    host_ptr = memory_region_get_ram_ptr(ram_region);
+-    if (!host_ptr) {
+-        return NULL;
+-    }
+-    host_ptr += ram_region_offset;
+-    *mapping_in_region = ram_region;
+-    return host_ptr;
+-}
+-
+-static bool apple_gfx_task_map_memory(AppleGFXState *s, PGTask_t *task,
+-                                      uint64_t virtual_offset,
+-                                      PGPhysicalMemoryRange_t *ranges,
+-                                      uint32_t range_count, bool read_only)
+-{
+-    kern_return_t r;
+-    void *source_ptr;
+-    mach_vm_address_t target;
+-    vm_prot_t cur_protection, max_protection;
+-    bool success = true;
+-    MemoryRegion *region;
+-
+-    RCU_READ_LOCK_GUARD();
+-    QEMU_LOCK_GUARD(&s->task_mutex);
+-
+-    trace_apple_gfx_map_memory(task, range_count, virtual_offset, read_only);
+-    for (int i = 0; i < range_count; i++) {
+-        PGPhysicalMemoryRange_t *range = &ranges[i];
+-
+-        target = task->address + virtual_offset;
+-        virtual_offset += range->physicalLength;
+-
+-        trace_apple_gfx_map_memory_range(i, range->physicalAddress,
+-                                         range->physicalLength);
+-
+-        region = NULL;
+-        source_ptr = apple_gfx_host_ptr_for_gpa_range(range->physicalAddress,
+-                                                      range->physicalLength,
+-                                                      read_only, &region);
+-        if (!source_ptr) {
+-            success = false;
+-            continue;
+-        }
+-
+-        if (!g_ptr_array_find(task->mapped_regions, region, NULL)) {
+-            g_ptr_array_add(task->mapped_regions, region);
+-            memory_region_ref(region);
+-        }
+-
+-        cur_protection = 0;
+-        max_protection = 0;
+-        /* Map guest RAM at range->physicalAddress into PG task memory range */
+-        r = mach_vm_remap(mach_task_self(),
+-                          &target, range->physicalLength, vm_page_size - 1,
+-                          VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+-                          mach_task_self(), (mach_vm_address_t)source_ptr,
+-                          false /* shared mapping, no copy */,
+-                          &cur_protection, &max_protection,
+-                          VM_INHERIT_COPY);
+-        trace_apple_gfx_remap(r, source_ptr, target);
+-        g_assert(r == KERN_SUCCESS);
+-    }
+-
+-    return success;
+-}
+-
+-static void apple_gfx_task_unmap_memory(AppleGFXState *s, PGTask_t *task,
+-                                        uint64_t virtual_offset, uint64_t length)
+-{
+-    kern_return_t r;
+-    mach_vm_address_t range_address;
+-
+-    trace_apple_gfx_unmap_memory(task, virtual_offset, length);
+-
+-    /*
+-     * Replace task memory range with fresh 0 pages, undoing the mapping
+-     * from guest RAM.
+-     */
+-    range_address = task->address + virtual_offset;
+-    r = mach_vm_allocate(mach_task_self(), &range_address, length,
+-                         VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+-    g_assert(r == KERN_SUCCESS);
+-}
+-
+-/* ------ Rendering and frame management ------ */
+-
+-static void apple_gfx_render_frame_completed_bh(void *opaque);
+-
+-static void apple_gfx_render_new_frame(AppleGFXState *s)
+-{
+-    bool managed_texture = s->using_managed_texture_storage;
+-    uint32_t width = surface_width(s->surface);
+-    uint32_t height = surface_height(s->surface);
+-    MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+-    id<MTLCommandBuffer> command_buffer = [s->mtl_queue commandBuffer];
+-    id<MTLTexture> texture = s->texture;
+-
+-    assert(bql_locked());
+-    [texture retain];
+-    [command_buffer retain];
+-
+-    s->rendering_frame_width = width;
+-    s->rendering_frame_height = height;
+-
+-    dispatch_async(get_background_queue(), ^{
+-        /*
+-         * This is not safe to call from the BQL/BH due to PVG-internal locks
+-         * causing deadlocks.
+-         */
+-        bool r = [s->pgdisp encodeCurrentFrameToCommandBuffer:command_buffer
+-                                                 texture:texture
+-                                                  region:region];
+-        if (!r) {
+-            [texture release];
+-            [command_buffer release];
+-            qemu_log_mask(LOG_GUEST_ERROR,
+-                          "%s: encodeCurrentFrameToCommandBuffer:texture:region: "
+-                          "failed\n", __func__);
+-            bql_lock();
+-            --s->pending_frames;
+-            if (s->pending_frames > 0) {
+-                apple_gfx_render_new_frame(s);
+-            }
+-            bql_unlock();
+-            return;
+-        }
+-
+-        if (managed_texture) {
+-            /* "Managed" textures exist in both VRAM and RAM and must be synced. */
+-            id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+-            [blit synchronizeResource:texture];
+-            [blit endEncoding];
+-        }
+-        [texture release];
+-        [command_buffer addCompletedHandler:
+-            ^(id<MTLCommandBuffer> cb)
+-            {
+-                aio_bh_schedule_oneshot(qemu_get_aio_context(),
+-                                        apple_gfx_render_frame_completed_bh, s);
+-            }];
+-        [command_buffer commit];
+-        [command_buffer release];
+-    });
+-}
+-
+-static void copy_mtl_texture_to_surface_mem(id<MTLTexture> texture, void *vram)
+-{
+-    /*
+-     * TODO: Skip this entirely on a pure Metal or headless/guest-only
+-     * rendering path, else use a blit command encoder? Needs careful
+-     * (double?) buffering design.
+-     */
+-    size_t width = texture.width, height = texture.height;
+-    MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+-    [texture getBytes:vram
+-          bytesPerRow:(width * 4)
+-        bytesPerImage:(width * height * 4)
+-           fromRegion:region
+-          mipmapLevel:0
+-                slice:0];
+-}
+-
+-static void apple_gfx_render_frame_completed_bh(void *opaque)
+-{
+-    AppleGFXState *s = opaque;
+-
+-    @autoreleasepool {
+-        --s->pending_frames;
+-        assert(s->pending_frames >= 0);
+-
+-        /* Only update display if mode hasn't changed since we started rendering. */
+-        if (s->rendering_frame_width == surface_width(s->surface) &&
+-            s->rendering_frame_height == surface_height(s->surface)) {
+-            copy_mtl_texture_to_surface_mem(s->texture, surface_data(s->surface));
+-            if (s->gfx_update_requested) {
+-                s->gfx_update_requested = false;
+-                qemu_console_update_full(s->con);
+-                qemu_console_hw_update_done(s->con);
+-                s->new_frame_ready = false;
+-            } else {
+-                s->new_frame_ready = true;
+-            }
+-        }
+-        if (s->pending_frames > 0) {
+-            apple_gfx_render_new_frame(s);
+-        }
+-    }
+-}
+-
+-static bool apple_gfx_fb_update_display(void *opaque)
+-{
+-    AppleGFXState *s = opaque;
+-    bool done = true;
+-
+-    assert(bql_locked());
+-    if (s->new_frame_ready) {
+-        qemu_console_update_full(s->con);
+-        s->new_frame_ready = false;
+-    } else if (s->pending_frames > 0) {
+-        s->gfx_update_requested = true;
+-        done = false;
+-    }
+-
+-    return done;
+-}
+-
+-static const GraphicHwOps apple_gfx_fb_ops = {
+-    .gfx_update = apple_gfx_fb_update_display,
+-};
+-
+-/* ------ Mouse cursor and display mode setting ------ */
+-
+-static void set_mode(AppleGFXState *s, uint32_t width, uint32_t height)
+-{
+-    MTLTextureDescriptor *textureDescriptor;
+-
+-    if (s->surface &&
+-        width == surface_width(s->surface) &&
+-        height == surface_height(s->surface)) {
+-        return;
+-    }
+-
+-    [s->texture release];
+-
+-    s->surface = qemu_create_displaysurface(width, height);
+-
+-    @autoreleasepool {
+-        textureDescriptor =
+-            [MTLTextureDescriptor
+-                texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+-                                             width:width
+-                                            height:height
+-                                         mipmapped:NO];
+-        textureDescriptor.usage = s->pgdisp.minimumTextureUsage;
+-        s->texture = [s->mtl newTextureWithDescriptor:textureDescriptor];
+-        s->using_managed_texture_storage =
+-            (s->texture.storageMode == MTLStorageModeManaged);
+-    }
+-
+-    qemu_console_set_surface(s->con, s->surface);
+-}
+-
+-static void update_cursor(AppleGFXState *s)
+-{
+-    assert(bql_locked());
+-    qemu_console_set_mouse(s->con, s->pgdisp.cursorPosition.x,
+-                           s->pgdisp.cursorPosition.y, qatomic_read(&s->cursor_show));
+-}
+-
+-static void update_cursor_bh(void *opaque)
+-{
+-    AppleGFXState *s = opaque;
+-    update_cursor(s);
+-}
+-
+-typedef struct AppleGFXSetCursorGlyphJob {
+-    AppleGFXState *s;
+-    NSBitmapImageRep *glyph;
+-    PGDisplayCoord_t hotspot;
+-} AppleGFXSetCursorGlyphJob;
+-
+-static void set_cursor_glyph(void *opaque)
+-{
+-    AppleGFXSetCursorGlyphJob *job = opaque;
+-    AppleGFXState *s = job->s;
+-    NSBitmapImageRep *glyph = job->glyph;
+-    uint32_t bpp = glyph.bitsPerPixel;
+-    size_t width = glyph.pixelsWide;
+-    size_t height = glyph.pixelsHigh;
+-    size_t padding_bytes_per_row = glyph.bytesPerRow - width * 4;
+-    const uint8_t* px_data = glyph.bitmapData;
+-
+-    trace_apple_gfx_cursor_set(bpp, width, height);
+-
+-    if (s->cursor) {
+-        cursor_unref(s->cursor);
+-        s->cursor = NULL;
+-    }
+-
+-    if (bpp == 32) { /* Shouldn't be anything else, but just to be safe... */
+-        s->cursor = cursor_alloc(width, height);
+-        s->cursor->hot_x = job->hotspot.x;
+-        s->cursor->hot_y = job->hotspot.y;
+-
+-        uint32_t *dest_px = s->cursor->data;
+-
+-        for (size_t y = 0; y < height; ++y) {
+-            for (size_t x = 0; x < width; ++x) {
+-                /*
+-                 * NSBitmapImageRep's red & blue channels are swapped
+-                 * compared to QEMUCursor's.
+-                 */
+-                *dest_px =
+-                    (px_data[0] << 16u) |
+-                    (px_data[1] <<  8u) |
+-                    (px_data[2] <<  0u) |
+-                    (px_data[3] << 24u);
+-                ++dest_px;
+-                px_data += 4;
+-            }
+-            px_data += padding_bytes_per_row;
+-        }
+-        qemu_console_set_cursor(s->con, s->cursor);
+-        update_cursor(s);
+-    }
+-    [glyph release];
+-
+-    g_free(job);
+-}
+-
+-/* ------ DMA (device reading system memory) ------ */
+-
+-typedef struct AppleGFXReadMemoryJob {
+-    QemuEvent event;
+-    hwaddr physical_address;
+-    uint64_t length;
+-    void *dst;
+-    bool success;
+-} AppleGFXReadMemoryJob;
+-
+-static void apple_gfx_do_read_memory(void *opaque)
+-{
+-    AppleGFXReadMemoryJob *job = opaque;
+-    MemTxResult r;
+-
+-    r = dma_memory_read(&address_space_memory, job->physical_address,
+-                        job->dst, job->length, MEMTXATTRS_UNSPECIFIED);
+-    job->success = (r == MEMTX_OK);
+-
+-    qemu_event_set(&job->event);
+-}
+-
+-static bool apple_gfx_read_memory(AppleGFXState *s, hwaddr physical_address,
+-                                  uint64_t length, void *dst)
+-{
+-    AppleGFXReadMemoryJob job = {
+-        .physical_address = physical_address, .length = length, .dst = dst
+-    };
+-
+-    trace_apple_gfx_read_memory(physical_address, length, dst);
+-
+-    /* Performing DMA requires BQL, so do it in a BH. */
+-    qemu_event_init(&job.event, 0);
+-    aio_bh_schedule_oneshot(qemu_get_aio_context(),
+-                            apple_gfx_do_read_memory, &job);
+-    qemu_event_wait(&job.event);
+-    qemu_event_destroy(&job.event);
+-    return job.success;
+-}
+-
+-/* ------ Memory-mapped device I/O operations ------ */
+-
+-typedef struct AppleGFXIOJob {
+-    AppleGFXState *state;
+-    uint64_t offset;
+-    uint64_t value;
+-    bool completed;
+-} AppleGFXIOJob;
+-
+-static void apple_gfx_do_read(void *opaque)
+-{
+-    AppleGFXIOJob *job = opaque;
+-    job->value = [job->state->pgdev mmioReadAtOffset:job->offset];
+-    qatomic_set(&job->completed, true);
+-    aio_wait_kick();
+-}
+-
+-static uint64_t apple_gfx_read(void *opaque, hwaddr offset, unsigned size)
+-{
+-    AppleGFXIOJob job = {
+-        .state = opaque,
+-        .offset = offset,
+-        .completed = false,
+-    };
+-    dispatch_queue_t queue = get_background_queue();
+-
+-    dispatch_async_f(queue, &job, apple_gfx_do_read);
+-    AIO_WAIT_WHILE(NULL, !qatomic_read(&job.completed));
+-
+-    trace_apple_gfx_read(offset, job.value);
+-    return job.value;
+-}
+-
+-static void apple_gfx_do_write(void *opaque)
+-{
+-    AppleGFXIOJob *job = opaque;
+-    [job->state->pgdev mmioWriteAtOffset:job->offset value:job->value];
+-    qatomic_set(&job->completed, true);
+-    aio_wait_kick();
+-}
+-
+-static void apple_gfx_write(void *opaque, hwaddr offset, uint64_t val,
+-                            unsigned size)
+-{
+-    /*
+-     * The methods mmioReadAtOffset: and especially mmioWriteAtOffset: can
+-     * trigger synchronous operations on other dispatch queues, which in turn
+-     * may call back out on one or more of the callback blocks. For this reason,
+-     * and as we are holding the BQL, we invoke the I/O methods on a pool
+-     * thread and handle AIO tasks while we wait. Any work in the callbacks
+-     * requiring the BQL will in turn schedule BHs which this thread will
+-     * process while waiting.
+-     */
+-    AppleGFXIOJob job = {
+-        .state = opaque,
+-        .offset = offset,
+-        .value = val,
+-        .completed = false,
+-    };
+-    dispatch_queue_t queue = get_background_queue();
+-
+-    dispatch_async_f(queue, &job, apple_gfx_do_write);
+-    AIO_WAIT_WHILE(NULL, !qatomic_read(&job.completed));
+-
+-    trace_apple_gfx_write(offset, val);
+-}
+-
+-static const MemoryRegionOps apple_gfx_ops = {
+-    .read = apple_gfx_read,
+-    .write = apple_gfx_write,
+-    .endianness = DEVICE_LITTLE_ENDIAN,
+-    .valid = {
+-        .min_access_size = 4,
+-        .max_access_size = 8,
+-    },
+-    .impl = {
+-        .min_access_size = 4,
+-        .max_access_size = 4,
+-    },
+-};
+-
+-static size_t apple_gfx_get_default_mmio_range_size(void)
+-{
+-    size_t mmio_range_size;
+-    @autoreleasepool {
+-        PGDeviceDescriptor *desc = [PGDeviceDescriptor new];
+-        mmio_range_size = desc.mmioLength;
+-        [desc release];
+-    }
+-    return mmio_range_size;
+-}
+-
+-/* ------ Initialisation and startup ------ */
+-
+-void apple_gfx_common_init(Object *obj, AppleGFXState *s, const char* obj_name)
+-{
+-    size_t mmio_range_size = apple_gfx_get_default_mmio_range_size();
+-
+-    trace_apple_gfx_common_init(obj_name, mmio_range_size);
+-    memory_region_init_io(&s->iomem_gfx, obj, &apple_gfx_ops, s, obj_name,
+-                          mmio_range_size);
+-
+-    /* TODO: PVG framework supports serialising device state: integrate it! */
+-}
+-
+-static void apple_gfx_register_task_mapping_handlers(AppleGFXState *s,
+-                                                     PGDeviceDescriptor *desc)
+-{
+-    desc.createTask = ^(uint64_t vmSize, void * _Nullable * _Nonnull baseAddress) {
+-        PGTask_t *task = apple_gfx_new_task(s, vmSize);
+-        *baseAddress = (void *)task->address;
+-        trace_apple_gfx_create_task(vmSize, *baseAddress);
+-        return task;
+-    };
+-
+-    desc.destroyTask = ^(PGTask_t * _Nonnull task) {
+-        trace_apple_gfx_destroy_task(task, task->mapped_regions->len);
+-
+-        apple_gfx_destroy_task(s, task);
+-    };
+-
+-    desc.mapMemory = ^bool(PGTask_t * _Nonnull task, uint32_t range_count,
+-                           uint64_t virtual_offset, bool read_only,
+-                           PGPhysicalMemoryRange_t * _Nonnull ranges) {
+-        return apple_gfx_task_map_memory(s, task, virtual_offset,
+-                                         ranges, range_count, read_only);
+-    };
+-
+-    desc.unmapMemory = ^bool(PGTask_t * _Nonnull task, uint64_t virtual_offset,
+-                             uint64_t length) {
+-        apple_gfx_task_unmap_memory(s, task, virtual_offset, length);
+-        return true;
+-    };
+-
+-    desc.readMemory = ^bool(uint64_t physical_address, uint64_t length,
+-                            void * _Nonnull dst) {
+-        return apple_gfx_read_memory(s, physical_address, length, dst);
+-    };
+-}
+-
+-static void new_frame_handler_bh(void *opaque)
+-{
+-    AppleGFXState *s = opaque;
+-
+-    /* Drop frames if guest gets too far ahead. */
+-    if (s->pending_frames >= 2) {
+-        return;
+-    }
+-    ++s->pending_frames;
+-    if (s->pending_frames > 1) {
+-        return;
+-    }
+-
+-    @autoreleasepool {
+-        apple_gfx_render_new_frame(s);
+-    }
+-}
+-
+-static PGDisplayDescriptor *apple_gfx_prepare_display_descriptor(AppleGFXState *s)
+-{
+-    PGDisplayDescriptor *disp_desc = [PGDisplayDescriptor new];
+-
+-    disp_desc.name = @"QEMU display";
+-    disp_desc.sizeInMillimeters = NSMakeSize(400., 300.); /* A 20" display */
+-    disp_desc.queue = dispatch_get_main_queue();
+-    disp_desc.newFrameEventHandler = ^(void) {
+-        trace_apple_gfx_new_frame();
+-        aio_bh_schedule_oneshot(qemu_get_aio_context(), new_frame_handler_bh, s);
+-    };
+-    disp_desc.modeChangeHandler = ^(PGDisplayCoord_t sizeInPixels,
+-                                    OSType pixelFormat) {
+-        trace_apple_gfx_mode_change(sizeInPixels.x, sizeInPixels.y);
+-
+-        BQL_LOCK_GUARD();
+-        set_mode(s, sizeInPixels.x, sizeInPixels.y);
+-    };
+-    disp_desc.cursorGlyphHandler = ^(NSBitmapImageRep *glyph,
+-                                     PGDisplayCoord_t hotspot) {
+-        AppleGFXSetCursorGlyphJob *job = g_malloc0(sizeof(*job));
+-        job->s = s;
+-        job->glyph = glyph;
+-        job->hotspot = hotspot;
+-        [glyph retain];
+-        aio_bh_schedule_oneshot(qemu_get_aio_context(),
+-                                set_cursor_glyph, job);
+-    };
+-    disp_desc.cursorShowHandler = ^(BOOL show) {
+-        trace_apple_gfx_cursor_show(show);
+-        qatomic_set(&s->cursor_show, show);
+-        aio_bh_schedule_oneshot(qemu_get_aio_context(),
+-                                update_cursor_bh, s);
+-    };
+-    disp_desc.cursorMoveHandler = ^(void) {
+-        trace_apple_gfx_cursor_move();
+-        aio_bh_schedule_oneshot(qemu_get_aio_context(),
+-                                update_cursor_bh, s);
+-    };
+-
+-    return disp_desc;
+-}
+-
+-static NSArray<PGDisplayMode *> *apple_gfx_create_display_mode_array(
+-    const AppleGFXDisplayMode display_modes[], uint32_t display_mode_count)
+-{
+-    PGDisplayMode *mode_obj;
+-    NSMutableArray<PGDisplayMode *> *mode_array =
+-        [[NSMutableArray alloc] initWithCapacity:display_mode_count];
+-
+-    for (unsigned i = 0; i < display_mode_count; i++) {
+-        const AppleGFXDisplayMode *mode = &display_modes[i];
+-        trace_apple_gfx_display_mode(i, mode->width_px, mode->height_px);
+-        PGDisplayCoord_t mode_size = { mode->width_px, mode->height_px };
+-
+-        mode_obj =
+-            [[PGDisplayMode alloc] initWithSizeInPixels:mode_size
+-                                        refreshRateInHz:mode->refresh_rate_hz];
+-        [mode_array addObject:mode_obj];
+-        [mode_obj release];
+-    }
+-
+-    return mode_array;
+-}
+-
+-static id<MTLDevice> copy_suitable_metal_device(void)
+-{
+-    id<MTLDevice> dev = nil;
+-    NSArray<id<MTLDevice>> *devs = MTLCopyAllDevices();
+-
+-    /* Prefer a unified memory GPU. Failing that, pick a non-removable GPU. */
+-    for (size_t i = 0; i < devs.count; ++i) {
+-        if (devs[i].hasUnifiedMemory) {
+-            dev = devs[i];
+-            break;
+-        }
+-        if (!devs[i].removable) {
+-            dev = devs[i];
+-        }
+-    }
+-
+-    if (dev != nil) {
+-        [dev retain];
+-    } else {
+-        dev = MTLCreateSystemDefaultDevice();
+-    }
+-    [devs release];
+-
+-    return dev;
+-}
+-
+-bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
+-                              PGDeviceDescriptor *desc, Error **errp)
+-{
+-    PGDisplayDescriptor *disp_desc;
+-    const AppleGFXDisplayMode *display_modes = apple_gfx_default_modes;
+-    uint32_t num_display_modes = ARRAY_SIZE(apple_gfx_default_modes);
+-    NSArray<PGDisplayMode *> *mode_array;
+-
+-    if (apple_gfx_mig_blocker == NULL) {
+-        error_setg(&apple_gfx_mig_blocker,
+-                  "Migration state blocked by apple-gfx display device");
+-        if (migrate_add_blocker(&apple_gfx_mig_blocker, errp) < 0) {
+-            return false;
+-        }
+-    }
+-
+-    qemu_mutex_init(&s->task_mutex);
+-    QTAILQ_INIT(&s->tasks);
+-    s->mtl = copy_suitable_metal_device();
+-    s->mtl_queue = [s->mtl newCommandQueue];
+-
+-    desc.device = s->mtl;
+-
+-    apple_gfx_register_task_mapping_handlers(s, desc);
+-
+-    s->cursor_show = true;
+-
+-    s->pgdev = PGNewDeviceWithDescriptor(desc);
+-
+-    disp_desc = apple_gfx_prepare_display_descriptor(s);
+-    /*
+-     * Although the framework does, this integration currently does not support
+-     * multiple virtual displays connected to a single PV graphics device.
+-     * It is however possible to create
+-     * more than one instance of the device, each with one display. The macOS
+-     * guest will ignore these displays if they share the same serial number,
+-     * so ensure each instance gets a unique one.
+-     */
+-    s->pgdisp = [s->pgdev newDisplayWithDescriptor:disp_desc
+-                                              port:0
+-                                         serialNum:next_pgdisplay_serial_num++];
+-    [disp_desc release];
+-
+-    if (s->display_modes != NULL && s->num_display_modes > 0) {
+-        trace_apple_gfx_common_realize_modes_property(s->num_display_modes);
+-        display_modes = s->display_modes;
+-        num_display_modes = s->num_display_modes;
+-    }
+-    s->pgdisp.modeList = mode_array =
+-        apple_gfx_create_display_mode_array(display_modes, num_display_modes);
+-    [mode_array release];
+-
+-    s->con = qemu_graphic_console_create(dev, 0, &apple_gfx_fb_ops, s);
+-    return true;
+-}
+-
+-/* ------ Display mode list device property ------ */
+-
+-static void apple_gfx_get_display_mode(Object *obj, Visitor *v,
+-                                       const char *name, void *opaque,
+-                                       Error **errp)
+-{
+-    Property *prop = opaque;
+-    AppleGFXDisplayMode *mode = object_field_prop_ptr(obj, prop);
+-    /* 3 uint16s (max 5 digits) + 2 separator characters + nul. */
+-    char buffer[5 * 3 + 2 + 1];
+-    char *pos = buffer;
+-
+-    int rc = snprintf(buffer, sizeof(buffer),
+-                      "%"PRIu16"x%"PRIu16"@%"PRIu16,
+-                      mode->width_px, mode->height_px,
+-                      mode->refresh_rate_hz);
+-    assert(rc < sizeof(buffer));
+-
+-    visit_type_str(v, name, &pos, errp);
+-}
+-
+-static void apple_gfx_set_display_mode(Object *obj, Visitor *v,
+-                                       const char *name, void *opaque,
+-                                       Error **errp)
+-{
+-    Property *prop = opaque;
+-    AppleGFXDisplayMode *mode = object_field_prop_ptr(obj, prop);
+-    const char *endptr;
+-    g_autofree char *str = NULL;
+-    int ret;
+-    int val;
+-
+-    if (!visit_type_str(v, name, &str, errp)) {
+-        return;
+-    }
+-
+-    endptr = str;
+-
+-    ret = qemu_strtoi(endptr, &endptr, 10, &val);
+-    if (ret || val > UINT16_MAX || val <= 0) {
+-        error_setg(errp, "width in '%s' must be a decimal integer number"
+-                         " of pixels in the range 1..65535", name);
+-        return;
+-    }
+-    mode->width_px = val;
+-    if (*endptr != 'x') {
+-        goto separator_error;
+-    }
+-
+-    ret = qemu_strtoi(endptr + 1, &endptr, 10, &val);
+-    if (ret || val > UINT16_MAX || val <= 0) {
+-        error_setg(errp, "height in '%s' must be a decimal integer number"
+-                         " of pixels in the range 1..65535", name);
+-        return;
+-    }
+-    mode->height_px = val;
+-    if (*endptr != '@') {
+-        goto separator_error;
+-    }
+-
+-    ret = qemu_strtoi(endptr + 1, &endptr, 10, &val);
+-    if (ret || val > UINT16_MAX || val <= 0) {
+-        error_setg(errp, "refresh rate in '%s'"
+-                         " must be a positive decimal integer (Hertz)", name);
+-        return;
+-    }
+-    mode->refresh_rate_hz = val;
+-    return;
+-
+-separator_error:
+-    error_setg(errp,
+-               "Each display mode takes the format '<width>x<height>@<rate>'");
+-}
+-
+-const PropertyInfo qdev_prop_apple_gfx_display_mode = {
+-    .type  = "display_mode",
+-    .description =
+-        "Display mode in pixels and Hertz, as <width>x<height>@<refresh-rate> "
+-        "Example: 3840x2160@60",
+-    .get   = apple_gfx_get_display_mode,
+-    .set   = apple_gfx_set_display_mode,
+-};
+diff --git a/hw/display/meson.build b/hw/display/meson.build
+index ffecedbf70..9fa0122ab0 100644
+--- a/hw/display/meson.build
++++ b/hw/display/meson.build
+@@ -62,8 +62,15 @@ system_ss.add(when: 'CONFIG_ARTIST', if_true: files('artist.c'))
+ 
+ system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_dbg.c'), pixman])
+ 
+-system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_PCI'],     if_true: [files('apple-gfx.m', 'apple-gfx-pci.m')])
+-system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_MMIO'],    if_true: [files('apple-gfx.m', 'apple-gfx-mmio.m')])
++# Only macOS naps an application; elsewhere apple-gfx's hold does nothing.
++if host_os == 'darwin'
++  apple_gfx_activity = [files('apple-gfx-activity.m'), foundation]
++else
++  apple_gfx_activity = files('apple-gfx-activity-stub.c')
++endif
++system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_MMIO'],
++              if_true: [files('apple-gfx.c', 'apple-gfx-mmio.c'),
++                        apple_gfx_activity])
+ 
+ if config_all_devices.has_key('CONFIG_VIRTIO_GPU')
+   virtio_gpu_ss = ss.source_set()
+diff --git a/hw/display/trace-events b/hw/display/trace-events
+index 4bfc457fba..d86f2b38e7 100644
+--- a/hw/display/trace-events
++++ b/hw/display/trace-events
+@@ -197,16 +197,9 @@ dm163_leds(int led, uint32_t value) "led %d: 0x%x"
+ dm163_channels(int channel, uint8_t value) "channel %d: 0x%x"
+ dm163_refresh_rate(uint32_t rr) "refresh rate %d"
+ 
+-# apple-gfx.m
++# apple-gfx.c, apple-gfx-mmio.c, apple-gfx-pci.c
+ apple_gfx_read(uint64_t offset, uint64_t res) "offset=0x%"PRIx64" res=0x%"PRIx64
+ apple_gfx_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
+-apple_gfx_create_task(uint32_t vm_size, void *va) "vm_size=0x%x base_addr=%p"
+-apple_gfx_destroy_task(void *task, unsigned int num_mapped_regions) "task=%p, task->mapped_regions->len=%u"
+-apple_gfx_map_memory(void *task, uint32_t range_count, uint64_t virtual_offset, uint32_t read_only) "task=%p range_count=0x%x virtual_offset=0x%"PRIx64" read_only=%d"
+-apple_gfx_map_memory_range(uint32_t i, uint64_t phys_addr, uint64_t phys_len) "[%d] phys_addr=0x%"PRIx64" phys_len=0x%"PRIx64
+-apple_gfx_remap(uint64_t retval, void *source_ptr, uint64_t target) "retval=%"PRId64" source=%p target=0x%"PRIx64
+-apple_gfx_unmap_memory(void *task, uint64_t virtual_offset, uint64_t length) "task=%p virtual_offset=0x%"PRIx64" length=0x%"PRIx64
+-apple_gfx_read_memory(uint64_t phys_address, uint64_t length, void *dst) "phys_addr=0x%"PRIx64" length=0x%"PRIx64" dest=%p"
+ apple_gfx_raise_irq(uint32_t vector) "vector=0x%x"
+ apple_gfx_new_frame(void) ""
+ apple_gfx_mode_change(uint64_t x, uint64_t y) "x=%"PRId64" y=%"PRId64
+@@ -216,13 +209,11 @@ apple_gfx_cursor_move(void) ""
+ apple_gfx_common_init(const char *device_name, size_t mmio_size) "device: %s; MMIO size: %zu bytes"
+ apple_gfx_common_realize_modes_property(uint32_t num_modes) "using %u modes supplied by 'display-modes' device property"
+ apple_gfx_display_mode(uint32_t mode_idx, uint16_t width_px, uint16_t height_px) "mode %2"PRIu32": %4"PRIu16"x%4"PRIu16
+-
+-# apple-gfx-mmio.m
++apple_gfx_memory_range(uint64_t gpa, uint64_t len, void *host, int fd, uint64_t offset) "gpa=0x%"PRIx64" len=0x%"PRIx64" host=%p fd=%d offset=0x%"PRIx64
+ apple_gfx_mmio_iosfc_read(uint64_t offset, uint64_t res) "offset=0x%"PRIx64" res=0x%"PRIx64
+ apple_gfx_mmio_iosfc_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
+-apple_gfx_iosfc_map_memory(uint64_t phys, uint64_t len, uint32_t ro, void *va, void *e, void *f, void* va_result) "phys=0x%"PRIx64" len=0x%"PRIx64" ro=%d va=%p e=%p f=%p -> *va=%p"
+-apple_gfx_iosfc_map_memory_new_region(size_t i, void *region, uint64_t start, uint64_t end) "index=%zu, region=%p, 0x%"PRIx64"-0x%"PRIx64
+-apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *f) "a=%p b=%p c=%p d=%p e=%p f=%p"
+-apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
+ apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
++apple_gfx_pci_iosfc_read(uint64_t offset, uint64_t res, unsigned size) "offset=0x%"PRIx64" res=0x%"PRIx64" size=%u"
++apple_gfx_pci_iosfc_write(uint64_t offset, uint64_t val, unsigned size) "offset=0x%"PRIx64" val=0x%"PRIx64" size=%u"
++
+ 
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index f52bbd8e14..54b8ab805f 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include CONFIG_DEVICES
+ #include "hw/misc/unimp.h"
+ #include "qemu/bitops.h"
+ #include "qemu/cutils.h"
+diff --git a/meson.build b/meson.build
+index 49a5baf5b5..a8c5cec9be 100644
+--- a/meson.build
++++ b/meson.build
+@@ -849,8 +849,6 @@ elif host_os == 'darwin'
+   coref = dependency('appleframeworks', modules: 'CoreFoundation')
+   iokit = dependency('appleframeworks', modules: 'IOKit', required: false)
+   host_dsosuf = '.dylib'
+-  pvg = dependency('appleframeworks', modules: ['ParavirtualizedGraphics', 'Metal'],
+-                   required: get_option('pvg'))
+ elif host_os == 'sunos'
+   socket = [cc.find_library('socket'),
+             cc.find_library('nsl'),
+@@ -866,6 +864,13 @@ elif host_os == 'openbsd'
+   endif
+ endif
+ 
++# apple-gfx drives reims-vgpu's C API (reims_vgpu.h), a library found
++# through pkg-config: reims-vgpu.pc, which reims-vgpu's `cargo xtask dist`
++# writes into its target/dist*/lib/pkgconfig. It is linked statically.
++if host_os in ['darwin', 'linux']
++  pvg = dependency('reims-vgpu', method: 'pkg-config', static: true,
++                   required: get_option('pvg'))
++endif
+ ###############################################
+ # Host-specific configuration of accelerators #
+ ###############################################
+@@ -3388,7 +3393,11 @@ foreach target : target_dirs
+ 
+     # PVG is not cross-architecture.  Use accelerator_targets as a proxy to
+     # figure out which target can support PVG on this host
+-    if pvg.found() and target in accelerator_targets.get('CONFIG_HVF', [])
++    # (TCG too here: the vmapple guest runs under TCG on an x86 Linux host,
++    # the library takes the guest's page size from the device.)
++    if pvg.found() and (target in accelerator_targets.get('CONFIG_HVF', []) or
++                        target in accelerator_targets.get('CONFIG_KVM', []) or
++                        target == 'aarch64-softmmu')
+       target_kconfig += 'CONFIG_MAC_PVG=y'
+     endif
+ 

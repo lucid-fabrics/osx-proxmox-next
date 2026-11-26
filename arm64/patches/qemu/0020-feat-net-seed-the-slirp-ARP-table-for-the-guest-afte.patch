@@ -1,0 +1,188 @@
+From e475148e2f569c6d3562021b12990e8f94a19cef Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(net): seed the slirp ARP table for the guest after
+ loadvm
+
+libslirp does not save its ARP table, so the first host-to-guest packet
+after a resume is dropped until the guest answers an ARP request.
+Remember the guest (ip, mac) pairs, save them in a slirp-guest-arp
+section and feed slirp a gratuitous ARP on load. SLIRP_ARP_SEED=0
+disables it.
+---
+ net/slirp.c | 129 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 129 insertions(+)
+
+diff --git a/net/slirp.c b/net/slirp.c
+index 9e9941fe73..62e902834a 100644
+--- a/net/slirp.c
++++ b/net/slirp.c
+@@ -87,8 +87,19 @@ struct GuestFwd {
+     Slirp *slirp;
+ };
+ 
++#define SLIRP_GUEST_ARP_MAX 4
++
++/* A guest (IPv4, MAC) pair seen on the wire, kept so that slirp's ARP table
++ * (which libslirp does not put in its saved state) can be re-seeded on load. */
++typedef struct SlirpGuestArp {
++    uint32_t ip;                /* network byte order, 0 = unused */
++    uint8_t mac[ETH_ALEN];
++} SlirpGuestArp;
++
+ typedef struct SlirpState {
+     NetClientState nc;
++    SlirpGuestArp guest_arp[SLIRP_GUEST_ARP_MAX];
++    unsigned guest_arp_next;
+     QTAILQ_ENTRY(SlirpState) entry;
+     Slirp *slirp;
+     Notifier poll_notifier;
+@@ -131,9 +142,42 @@ static ssize_t net_slirp_send_packet(const void *pkt, size_t pkt_len,
+     return qemu_send_packet(&s->nc, pkt, pkt_len);
+ }
+ 
++static void slirp_learn_guest(SlirpState *s, const uint8_t *buf, size_t size)
++{
++    uint32_t ip;
++    const uint8_t *mac;
++    unsigned i;
++
++    if (size < 14 + 20) {
++        return;
++    }
++    mac = buf + 6;
++    if (buf[12] == 0x08 && buf[13] == 0x00 && (buf[14] >> 4) == 4) {
++        memcpy(&ip, buf + 14 + 12, 4);          /* IPv4 source */
++    } else if (buf[12] == 0x08 && buf[13] == 0x06 && size >= 14 + 28) {
++        mac = buf + 14 + 8;                     /* ARP sender hw */
++        memcpy(&ip, buf + 14 + 14, 4);          /* ARP sender ip */
++    } else {
++        return;
++    }
++    if (ip == 0 || ip == 0xffffffff || (mac[0] & 1)) {
++        return;
++    }
++    for (i = 0; i < SLIRP_GUEST_ARP_MAX; i++) {
++        if (s->guest_arp[i].ip == ip) {
++            memcpy(s->guest_arp[i].mac, mac, ETH_ALEN);
++            return;
++        }
++    }
++    s->guest_arp[s->guest_arp_next].ip = ip;
++    memcpy(s->guest_arp[s->guest_arp_next].mac, mac, ETH_ALEN);
++    s->guest_arp_next = (s->guest_arp_next + 1) % SLIRP_GUEST_ARP_MAX;
++}
++
+ static ssize_t net_slirp_receive(NetClientState *nc, const uint8_t *buf, size_t size)
+ {
+     SlirpState *s = DO_UPCAST(SlirpState, nc, nc);
++    slirp_learn_guest(s, buf, size);
+ 
+     slirp_input(s->slirp, buf, size);
+ 
+@@ -161,6 +205,7 @@ static void net_slirp_cleanup(NetClientState *nc)
+     g_slist_free_full(s->fwd, slirp_free_fwd);
+     main_loop_poll_remove_notifier(&s->poll_notifier);
+     unregister_savevm(NULL, "slirp", s->slirp);
++    unregister_savevm(NULL, "slirp-guest-arp", s);
+     slirp_cleanup(s->slirp);
+     if (s->exit_notifier.notify) {
+         qemu_remove_exit_notifier(&s->exit_notifier);
+@@ -429,6 +474,88 @@ static SaveVMHandlers savevm_slirp_state = {
+     .load_state = net_slirp_state_load,
+ };
+ 
++/*
++ * libslirp keeps its ARP table out of the saved state, so after a loadvm the
++ * first packet slirp wants to send to the guest (for example the SYN of a
++ * hostfwd connection) is dropped until the guest answers slirp's ARP request,
++ * which a freshly resumed guest does late. Save the (ip, mac) pairs the guest
++ * used and on load feed slirp a gratuitous ARP for each, which only fills the
++ * table (libslirp arp_input: request with tip == sip, no reply is sent).
++ * SLIRP_ARP_SEED=0 in the environment skips the seeding (A/B tests).
++ */
++static void net_slirp_arp_save(QEMUFile *f, void *opaque)
++{
++    SlirpState *s = opaque;
++    unsigned i, n = 0;
++
++    for (i = 0; i < SLIRP_GUEST_ARP_MAX; i++) {
++        n += s->guest_arp[i].ip != 0;
++    }
++    qemu_put_be32(f, n);
++    for (i = 0; i < SLIRP_GUEST_ARP_MAX; i++) {
++        if (s->guest_arp[i].ip) {
++            qemu_put_buffer(f, (const uint8_t *)&s->guest_arp[i].ip, 4);
++            qemu_put_buffer(f, s->guest_arp[i].mac, ETH_ALEN);
++        }
++    }
++}
++
++static int net_slirp_arp_load(QEMUFile *f, void *opaque, int version_id)
++{
++    SlirpState *s = opaque;
++    const char *e = getenv("SLIRP_ARP_SEED");
++    bool seed = !(e && !strcmp(e, "0"));
++    uint32_t n = qemu_get_be32(f);
++    uint32_t i;
++
++    if (n > SLIRP_GUEST_ARP_MAX) {
++        return -EINVAL;
++    }
++    for (i = 0; i < n; i++) {
++        uint8_t frame[14 + 28];
++        uint32_t ip;
++        uint8_t mac[ETH_ALEN];
++
++        qemu_get_buffer(f, (uint8_t *)&ip, 4);
++        qemu_get_buffer(f, mac, ETH_ALEN);
++        if (qemu_file_get_error(f)) {
++            return -EIO;
++        }
++        if (ip == 0) {
++            continue;
++        }
++        /* keep it for a later save too */
++        s->guest_arp[s->guest_arp_next].ip = ip;
++        memcpy(s->guest_arp[s->guest_arp_next].mac, mac, ETH_ALEN);
++        s->guest_arp_next = (s->guest_arp_next + 1) % SLIRP_GUEST_ARP_MAX;
++        if (!seed) {
++            continue;
++        }
++        memset(frame, 0, sizeof(frame));
++        memset(frame, 0xff, 6);                 /* dst: broadcast */
++        memcpy(frame + 6, mac, 6);              /* src: the guest */
++        frame[12] = 0x08; frame[13] = 0x06;     /* ARP */
++        frame[14] = 0; frame[15] = 1;           /* ethernet */
++        frame[16] = 0x08; frame[17] = 0x00;     /* IPv4 */
++        frame[18] = 6; frame[19] = 4;
++        frame[20] = 0; frame[21] = 1;           /* request */
++        memcpy(frame + 22, mac, 6);             /* sha */
++        memcpy(frame + 28, &ip, 4);             /* sip */
++        memcpy(frame + 38, &ip, 4);             /* tip == sip: gratuitous */
++        slirp_input(s->slirp, frame, sizeof(frame));
++        info_report("slirp: seeded ARP %d.%d.%d.%d -> %02x:%02x:%02x:%02x:%02x:%02x",
++                    ((uint8_t *)&ip)[0], ((uint8_t *)&ip)[1],
++                    ((uint8_t *)&ip)[2], ((uint8_t *)&ip)[3],
++                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
++    }
++    return 0;
++}
++
++static SaveVMHandlers savevm_slirp_arp = {
++    .save_state = net_slirp_arp_save,
++    .load_state = net_slirp_arp_load,
++};
++
+ static int net_slirp_init(NetClientState *peer, const char *model,
+                           const char *name, int restricted,
+                           bool ipv4, const char *vnetwork, const char *vhost,
+@@ -677,6 +804,8 @@ static int net_slirp_init(NetClientState *peer, const char *model,
+     g_assert(slirp_state_version() == 4);
+     register_savevm_live("slirp", VMSTATE_INSTANCE_ID_ANY,
+                          slirp_state_version(), &savevm_slirp_state, s->slirp);
++    register_savevm_live("slirp-guest-arp", VMSTATE_INSTANCE_ID_ANY, 1,
++                         &savevm_slirp_arp, s);
+ 
+     s->poll_notifier.notify = net_slirp_poll_notify;
+     main_loop_poll_add_notifier(&s->poll_notifier);

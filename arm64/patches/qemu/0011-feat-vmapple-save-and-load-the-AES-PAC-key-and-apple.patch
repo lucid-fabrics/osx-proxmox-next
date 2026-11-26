@@ -1,0 +1,793 @@
+From dcaf397bad98948342035f669e85d18840ce4f07 Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] feat(vmapple): save and load the AES, PAC key and apple-gfx
+ state
+
+Adds VMState to the AES device (with checks for a corrupt FIFO index
+and key length at a load) and migrates the PAC key service state.
+apple-gfx suspends and resumes for savevm and migration: it suspends
+before the RAM is saved and checks the config and sizes at a load.
+---
+ hw/display/apple-gfx-mmio.c | 414 +++++++++++++++++++++++++++++++++++-
+ hw/display/apple-gfx.c      |  81 +++++--
+ hw/display/apple-gfx.h      |  16 ++
+ hw/vmapple/aes.c            |  65 ++++++
+ target/arm/machine.c        |  24 +++
+ 5 files changed, 585 insertions(+), 15 deletions(-)
+
+diff --git a/hw/display/apple-gfx-mmio.c b/hw/display/apple-gfx-mmio.c
+index d61afe2d5d..3db2cded7d 100644
+--- a/hw/display/apple-gfx-mmio.c
++++ b/hw/display/apple-gfx-mmio.c
+@@ -19,11 +19,42 @@
+ #include "qemu/main-loop.h"
+ #include "hw/core/sysbus.h"
+ #include "hw/core/irq.h"
++#include "migration/vmstate.h"
++#include "migration/misc.h"
++#include "system/runstate.h"
++#include "system/address-spaces.h"
++#include "qemu/error-report.h"
++#include "qemu/units.h"
+ #include "apple-gfx.h"
+ #include "trace.h"
+ 
+ OBJECT_DECLARE_SIMPLE_TYPE(AppleGFXMMIOState, APPLE_GFX_MMIO)
+ 
++/* The IOSurface device's registers, as the library defines them */
++#define IOSFC_REG_RING_BASE     0x1000
++#define IOSFC_REG_RING_SIZE     0x1008
++#define IOSFC_REG_DESC_BASE     0x1010
++#define IOSFC_REG_RING_WR       0x1018
++#define IOSFC_REG_RING_RD       0x1020
++#define IOSFC_REG_DESC_ENABLE   0x1030
++/* Saved in this order */
++enum {
++    IOSFC_SAVED_RING_BASE,
++    IOSFC_SAVED_RING_SIZE,
++    IOSFC_SAVED_DESC_BASE,
++    IOSFC_SAVED_RING_WR,
++    IOSFC_SAVED_RING_RD,
++    IOSFC_SAVED_DESC_ENABLE,
++    IOSFC_NUM_REGS,
++};
++#define IOSFC_MAPPING_IDS       8192
++/* the largest ring a restore replays through, and the largest state blob */
++#define IOSFC_MAX_RING          65536
++#define SUSPEND_STATE_MAX       (64 * 1024 * 1024)
++#define IOSFC_RING_CMD_SIZE     16
++#define IOSFC_CMD_MAP           1
++#define IOSFC_CMD_UNMAP         2
++
+ struct AppleGFXMMIOState {
+     SysBusDevice parent_obj;
+ 
+@@ -33,9 +64,26 @@ struct AppleGFXMMIOState {
+     qemu_irq irq_iosfc;
+     MemoryRegion iomem_iosfc;
+     RvgIOSurfaceDevice *pgiosfc;
++    /* suspended for a save: the library device is quiet, state is kept */
++    bool suspended;
++    NotifierWithReturn mig_notifier;
++    VMChangeStateEntry *vmsh;
++    /* saved with the state and checked at a load */
++    uint8_t cfg_argument_buffers;
++    uint32_t cfg_page_shift;
+     /* log2 of the guest page size; arm64 guests use 16 KiB pages */
+     uint32_t guest_page_shift;
+     bool process_isolation;
++    bool disable_argument_buffers;
++
++    /*
++     * What the IOSurface device holds that its library cannot give back
++     * (it has no suspend call): the registers, which are read at a save,
++     * and the mapping ids the guest has mapped, followed from its ring.
++     */
++    uint64_t iosfc_seen; /* the write counter the ring was last read to */
++    uint8_t iosfc_live[IOSFC_MAPPING_IDS / 8];
++    uint64_t iosfc_regs[IOSFC_NUM_REGS];
+ };
+ 
+ /*
+@@ -55,12 +103,62 @@ static uint64_t iosfc_read(void *opaque, hwaddr offset, unsigned size)
+     return value;
+ }
+ 
++/*
++ * The guest rang the doorbell: read the commands it queued since the last
++ * ring, before the library runs them, and note which mapping ids it maps and
++ * unmaps. The set is what a restore maps again. A command that then fails
++ * leaves its id in the set; a map of it at a restore fails the same way.
++ */
++static void iosfc_follow_ring(AppleGFXMMIOState *s, uint64_t wr)
++{
++    uint64_t ring_base = rvg_iosurface_device_mmio_read(s->pgiosfc,
++                                                        IOSFC_REG_RING_BASE);
++    uint64_t ring_size = rvg_iosurface_device_mmio_read(s->pgiosfc,
++                                                        IOSFC_REG_RING_SIZE);
++    uint64_t n = wr - s->iosfc_seen;
++    uint64_t i;
++
++    if (ring_base == 0 || ring_size == 0 || ring_base == UINT64_MAX ||
++        n == 0 || n > ring_size || ring_size > IOSFC_MAX_RING) {
++        s->iosfc_seen = wr;
++        return;
++    }
++    for (i = s->iosfc_seen; i != wr; i++) {
++        uint32_t cmd[2];
++        hwaddr slot = ring_base + (i % ring_size) * IOSFC_RING_CMD_SIZE;
++
++        if (address_space_read(&address_space_memory, slot,
++                               MEMTXATTRS_UNSPECIFIED, cmd,
++                               sizeof(cmd)) != MEMTX_OK) {
++            continue;
++        }
++        cmd[0] = le32_to_cpu(cmd[0]);
++        cmd[1] = le32_to_cpu(cmd[1]);
++        if (cmd[1] == 0 || cmd[1] >= IOSFC_MAPPING_IDS) {
++            continue;
++        }
++        if (cmd[0] == IOSFC_CMD_MAP) {
++            s->iosfc_live[cmd[1] / 8] |= 1 << (cmd[1] % 8);
++        } else if (cmd[0] == IOSFC_CMD_UNMAP) {
++            s->iosfc_live[cmd[1] / 8] &= ~(1 << (cmd[1] % 8));
++        }
++    }
++    s->iosfc_seen = wr;
++}
++
+ static void iosfc_write(void *opaque, hwaddr offset, uint64_t val,
+                         unsigned size)
+ {
+     AppleGFXMMIOState *s = opaque;
+ 
+-    rvg_iosurface_device_mmio_write(s->pgiosfc, offset, (uint32_t)val);
++    /* The library's registers are 64 bits wide, this declaration 32 */
++    val = (uint32_t)val;
++    if (offset == IOSFC_REG_RING_RD) {
++        s->iosfc_seen = val;
++    } else if (offset == IOSFC_REG_RING_WR) {
++        iosfc_follow_ring(s, val);
++    }
++    rvg_iosurface_device_mmio_write(s->pgiosfc, offset, val);
+     trace_apple_gfx_mmio_iosfc_write(offset, val);
+ }
+ 
+@@ -153,6 +251,7 @@ static void apple_gfx_mmio_realize(DeviceState *dev, Error **errp)
+         /* The IOSurface device made below maps the guest's IOSurfaces. */
+         .use_iosurface_mapper = true,
+         .process_isolation = s->process_isolation,
++        .disable_argument_buffers = s->disable_argument_buffers,
+         .callbacks = &callbacks,
+         .guest_page_shift = s->guest_page_shift,
+     };
+@@ -164,6 +263,11 @@ static void apple_gfx_mmio_realize(DeviceState *dev, Error **errp)
+     apple_gfx_mmio_create_iosurface_device(s, errp);
+ }
+ 
++static int apple_gfx_mmio_mig_notify(NotifierWithReturn *n,
++                                     MigrationEvent *e, Error **errp);
++static void apple_gfx_mmio_vm_state(void *opaque, bool running,
++                                    RunState state);
++
+ static void apple_gfx_mmio_init(Object *obj)
+ {
+     AppleGFXMMIOState *s = APPLE_GFX_MMIO(obj);
+@@ -176,8 +280,305 @@ static void apple_gfx_mmio_init(Object *obj)
+     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem_iosfc);
+     sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq_gfx);
+     sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq_iosfc);
++    migration_add_notifier(&s->mig_notifier, apple_gfx_mmio_mig_notify);
++    s->vmsh = qemu_add_vm_change_state_handler(apple_gfx_mmio_vm_state, s);
++}
++
++/* ------ Suspend and resume ------ */
++
++static uint64_t iosfc_reg(AppleGFXMMIOState *s, hwaddr offset)
++{
++    return rvg_iosurface_device_mmio_read(s->pgiosfc, offset);
++}
++
++static void iosfc_poll_rd(AppleGFXMMIOState *s, uint64_t want)
++{
++    int64_t deadline = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 10000;
++
++    while (iosfc_reg(s, IOSFC_REG_RING_RD) != want &&
++           qemu_clock_get_ms(QEMU_CLOCK_REALTIME) < deadline) {
++        g_usleep(500);
++    }
++}
++
++/* Read the IOSurface device's registers, once the ring has gone quiet */
++static bool iosfc_save(AppleGFXMMIOState *s)
++{
++    iosfc_poll_rd(s, iosfc_reg(s, IOSFC_REG_RING_WR));
++    if (iosfc_reg(s, IOSFC_REG_RING_RD) != iosfc_reg(s, IOSFC_REG_RING_WR)) {
++        return false;
++    }
++    s->iosfc_regs[IOSFC_SAVED_RING_BASE] = iosfc_reg(s, IOSFC_REG_RING_BASE);
++    s->iosfc_regs[IOSFC_SAVED_RING_SIZE] = iosfc_reg(s, IOSFC_REG_RING_SIZE);
++    s->iosfc_regs[IOSFC_SAVED_DESC_BASE] = iosfc_reg(s, IOSFC_REG_DESC_BASE);
++    s->iosfc_regs[IOSFC_SAVED_RING_WR] = iosfc_reg(s, IOSFC_REG_RING_WR);
++    s->iosfc_regs[IOSFC_SAVED_RING_RD] = iosfc_reg(s, IOSFC_REG_RING_RD);
++    s->iosfc_regs[IOSFC_SAVED_DESC_ENABLE] =
++        iosfc_reg(s, IOSFC_REG_DESC_ENABLE);
++    return true;
++}
++
++/*
++ * Bring a fresh IOSurface device to the registers saved, and map the ids the
++ * guest had mapped, by running map commands through its ring as the guest
++ * would. The ring slots the commands use are saved and put back, and the
++ * counters are set back at the end, so the guest sees nothing of it.
++ */
++static bool iosfc_restore(AppleGFXMMIOState *s)
++{
++    RvgIOSurfaceDevice *dev = s->pgiosfc;
++    uint64_t ring_base = s->iosfc_regs[IOSFC_SAVED_RING_BASE];
++    uint64_t ring_size = s->iosfc_regs[IOSFC_SAVED_RING_SIZE];
++    uint64_t desc_base = s->iosfc_regs[IOSFC_SAVED_DESC_BASE];
++    uint64_t wr = s->iosfc_regs[IOSFC_SAVED_RING_WR];
++    uint64_t rd = s->iosfc_regs[IOSFC_SAVED_RING_RD];
++    uint64_t enable = s->iosfc_regs[IOSFC_SAVED_DESC_ENABLE];
++    uint32_t ids[IOSFC_MAPPING_IDS];
++    uint32_t nids = 0, i, done = 0;
++    uint64_t cursor;
++    bool ok = true;
++
++    /* Enabling the descriptor form clears the table base: this order */
++    rvg_iosurface_device_mmio_write(dev, IOSFC_REG_DESC_ENABLE, enable);
++    if (desc_base) {
++        rvg_iosurface_device_mmio_write(dev, IOSFC_REG_DESC_BASE, desc_base);
++    }
++    if (ring_base == 0 || ring_base == UINT64_MAX || ring_size == 0) {
++        return true;
++    }
++    if (ring_size > IOSFC_MAX_RING) {
++        error_report("apple-gfx: IOSurface ring size %" PRIu64 " out of range",
++                     ring_size);
++        return false;
++    }
++
++    /* The read counter is stored only while no ring is mapped */
++    rvg_iosurface_device_mmio_write(dev, IOSFC_REG_RING_BASE, ring_base);
++    rvg_iosurface_device_mmio_write(dev, IOSFC_REG_RING_RD, rd);
++    rvg_iosurface_device_mmio_write(dev, IOSFC_REG_RING_WR, wr);
++    rvg_iosurface_device_mmio_write(dev, IOSFC_REG_RING_SIZE, ring_size);
++
++    for (i = 1; i < IOSFC_MAPPING_IDS; i++) {
++        if (s->iosfc_live[i / 8] & (1 << (i % 8))) {
++            ids[nids++] = i;
++        }
++    }
++    info_report("apple-gfx: %u IOSurface mapping ids to map again", nids);
++    if (nids == 0 || desc_base == 0) {
++        s->iosfc_seen = wr;
++        return true;
++    }
++
++    cursor = wr;
++    while (done < nids) {
++        uint32_t n = MIN(nids - done, ring_size);
++        g_autofree uint8_t *keep = g_malloc(n * IOSFC_RING_CMD_SIZE);
++        uint32_t j;
++
++        /* The slots from cursor on, which wrap */
++        for (j = 0; j < n; j++) {
++            hwaddr slot = ring_base + ((cursor + j) % ring_size) *
++                          IOSFC_RING_CMD_SIZE;
++            uint32_t cmd[4] = {
++                cpu_to_le32(IOSFC_CMD_MAP), cpu_to_le32(ids[done + j]), 0, 0
++            };
++
++            address_space_read(&address_space_memory, slot,
++                               MEMTXATTRS_UNSPECIFIED,
++                               keep + j * IOSFC_RING_CMD_SIZE,
++                               IOSFC_RING_CMD_SIZE);
++            address_space_write(&address_space_memory, slot,
++                                MEMTXATTRS_UNSPECIFIED, cmd, sizeof(cmd));
++        }
++        rvg_iosurface_device_mmio_write(dev, IOSFC_REG_RING_WR, cursor + n);
++        iosfc_poll_rd(s, cursor + n);
++        if (iosfc_reg(s, IOSFC_REG_RING_RD) != cursor + n) {
++            error_report("apple-gfx: restore of mapped IOSurfaces timed out");
++            ok = false;
++        }
++        for (j = 0; j < n; j++) {
++            hwaddr slot = ring_base + ((cursor + j) % ring_size) *
++                          IOSFC_RING_CMD_SIZE;
++
++            address_space_write(&address_space_memory, slot,
++                                MEMTXATTRS_UNSPECIFIED,
++                                keep + j * IOSFC_RING_CMD_SIZE,
++                                IOSFC_RING_CMD_SIZE);
++        }
++        cursor += n;
++        done += n;
++        if (!ok) {
++            break;
++        }
++    }
++
++    /* Back to the guest's counters: unmap the ring, set them, map it again */
++    rvg_iosurface_device_mmio_write(dev, IOSFC_REG_RING_BASE, ring_base);
++    rvg_iosurface_device_mmio_write(dev, IOSFC_REG_RING_RD, rd);
++    rvg_iosurface_device_mmio_write(dev, IOSFC_REG_RING_WR, wr);
++    rvg_iosurface_device_mmio_write(dev, IOSFC_REG_RING_SIZE, ring_size);
++    s->iosfc_seen = wr;
++    return ok;
++}
++
++/*
++ * The device must be quiet before RAM is saved: precopy writes RAM first and
++ * the devices after it, and suspending flushes the guest's GPU tasks into
++ * guest memory. So it happens when the machine stops for a save (a migration
++ * that starts on a stopped machine does it at its setup), and pre_save only
++ * serializes.
++ */
++static bool apple_gfx_mmio_suspend(AppleGFXMMIOState *s, Error **errp)
++{
++    int64_t t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
++
++    if (s->suspended) {
++        return true;
++    }
++    if (!iosfc_save(s)) {
++        error_setg(errp, "apple-gfx: the IOSurface ring did not drain");
++        return false;
++    }
++    if (!apple_gfx_common_suspend(&s->common, errp)) {
++        return false;
++    }
++    s->suspended = true;
++    info_report("apple-gfx: suspended in %" PRId64 " ms, state %u bytes",
++                qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - t0,
++                s->common.suspend_state_len);
++    return true;
++}
++
++static void apple_gfx_mmio_wake(AppleGFXMMIOState *s)
++{
++    Error *err = NULL;
++
++    if (!s->suspended) {
++        return;
++    }
++    s->suspended = false;
++    if (!apple_gfx_common_resume(&s->common, &err)) {
++        /* the guest may map memory the library does not know: no way on */
++        error_report_err(err);
++        error_report("apple-gfx: cannot resume the device, shutting down");
++        qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_ERROR);
++    }
++    apple_gfx_common_free_suspend_state(&s->common);
++}
++
++static int apple_gfx_mmio_mig_notify(NotifierWithReturn *n,
++                                     MigrationEvent *e, Error **errp)
++{
++    AppleGFXMMIOState *s = container_of(n, AppleGFXMMIOState, mig_notifier);
++
++    if (e->type == MIG_EVENT_SETUP && !runstate_is_running()) {
++        return apple_gfx_mmio_suspend(s, errp) ? 0 : -EINVAL;
++    }
++    if (e->type == MIG_EVENT_FAILED) {
++        apple_gfx_mmio_wake(s);
++    }
++    return 0;
++}
++
++static void apple_gfx_mmio_vm_state(void *opaque, bool running, RunState state)
++{
++    AppleGFXMMIOState *s = opaque;
++    Error *err = NULL;
++
++    if (!running && (state == RUN_STATE_FINISH_MIGRATE ||
++                     state == RUN_STATE_SAVE_VM)) {
++        if (!apple_gfx_mmio_suspend(s, &err)) {
++            error_report_err(err);
++        }
++    }
++}
++
++static int apple_gfx_mmio_pre_save(void *opaque)
++{
++    AppleGFXMMIOState *s = opaque;
++    Error *err = NULL;
++
++    if (!apple_gfx_mmio_suspend(s, &err)) {
++        error_report_err(err);
++        return -EINVAL;
++    }
++    s->cfg_argument_buffers = s->disable_argument_buffers;
++    s->cfg_page_shift = s->guest_page_shift;
++    return 0;
++}
++
++/* The device is suspended: wake it, as a restore does, from the same state */
++static void apple_gfx_mmio_post_save(void *opaque)
++{
++    apple_gfx_mmio_wake(opaque);
++}
++
++static int apple_gfx_mmio_pre_load(void *opaque)
++{
++    AppleGFXMMIOState *s = opaque;
++
++    apple_gfx_common_free_suspend_state(&s->common);
++    memset(s->iosfc_live, 0, sizeof(s->iosfc_live));
++    return 0;
+ }
+ 
++static int apple_gfx_mmio_post_load(void *opaque, int version_id)
++{
++    AppleGFXMMIOState *s = opaque;
++    Error *err = NULL;
++    int ret = 0;
++    int64_t t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
++
++    if (s->common.suspend_state_len > SUSPEND_STATE_MAX) {
++        error_report("apple-gfx: device state of %u bytes is too large",
++                     s->common.suspend_state_len);
++        return -EINVAL;
++    }
++    if (s->cfg_argument_buffers != s->disable_argument_buffers ||
++        s->cfg_page_shift != s->guest_page_shift) {
++        error_report("apple-gfx: the snapshot was saved with "
++                     "disable-argument-buffers=%s guest-page-shift=%u, "
++                     "this machine has %s and %u",
++                     s->cfg_argument_buffers ? "on" : "off",
++                     s->cfg_page_shift,
++                     s->disable_argument_buffers ? "on" : "off",
++                     s->guest_page_shift);
++        return -EINVAL;
++    }
++    if (!iosfc_restore(s)) {
++        warn_report("apple-gfx: some IOSurface mappings were not restored");
++    }
++    if (!apple_gfx_common_resume(&s->common, &err)) {
++        error_report_err(err);
++        ret = -EINVAL;
++    }
++    info_report("apple-gfx: restored in %" PRId64 " ms, state %u bytes",
++                qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - t0,
++                s->common.suspend_state_len);
++    apple_gfx_common_free_suspend_state(&s->common);
++    return ret;
++}
++
++static const VMStateDescription vmstate_apple_gfx_mmio = {
++    .name = TYPE_APPLE_GFX_MMIO,
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .pre_save = apple_gfx_mmio_pre_save,
++    .post_save = apple_gfx_mmio_post_save,
++    .pre_load = apple_gfx_mmio_pre_load,
++    .post_load = apple_gfx_mmio_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT8(cfg_argument_buffers, AppleGFXMMIOState),
++        VMSTATE_UINT32(cfg_page_shift, AppleGFXMMIOState),
++        VMSTATE_UINT32(common.suspend_state_len, AppleGFXMMIOState),
++        VMSTATE_VBUFFER_ALLOC_UINT32(common.suspend_state, AppleGFXMMIOState,
++                                     0, NULL, common.suspend_state_len),
++        VMSTATE_UINT64_ARRAY(iosfc_regs, AppleGFXMMIOState, IOSFC_NUM_REGS),
++        VMSTATE_BUFFER(iosfc_live, AppleGFXMMIOState),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ static void apple_gfx_mmio_finalize(Object *obj)
+ {
+     AppleGFXMMIOState *s = APPLE_GFX_MMIO(obj);
+@@ -190,6 +591,8 @@ static void apple_gfx_mmio_reset(Object *obj, ResetType type)
+     AppleGFXMMIOState *s = APPLE_GFX_MMIO(obj);
+ 
+     rvg_device_reset(s->common.pgdev);
++    memset(s->iosfc_live, 0, sizeof(s->iosfc_live));
++    s->iosfc_seen = 0;
+ }
+ 
+ static const Property apple_gfx_mmio_properties[] = {
+@@ -212,6 +615,14 @@ static const Property apple_gfx_mmio_properties[] = {
+      */
+     DEFINE_PROP_BOOL("process-isolation", AppleGFXMMIOState,
+                      process_isolation, true),
++    /*
++     * Do not offer the guest argument buffers.  The library rebuilds a
++     * task's object placements from the guest's lists at a restore, which
++     * argument buffers need; without them a restored guest creates its
++     * resources again with no clash.
++     */
++    DEFINE_PROP_BOOL("disable-argument-buffers", AppleGFXMMIOState,
++                     disable_argument_buffers, false),
+     /*
+      * log2 of the guest's page size.  The library's default is the host's
+      * page size, 4 KiB on x86-64, while this arm64 guest uses 16 KiB.
+@@ -227,6 +638,7 @@ static void apple_gfx_mmio_class_init(ObjectClass *klass, const void *data)
+ 
+     rc->phases.hold = apple_gfx_mmio_reset;
+     dc->hotpluggable = false;
++    dc->vmsd = &vmstate_apple_gfx_mmio;
+     dc->realize = apple_gfx_mmio_realize;
+ 
+     device_class_set_props(dc, apple_gfx_mmio_properties);
+diff --git a/hw/display/apple-gfx.c b/hw/display/apple-gfx.c
+index bbb69d4bae..d7d2c27004 100644
+--- a/hw/display/apple-gfx.c
++++ b/hw/display/apple-gfx.c
+@@ -23,7 +23,6 @@
+ #include "qapi/error.h"
+ #include "qapi/qapi-commands-ui.h"
+ #include "system/address-spaces.h"
+-#include "migration/blocker.h"
+ #include "exec/target_page.h"
+ #include "hw/core/boards.h"
+ #include "hw/core/cpu.h"
+@@ -44,7 +43,6 @@ static const AppleGFXDisplayMode apple_gfx_default_modes[] = {
+     { 1280, 1024, 60 },
+ };
+ 
+-static Error *apple_gfx_mig_blocker;
+ static uint32_t next_pgdisplay_serial_num = 1;
+ 
+ /* ------ Rendering and frame management ------ */
+@@ -587,10 +585,6 @@ void apple_gfx_common_init(Object *obj, AppleGFXState *s, const char *obj_name)
+      */
+     memory_region_enable_lockless_io(&s->iomem_gfx);
+ 
+-    /*
+-     * TODO: reims-vgpu can suspend and resume the device
+-     * (rvg_device_will_suspend and the rest): integrate it!
+-     */
+ }
+ 
+ typedef struct AppleGFXMemoryWalk {
+@@ -1028,14 +1022,6 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
+         return false;
+     }
+ 
+-    if (apple_gfx_mig_blocker == NULL) {
+-        error_setg(&apple_gfx_mig_blocker,
+-                  "Migration state blocked by apple-gfx display device");
+-        if (migrate_add_blocker(&apple_gfx_mig_blocker, errp) < 0) {
+-            return false;
+-        }
+-    }
+-
+     /* The library copies the ranges, and duplicates the files' descriptors. */
+     memory_ranges = apple_gfx_new_memory_ranges(&memory_files);
+     if (!apple_gfx_memory_files(memory_ranges, memory_files,
+@@ -1129,8 +1115,75 @@ fail:
+     return false;
+ }
+ 
++/* ------ Suspend and resume (savevm, migration) ------ */
++
++void apple_gfx_common_free_suspend_state(AppleGFXState *s)
++{
++    g_free(s->suspend_state);
++    s->suspend_state = NULL;
++    s->suspend_state_len = 0;
++}
++
++bool apple_gfx_common_suspend(AppleGFXState *s, Error **errp)
++{
++    RvgBytes bytes = { NULL, 0 };
++    RvgStatus status;
++
++    assert(bql_locked());
++    apple_gfx_common_free_suspend_state(s);
++
++    /*
++     * The library's display thread calls mode_change, which takes the BQL,
++     * while a suspend pauses the displays.
++     */
++    bql_unlock();
++    rvg_device_will_suspend(s->pgdev);
++    status = rvg_device_finish_suspend(s->pgdev, &bytes);
++    bql_lock();
++
++    if (status != RVG_OK) {
++        error_setg(errp, "apple-gfx: rvg_device_finish_suspend: %s",
++                   rvg_status_message(status));
++        return false;
++    }
++    s->suspend_state = g_memdup2(bytes.data, bytes.length);
++    s->suspend_state_len = bytes.length;
++    rvg_bytes_free(bytes);
++    return true;
++}
++
++bool apple_gfx_common_resume(AppleGFXState *s, Error **errp)
++{
++    static const uint8_t empty[1];
++    RvgResumeError reason = RVG_RESUME_ERROR_NONE;
++    RvgStatus status;
++    uint32_t i;
++
++    assert(bql_locked());
++    bql_unlock();
++    status = rvg_device_will_resume(s->pgdev,
++                                    s->suspend_state ? s->suspend_state : empty,
++                                    s->suspend_state_len, &reason);
++    if (status == RVG_OK) {
++        rvg_device_did_resume(s->pgdev);
++    }
++    bql_lock();
++
++    if (status != RVG_OK) {
++        error_setg(errp, "apple-gfx: rvg_device_will_resume: %s (reason %u)",
++                   rvg_status_message(status), reason);
++        return false;
++    }
++    /* The surfaces were drawn from state the library rebuilt: draw again. */
++    for (i = 0; i < s->num_displays; i++) {
++        s->displays[i].frame_dirty = true;
++    }
++    return true;
++}
++
+ void apple_gfx_common_finalize(AppleGFXState *s)
+ {
++    apple_gfx_common_free_suspend_state(s);
+     if (s->holds_activity) {
+         s->holds_activity = false;
+         apple_gfx_activity_end();
+diff --git a/hw/display/apple-gfx.h b/hw/display/apple-gfx.h
+index 928638a1bc..01a542d1ac 100644
+--- a/hw/display/apple-gfx.h
++++ b/hw/display/apple-gfx.h
+@@ -93,6 +93,12 @@ struct AppleGFXState {
+ 
+     /* Mutable state (BQL protected) */
+     uint32_t input_buttons; /* RVG_WINDOW_BUTTON_* bits the guest was sent */
++    /*
++     * The library's suspend state: written by apple_gfx_common_suspend(),
++     * migrated, and offered back by apple_gfx_common_resume().
++     */
++    uint8_t *suspend_state;
++    uint32_t suspend_state_len;
+ };
+ 
+ void apple_gfx_common_init(Object *obj, AppleGFXState *s, const char *obj_name);
+@@ -102,6 +108,16 @@ void apple_gfx_common_init(Object *obj, AppleGFXState *s, const char *obj_name);
+  */
+ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
+                               RvgDeviceConfig *config, Error **errp);
++/*
++ * Suspends the library's device into s->suspend_state (the guest's tasks
++ * end, its displays pause), and resumes it from that state. Both run with
++ * the guest stopped, and drop the BQL for the library's calls: its display
++ * thread's mode_change callback takes it.
++ */
++bool apple_gfx_common_suspend(AppleGFXState *s, Error **errp);
++bool apple_gfx_common_resume(AppleGFXState *s, Error **errp);
++void apple_gfx_common_free_suspend_state(AppleGFXState *s);
++
+ /* Ends the hold on the activity against App Nap that realize began. */
+ void apple_gfx_common_finalize(AppleGFXState *s);
+ /*
+diff --git a/hw/vmapple/aes.c b/hw/vmapple/aes.c
+index 40178ac37e..c0304bdf06 100644
+--- a/hw/vmapple/aes.c
++++ b/hw/vmapple/aes.c
+@@ -578,11 +578,76 @@ static void aes_init(Object *obj)
+     s->as = &address_space_memory;
+ }
+ 
++static int aes_key_post_load(void *opaque, int version_id)
++{
++    Key *k = opaque;
++
++    return k->key_len > sizeof(k->key) ? -EINVAL : 0;
++}
++
++static const VMStateDescription vmstate_aes_key = {
++    .name = "apple-aes/key",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .post_load = aes_key_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT32(key_len, Key),
++        VMSTATE_UINT8_ARRAY(key, Key, 32),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static const VMStateDescription vmstate_aes_iv = {
++    .name = "apple-aes/iv",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT32_ARRAY(iv, IV, 4),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++/*
++ * The FIFO, keys, IVs and mode are what a guest driver has programmed and
++ * expects to still be there after a restore.
++ */
++static int aes_post_load(void *opaque, int version_id)
++{
++    AESState *s = opaque;
++
++    /* fifo_append() writes at fifo_idx: it must stay inside the array */
++    return s->fifo_idx > MAX_FIFO_SIZE ? -EINVAL : 0;
++}
++
++static const VMStateDescription vmstate_aes = {
++    .name = TYPE_APPLE_AES,
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .post_load = aes_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT32(status, AESState),
++        VMSTATE_UINT32(q_status, AESState),
++        VMSTATE_UINT32(irq_status, AESState),
++        VMSTATE_UINT32(irq_enable, AESState),
++        VMSTATE_UINT32(watermark, AESState),
++        VMSTATE_UINT32(flag_info, AESState),
++        VMSTATE_UINT32_ARRAY(fifo, AESState, MAX_FIFO_SIZE),
++        VMSTATE_UINT32(fifo_idx, AESState),
++        VMSTATE_STRUCT_ARRAY(key, AESState, 2, 1, vmstate_aes_key, Key),
++        VMSTATE_STRUCT_ARRAY(iv, AESState, 4, 1, vmstate_aes_iv, IV),
++        VMSTATE_BOOL(is_encrypt, AESState),
++        VMSTATE_UINT32(block_mode, AESState),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ static void aes_class_init(ObjectClass *klass, const void *data)
+ {
+     ResettableClass *rc = RESETTABLE_CLASS(klass);
++    DeviceClass *dc = DEVICE_CLASS(klass);
+ 
+     rc->phases.hold = aes_reset;
++    dc->vmsd = &vmstate_aes;
+ }
+ 
+ static const TypeInfo aes_info = {
+diff --git a/target/arm/machine.c b/target/arm/machine.c
+index 89127e5d83..c46e3d90de 100644
+--- a/target/arm/machine.c
++++ b/target/arm/machine.c
+@@ -1245,6 +1245,29 @@ static int cpu_post_load(void *opaque, int version_id)
+     return 0;
+ }
+ 
++static bool vmapple_pac_needed(void *opaque)
++{
++    ARMCPU *cpu = opaque;
++    CPUARMState *env = &cpu->env;
++
++    return env->vmapple_rop_pid || env->vmapple_jop_pid ||
++           env->vmapple_user_jop_key;
++}
++
++/* State of the vmapple Apple PAC key service (target/arm/tcg/psci.c) */
++static const VMStateDescription vmstate_vmapple_pac = {
++    .name = "cpu/vmapple-pac",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = vmapple_pac_needed,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT64(env.vmapple_rop_pid, ARMCPU),
++        VMSTATE_UINT64(env.vmapple_jop_pid, ARMCPU),
++        VMSTATE_BOOL(env.vmapple_user_jop_key, ARMCPU),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ const VMStateDescription vmstate_arm_cpu = {
+     .name = "cpu",
+     .version_id = 22,
+@@ -1343,6 +1366,7 @@ const VMStateDescription vmstate_arm_cpu = {
+         &vmstate_pstate64,
+         &vmstate_event,
+         &vmstate_fpmr,
++        &vmstate_vmapple_pac,
+         NULL
+     }
+ };

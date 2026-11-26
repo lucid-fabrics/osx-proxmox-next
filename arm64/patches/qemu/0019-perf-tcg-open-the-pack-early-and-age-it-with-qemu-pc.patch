@@ -1,0 +1,1582 @@
+From 045acfbd5bbc4aaa833ff9526055d5e7d263daeb Mon Sep 17 00:00:00 2001
+From: wmehanna <wassimmehanna@gmail.com>
+Date: Thu, 19 Nov 2026 18:43:11 -0500
+Subject: [PATCH] perf(tcg): open the pack early and age it with
+ qemu-pcache-compact
+
+- P82_PCOPEN: open the pack on a helper thread, or at machine init
+  when an incoming snapshot is loaded (default), cold boots keep the
+  lazy open.
+- The pack ages itself: per-boot use bitmaps, records stored and never
+  hit are dropped after 3 boots, unused for 8 boots after that.
+- The exit only writes the use bitmap; the new qemu-pcache-compact tool
+  rewrites the pack under its lock (tmp, fdatasync, rename, directory
+  fsync), and prints the age table with P89_STAT=1. Lookups compare the
+  stored hash before reading a record.
+- P89_PACK=legacy and P89_COMPACT_AT=exit keep the old behaviour.
+---
+ accel/tcg/p80.c          |   5 +-
+ accel/tcg/pcache-tcg.c   | 173 +++++++++--
+ accel/tcg/pcache.c       | 641 +++++++++++++++++++++++++++++++++++++--
+ accel/tcg/pcache.h       |  35 +++
+ tests/unit/test-pcache.c | 312 +++++++++++++++++++
+ tools/meson.build        |   5 +
+ tools/pcache-compact.c   |  83 +++++
+ 7 files changed, 1210 insertions(+), 44 deletions(-)
+ create mode 100644 tools/pcache-compact.c
+
+diff --git a/accel/tcg/p80.c b/accel/tcg/p80.c
+index 0dcb63b184..a04aafeb6a 100644
+--- a/accel/tcg/p80.c
++++ b/accel/tcg/p80.c
+@@ -276,13 +276,14 @@ static void p80_init_once(void)
+     const char *u = getenv("P80_US");
+     const char *bc = getenv("P80_BC");
+     QemuThread t;
+-    if (bc && strstr(bc, "quiet")) {
++    /* D3: quiet and asid are on by default; P80_BC=off / P85_BC=off turn them off */
++    if (!bc || strstr(bc, "quiet")) {
+         p80_bc_quiet = true;
+     }
+     if (bc && strstr(bc, "nowait")) {
+         p80_bc_nowait = true;
+     }
+-    if (getenv("P85_BC") && strstr(getenv("P85_BC"), "asid")) {
++    if (!getenv("P85_BC") || strstr(getenv("P85_BC"), "asid")) {
+         p85_bc_asid = true;
+     }
+     if (getenv("P85_BC") && strstr(getenv("P85_BC"), "asidbad")) {
+diff --git a/accel/tcg/pcache-tcg.c b/accel/tcg/pcache-tcg.c
+index 44c5649875..8a34e09117 100644
+--- a/accel/tcg/pcache-tcg.c
++++ b/accel/tcg/pcache-tcg.c
+@@ -33,6 +33,8 @@
+ #include "qemu/plugin.h"
+ #include "qemu/config-file.h"
+ #include "qemu/option.h"
++#include "system/system.h"
++#include "system/runstate.h"
+ #include "pcache.h"
+ #include "pcache-tcg.h"
+ #include "internal-common.h"
+@@ -74,7 +76,7 @@ static struct {
+     char *dir;
+     bool rw;
+     uint64_t cap;
+-    int state;                  /* 0 not opened, 1 open, 2 unusable */
++    int state;                  /* 0 not opened, 1 open, 2 unusable, 3 opening */
+     QemuMutex lock;
+     PCache *c;
+     uintptr_t img_lo, img_hi;   /* the executable's image */
+@@ -262,6 +264,7 @@ static void pt_compute_id(CPUState *cpu, uint8_t id[PCACHE_ID_LEN])
+ }
+ 
+ static void pt_exit(void);
++static void pt_early_register(void);
+ static void *pt_stats_thread(void *opaque);
+ 
+ void tb_pcache_configure(const char *dir, const char *mode, uint64_t cap,
+@@ -291,6 +294,7 @@ void tb_pcache_configure(const char *dir, const char *mode, uint64_t cap,
+     pt.t0_ticks = cpu_get_host_ticks();
+     tb_pcache_on = true;
+     atexit(pt_exit);
++    pt_early_register();
+     pt.interval_ms = interval_s * 1000;
+     if (pt.interval_ms) {
+         static QemuThread th;
+@@ -335,6 +339,78 @@ static bool pt_layout_ok(void)
+     return ok;
+ }
+ 
++/*
++ * P82: how the pack is opened. P82_PCOPEN unset: on the first lookup, in the
++ * vCPU thread that asks (the scan of a 4 GB pack held vCPU 0 for 1.5 s at
++ * time zero). "presize": the same, with the index table sized from the file
++ * size up front (no rehash while scanning). "async": the translator id is
++ * still computed by the first vCPU, then a helper thread opens and scans the
++ * pack while the vCPUs translate; every lookup before it is ready is a miss.
++ */
++static int pt_open_mode(void)
++{
++    static int m = -1;
++
++    if (m < 0) {
++        const char *e = getenv("P82_PCOPEN");
++
++        /*
++         * D3: unset means "early" on the resume path (-incoming, i.e. loadvm)
++         * and the old behaviour on a cold boot. P82_PCOPEN=off forces the old
++         * behaviour, "early" forces early.
++         */
++        m = !e ? (runstate_check(RUN_STATE_INMIGRATE) ? 3 : 0) :
++            !strcmp(e, "async") ? 2 : !strcmp(e, "presize") ? 1 :
++            !strcmp(e, "early") ? 3 : 0;
++    }
++    return m;
++}
++
++static uint8_t pt_open_id[PCACHE_ID_LEN];
++static int64_t pt_open_t0, pt_open_id_ns;
++
++static void pt_publish(PCache *c, Error *err)
++{
++    /* P84b: when the pack became usable, from tb_pcache_configure() */
++    info_report("pcache: open mode %d finished %" PRId64 " ms after configure",
++                pt_open_mode(), (get_clock() - pt.t0_ns) / SCALE_MS);
++    if (c) {
++        PCacheStats cs;
++
++        pcache_stats(c, &cs);
++        info_report("pcache: %s, %s, boot %u, %" PRIu64
++                    " records, %" PRIu64 " MiB, opened in %" PRId64
++                    " ms (id %" PRId64 " ms, open mode %d)",
++                    pcache_path(c), cs.rw ? "rw" : "ro",
++                    cs.boot_no, cs.records, cs.end >> 20,
++                    (get_clock() - pt_open_t0) / SCALE_MS,
++                    pt_open_id_ns / SCALE_MS, pt_open_mode());
++    } else if (err) {
++        warn_report_err(err);
++    }
++    /* the record path reads pt.c without the state: publish it whole */
++    qatomic_store_release((void **)&pt.c, (void *)c);
++    qatomic_store_release(&pt.state, c ? 1 : 2);
++}
++
++static CPUState *pt_open_cpu;
++
++static void *pt_open_thread(void *opaque)
++{
++    Error *err = NULL;
++    PCache *c;
++
++    if (pt_open_cpu) {
++        /* P84b early: the id is computed here, off every vCPU thread */
++        pt_compute_id(pt_open_cpu, pt_open_id);
++        pt_open_id_ns = get_clock() - pt_open_t0;
++    }
++    c = pcache_open(pt.dir, pt_open_id, pt.rw, pt.cap, &err);
++
++    pt_publish(c, err);
++    return NULL;
++}
++
+ static PCache *pt_get(CPUState *cpu)
+ {
+     int st = qatomic_load_acquire(&pt.state);
+@@ -342,16 +418,22 @@ static PCache *pt_get(CPUState *cpu)
+     if (st == 1) {
+         return pt.c;
+     }
+-    if (st == 2) {
++    {
++        static int first_seen;
++
++        if (!qatomic_read(&first_seen) && !qatomic_xchg(&first_seen, 1)) {
++            info_report("pcache: first lookup %" PRId64 " ms after configure, "
++                        "pack state %d",
++                        (get_clock() - pt.t0_ns) / SCALE_MS, st);
++        }
++    }
++    if (st == 2 || st == 3) {
+         return NULL;
+     }
+     qemu_mutex_lock(&pt.lock);
+     if (pt.state == 0) {
+-        uint8_t id[PCACHE_ID_LEN];
+-        Error *err = NULL;
+-        PCache *c = NULL;
+-        int64_t t0 = get_clock();
+-
++        pt_open_t0 = get_clock();
++        pcache_set_presize(pt_open_mode() >= 1);
+         if (icount_enabled() || tcg_splitwx_diff != 0 ||
+             qatomic_read(&one_insn_per_tb) ||
+             !cpu->cc->tcg_ops->pcache_hash_cpu || pt.img_lo < PT_PTR_LO ||
+@@ -359,32 +441,75 @@ static PCache *pt_get(CPUState *cpu)
+             warn_report("pcache: disabled (icount, split-wx, "
+                         "one-insn-per-tb, plugins, a target without a cpu "
+                         "hash, a non-PIE executable or a low mmap layout)");
++            pt_publish(NULL, NULL);
+         } else {
+-            pt_compute_id(cpu, id);
+-            c = pcache_open(pt.dir, id, pt.rw, pt.cap, &err);
++            pt_compute_id(cpu, pt_open_id);
++            pt_open_id_ns = get_clock() - pt_open_t0;
++            if (pt_open_mode() >= 2) {
++                static QemuThread th;
++
++                qatomic_store_release(&pt.state, 3);
++                qemu_thread_create(&th, "pcache-open", pt_open_thread, NULL,
++                                   QEMU_THREAD_DETACHED);
++            } else {
++                Error *err = NULL;
++                PCache *c = pcache_open(pt.dir, pt_open_id, pt.rw, pt.cap,
++                                        &err);
++
++                pt_publish(c, err);
++            }
+         }
+-        if (c) {
+-            PCacheStats cs;
+-
+-            pcache_stats(c, &cs);
+-            info_report("pcache: %s, %s, boot %u, %" PRIu64
+-                        " records, %" PRIu64 " MiB, opened in %" PRId64
+-                        " ms", pcache_path(c), cs.rw ? "rw" : "ro",
+-                        cs.boot_no, cs.records, cs.end >> 20,
+-                        (get_clock() - t0) / SCALE_MS);
+-        } else if (err) {
+-            warn_report_err(err);
++    }
++    qemu_mutex_unlock(&pt.lock);
++    return qatomic_load_acquire(&pt.state) == 1 ? pt.c : NULL;
++}
++
++/*
++ * P84b P82_PCOPEN=early: start the open at machine init done, before an
++ * incoming snapshot is read, so the scan of the pack overlaps the load of the
++ * snapshot and the first vCPU after cont does not pay for it. The checks are
++ * those of pt_get(); the id is computed on the helper thread.
++ */
++static void pt_early_open(Notifier *n, void *data)
++{
++    CPUState *cpu = first_cpu;
++
++    qemu_mutex_lock(&pt.lock);
++    if (cpu && pt.state == 0) {
++        pt_open_t0 = get_clock();
++        pcache_set_presize(true);
++        if (icount_enabled() || tcg_splitwx_diff != 0 ||
++            qatomic_read(&one_insn_per_tb) ||
++            !cpu->cc->tcg_ops->pcache_hash_cpu || pt.img_lo < PT_PTR_LO ||
++            pt_plugins_active(cpu) || !pt_layout_ok()) {
++            warn_report("pcache: disabled (icount, split-wx, "
++                        "one-insn-per-tb, plugins, a target without a cpu "
++                        "hash, a non-PIE executable or a low mmap layout)");
++            pt_publish(NULL, NULL);
++        } else {
++            static QemuThread th;
++
++            pt_open_cpu = cpu;
++            qatomic_store_release(&pt.state, 3);
++            qemu_thread_create(&th, "pcache-open", pt_open_thread, NULL,
++                               QEMU_THREAD_DETACHED);
+         }
+-        pt.c = c;
+-        qatomic_store_release(&pt.state, c ? 1 : 2);
+     }
+     qemu_mutex_unlock(&pt.lock);
+-    return pt.c;
++}
++
++static Notifier pt_early_notifier = { .notify = pt_early_open };
++
++static void pt_early_register(void)
++{
++    if (pt_open_mode() == 3) {
++        qemu_add_machine_init_done_notifier(&pt_early_notifier);
++    }
+ }
+ 
+ bool tb_pcache_recording(void)
+ {
+-    PCache *c = pt.c;
++    PCache *c = (PCache *)qatomic_load_acquire((void **)&pt.c);
+ 
+     return c && pcache_is_rw(c);
+ }
+diff --git a/accel/tcg/pcache.c b/accel/tcg/pcache.c
+index d15af6b956..20f15080fe 100644
+--- a/accel/tcg/pcache.c
++++ b/accel/tcg/pcache.c
+@@ -17,10 +17,13 @@
+ #include "qemu/crc32c.h"
+ #include "qemu/thread.h"
+ #include "qemu/atomic.h"
++#include "qemu/host-utils.h"
+ #include "qemu/error-report.h"
++#include "qemu/timer.h"
+ #include "qapi/error.h"
+ #include "pcache.h"
+ #include <sys/file.h>
++#include <sys/statvfs.h>
+ 
+ #define PC_FILE_MAGIC   "SNAPPC01"
+ #define PC_VERSION      1
+@@ -28,6 +31,8 @@
+ #define PC_REC_MAGIC    0x31524350u     /* "PCR1" */
+ #define PC_KIND_TB      1
+ #define PC_KIND_USE     2
++#define PC_KIND_USE2    3       /* P89: bitmap of the records hit in a boot */
++#define PC_VERSION_MAX  2       /* 2: may hold PC_KIND_USE2 records */
+ #define PC_GROW         (64ull << 20)
+ #define PC_KEEP_BOOTS   5
+ 
+@@ -37,7 +42,7 @@ typedef struct PCacheFileHdr {
+     uint32_t hdr_size;
+     uint8_t id[PCACHE_ID_LEN];
+     uint32_t boot_no;
+-    uint32_t pad;
++    uint32_t cold4k;        /* P89b: the probation tail starts here, in 4 KiB units, 0 none */
+ } PCacheFileHdr;
+ 
+ /* The hash table: readers load the pointer and never take the lock. */
+@@ -71,9 +76,42 @@ struct PCache {
+     uint32_t *uses;
+     uint8_t *state;         /* 0 unchecked, 1 crc ok, 2 bad */
+     uint64_t *mut_pc;       /* test mutant 3 only */
++    uint64_t use_v1_bytes;  /* P89: bytes of per-entry use records */
++    uint64_t use2_bytes;    /* P89: bytes of bitmap use records */
++    uint8_t *touch;         /* P89b P89_TOUCH=1: 4 KiB pages used: 1 cand, 2 hit */
++    bool offline;           /* P89b: opened by the compactor, no boot of its own */
+     PCacheStats st;
+ };
+ 
++/* P89: how the pack ages. */
++enum { P89_LEGACY = 0, P89_NONE, P89_ON };
++
++static int p89_mode(void)
++{
++    const char *e = getenv("P89_PACK");
++
++    /* P89_PACK=legacy: the P47..P84b behaviour; none: legacy, no compaction */
++    if (e && !strcmp(e, "legacy")) {
++        return P89_LEGACY;
++    }
++    return e && !strcmp(e, "none") ? P89_NONE : P89_ON;
++}
++
++static uint64_t p89_env(const char *name, uint64_t def)
++{
++    const char *e = getenv(name);
++
++    return e && *e ? strtoull(e, NULL, 0) : def;
++}
++
++/* P89b: P89_COMPACT_AT=exit puts the rewrite back on the exit path */
++static bool p89_at_exit(void)
++{
++    const char *e = getenv("P89_COMPACT_AT");
++
++    return e && !strcmp(e, "exit");
++}
++
+ #ifdef PCACHE_TEST_HOOKS
+ static int pc_mutant(void)
+ {
+@@ -129,6 +167,14 @@ static uint32_t pc_hash(uint64_t cs_base, uint32_t flags, uint32_t cflags,
+     return (uint32_t)h;
+ }
+ 
++static bool pc_presize;
++
++/* P82: size the index table from the file before the scan (no rehash) */
++void pcache_set_presize(bool on)
++{
++    pc_presize = on;
++}
++
+ static void *pc_anon(size_t n)
+ {
+     void *p = mmap(NULL, n, PROT_READ | PROT_WRITE,
+@@ -205,6 +251,46 @@ static uint32_t pc_find_rid(PCache *c, uint32_t off8)
+     return lo < c->nrec && c->off8[lo] == off8 ? lo : UINT32_MAX;
+ }
+ 
++/*
++ * P89b P89_TOUCH=1: which 4 KiB pages of the pack a boot looked at, to tell
++ * the pages of the records it used from the ones it only inspected on the
++ * way (a hash chain neighbour, a variant with another guest byte).
++ */
++static void pc_touch_mark(PCache *c, uint32_t rid, uint8_t bit)
++{
++    uint64_t a = (uint64_t)c->off8[rid] << 3;
++
++    if (bit == 1) {
++        c->touch[a >> 12] |= 1;
++    } else {
++        uint64_t e = a + pc_rec(c, rid)->total - 1;
++
++        for (uint64_t pg = a >> 12; pg <= e >> 12; pg++) {
++            c->touch[pg] |= 2;
++        }
++    }
++}
++
++static void pc_touch_report(PCache *c)
++{
++    uint64_t hit = 0, cand = 0, none = 0, tail = 0;
++    uint64_t cold = (uint64_t)c->fh->cold4k;
++
++    for (uint64_t pg = 0; pg < (c->end + 4095) >> 12; pg++) {
++        uint8_t t = c->touch[pg];
++
++        hit += t & 2 ? 1 : 0;
++        cand += (t & 3) == 1 ? 1 : 0;
++        none += t ? 0 : 1;
++        tail += cold && pg >= cold && t ? 1 : 0;
++    }
++    info_report("pcache: pages of the pack used in this boot: %" PRIu64
++                " MiB with a hit, %" PRIu64 " MiB looked at only, %" PRIu64
++                " MiB not touched by a lookup (of %" PRIu64 " MiB), %" PRIu64
++                " MiB used in the probation tail", hit >> 8, cand >> 8,
++                none >> 8, c->end >> 20, tail >> 8);
++}
++
+ static void pc_scan(PCache *c, uint64_t st_size)
+ {
+     uint64_t pos = PC_HDR_SIZE;
+@@ -233,10 +319,41 @@ static void pc_scan(PCache *c, uint64_t st_size)
+                 break;
+             }
+             pc_index_add(c, pos, h->pad);
++        } else if (h->kind == PC_KIND_USE2) {
++            /* P89: u32 boot, u32 nbits, bitmap of rids; one pass, no search */
++            const uint32_t *p = (const uint32_t *)(h + 1);
++            uint32_t nbits = p[1];
++            const uint8_t *bm = (const uint8_t *)(p + 2);
++
++            c->use2_bytes += total;
++            if (crc32c(0xffffffff, (const uint8_t *)h + 16, total - 16) !=
++                h->crc || nbits > c->nrec ||
++                sizeof(*h) + 8 + ((uint64_t)nbits + 7) / 8 > total) {
++                /* a bad use record says nothing: skip it, keep scanning */
++            } else {
++                uint32_t stamp = p[0] & 0xffff;
++
++                for (uint32_t i = 0; i * 8 < nbits; i++) {
++                    if (!bm[i]) {
++                        continue;
++                    }
++                    for (uint32_t b = 0; b < 8 && i * 8 + b < nbits; b++) {
++                        uint32_t rid = i * 8 + b;
++
++                        if ((bm[i] >> b & 1) &&
++                            (uint16_t)(stamp - c->lastboot[rid]) - 1u <
++                            0x7fffu) {
++                            c->lastboot[rid] = stamp;
++                        }
++                    }
++                }
++            }
+         } else if (h->kind == PC_KIND_USE) {
+             const uint32_t *p = (const uint32_t *)(h + 1);
+             uint32_t n = p[1];
+ 
++            c->use_v1_bytes += total;
++
+             if (crc32c(0xffffffff, (const uint8_t *)h + 16, total - 16) !=
+                 h->crc) {
+                 /* a bad use record says nothing: skip it, keep scanning */
+@@ -264,6 +381,24 @@ static void pc_scan(PCache *c, uint64_t st_size)
+     c->st.scanned_bytes = pos;
+ }
+ 
++/*
++ * P89b P89_COLD=drop: the scan has just read the probation tail (records
++ * stored and not hit yet, which the compactor puts last) to index it. A
++ * boot rarely needs them, so give their pages back to the page cache's
++ * reclaim now instead of letting them compete with the pages it does use.
++ */
++static void pc_cold_drop(PCache *c, uint64_t st_size)
++{
++    const char *e = getenv("P89_COLD");
++    uint64_t at = (uint64_t)c->fh->cold4k << 12;
++
++    if (!e || strcmp(e, "drop") || !at || at >= st_size || c->offline) {
++        return;
++    }
++    madvise(c->map + at, st_size - at, MADV_DONTNEED);
++    posix_fadvise(c->fd, at, st_size - at, POSIX_FADV_DONTNEED);
++}
++
+ static bool pc_grow(PCache *c, uint64_t need)
+ {
+     uint64_t want;
+@@ -300,6 +435,9 @@ static void pc_free(PCache *c)
+             munmap(arrs[i], (size_t)c->maxrec * sz[i]);
+         }
+     }
++    if (c->touch) {
++        munmap(c->touch, (size_t)(c->cap >> 12) + 1);
++    }
+     g_free(c->tab);
+     if (c->old_tabs) {
+         g_ptr_array_free(c->old_tabs, true);
+@@ -437,9 +575,229 @@ static bool pc_compact(PCache *c)
+     return false;
+ }
+ 
++/*
++ * P89: a bitmap use record for @boot over rids [0, n): bit i set when
++ * hit[i] is non zero (or, with @gen, when gen[i] == @boot). Returns a g_malloc
++ * buffer, total bytes in *@total.
++ */
++static PCacheRecHdr *pc_use2_build(uint32_t boot, uint32_t nbits,
++                                   const uint32_t *hit, const uint32_t *gen,
++                                   uint64_t *total)
++{
++    uint64_t nb = ((uint64_t)nbits + 7) / 8;
++    uint64_t t = sizeof(PCacheRecHdr) + 8 + ROUND_UP(nb, 8);
++    PCacheRecHdr *h = g_malloc0(t);
++    uint32_t *p = (uint32_t *)(h + 1);
++    uint8_t *bm = (uint8_t *)(p + 2);
++
++    h->magic = PC_REC_MAGIC;
++    h->total = t;
++    h->kind = PC_KIND_USE2;
++    p[0] = boot;
++    p[1] = nbits;
++    for (uint32_t i = 0; i < nbits; i++) {
++        if (hit ? qatomic_read(&hit[i]) != 0 : gen[i] == boot) {
++            bm[i >> 3] |= 1u << (i & 7);
++        }
++    }
++    h->crc = crc32c(0xffffffff, (const uint8_t *)h + 16, t - 16);
++    *total = t;
++    return h;
++}
++
++#define PC2_MAX_KEEP 32
++
++/*
++ * P89: a record is dead when it was last hit more than @keep boots ago, or
++ * when it was stored more than @unhit boots ago and never hit since: a
++ * translation that was needed once and never again (a one-off program, a
++ * changed binary) says nothing about the next boot.
++ */
++static bool pc_p89_dead(PCache *c, uint32_t rid, uint32_t keep, uint32_t unhit)
++{
++    uint32_t age = (uint16_t)(c->boot_no - c->lastboot[rid]);
++
++    if (age > keep) {
++        return true;
++    }
++    return c->lastboot[rid] == pc_rec(c, rid)->pad &&
++           (uint16_t)(c->boot_no - pc_rec(c, rid)->pad) > unhit;
++}
++
++/*
++ * P89 compaction (run by qemu-pcache-compact with the pack's lock held and
++ * nothing appending, or, with P89_COMPACT_AT=exit, at exit). Keeps the
++ * records hit or born within the last @keep boots (fewer when that is still
++ * over @target bytes: oldest generation goes first, the newest never), plus
++ * one bitmap use record per generation so the ages survive. P89b: the
++ * records that have been hit since they were stored come first, in file
++ * (first use) order, the ones stored and not hit yet (the probation tail)
++ * after them, and the header says where the tail starts. The new pack is
++ * written to <path>.tmp, synced, and renamed over the old one: until the
++ * rename the old pack is the pack, after it the new one is, and a tmp left
++ * by a crash is removed by the next read-write open. Returns true when the
++ * new pack replaced the old one.
++ */
++static bool pc_p89_prob(PCache *c, uint32_t rid)
++{
++    return c->lastboot[rid] == pc_rec(c, rid)->pad;
++}
++
++static bool pc_compact2(PCache *c, uint32_t keep, uint32_t unhit,
++                        uint64_t target, PCacheCompactRes *res)
++{
++    char *tmp = g_strdup_printf("%s.tmp", c->path);
++    uint64_t by_age[PC2_MAX_KEEP + 1] = { 0 };
++    uint64_t kept = 0, dead = 0, out = 0, t0 = get_clock(), cold_at = 0;
++    uint32_t nk = 0, *kgen, limit;
++    uint64_t pause_at = p89_env("P89_COMPACT_PAUSE_AT", 0);
++    uint8_t *buf = g_malloc(1 << 20);
++    size_t fill = 0;
++    bool ok;
++    int fd = -1;
++    struct statvfs sv;
++    PCacheFileHdr nh;
++
++    keep = MIN(keep, PC2_MAX_KEEP);
++    for (uint32_t rid = 0; rid < c->nrec; rid++) {
++        uint32_t age = (uint16_t)(c->boot_no - c->lastboot[rid]);
++
++        if (!pc_p89_dead(c, rid, keep, unhit)) {
++            by_age[age] += pc_rec(c, rid)->total;
++        } else {
++            dead += pc_rec(c, rid)->total;
++        }
++    }
++    limit = keep;
++    for (;;) {
++        kept = 0;
++        for (uint32_t a = 0; a <= limit; a++) {
++            kept += by_age[a];
++        }
++        if (kept <= target || limit == 0) {
++            break;
++        }
++        limit--;
++    }
++    if (statvfs(c->dir, &sv) == 0 &&
++        (uint64_t)sv.f_bavail * sv.f_frsize < kept + (256ull << 20)) {
++        warn_report("pcache: not enough disk to compact %s", c->path);
++        goto fail_nofd;
++    }
++    fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++    kgen = g_new(uint32_t, c->nrec + 1);
++    ok = fd >= 0;
++    memcpy(&nh, c->map, sizeof(nh));
++    nh.version = PC_VERSION_MAX;
++    nh.cold4k = 0;
++    if (ok) {
++        memcpy(buf, c->map, PC_HDR_SIZE);
++        memcpy(buf, &nh, sizeof(nh));
++        ok = write(fd, buf, PC_HDR_SIZE) == PC_HDR_SIZE;
++        out = PC_HDR_SIZE;
++    }
++    for (int pass = 0; ok && pass < 2; pass++) {
++        if (pass == 1) {
++            cold_at = out;     /* the probation tail starts here */
++        }
++        for (uint32_t rid = 0; ok && rid < c->nrec; rid++) {
++            const PCacheRecHdr *h = pc_rec(c, rid);
++
++            if (pc_p89_dead(c, rid, limit, unhit) ||
++                pc_p89_prob(c, rid) != (pass == 1)) {
++                continue;
++            }
++            kgen[nk++] = c->lastboot[rid];
++            if (fill + h->total > (1 << 20)) {
++                ok = write(fd, buf, fill) == (ssize_t)fill;
++                fill = 0;
++            }
++            if (h->total > (1 << 20)) {
++                ok = ok && write(fd, h, h->total) == (ssize_t)h->total;
++            } else {
++                memcpy(buf + fill, h, h->total);
++                fill += h->total;
++            }
++            out += h->total;
++            if (pause_at && nk == pause_at) {
++                /* test hook: stand still half way so a power cut can be tried */
++                ok = ok && write(fd, buf, fill) == (ssize_t)fill;
++                fill = 0;
++                warn_report("pcache: P89 test pause in compaction");
++                sleep(p89_env("P89_COMPACT_PAUSE_S", 60));
++            }
++        }
++    }
++    if (ok && fill) {
++        ok = write(fd, buf, fill) == (ssize_t)fill;
++        fill = 0;
++    }
++    if (cold_at && cold_at < out) {
++        /* records are not page aligned: the hint is the first whole page */
++        nh.cold4k = (cold_at + 4095) >> 12;
++    }
++    /* one bitmap per generation, the current boot's included */
++    for (uint32_t a = 0; ok && a <= limit; a++) {
++        uint32_t boot = (uint16_t)(c->boot_no - a);
++        uint64_t total;
++        PCacheRecHdr *h;
++        bool any = false;
++
++        for (uint32_t k = 0; k < nk && !any; k++) {
++            any = kgen[k] == boot;
++        }
++        if (!any) {
++            continue;
++        }
++        h = pc_use2_build(boot, nk, NULL, kgen, &total);
++        ok = write(fd, h, total) == (ssize_t)total;
++        out += total;
++        g_free(h);
++    }
++    g_free(kgen);
++    ok = ok && pwrite(fd, &nh, sizeof(nh), 0) == (ssize_t)sizeof(nh);
++    if (ok && p89_env("P89_FSYNC", 1)) {
++        ok = fdatasync(fd) == 0;
++    }
++    if (fd >= 0) {
++        close(fd);
++    }
++    if (ok && rename(tmp, c->path) == 0) {
++        int dfd = open(c->dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
++
++        if (dfd >= 0) {
++            fsync(dfd);
++            close(dfd);
++        }
++        info_report("pcache: P89 compacted %s: %" PRIu64 " MiB of %" PRIu64
++                    " MiB kept (%" PRIu64 " MiB older than %u boots), "
++                    "%u of %u records, probation tail from %" PRIu64
++                    " MiB, in %" PRIu64 " ms", c->path,
++                    out >> 20, c->end >> 20, dead >> 20, keep, nk, c->nrec,
++                    (uint64_t)nh.cold4k >> 8, (get_clock() - t0) / SCALE_MS);
++        if (res) {
++            res->before = c->end;
++            res->after = out;
++            res->dead = dead;
++            res->rec_before = c->nrec;
++            res->rec_after = nk;
++            res->cold_at = (uint64_t)nh.cold4k << 12;
++            res->ms = (get_clock() - t0) / SCALE_MS;
++        }
++        g_free(buf);
++        g_free(tmp);
++        return true;
++    }
++    unlink(tmp);
++fail_nofd:
++    g_free(buf);
++    g_free(tmp);
++    return false;
++}
++
+ static PCache *pc_open_file(const char *dir, const uint8_t id[PCACHE_ID_LEN],
+                             bool want_rw, uint64_t cap, bool may_compact,
+-                            Error **errp)
++                            bool offline, Error **errp)
+ {
+     PCache *c = g_new0(PCache, 1);
+     struct stat sb;
+@@ -463,9 +821,30 @@ static PCache *pc_open_file(const char *dir, const uint8_t id[PCACHE_ID_LEN],
+             error_setg_errno(errp, errno, "pcache: cannot create %s", dir);
+             goto fail;
+         }
+-        c->fd = open(c->path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+-        if (c->fd >= 0 && flock(c->fd, LOCK_EX | LOCK_NB) == 0) {
++        c->offline = offline;
++        for (int tries = 0; tries < 4; tries++) {
++            struct stat fs, ps;
++
++            c->fd = open(c->path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
++            if (c->fd < 0 || flock(c->fd, LOCK_EX | LOCK_NB) != 0) {
++                break;
++            }
++            /*
++             * P89b: a compactor may have renamed a new pack over this one
++             * between our open and the lock: the lock is on a file nobody
++             * will read again, and what we append would be lost
++             */
++            if (fstat(c->fd, &fs) == 0 && stat(c->path, &ps) == 0 &&
++                fs.st_ino != ps.st_ino) {
++                close(c->fd);
++                c->fd = -1;
++                continue;
++            }
+             c->rw = true;
++            break;
++        }
++        if (c->rw) {
++            /* held */
+         } else if (c->fd >= 0) {
+             /* another process appends to it: read it, never write */
+             close(c->fd);
+@@ -519,7 +898,8 @@ static PCache *pc_open_file(const char *dir, const uint8_t id[PCACHE_ID_LEN],
+     }
+     c->fh = (PCacheFileHdr *)c->map;
+     if (memcmp(c->fh->magic, PC_FILE_MAGIC, 8) ||
+-        c->fh->version != PC_VERSION || c->fh->hdr_size != PC_HDR_SIZE) {
++        c->fh->version < PC_VERSION || c->fh->version > PC_VERSION_MAX ||
++        c->fh->hdr_size != PC_HDR_SIZE) {
+         error_setg(errp, "pcache: %s is not a pack of this version, ignored",
+                    c->path);
+         goto fail;
+@@ -550,18 +930,44 @@ static PCache *pc_open_file(const char *dir, const uint8_t id[PCACHE_ID_LEN],
+         error_setg(errp, "pcache: out of address space for the index");
+         goto fail;
+     }
+-    c->tab = pc_tab_new(1 << 16);
++    if (pc_presize) {
++        /* records are 400 bytes or more: two buckets per 400 bytes */
++        uint64_t want = MIN((uint64_t)sb.st_size / 200, c->maxrec * 2ull);
++
++        c->tab = pc_tab_new(MAX(1u << 16, pow2ceil(MAX(want, 1))));
++    } else {
++        c->tab = pc_tab_new(1 << 16);
++    }
+     c->old_tabs = g_ptr_array_new_with_free_func(g_free);
+     c->boot_no = c->fh->boot_no;
++    if (getenv("P89_TOUCH") && !offline) {
++        c->touch = pc_anon((size_t)(c->cap >> 12) + 1);
++    }
+     pc_scan(c, sb.st_size);
++    pc_cold_drop(c, sb.st_size);
+     c->st.records = c->nrec;
+-    if (c->rw) {
++    if (c->rw && offline) {
++        /* the compactor is not a boot: the pack's last boot is the present */
++        if (p89_mode() != P89_LEGACY) {
++            char *tmp = g_strdup_printf("%s.tmp", c->path);
++
++            unlink(tmp);
++            g_free(tmp);
++        }
++    } else if (c->rw) {
+         c->boot_no++;
+         c->fh->boot_no = c->boot_no;
+-        if (may_compact && !created && c->end > c->cap / 4 * 3 &&
+-            pc_compact(c)) {
++        if (p89_mode() != P89_LEGACY) {
++            char *tmp = g_strdup_printf("%s.tmp", c->path);
++
++            /* the lock is ours: no compactor runs, a tmp is a dead one's */
++            unlink(tmp);
++            g_free(tmp);
++        }
++        if (may_compact && p89_mode() == P89_LEGACY && !created &&
++            c->end > c->cap / 4 * 3 && pc_compact(c)) {
+             pc_free(c);
+-            return pc_open_file(dir, id, want_rw, cap, false, errp);
++            return pc_open_file(dir, id, want_rw, cap, false, offline, errp);
+         }
+         if (c->file_size < c->end) {
+             c->file_size = c->end;
+@@ -583,7 +989,7 @@ fail:
+ PCache *pcache_open(const char *dir, const uint8_t id[PCACHE_ID_LEN],
+                     bool want_rw, uint64_t cap, Error **errp)
+ {
+-    return pc_open_file(dir, id, want_rw, cap, true, errp);
++    return pc_open_file(dir, id, want_rw, cap, true, false, errp);
+ }
+ 
+ const char *pcache_path(PCache *c)
+@@ -647,17 +1053,30 @@ bool pcache_lookup(PCache *c, const PCacheKey *key, const uint8_t *p0,
+         for (int probe = 0; probe < 2 && found == UINT32_MAX; probe++) {
+             /* second probe: blocks of one word, which have no second word */
+             uint32_t w = probe ? 0 : e8;
++            uint32_t hv;
+ 
+             if (probe && !e8) {
+                 break;
+             }
+-            for (uint32_t r = qatomic_load_acquire(&tab->b[
+-                     pc_hash(key->cs_base, key->flags, key->cflags,
+-                             key->entry_off, e4, w) & (tab->n - 1)]);
++            hv = pc_hash(key->cs_base, key->flags, key->cflags,
++                         key->entry_off, e4, w);
++            for (uint32_t r = qatomic_load_acquire(&tab->b[hv & (tab->n - 1)]);
+                  r; r = qatomic_read(&c->next[r - 1])) {
+-                const PCacheRecHdr *h = pc_rec(c, r - 1);
++                const PCacheRecHdr *h;
+                 PCacheView v;
+ 
++                /*
++                 * P89b: a bucket neighbour has another hash: leave its record
++                 * alone, reading its header is a page of the pack touched
++                 * for nothing (hash32 is set before the record is linked).
++                 */
++                if (qatomic_read(&c->hash32[r - 1]) != hv) {
++                    continue;
++                }
++                h = pc_rec(c, r - 1);
++                if (c->touch) {
++                    pc_touch_mark(c, r - 1, 1);
++                }
+                 if (!pc_key_match(c, r - 1, key, e4, w) ||
+                     qatomic_read(&c->state[r - 1]) == 2) {
+                     continue;
+@@ -693,6 +1112,9 @@ bool pcache_lookup(PCache *c, const PCacheKey *key, const uint8_t *p0,
+             }
+         }
+         pc_view(c, found, out);
++        if (c->touch) {
++            pc_touch_mark(c, found, 2);
++        }
+         qatomic_inc(&c->uses[found]);
+         qatomic_inc(&c->st.hits);
+         return true;
+@@ -812,19 +1234,96 @@ void pcache_stats(PCache *c, PCacheStats *st)
+     st->end = c->end;
+ }
+ 
++/* P89: the use record of a boot: a bitmap, not a list of offsets */
++static bool pc_close_use2(PCache *c, uint32_t nhit)
++{
++    uint64_t total;
++    PCacheRecHdr *h;
++    bool ok = false;
++
++    if (nhit < p89_env("P89_MIN_HITS", 1024) && !c->st.stores) {
++        /* a run that hit next to nothing is not a generation: give the
++         * boot number back so that short runs do not age the pack */
++        c->fh->boot_no = c->boot_no - 1;
++        return true;
++    }
++    h = pc_use2_build(c->boot_no, c->nrec, c->uses, NULL, &total);
++    if (c->end + total + 8 <= c->cap && pc_grow(c, c->end + total + 8)) {
++        PCacheRecHdr *dst = (PCacheRecHdr *)(c->map + c->end);
++        uint32_t magic = h->magic;
++
++        /* version first (an older reader refuses the pack), magic last */
++        c->fh->version = PC_VERSION_MAX;
++        h->magic = 0;
++        memcpy(dst, h, total);
++        memset(c->map + c->end + total, 0, 8);
++        qatomic_store_release(&dst->magic, magic);
++        c->end += total;
++        c->use2_bytes += total;
++        ok = true;
++    }
++    g_free(h);
++    return ok;
++}
++
++static void pc_p89_exit(PCache *c, uint32_t nhit)
++{
++    uint64_t end = c->end, dead = 0;
++    uint64_t keep = p89_env("P89_KEEP", 8);
++    uint64_t unhit = p89_env("P89_UNHIT", 3);
++    uint64_t target = p89_env("P89_TARGET_KB", c->cap * 5 / 8 >> 10) << 10;
++    uint64_t trig = p89_env("P89_TRIGGER_MB", c->cap * 3 / 4 >> 20) << 20;
++
++    if (!pc_close_use2(c, nhit) || c->fh->boot_no != c->boot_no) {
++        /* a short run: nothing aged, nothing to rewrite */
++        msync(c->map, c->end, MS_ASYNC);
++        return;
++    }
++    for (uint32_t rid = 0; rid < c->nrec; rid++) {
++        if (qatomic_read(&c->uses[rid])) {
++            c->lastboot[rid] = c->boot_no & 0xffff;
++        }
++        if (pc_p89_dead(c, rid, keep, unhit)) {
++            dead += pc_rec(c, rid)->total;
++        }
++    }
++    msync(c->map, c->end, MS_SYNC);
++    if (p89_mode() == P89_ON &&
++        (dead >= MAX(256ull << 20, end / 8) || end >= trig ||
++         c->use_v1_bytes >= (64ull << 20))) {
++        if (p89_at_exit()) {
++            /* the P89 behaviour: hold the exit for the rewrite */
++            pc_compact2(c, keep, unhit, target, NULL);
++        } else {
++            /* P89b: the rewrite is qemu-pcache-compact's, not the exit's */
++            info_report("pcache: %" PRIu64 " MiB of %" PRIu64 " MiB are dead, "
++                        "qemu-pcache-compact reclaims them while the VM is "
++                        "off", dead >> 20, end >> 20);
++        }
++    }
++}
++
+ void pcache_close(PCache *c, bool unmap)
+ {
+     if (!c) {
+         return;
+     }
+     qemu_mutex_lock(&c->lock);
++    if (c->touch) {
++        pc_touch_report(c);
++    }
+     if (c->rw) {
+         uint32_t n = 0;
++        uint64_t t0 = get_clock();
+ 
+         for (uint32_t rid = 0; rid < c->nrec; rid++) {
+             n += c->uses[rid] != 0;
+         }
+-        if (n) {
++        /* nothing is appended from here on */
++        c->rw = false;
++        if (p89_mode() != P89_LEGACY && p89_mode() != P89_NONE) {
++            pc_p89_exit(c, n);
++        } else if (n) {
+             uint64_t total = sizeof(PCacheRecHdr) + 8 + (uint64_t)n * 8;
+ 
+             if (c->end + total + 8 <= c->cap &&
+@@ -851,15 +1350,121 @@ void pcache_close(PCache *c, bool unmap)
+                 qatomic_store_release(&h->magic, PC_REC_MAGIC);
+             }
+         }
+-        msync(c->map, c->end, MS_ASYNC);
++        if (p89_mode() == P89_LEGACY || p89_mode() == P89_NONE) {
++            msync(c->map, c->end, MS_ASYNC);
++        }
+         if (unmap && ftruncate(c->fd, c->end) < 0) {
+             /* a padded file is fine, the scan stops at the zero magic */
+         }
+-        c->rw = false;
++        info_report("pcache: exit work %" PRIu64 " ms",
++                    (get_clock() - t0) / SCALE_MS);
+     }
+     qemu_mutex_unlock(&c->lock);
+     if (unmap) {
+         pc_free(c);
+     }
+ }
++
++PCacheCompactRc pcache_compact_file(const char *path,
++                                    const PCacheCompactOpts *o,
++                                    PCacheCompactRes *res, Error **errp)
++{
++    PCacheFileHdr fh;
++    uint64_t cap = o && o->cap ? o->cap : 8ull << 30;
++    uint32_t keep = o && o->keep ? o->keep : p89_env("P89_KEEP", 8);
++    uint32_t unhit = o && o->unhit ? o->unhit : p89_env("P89_UNHIT", 3);
++    uint64_t target, min_dead, dead = 0;
++    PCacheCompactRc rc = PCACHE_COMPACT_NOTHING;
++    char *dir, *base;
++    PCache *c;
++    uint8_t id[PCACHE_ID_LEN];
++    int fd;
++    Error *local = NULL;
++
++    fd = open(path, O_RDONLY | O_CLOEXEC);
++    if (fd < 0) {
++        error_setg_errno(errp, errno, "pcache: cannot open %s", path);
++        return PCACHE_COMPACT_ERROR;
++    }
++    if (pread(fd, &fh, sizeof(fh), 0) != sizeof(fh) ||
++        memcmp(fh.magic, PC_FILE_MAGIC, 8) || fh.version < PC_VERSION ||
++        fh.version > PC_VERSION_MAX || fh.hdr_size != PC_HDR_SIZE) {
++        close(fd);
++        error_setg(errp, "pcache: %s is not a pack of this version", path);
++        return PCACHE_COMPACT_ERROR;
++    }
++    close(fd);
++    memcpy(id, fh.id, PCACHE_ID_LEN);
++    dir = g_path_get_dirname(path);
++    base = g_path_get_basename(path);
++    {
++        char hex[PCACHE_ID_LEN * 2 + 8];
++
++        for (int i = 0; i < PCACHE_ID_LEN; i++) {
++            snprintf(hex + 2 * i, 3, "%02x", id[i]);
++        }
++        strcat(hex, ".pack");
++        if (strcmp(hex, base)) {
++            /* the compactor renames <dir>/<id>.pack: it must be this file */
++            g_free(dir);
++            g_free(base);
++            error_setg(errp, "pcache: %s is not named after its id", path);
++            return PCACHE_COMPACT_ERROR;
++        }
++    }
++    c = pc_open_file(dir, id, true, cap, false, true, &local);
++    g_free(dir);
++    g_free(base);
++    if (!c) {
++        error_propagate(errp, local);
++        return PCACHE_COMPACT_ERROR;
++    }
++    if (!c->rw) {
++        pc_free(c);
++        return PCACHE_COMPACT_BUSY;
++    }
++    c->boot_no = c->fh->boot_no;
++    target = o && o->target ? o->target : p89_env("P89_TARGET_KB", cap * 5 / 8 >> 10) << 10;
++    min_dead = o && o->min_dead ? o->min_dead : 128ull << 20;
++    for (uint32_t rid = 0; rid < c->nrec; rid++) {
++        if (pc_p89_dead(c, rid, keep, unhit)) {
++            dead += pc_rec(c, rid)->total;
++        }
++    }
++    if (getenv("P89_STAT")) {
++        uint64_t n[34] = { 0 }, b[34] = { 0 };
++
++        for (uint32_t rid = 0; rid < c->nrec; rid++) {
++            uint32_t a = MIN((uint16_t)(c->boot_no - c->lastboot[rid]), 33);
++
++            n[a]++;
++            b[a] += pc_rec(c, rid)->total;
++        }
++        for (int a = 0; a < 34; a++) {
++            if (n[a]) {
++                fprintf(stderr, "age %2d%s: %9" PRIu64 " records %6" PRIu64
++                        " MiB\n", a, a == 33 ? "+" : " ", n[a], b[a] >> 20);
++            }
++        }
++    }
++    if (res) {
++        memset(res, 0, sizeof(*res));
++        res->before = c->end;
++        res->dead = dead;
++        res->rec_before = c->nrec;
++        res->boot_no = c->boot_no;
++    }
++    if ((o && o->force && (dead || c->use_v1_bytes)) ||
++        dead >= MAX(min_dead, c->end / 16) || c->end >= cap / 4 * 3 ||
++        c->use_v1_bytes >= (64ull << 20)) {
++        if (pc_compact2(c, keep, unhit, target, res)) {
++            rc = PCACHE_COMPACT_DONE;
++        } else {
++            error_setg(errp, "pcache: could not rewrite %s", c->path);
++            rc = PCACHE_COMPACT_ERROR;
++        }
++    }
++    pc_free(c);
++    return rc;
++}
+ #endif /* CONFIG_LINUX */
+diff --git a/accel/tcg/pcache.h b/accel/tcg/pcache.h
+index 48c9b29399..e8bc9e9add 100644
+--- a/accel/tcg/pcache.h
++++ b/accel/tcg/pcache.h
+@@ -137,4 +137,39 @@ bool pcache_store(PCache *c, const PCacheNew *n);
+ void pcache_stats(PCache *c, PCacheStats *st);
+ bool pcache_is_rw(PCache *c);
+ 
++void pcache_set_presize(bool on);
++
++/*
++ * P89b: rewrite the pack at @path without its dead records, while no VM runs
++ * (qemu-pcache-compact). It takes the pack's lock itself and never waits for
++ * it. Returns PCACHE_COMPACT_DONE (the new pack replaced the old one),
++ * _NOTHING (not worth it), _BUSY (another process holds the pack) or
++ * _ERROR (with @errp set). Zero fields in @o mean the defaults of the P89_*
++ * environment, @o->force compacts whatever is dead.
++ */
++typedef struct PCacheCompactOpts {
++    uint32_t keep;          /* boots a hit record is kept */
++    uint32_t unhit;         /* boots a stored and never hit record is kept */
++    uint64_t target;        /* bytes the live part may keep, 0 default */
++    uint64_t min_dead;      /* dead bytes that make a rewrite worth it */
++    uint64_t cap;           /* pcache-max, 0 default 8 GiB */
++    bool force;
++} PCacheCompactOpts;
++
++typedef struct PCacheCompactRes {
++    uint64_t before, after, dead, cold_at, ms;
++    uint32_t rec_before, rec_after, boot_no;
++} PCacheCompactRes;
++
++typedef enum PCacheCompactRc {
++    PCACHE_COMPACT_DONE = 0,
++    PCACHE_COMPACT_NOTHING = 1,
++    PCACHE_COMPACT_BUSY = 2,
++    PCACHE_COMPACT_ERROR = 3,
++} PCacheCompactRc;
++
++PCacheCompactRc pcache_compact_file(const char *path,
++                                    const PCacheCompactOpts *o,
++                                    PCacheCompactRes *res, Error **errp);
++
+ #endif
+diff --git a/tests/unit/test-pcache.c b/tests/unit/test-pcache.c
+index 66c8e67acd..2712db7317 100644
+--- a/tests/unit/test-pcache.c
++++ b/tests/unit/test-pcache.c
+@@ -536,11 +536,319 @@ static void test_half_created(void)
+     g_free(path);
+     rm_dir(dir);
+ }
++
++/*
++ * P89: with P89_PACK=on the use record is a bitmap, a run that hit next to
++ * nothing is not a boot, and the pack is compacted at exit, not at open.
++ */
++static void p89_boots(const char *dir, int n, unsigned hot)
++{
++    for (int i = 0; i < n; i++) {
++        PCache *c = open_rw(dir, id_a);
++
++        for (unsigned r = 0; r < hot; r++) {
++            g_assert_true(find_range(c, r));
++        }
++        pcache_close(c, true);
++    }
++}
++
++static void test_p89_exit_compaction(void)
++{
++    char *dir = make_dir();
++    char *path = hex_path(dir, id_a);
++    PCache *c;
++
++    g_setenv("P89_PACK", "on", true);
++    g_setenv("P89_MIN_HITS", "1", true);
++    g_setenv("P89_KEEP", "3", true);
++    g_setenv("P89_TRIGGER_MB", "100000", true);    /* not by size */
++    g_setenv("P89_TARGET_KB", "100000000", true);
++    c = open_rw(dir, id_a);
++    store_range(c, 0, 100);         /* 0..49 hot, 50..99 cold */
++    pcache_close(c, true);
++    p89_boots(dir, 3, 50);
++    /* boots 2..4 used 0..49; the cold half is 3 boots old: kept (keep 3) */
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->boot_no, ==, 5);
++    g_assert_cmpuint(c->nrec, ==, 100);
++    g_assert_cmpuint(c->use_v1_bytes, ==, 0);
++    g_assert_cmpuint(c->use2_bytes, >, 0);
++    g_assert_cmpuint(c->fh->version, ==, 2);
++    pcache_close(c, true);
++    /* a run that hits nothing is not a generation */
++    g_setenv("P89_MIN_HITS", "1024", true);
++    for (int i = 0; i < 5; i++) {
++        c = open_rw(dir, id_a);
++        pcache_close(c, true);
++    }
++    g_setenv("P89_MIN_HITS", "1", true);
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->boot_no, ==, 5);    /* the short runs took none */
++    g_assert_cmpuint(c->nrec, ==, 100);
++    pcache_close(c, true);
++    /* one more real boot: the cold half, last used in boot 1, is now older
++     * than keep, and the exit of this one rewrites the pack without it */
++    g_setenv("P89_TRIGGER_MB", "0", true);
++    p89_boots(dir, 1, 50);
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->nrec, ==, 50);
++    g_assert_true(find_range(c, 10));
++    g_assert_false(find_range(c, 60));
++    /* last use survives the rewrite */
++    g_assert_cmpuint(c->lastboot[0], ==, 5);
++    pcache_close(c, true);
++    /* a tmp left by a crashed compaction is removed by the next rw open */
++    {
++        char *tmp = g_strdup_printf("%s.tmp", path);
++
++        g_assert_true(g_file_set_contents(tmp, "garbage", 7, NULL));
++        c = open_rw(dir, id_a);
++        g_assert_false(g_file_test(tmp, G_FILE_TEST_EXISTS));
++        g_assert_cmpuint(c->nrec, ==, 50);
++        pcache_close(c, true);
++        g_free(tmp);
++    }
++    g_setenv("P89_PACK", "legacy", true);
++    g_unsetenv("P89_MIN_HITS");
++    g_unsetenv("P89_KEEP");
++    g_unsetenv("P89_TRIGGER_MB");
++    g_unsetenv("P89_TARGET_KB");
++    g_free(path);
++    rm_dir(dir);
++}
++
++/* An old pack with per entry use records is read, and converted by the first
++ * compaction with its ages kept. */
++static void test_p89_migrates_legacy(void)
++{
++    char *dir = make_dir();
++    PCache *c;
++
++    g_setenv("P89_PACK", "legacy", true);
++    c = open_rw(dir, id_a);
++    store_range(c, 0, 100);
++    pcache_close(c, true);
++    for (int boot = 2; boot <= 5; boot++) {
++        c = open_rw(dir, id_a);
++        for (unsigned i = 0; i < 50; i++) {
++            g_assert_true(find_range(c, i));
++        }
++        pcache_close(c, true);
++    }
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->use_v1_bytes, >, 0);
++    g_assert_cmpuint(c->lastboot[0], ==, 5);
++    g_assert_cmpuint(c->lastboot[99], ==, 1);
++    pcache_close(c, true);                  /* boot 6 */
++    g_setenv("P89_PACK", "on", true);
++    g_setenv("P89_MIN_HITS", "1", true);
++    g_setenv("P89_KEEP", "3", true);
++    g_setenv("P89_TRIGGER_MB", "100000", true);
++    g_setenv("P89_TARGET_KB", "100000000", true);
++    c = open_rw(dir, id_a);                 /* boot 7: v1 use bytes trigger */
++    g_assert_cmpuint(c->boot_no, ==, 7);
++    for (unsigned i = 0; i < 50; i++) {
++        g_assert_true(find_range(c, i));
++    }
++    c->use_v1_bytes = 64ull << 20;          /* as if the old records were big */
++    pcache_close(c, true);
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->use_v1_bytes, ==, 0);
++    g_assert_cmpuint(c->nrec, ==, 50);      /* the cold half was 6 boots old */
++    g_assert_cmpuint(c->lastboot[0], ==, 7);
++    pcache_close(c, true);
++    g_setenv("P89_PACK", "legacy", true);
++    g_unsetenv("P89_MIN_HITS");
++    g_unsetenv("P89_KEEP");
++    g_unsetenv("P89_TRIGGER_MB");
++    g_unsetenv("P89_TARGET_KB");
++    rm_dir(dir);
++}
++
++/* Over the target the oldest generation goes first and the newest stays. */
++static void test_p89_target(void)
++{
++    char *dir = make_dir();
++    PCache *c;
++    uint64_t one;
++    char *kb;
++
++    g_setenv("P89_PACK", "on", true);
++    g_setenv("P89_MIN_HITS", "1", true);
++    g_setenv("P89_KEEP", "8", true);
++    g_setenv("P89_TRIGGER_MB", "100000", true);
++    g_setenv("P89_TARGET_KB", "100000000", true);
++    c = open_rw(dir, id_a);
++    store_range(c, 0, 100);
++    pcache_close(c, true);
++    /* last use: 0..9 boot 5, 10..29 boot 4, 30..59 boot 3, 60..99 boot 2 */
++    p89_boots(dir, 1, 100);
++    p89_boots(dir, 1, 60);
++    p89_boots(dir, 1, 30);
++    p89_boots(dir, 1, 10);
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->boot_no, ==, 6);
++    one = pc_rec(c, 0)->total;
++    pcache_close(c, true);
++    /* a target of 40 records, compaction on every exit: boot 6 hits 0..9, so
++     * ages are 0, 2, 3, 4 for 10, 20, 30, 40 records: 30 fit, 60 do not */
++    kb = g_strdup_printf("%" PRIu64, one * 40 / 1024);
++    g_setenv("P89_TARGET_KB", kb, true);
++    g_setenv("P89_TRIGGER_MB", "0", true);
++    p89_boots(dir, 1, 10);
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->nrec, ==, 30);
++    g_assert_true(find_range(c, 5));
++    g_assert_true(find_range(c, 20));
++    g_assert_false(find_range(c, 40));
++    pcache_close(c, true);
++    g_free(kb);
++    g_setenv("P89_PACK", "legacy", true);
++    g_unsetenv("P89_MIN_HITS");
++    g_unsetenv("P89_KEEP");
++    g_unsetenv("P89_TRIGGER_MB");
++    g_unsetenv("P89_TARGET_KB");
++    rm_dir(dir);
++}
++
++/* A record stored a few boots ago and never hit since goes before the keep window ends. */
++static void test_p89_unhit(void)
++{
++    char *dir = make_dir();
++    PCache *c;
++
++    g_setenv("P89_PACK", "on", true);
++    g_setenv("P89_MIN_HITS", "1", true);
++    g_setenv("P89_KEEP", "8", true);
++    g_setenv("P89_UNHIT", "2", true);
++    g_setenv("P89_TRIGGER_MB", "100000", true);
++    g_setenv("P89_TARGET_KB", "100000000", true);
++    c = open_rw(dir, id_a);
++    store_range(c, 0, 100);         /* 0..49 hot, 50..99 never hit again */
++    pcache_close(c, true);
++    p89_boots(dir, 2, 50);          /* boots 2, 3: unhit records are 2 old */
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->nrec, ==, 100);
++    pcache_close(c, true);          /* boot 4 without hits: not a boot */
++    g_setenv("P89_TRIGGER_MB", "0", true);
++    p89_boots(dir, 1, 50);          /* boot 4: 3 boots old and never hit */
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->nrec, ==, 50);
++    g_assert_true(find_range(c, 10));
++    pcache_close(c, true);
++    g_setenv("P89_PACK", "legacy", true);
++    g_unsetenv("P89_MIN_HITS");
++    g_unsetenv("P89_KEEP");
++    g_unsetenv("P89_UNHIT");
++    g_unsetenv("P89_TRIGGER_MB");
++    g_unsetenv("P89_TARGET_KB");
++    rm_dir(dir);
++}
++
++/* P89b: the exit no longer rewrites the pack; qemu-pcache-compact does it
++ * with the pack's lock, hot records first, probation tail last. */
++static void test_p89b_offline(void)
++{
++    char *dir = make_dir();
++    char *path = hex_path(dir, id_a);
++    PCacheCompactOpts o = { .unhit = 1, .min_dead = 1 };
++    PCacheCompactRes res;
++    Error *err = NULL;
++    PCache *c;
++    uint64_t size_before;
++
++    g_unsetenv("P89_COMPACT_AT");
++    g_setenv("P89_PACK", "on", true);
++    g_setenv("P89_MIN_HITS", "1", true);
++    g_setenv("P89_TRIGGER_MB", "0", true);      /* the exit would compact */
++    g_setenv("P89_TARGET_KB", "100000000", true);
++    c = open_rw(dir, id_a);
++    store_range(c, 0, 100);         /* 0..49 hot, 50..99 never hit again */
++    pcache_close(c, true);
++    p89_boots(dir, 2, 50);          /* boots 2 and 3 */
++    c = open_rw(dir, id_a);         /* boot 4: 50 hot, 20 new */
++    for (unsigned i = 0; i < 50; i++) {
++        g_assert_true(find_range(c, i));
++    }
++    store_range(c, 100, 20);
++    pcache_close(c, true);
++    /* the exit of those boots did not rewrite anything */
++    c = open_rw(dir, id_a);         /* boot 5 */
++    g_assert_cmpuint(c->nrec, ==, 120);
++    g_assert_cmpuint(c->boot_no, ==, 5);
++    pcache_close(c, true);          /* a run with no hits: no boot */
++    {
++        struct stat st;
++
++        g_assert_cmpint(stat(path, &st), ==, 0);
++        size_before = st.st_size;
++    }
++    /* a held lock: the compactor leaves the pack alone */
++    c = open_rw(dir, id_a);
++    g_assert_cmpint(pcache_compact_file(path, &o, &res, &err), ==,
++                    PCACHE_COMPACT_BUSY);
++    g_assert_null(err);
++    pcache_close(c, true);
++    g_assert_cmpint(pcache_compact_file(path, &o, &res, &err), ==,
++                    PCACHE_COMPACT_DONE);
++    g_assert_null(err);
++    g_assert_cmpuint(res.rec_before, ==, 120);
++    g_assert_cmpuint(res.rec_after, ==, 70);
++    g_assert_cmpuint(res.after, <, size_before);
++    c = open_rw(dir, id_a);
++    g_assert_cmpuint(c->nrec, ==, 70);
++    g_assert_cmpuint(c->boot_no, ==, 5);        /* the compactor took none */
++    g_assert_cmpuint(c->fh->cold4k, !=, 0);
++    /* hit records first and in their old order, the new ones after */
++    for (uint32_t rid = 0; rid < 50; rid++) {
++        g_assert_cmpuint(pc_rec(c, rid)->pad, ==, 1);
++    }
++    for (uint32_t rid = 50; rid < 70; rid++) {
++        g_assert_cmpuint(pc_rec(c, rid)->pad, ==, 4);
++    }
++    g_assert_true(find_range(c, 10));
++    g_assert_true(find_range(c, 110));
++    g_assert_false(find_range(c, 70));
++    g_assert_cmpuint(c->lastboot[0], ==, 4);
++    pcache_close(c, true);
++    /* nothing left to drop: nothing to do */
++    o.min_dead = 1ull << 30;
++    g_assert_cmpint(pcache_compact_file(path, &o, &res, &err), ==,
++                    PCACHE_COMPACT_NOTHING);
++    /* a file that is not named after its id is refused, not renamed over */
++    {
++        char *bad = g_build_filename(dir, "x.pack", NULL);
++        char *data = NULL;
++        gsize len;
++
++        g_assert_true(g_file_get_contents(path, &data, &len, NULL));
++        g_assert_true(g_file_set_contents(bad, data, len, NULL));
++        g_assert_cmpint(pcache_compact_file(bad, &o, &res, &err), ==,
++                        PCACHE_COMPACT_ERROR);
++        g_assert_nonnull(err);
++        error_free(err);
++        g_free(data);
++        g_free(bad);
++    }
++    g_setenv("P89_PACK", "legacy", true);
++    g_setenv("P89_COMPACT_AT", "exit", true);
++    g_unsetenv("P89_MIN_HITS");
++    g_unsetenv("P89_TRIGGER_MB");
++    g_unsetenv("P89_TARGET_KB");
++    g_free(path);
++    rm_dir(dir);
++}
++
+ int main(int argc, char **argv)
+ {
++    /* the older tests are about the legacy pack; the p89 ones set their own */
++    g_setenv("P89_PACK", "legacy", true);
++    g_setenv("P89_COMPACT_AT", "exit", true);   /* the P89 tests want it */
+     memset(id_a, 0xa1, sizeof(id_a));
+     memset(id_b, 0xb2, sizeof(id_b));
+     g_test_init(&argc, &argv, NULL);
++    g_test_add_func("/pcache/p89b/offline", test_p89b_offline);
+     g_test_add_func("/pcache/roundtrip", test_roundtrip);
+     g_test_add_func("/pcache/key/other-va", test_other_va);
+     g_test_add_func("/pcache/key/changed-byte", test_changed_byte);
+@@ -555,5 +863,9 @@ int main(int argc, char **argv)
+     g_test_add_func("/pcache/compact/keeps-use", test_compact_keeps_use);
+     g_test_add_func("/pcache/file/bad-crc-restore", test_bad_crc_restore);
+     g_test_add_func("/pcache/file/half-created", test_half_created);
++    g_test_add_func("/pcache/p89/exit-compaction", test_p89_exit_compaction);
++    g_test_add_func("/pcache/p89/migrates-legacy", test_p89_migrates_legacy);
++    g_test_add_func("/pcache/p89/target", test_p89_target);
++    g_test_add_func("/pcache/p89/unhit", test_p89_unhit);
+     return g_test_run();
+ }
+diff --git a/tools/meson.build b/tools/meson.build
+index e69de29bb2..9c1447f7a5 100644
+--- a/tools/meson.build
++++ b/tools/meson.build
+@@ -0,0 +1,5 @@
++if host_machine.system() == 'linux' and host_machine.cpu_family() == 'x86_64'
++  # P89b: rewrite a translation pack offline (accel/tcg/pcache.c)
++  executable('qemu-pcache-compact', files('pcache-compact.c', '../accel/tcg/pcache.c'),
++             genh, dependencies: [qemuutil], install: true)
++endif
+diff --git a/tools/pcache-compact.c b/tools/pcache-compact.c
+new file mode 100644
+index 0000000000..97d3e54176
+--- /dev/null
++++ b/tools/pcache-compact.c
+@@ -0,0 +1,83 @@
++/*
++ * qemu-pcache-compact: rewrite a translation pack (<dir>/<id>.pack) without
++ * its dead records while no VM uses it. See accel/tcg/pcache.c.
++ *
++ *   qemu-pcache-compact [-f] [-q] [-k BOOTS] [-u BOOTS] [-t MIB] [-d MIB] [-m MIB] PACK...
++ *
++ * Exit status: 0 rewritten, 1 nothing worth rewriting, 2 pack in use (a VM
++ * or another compactor holds its lock), 3 error. It never waits for the
++ * lock and never touches the pack until the new one is complete (tmp,
++ * fdatasync, rename, directory fsync).
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu/error-report.h"
++#include "../accel/tcg/pcache.h"
++#include <getopt.h>
++
++int main(int argc, char **argv)
++{
++    PCacheCompactOpts o = { 0 };
++    bool quiet = false;
++    int rc = 1, c;
++
++    while ((c = getopt(argc, argv, "fqk:u:t:d:m:h")) != -1) {
++        switch (c) {
++        case 'f':
++            o.force = true;
++            break;
++        case 'q':
++            quiet = true;
++            break;
++        case 'k':
++            o.keep = strtoul(optarg, NULL, 0);
++            break;
++        case 'u':
++            o.unhit = strtoul(optarg, NULL, 0);
++            break;
++        case 't':
++            o.target = strtoull(optarg, NULL, 0) << 20;
++            break;
++        case 'd':
++            o.min_dead = strtoull(optarg, NULL, 0) << 20;
++            break;
++        case 'm':
++            o.cap = strtoull(optarg, NULL, 0) << 20;
++            break;
++        default:
++            fprintf(stderr, "usage: %s [-f] [-q] [-k boots] [-u boots] "
++                    "[-t MiB] [-d MiB] [-m MiB] pack...\n", argv[0]);
++            return 3;
++        }
++    }
++    if (optind >= argc) {
++        fprintf(stderr, "no pack given\n");
++        return 3;
++    }
++    for (; optind < argc; optind++) {
++        PCacheCompactRes r;
++        Error *err = NULL;
++        PCacheCompactRc k = pcache_compact_file(argv[optind], &o, &r, &err);
++
++        if (err) {
++            error_report_err(err);
++        }
++        if (!quiet) {
++            bool done = k == PCACHE_COMPACT_DONE;
++
++            printf("%s: %s, %" PRIu64 " MiB dead, %" PRIu64 " MiB -> %" PRIu64
++                   " MiB, %u -> %u records, boot %u, %" PRIu64 " ms\n",
++                   argv[optind],
++                   done ? "compacted" :
++                   k == PCACHE_COMPACT_NOTHING ? "nothing to do" :
++                   k == PCACHE_COMPACT_BUSY ? "in use" : "error",
++                   r.dead >> 20, r.before >> 20,
++                   (done ? r.after : r.before) >> 20, r.rec_before,
++                   done ? r.rec_after : r.rec_before, r.boot_no, r.ms);
++        }
++        rc = k == PCACHE_COMPACT_DONE ? 0 : (int)k;
++    }
++    return rc;
++}

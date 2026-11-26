@@ -1,0 +1,16 @@
+snapintosh bench  release c9939ff  QEMU md5 455899b7  3 runs
+host: 12th Gen Intel(R) Core(TM) i5-1240P, 6 threads, guest 6 vCPUs / 4G, GPU path ANV, translation cache ro
+seconds from QEMU start unless noted; spread is min to max and the standard deviation
+┌─────────────────────────────────────────────┬────────┬───────┬───────┬──────┬───┐
+│ metric                                      │ median │   min │   max │   sd │ n │
+├─────────────────────────────────────────────┼────────┼───────┼───────┼──────┼───┤
+│ boot to ssh (s)                             │  114.3 │  96.1 │ 173.2 │ 40.3 │ 3 │
+│ boot to Dock (s)                            │  200.0 │ 152.9 │ 203.2 │ 28.2 │ 3 │
+│ Safari cold launch, open to first draw (s)  │  150.2 │ 140.2 │ 192.2 │ 27.6 │ 3 │
+│ Safari cold launch, open to GET at host (s) │  120.9 │ 115.2 │ 173.9 │ 32.4 │ 3 │
+│ Safari launch from resumed snapshot (s)     │   33.1 │  18.0 │  74.1 │ 29.0 │ 3 │
+│ Safari from resume, open to GET at host (s) │   25.1 │  12.4 │  37.2 │ 12.4 │ 3 │
+│ window drag (fps)                           │   6.74 │  6.29 │  7.00 │ 0.36 │ 3 │
+│ resume time (load to cont) (s)              │    0.9 │   0.8 │   1.0 │  0.1 │ 3 │
+│ ssh after resume (s)                        │    6.2 │   5.5 │   7.0 │  0.8 │ 3 │
+└─────────────────────────────────────────────┴────────┴───────┴───────┴──────┴───┘
