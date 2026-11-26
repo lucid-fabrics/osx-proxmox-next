@@ -1,6 +1,7 @@
 """The graphics card flow, moments 2 and 3: the run, the one restart, the attach, the first boot, undo."""
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +9,7 @@ from textual.widgets import Button, Input, Static
 
 import tui_fakes as F
 from gpu_tui_fakes import (  # noqa: F401 - the underscore names are autouse fixtures
-    HINT, SIZE, _no_network, _vm_list, amd_env, applied, approved, at_choose, box, dialog_text, flat, host_card, keys,
+    HINT, SIZE, _no_network, _vm_list, amd_env, applied, approved, at_choose, box, dialog_text, flat, host_card, in_flight, keys,
     mode, nvidia_card, reboot_host, row, start, timeline)
 from osx_proxmox_next import gpu_setup, host_setup, nullmoth
 from osx_proxmox_next.app import NextApp
@@ -203,6 +204,38 @@ async def test_a_changed_vm_after_the_restart_is_shown_and_asked_again(tmp_path,
         await pilot.press("enter")
         await mode(pilot, screen2, "first_boot")
         assert len(applied) == 1
+
+
+@F.tui
+async def test_mode_waits_while_the_run_view_is_still_being_built(tmp_path, applied, monkeypatch):
+    """`mode` is the wait every run test ends on. The screen stores its new mode before it mounts the view and with
+    `working` still false, so a wait on those two alone returns on a view that is not there yet (the CI flake)."""
+    env = amd_env(tmp_path)
+    app = NextApp()
+    async with app.run_test(size=SIZE) as pilot:
+        await to_restart_box(pilot, app, env)
+        await pilot.press("escape")
+        await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen))
+        reboot_host(env)
+        gate, real = asyncio.Event(), GpuScreen.set_mode
+
+        async def held(self, name, widgets):
+            self.mode = name                                      # what set_mode does first ...
+            if name == "run":
+                await gate.wait()                                 # ... then the mount is slow
+            await real(self, name, widgets)
+
+        monkeypatch.setattr(GpuScreen, "set_mode", held)
+        s2 = env.session()
+        s2.state["approved"]["vm_fp"] = "something else"           # the same flow as the test above: it ends on a question
+        screen = GpuScreen(session=s2)
+        app.push_screen(screen)
+        await F.settle(pilot, lambda: screen.mode == "run")
+        assert not screen.working                                  # the old wait was satisfied here, on an empty view
+        assert in_flight(screen) and not screen.query("#g-box-text")
+        gate.set()
+        await mode(pilot, screen, "run")
+        assert not in_flight(screen) and box(screen).startswith("This differs from what you approved")
 
 
 @F.tui

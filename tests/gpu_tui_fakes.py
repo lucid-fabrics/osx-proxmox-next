@@ -111,8 +111,18 @@ async def at_choose_unusable(pilot, app, env) -> GpuScreen:
     return screen
 
 
+def in_flight(screen) -> bool:
+    """A step or a mode change is still running on the screen: a job, or a worker that builds the next view.
+
+    `screen.working` alone is false twice on the way to a result: between two chained steps, and after
+    `set_mode` has stored the new mode but before its widgets are mounted. Both gaps are only a few event-loop
+    turns on a fast machine and long enough for a poll to land in on a loaded one."""
+    return screen.working or any(not w.is_finished for w in screen.workers)
+
+
 async def mode(pilot, screen, name: str) -> None:
-    await F.settle(pilot, lambda: screen.mode == name and not screen.working)
+    """Wait until the screen is in *name* and nothing is still on its way to a different view."""
+    await F.settle(pilot, lambda: screen.mode == name and not in_flight(screen), what=f"the {name} view to be drawn")
     await pilot.pause(0.15)
 
 

@@ -87,6 +87,16 @@ async def open_driver(pilot, app):
     return app.screen
 
 
+async def laid_out(pilot, screen, *rows):
+    """Wait until every row in *rows* has been given a place on screen.
+
+    A row that was just mounted has its text before it has a size: `size` is 0 x 0 until the next layout pass, which
+    a loaded machine runs several frames after the text shows. A row that wraps has a size of 2 and fails the test
+    for the right reason, so only the 0 is waited out."""
+    await F.settle(pilot, lambda: all(screen.query_one(r).size.height > 0 for r in rows),
+                   what="the rows " + ", ".join(rows) + " to be laid out")
+
+
 def text(app, selector):
     return F.text_of(app.screen.query_one(selector))
 
@@ -709,12 +719,14 @@ async def test_the_driver_and_status_rows_stay_on_one_line(host, size):
     app = NextApp()
     async with app.run_test(size=size) as pilot:
         screen = await open_driver(pilot, app)
+        await laid_out(pilot, screen, "#d-driver", "#d-status")
         for row in ("#d-driver", "#d-status"):
             assert screen.query_one(row).size.height == 1, (row, size, text(app, row))
         assert "installed version unknown" in text(app, "#d-driver") and "update available" in text(app, "#d-status")
         host["view"] = DriverView(plan("intel", installed={"WhateverXe": "1.2.0", "WhateverXe Graphics": "0.9.1"}, target=host["view"].plan.target), [])
         screen.load()
         await F.settle(pilot, lambda: screen.query("#d-driver-2") and not screen.working and "1.2.0" in text(app, "#d-driver"))
+        await laid_out(pilot, screen, "#d-driver", "#d-driver-2", "#d-status")
         for row in ("#d-driver", "#d-driver-2", "#d-status"):
             assert screen.query_one(row).size.height == 1, (row, size, text(app, row))
         assert "WhateverXe 1.2.0" in text(app, "#d-driver") and "WhateverXe Graphics 0.9.1" in text(app, "#d-driver-2")
