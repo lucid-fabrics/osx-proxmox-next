@@ -16,8 +16,8 @@ arguments or by defaults under the runner's snapintosh data directory. `snapinto
 
 Exit status: `0` installed, `3` install-pending (the restore finished, but the first-boot LocalPolicy is
 not there yet; build it with `mkpolicy-hack.py` and pass `--policy FILE`), `2` a bad input, anything else
-the restore host's own status. The install is code- and unit-tested only; a live end-to-end restore is a
-follow-up.
+the restore host's own status. A live run on 2026-11-26 restored macOS 27.2.1 to a fresh disk with
+`Status 0` and `AMRError 0`; the disk then booted to a `snap` console session.
 
 ## Inputs
 
@@ -31,7 +31,7 @@ follow-up.
 | `RAMDISK` | `$HOME_DIR/install/bundle/restore-ramdisk.im4p` | the restore ramdisk |
 | `AMBROSIA` | `$HOME_DIR/install/bundle/ambrosia-r4.bin` | the Ambrosia build with restore mode |
 | `SNAPINTOSH_INSTALL_RUNS` | `$HOME_DIR/install/runs` | run directories (`qemu.out`, `host.out`, serial) |
-| TSS cache | `$HOME_DIR/install/tsscache` | answers from Apple's TSS, keyed by the request without its UUID |
+| `--cache` | `$HOME_DIR/install/tsscache` | TSS answers keyed by the request without its UUID |
 
 `--tss` allows the TSS requests. Every request is appended to `apple-requests.jsonl` in the run directory.
 

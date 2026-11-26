@@ -12,9 +12,10 @@ CLI = ROOT / "arm64" / "snapintosh"
 ECID = "4533301000242790675"
 
 
-def run(tmp_path, args):
+def run(tmp_path, args, extra_env=None):
     env = dict(os.environ, SNAPINTOSH_HOME=str(tmp_path / "home"), XDG_CONFIG_HOME=str(tmp_path / "cfg"),
                HOME=str(tmp_path))
+    env.update(extra_env or {})
     return subprocess.run(["bash", str(CLI), *args], cwd=tmp_path, env=env, capture_output=True, text=True)
 
 
@@ -90,3 +91,25 @@ def test_a_missing_ipsw_is_an_error_not_a_traceback(tmp_path, inputs):
 def test_an_unknown_option_is_named(tmp_path, inputs):
     result = dry(tmp_path, inputs, "--bogus")
     assert result.returncode == 2 and "--bogus" in result.stderr
+
+
+def test_a_real_run_gives_qemu_the_usb_chardev_exactly_once(tmp_path, inputs):
+    """go.sh adds the vusb chardev itself; install adding it too made QEMU die with Duplicate ID 'vusb'."""
+    ipsw, aux = inputs
+    qemu, args_file = tmp_path / "qemu", tmp_path / "qemu.args"
+    qemu.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_file}\n")
+    qemu.chmod(0o755)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    for name in ("restore.cpio", "restore-ramdisk.im4p", "ambrosia-r4.bin"):
+        (bundle / name).write_text("x")
+    run(tmp_path, ["install", "--ipsw", str(ipsw), "--aux", str(aux), "--ecid", ECID, "--disk", str(tmp_path / "d.raw")],
+        {"QEMU": str(qemu), "SNAPINTOSH_INSTALL_BUNDLE": str(bundle)})
+    lines = args_file.read_text().splitlines()
+    assert sum(1 for line in lines if line.startswith("socket,id=vusb,")) == 1
+    assert sum(1 for line in lines if line == "vmapple-virtio-usb-pci,chardev=vusb") == 1
+
+
+def test_a_relative_cache_dir_is_refused(tmp_path, inputs):
+    result = dry(tmp_path, inputs, "--cache", "relative/cache")
+    assert result.returncode == 2 and "--cache" in result.stderr
