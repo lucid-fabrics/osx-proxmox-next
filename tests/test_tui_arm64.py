@@ -143,7 +143,8 @@ async def test_enter_creates_the_runner_through_its_own_build_screen(monkeypatch
         steps, execute = seen[0]
         assert execute is True and steps[3].argv[:5] == ["qm", "create", "105", "--name", "macos-arm64"]
         assert build.ok and build.crumb() == "macos-arm64"
-        log = "\n".join(line.text for line in build.query_one("#arm64-log").lines)
+        await F.settle_text(pilot, lambda: build_log(build), "not in this beta build yet")   # `finished` is set a line early
+        log = build_log(build)
         assert "[4/10] Create the runner VM" in log and "starts" not in log
         assert "is starting" in log and "not in this beta build yet" in log
         await pilot.press("escape")
@@ -154,6 +155,10 @@ def build_screen_after(monkeypatch, apply):
     from osx_proxmox_next.arm64 import Arm64Config
     monkeypatch.setattr("osx_proxmox_next.screens.arm64_build.apply_plan", apply)
     return Arm64BuildScreen(Arm64Config(vmid=478, name="macos27-runner", storage="sn850x", source_ref="v0.9.0", source_sha256="a" * 64))
+
+
+def build_log(screen) -> str:
+    return "\n".join(line.text for line in screen.query_one("#arm64-log").lines)
 
 
 @F.tui
@@ -167,8 +172,8 @@ async def test_a_failed_step_is_shown_with_its_output_and_the_way_out(monkeypatc
     async with app.run_test(size=SIZE) as pilot:
         screen = build_screen_after(monkeypatch, failing)
         await app.push_screen(screen)
-        await F.settle(pilot, lambda: screen.finished)
-        log = "\n".join(line.text for line in screen.query_one("#arm64-log").lines)
+        await F.settle_text(pilot, lambda: build_log(screen), "uninstall --vmid 478 --execute")   # `finished` is set a line early
+        log = build_log(screen)
         assert not screen.ok and "FAILED: Import the disk\nstorage is full" in log
         assert "osx-next-cli arm64 uninstall --vmid 478 --execute" in log
 
@@ -182,8 +187,8 @@ async def test_a_crash_in_the_worker_is_shown_not_swallowed(monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         screen = build_screen_after(monkeypatch, crashing)
         await app.push_screen(screen)
-        await F.settle(pilot, lambda: screen.finished)
-        log = "\n".join(line.text for line in screen.query_one("#arm64-log").lines)
+        await F.settle_text(pilot, lambda: build_log(screen), "Stopped.")                   # `finished` is set a line early
+        log = build_log(screen)
         assert not screen.ok and "Unexpected error: no qm here" in log and "Stopped." in log
 
 
