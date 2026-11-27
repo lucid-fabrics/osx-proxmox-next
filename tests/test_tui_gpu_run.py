@@ -81,7 +81,7 @@ async def test_the_backup_folder_is_in_the_p_dialog_not_on_the_screen(tmp_path, 
     async with app.run_test(size=SIZE) as pilot:
         screen = await to_restart_box(pilot, app, env)
         await pilot.press("p")
-        await F.settle(pilot, lambda: isinstance(app.screen, ChangesDialog))
+        await F.settle_dialog(pilot, app, ChangesDialog)
         text = F.text_of(app.screen.query_one("#changes-text"))
         assert "Backups of this setup: " + screen.s.state["backup_dir"] in text
         assert "VM 100 settings" in text and "Address: 0000:06:00" in text
@@ -310,7 +310,7 @@ async def test_a_running_mac_is_stopped_only_after_a_confirmation(tmp_path, appl
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await start(pilot, app, env, session=env.session())
-        await F.settle(pilot, lambda: isinstance(app.screen, ChoiceDialog))
+        await F.settle_dialog(pilot, app, ChoiceDialog)
         dialog = app.screen
         assert F.text_of(dialog.query_one(".dialog-title")) == "Stop macos-sequoia first?"
         assert "closed without saving" in dialog_text(dialog)
@@ -318,7 +318,7 @@ async def test_a_running_mac_is_stopped_only_after_a_confirmation(tmp_path, appl
         await pilot.pause(0.3)
         assert applied == [] and app.screen is screen
         screen.drive()                                                # look again: the question comes back
-        await F.settle(pilot, lambda: isinstance(app.screen, ChoiceDialog))
+        await F.settle_dialog(pilot, app, ChoiceDialog)
         await pilot.press("tab")
         await pilot.press("enter")
         await mode(pilot, screen, "first_boot")
@@ -353,7 +353,7 @@ async def test_a_running_mac_with_an_nvidia_card_is_stopped_before_the_driver_se
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await start(pilot, app, env, session=env.session())
-        await F.settle(pilot, lambda: isinstance(app.screen, ChoiceDialog))
+        await F.settle_dialog(pilot, app, ChoiceDialog)
         await pilot.press("tab")
         await pilot.press("enter")
         await mode(pilot, screen, "first_boot")
@@ -368,7 +368,7 @@ async def test_the_vm_changed_while_the_stop_question_was_open_is_shown_again_no
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = await start(pilot, app, env, session=env.session())
-        await F.settle(pilot, lambda: isinstance(app.screen, ChoiceDialog))
+        await F.settle_dialog(pilot, app, ChoiceDialog)
         env.qm.vms[100] = ("running", SEQUOIA.replace("-cpu host", "-cpu host -device edited"))  # edited in the web UI
         await pilot.press("tab")
         await pilot.press("enter")
@@ -814,7 +814,7 @@ async def test_u_puts_everything_back_after_a_confirmation(tmp_path, applied):
         await mode(pilot, screen, "run")
         assert "Put everything back" in keys(app)
         await pilot.press("u")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, ChoiceDialog) and F.text_of(dialog.query_one(".dialog-title")) == "Put everything back?"
         assert "Remove /etc/modprobe.d/osx-proxmox-next-vfio.conf" in dialog_text(dialog)
         assert "Anything you edited since is kept and reported." in dialog_text(dialog)
@@ -869,7 +869,7 @@ async def test_undo_from_the_vm_view_opens_the_question_even_while_the_name_is_r
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         await start(pilot, app, env, undo=True, session=env.session())
-        await F.settle(pilot, lambda: isinstance(app.screen, ChoiceDialog))
+        await F.settle_dialog(pilot, app, ChoiceDialog)
         assert F.text_of(app.screen.query_one(".dialog-title")) == "Put everything back?"
 
 
@@ -880,7 +880,7 @@ async def test_the_changes_dialog_after_the_approval_lists_what_is_left(tmp_path
     async with app.run_test(size=SIZE) as pilot:
         await to_restart_box(pilot, app, env)
         await pilot.press("p")
-        await F.settle(pilot, lambda: isinstance(app.screen, ChangesDialog))
+        await F.settle_dialog(pilot, app, ChangesDialog)
         assert "VM 100 settings" in F.text_of(app.screen.query_one("#changes-text"))
         await pilot.press("escape")
 

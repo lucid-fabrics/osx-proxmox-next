@@ -11,6 +11,7 @@ from osx_proxmox_next import gpu, gpu_setup
 from osx_proxmox_next.app import NextApp
 from osx_proxmox_next.executor import ApplyResult, StepResult
 from osx_proxmox_next.gpu_setup import TROUBLESHOOTING
+from osx_proxmox_next.screens.base import ChoiceDialog
 from osx_proxmox_next.screens.gpu import ChangesDialog, undo_progress_text
 from osx_proxmox_next.screens.gpu_attach_step import failure_lines
 from osx_proxmox_next.screens.gpu_boot import HELP_WIDTH, reflow_help
@@ -22,7 +23,7 @@ async def test_every_change_scrolls_one_line_or_one_page_per_key(tmp_path):
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         app.push_screen(ChangesDialog("\n".join(f"line {i}" for i in range(200))))
-        await F.settle(pilot, lambda: isinstance(app.screen, ChangesDialog))
+        await F.settle_dialog(pilot, app, ChangesDialog)
         scroll = app.screen.query_one("#changes-scroll")
         await pilot.pause(0.2)
         for _ in range(5):
@@ -139,7 +140,10 @@ async def test_the_undo_dialog_moves_line_by_line_while_it_runs(tmp_path, applie
         assert text.startswith("Undoing") or "Undoing..." in text
         assert "◐ Remove /etc/" in text
         gate.set()
-        await F.settle(pilot, lambda: not screen.working)
+        await F.settle(pilot, lambda: isinstance(app.screen, ChoiceDialog) and bool(app.screen.query("#choice-ok")),
+                       what="the Everything is back dialog to be built")
+        await pilot.press("enter")
+        await mode(pilot, screen, "choose")
 
 
 def test_the_no_signal_help_wraps_under_each_number_at_the_box_width():

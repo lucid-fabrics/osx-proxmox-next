@@ -176,7 +176,7 @@ async def test_f_confirms_then_runs_the_commands_with_live_output_and_checks_aga
     async with app.run_test(size=SIZE) as pilot:
         screen = await open_check(pilot, app)
         await pilot.press("f")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, ChoiceDialog) and app.focused.name == "no"
         assert F.text_of(dialog.query(".dialog-title").first()) == "Run 4 commands as root?"
         shown = [F.text_of(w) for w in dialog.query(".dialog-line")]

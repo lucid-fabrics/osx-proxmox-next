@@ -220,20 +220,25 @@ async def test_choice_rows_skip_disabled_options_and_notify_only_on_change():
         assert more.render().plain.strip().startswith("▾ More")
 
 
+async def key_column(pilot, app, key: str) -> int:
+    """The column of *key* in the footer, read once the footer has a width.
+
+    A footer that was just mounted is 0 wide until the next layout pass, and at width 0 it renders every key with the
+    widest gap: the column read then is not where the key ends up once the footer is laid out."""
+    await F.settle(pilot, lambda: app.screen.query_one(KeyBar).size.width > 0, what="the footer to be laid out")
+    return app.screen.query_one(KeyBar).render().plain.index(key)
+
+
 @F.tui
 async def test_the_footer_keys_are_clickable(monkeypatch):
     F.patch_host(monkeypatch)
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen) and app.screen.loaded)
-        bar = app.screen.query_one(KeyBar)
-        plain = bar.render().plain
-        at = plain.index("n New Mac")
-        await pilot.click(KeyBar, offset=(at, 0))
+        await pilot.click(KeyBar, offset=(await key_column(pilot, app, "n New Mac"), 0))
         from osx_proxmox_next.screens.new_mac import NewMacScreen
         await F.settle(pilot, lambda: isinstance(app.screen, NewMacScreen))
-        at = app.screen.query_one(KeyBar).render().plain.index("? Help")
-        await pilot.click(KeyBar, offset=(at, 0))
+        await pilot.click(KeyBar, offset=(await key_column(pilot, app, "? Help"), 0))
         from osx_proxmox_next.screens.base import HelpScreen
         await F.settle(pilot, lambda: isinstance(app.screen, HelpScreen))
 

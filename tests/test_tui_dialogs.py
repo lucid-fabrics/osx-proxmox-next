@@ -115,7 +115,7 @@ async def test_remove_dialog_defaults_cancel_focus_purge_on_and_a_disabled_butto
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("l", "l", "d")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, RemoveDialog)
         assert app.focused.id == "cancel" and dialog.query_one("#remove", Button).disabled
         assert dialog.query_one("#purge", Checkbox).value is True
@@ -155,7 +155,7 @@ async def test_removing_with_the_typed_id_runs_the_destroy_plan(monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("d")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         dialog.query_one("#purge", Checkbox).value = False
         dialog.query_one("#confirm-id", Input).value = "101"
         await pilot.pause()
@@ -241,7 +241,7 @@ async def test_the_remove_guard_ignores_a_wrong_or_missing_id(monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         await open_home(pilot, app)
         await pilot.press("d")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         dialog.action_remove()
         dialog.on_input_submitted(None)
         await pilot.pause(0.2)
@@ -433,7 +433,7 @@ async def test_edit_from_the_vm_view_and_remove_leaves_the_view(monkeypatch):
         from osx_proxmox_next.screens.vm_view import VmViewScreen
         await F.settle(pilot, lambda: isinstance(app.screen, VmViewScreen))
         await pilot.press("e")
-        await F.settle(pilot, lambda: isinstance(app.screen, EditDialog), what="the edit dialog")
+        await F.settle_dialog(pilot, app, EditDialog)
         assert isinstance(app.screen, EditDialog)
         await pilot.press("escape")
         await pilot.press("d")

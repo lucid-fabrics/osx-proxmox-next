@@ -308,7 +308,7 @@ async def test_the_run_screen_is_up_while_the_host_works_and_keys_keep_working(t
         await pilot.press("escape")                                           # keys answer: leaving waits, politely
         assert app.screen is screen and any("Wait for this step" in n.message for n in app._notifications)
         await pilot.press("p")
-        await F.settle(pilot, lambda: isinstance(app.screen, ChangesDialog))
+        await F.settle_dialog(pilot, app, ChangesDialog)
         await pilot.press("escape")
         await pilot.press("question_mark")
         await F.settle(pilot, lambda: app.screen is not screen and not isinstance(app.screen, ChangesDialog))
@@ -355,7 +355,7 @@ async def test_the_undo_question_lists_what_it_will_do_and_the_answer_says_remov
         await pilot.press("enter")
         await mode(pilot, screen, "run")
         await pilot.press("u")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         lines = [F.text_of(w) for w in dialog.query(".dialog-line")]
         assert lines[0].startswith("Remove /etc/") and "Remove /etc/default/grub.d/osx-proxmox-next.cfg" in lines
         assert "The host needs one restart afterwards." in lines and lines[-1] == "Anything you edited since is kept and reported."
@@ -396,7 +396,7 @@ async def test_p_shows_plain_lines_and_x_toggles_the_exact_commands(tmp_path):
     async with app.run_test(size=SIZE) as pilot:
         await at_choose(pilot, app, env)
         await pilot.press("p")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, ChangesDialog)
         assert keys(app).split() == ["↑↓", "Scroll", "x", "Exact", "commands", "esc", "Close"]
         plain = F.text_of(dialog.query_one("#changes-text"))

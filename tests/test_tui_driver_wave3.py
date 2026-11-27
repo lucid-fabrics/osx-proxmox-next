@@ -106,7 +106,7 @@ async def test_the_plan_of_a_failed_run_is_what_finish_does(host):
         screen.error = "Staging failed."
         screen.mode = "run"
         await pilot.press("p")
-        await F.settle_screen(pilot, app, ChangesDialog)
+        await F.settle_dialog(pilot, app, ChangesDialog)
         shown = F.text_of(app.screen.query_one("#changes-text"))
         assert "Finish the NVIDIA driver update" in shown and "No new snapshot is saved" in shown
         assert "Save a snapshot" not in shown and "is saved first" not in shown
