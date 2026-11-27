@@ -72,6 +72,56 @@ async def test_the_picture_is_resampled_when_the_widget_is_resized(monkeypatch):
 
 
 @F.tui
+async def test_the_first_frame_is_one_grab_not_one_per_trigger(monkeypatch):
+    calls = []
+    monkeypatch.setattr(LiveScreen, "grabber", staticmethod(lambda vmid, probe: calls.append(vmid) or F.desktop_ppm(16, 10)))
+    live = LiveScreen(1, "running", interval=60)
+    async with Host(live).run_test(size=(40, 10)) as pilot:
+        await F.settle(pilot, lambda: live.grabs >= 1)
+        await pilot.pause(0.3)          # a window well past the 0.05 s mount timer, to see that it starts nothing more
+        assert live.grabs == 1 and calls == [1]
+
+
+@F.tui
+async def test_the_mount_timer_still_grabs_when_the_first_resize_could_not(monkeypatch):
+    calls = []
+    monkeypatch.setattr(LiveScreen, "grabber", staticmethod(lambda vmid, probe: calls.append(vmid) or F.desktop_ppm(16, 10)))
+    live = LiveScreen(1, "stopped", interval=60)
+    async with Host(live).run_test(size=(40, 10)) as pilot:
+        await pilot.pause(0.2)          # sized, but not running: the first resize found nothing to grab
+        assert calls == [] and not live._started
+        live.status = "running"
+        live._first_grab()              # what the 0.05 s mount timer calls
+        await F.settle(pilot, lambda: live.grabs >= 1)
+        live._first_grab()              # a grab has started already: the timer starts no second one
+        await pilot.pause(0.2)
+        assert calls == [1] and live.grabs == 1
+
+
+@F.tui
+async def test_a_resize_during_a_grab_still_ends_with_cells_for_the_new_size(monkeypatch):
+    import threading
+    gate, entered = threading.Event(), threading.Event()
+
+    def held(vmid, probe):
+        entered.set()
+        assert gate.wait(10)
+        return F.desktop_ppm(64, 40)
+
+    monkeypatch.setattr(LiveScreen, "grabber", staticmethod(held))
+    live = LiveScreen(1, "running", interval=60)
+    async with Host(live).run_test(size=(40, 12)) as pilot:
+        await F.settle(pilot, entered.is_set, what="the grab to be in flight")
+        old = live.size
+        await pilot.resize_terminal(60, 20)
+        await F.settle(pilot, lambda: live.size != old and live.size.height > 12, what="the widget to be resized")
+        assert live.grabs == 0 and live._cells == []
+        gate.set()
+        await F.settle(pilot, lambda: live.grabs >= 1)
+        assert live.size != old and live._cells_size == live.size and len(live._cells) == live.size.height
+
+
+@F.tui
 async def test_placeholders_for_a_stopped_vm_a_gpu_vm_and_a_failed_grab(monkeypatch):
     monkeypatch.setattr(LiveScreen, "grabber", staticmethod(lambda vmid, probe: b""))
     live = LiveScreen(105, "stopped", interval=60)
