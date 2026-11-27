@@ -50,8 +50,15 @@ def deps(**over) -> PipelineDeps:
     return d
 
 
+def just_started() -> DriverState:
+    """A driver log of an install that has only just begun. The build screen drops a log stamped more than 2 s
+    before its own driver started as an earlier run of the same VM ID, and a starved host takes longer than that to
+    reach the install phase, so the stamp is a minute ahead of the pipeline's clock instead of the test's start."""
+    return F.installing_driver(0, now=time.time() + 60)
+
+
 def patch_build(monkeypatch, state=None, status="running"):
-    box = {"state": state or F.installing_driver(0), "status": status}
+    box = {"state": state or just_started(), "status": status}
     monkeypatch.setattr("osx_proxmox_next.screens.build.read_driver_state", lambda vmid: box["state"])
     monkeypatch.setattr("osx_proxmox_next.screens.build.fetch_vm_info",
                         lambda vmid, adapter=None: VmInfo(vmid, "macos-sequoia", box["status"], ""))
@@ -337,7 +344,7 @@ async def test_z_zooms_the_live_screen_and_esc_comes_back(monkeypatch):
 async def test_a_cut_entry_of_latest_ends_with_an_ellipsis_and_never_runs_into_the_next_time(monkeypatch):
     F.patch_host(monkeypatch)
     long = "screen changed, still installing, the installer says about 15 min left and the estimate keeps moving"
-    state = F.installing_driver(0)
+    state = just_started()
     state.events = [("13:40:01", "recovery detached"), ("13:41:02", long), ("13:42:03", long + " again")]
     patch_build(monkeypatch, state=state)
     app = NextApp()
@@ -356,7 +363,7 @@ async def test_a_cut_entry_of_latest_ends_with_an_ellipsis_and_never_runs_into_t
 @F.tui
 async def test_the_driver_log_drives_the_substeps_and_the_latest_lines(monkeypatch):
     F.patch_host(monkeypatch)
-    box = patch_build(monkeypatch, state=F.installing_driver(0))
+    box = patch_build(monkeypatch, state=just_started())
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         screen = BuildScreen(CONFIG, True, pipeline=BuildPipeline(CONFIG, True, deps=deps()))
