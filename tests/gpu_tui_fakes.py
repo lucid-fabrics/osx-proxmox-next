@@ -99,14 +99,27 @@ async def start(pilot, app, env, vmid=100, undo=False, session=None) -> GpuScree
 
 async def at_choose(pilot, app, env, **kw) -> GpuScreen:
     screen = await start(pilot, app, env, **kw)
-    await F.settle(pilot, lambda: screen.mode == "choose" and screen.preview is not None)
+    await F.settle(pilot, lambda: screen.mode == "choose" and screen.preview is not None and not in_flight(screen),
+                   what="the choose view to be built")
     await pilot.pause(0.1)
+    return screen
+
+
+async def gpu_opened(pilot, app) -> GpuScreen:
+    """Wait until the GPU screen the app just opened has built its choose form and its loader has ended.
+
+    `GpuScreen` is attached before its loader worker mounts the form, and that worker queries the form: a test that
+    ends on the attach closes the app under it and the worker dies with NoMatches."""
+    await F.settle_screen(pilot, app, GpuScreen)
+    screen = app.screen
+    await F.settle(pilot, lambda: screen.mode == "choose" and not in_flight(screen) and bool(screen.query("#g-mac")),
+                   what="the GPU screen to finish loading")
     return screen
 
 
 async def at_choose_unusable(pilot, app, env) -> GpuScreen:
     screen = await start(pilot, app, env)
-    await F.settle(pilot, lambda: screen.mode == "choose" and not screen.working and bool(screen.query("#g-card")))
+    await F.settle(pilot, lambda: screen.mode == "choose" and not in_flight(screen) and bool(screen.query("#g-card")))
     await pilot.pause(0.2)
     return screen
 

@@ -9,6 +9,7 @@ from textual.widgets import Input, Static
 
 import tui_fakes as F
 from driver_fakes import DPve, comps
+from gpu_tui_fakes import gpu_opened
 from osx_proxmox_next import driver_check, driver_engine as engine, driver_spawn, gpu
 from osx_proxmox_next.app import NextApp
 from osx_proxmox_next.driver_core import DriverError
@@ -139,7 +140,7 @@ async def test_g_on_a_mac_without_a_card_still_opens_the_card_choice(host):
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen) and app.screen.loaded)
         await pilot.press("right", "right")
         await pilot.press("g")
-        await F.settle_screen(pilot, app, GpuScreen)
+        await gpu_opened(pilot, app)
 
 
 @F.tui
@@ -711,7 +712,7 @@ async def test_a_passed_through_device_that_is_no_graphics_card_keeps_the_card_c
     async with app.run_test(size=SIZE) as pilot:
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen) and app.screen.loaded)
         await pilot.press("g")
-        await F.settle_screen(pilot, app, GpuScreen)
+        await gpu_opened(pilot, app)
 
 
 # ── the Driver row never wraps (design) ──────────────────────────────

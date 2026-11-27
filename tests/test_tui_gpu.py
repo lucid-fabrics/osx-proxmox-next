@@ -10,7 +10,7 @@ from textual.widgets import Button, Input
 import tui_fakes as F
 from gpu_fakes import write
 from gpu_tui_fakes import (  # noqa: F401 - _vm_list is an autouse fixture
-    SIZE, _no_network, _vm_list, amd_env, applied, at_choose, at_choose_unusable, box, dialog_text, flat, host_card, keys, mode, nvidia_card,
+    SIZE, _no_network, _vm_list, amd_env, applied, at_choose, at_choose_unusable, box, dialog_text, flat, gpu_opened, host_card, keys, mode, nvidia_card,
     panel, reboot_host, row, start, timeline)
 from osx_proxmox_next import gpu_setup, host_setup, nullmoth
 from osx_proxmox_next.app import NextApp
@@ -588,11 +588,7 @@ async def test_the_palette_opens_the_flow_without_a_preselected_mac(tmp_path, mo
     async with app.run_test(size=SIZE) as pilot:
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen) and app.screen.loaded and app.screen.is_attached)
         app.action_gpu()
-        await F.settle_screen(pilot, app, GpuScreen)
-        screen = app.screen
-        await F.settle(pilot, lambda: screen.mode == "choose" and not screen.working and bool(screen.query("#g-mac")),
-                       what="the GPU screen to finish loading")
-        await screen.workers.wait_for_complete()       # its loader queries the screen: let it end before the app closes
+        screen = await gpu_opened(pilot, app)
         assert screen.vmid is None and not screen.fixed_vm
 
 
