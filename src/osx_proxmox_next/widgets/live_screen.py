@@ -132,6 +132,7 @@ class LiveScreen(Widget):
         self._cells: list[Strip] = []
         self._cells_size = Size(0, 0)
         self._busy = False
+        self._started = False   # a first grab has been started (the first frame waits for a real size, not a timer)
         self.grabs = 0          # finished grabs, for tests and the status line
         self._dir = ""      # a private (0700) directory for the probe file, made on the first grab
         self._probe = ""
@@ -200,6 +201,7 @@ class LiveScreen(Widget):
             install_cleanup()
             self._probe = os.path.join(self._dir, "frame.ppm")
         self._busy = True
+        self._started = True
         size = self.size
         self.run_worker(lambda: self._grab(size), thread=True, group=f"grab-{self.vmid}-{id(self)}",
                         exit_on_error=False)
@@ -241,6 +243,8 @@ class LiveScreen(Widget):
         return max(3, -(-int(width * LiveScreen.ratio) // 2))
 
     def on_resize(self) -> None:
+        if not self._started and self.size.width and self.size.height:
+            self.grab_now()     # the first layout pass: the 0.05 s timer may have fired before the widget had a size
         if self._frame is not None and self.size != self._cells_size and self.size.width and self.size.height:
             self._cells = self._render(self._frame, self.size)
             self._cells_size = self.size
