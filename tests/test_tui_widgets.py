@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from textual.app import App
-from textual.containers import VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 
 import tui_fakes as F
 from osx_proxmox_next.app import NextApp
@@ -69,6 +69,56 @@ async def test_the_picture_is_resampled_when_the_widget_is_resized(monkeypatch):
         await pilot.resize_terminal(60, 20)
         await F.settle(pilot, lambda: live._cells_size != before)
         assert live._cells_size == live.size
+
+
+@F.tui
+async def test_the_first_frame_is_one_grab_not_one_per_trigger(monkeypatch):
+    calls = []
+    monkeypatch.setattr(LiveScreen, "grabber", staticmethod(lambda vmid, probe: calls.append(vmid) or F.desktop_ppm(16, 10)))
+    live = LiveScreen(1, "running", interval=60)
+    async with Host(live).run_test(size=(40, 10)) as pilot:
+        await F.settle(pilot, lambda: live.grabs >= 1)
+        await pilot.pause(0.3)          # a window well past the 0.05 s mount timer, to see that it starts nothing more
+        assert live.grabs == 1 and calls == [1]
+
+
+@F.tui
+async def test_the_mount_timer_still_grabs_when_the_first_resize_could_not(monkeypatch):
+    calls = []
+    monkeypatch.setattr(LiveScreen, "grabber", staticmethod(lambda vmid, probe: calls.append(vmid) or F.desktop_ppm(16, 10)))
+    live = LiveScreen(1, "stopped", interval=60)
+    async with Host(live).run_test(size=(40, 10)) as pilot:
+        await pilot.pause(0.2)          # sized, but not running: the first resize found nothing to grab
+        assert calls == [] and not live._started
+        live.status = "running"
+        live._first_grab()              # what the 0.05 s mount timer calls
+        await F.settle(pilot, lambda: live.grabs >= 1)
+        live._first_grab()              # a grab has started already: the timer starts no second one
+        await pilot.pause(0.2)
+        assert calls == [1] and live.grabs == 1
+
+
+@F.tui
+async def test_a_resize_during_a_grab_still_ends_with_cells_for_the_new_size(monkeypatch):
+    import threading
+    gate, entered = threading.Event(), threading.Event()
+
+    def held(vmid, probe):
+        entered.set()
+        assert gate.wait(10)
+        return F.desktop_ppm(64, 40)
+
+    monkeypatch.setattr(LiveScreen, "grabber", staticmethod(held))
+    live = LiveScreen(1, "running", interval=60)
+    async with Host(live).run_test(size=(40, 12)) as pilot:
+        await F.settle(pilot, entered.is_set, what="the grab to be in flight")
+        old = live.size
+        await pilot.resize_terminal(60, 20)
+        await F.settle(pilot, lambda: live.size != old and live.size.height > 12, what="the widget to be resized")
+        assert live.grabs == 0 and live._cells == []
+        gate.set()
+        await F.settle(pilot, lambda: live.grabs >= 1)
+        assert live.size != old and live._cells_size == live.size and len(live._cells) == live.size.height
 
 
 @F.tui
@@ -293,3 +343,30 @@ def test_remove_frame_dirs_empties_the_registry(tmp_path):
     ls._FRAME_DIRS.add(str(folder))
     ls.remove_frame_dirs()
     assert not folder.exists() and not ls._FRAME_DIRS
+
+
+@F.tui
+async def test_the_first_frame_waits_for_a_size_not_for_the_next_interval(monkeypatch):
+    calls = []
+    monkeypatch.setattr(LiveScreen, "grabber", staticmethod(lambda vmid, probe: calls.append(vmid) or F.desktop_ppm(16, 10)))
+    live = LiveScreen(1, "running", interval=60)
+
+    class Held(App):
+        def compose(self):
+            holder = Vertical(live, id="holder")
+            holder.styles.width = 0                 # no layout size from the first pass: the mount timer finds nothing to grab
+            yield holder
+
+    app = Held()
+    async with app.run_test(size=(40, 10)) as pilot:
+        holder = app.query_one("#holder")
+        await pilot.pause(0.3)                      # well past the 0.05 s timer
+        assert live.size.width == 0 and calls == []
+        holder.styles.width = 30                    # the layout pass arrives late
+        await F.settle(pilot, lambda: live.grabs >= 1, what="the first frame, long before the 60 s interval")
+        assert calls == [1]
+        holder.styles.width = 36                    # later resizes re-render the cached frame, they never grab again
+        await pilot.pause(0.3)
+        holder.styles.width = 20
+        await pilot.pause(0.3)
+        assert calls == [1] and live.grabs == 1

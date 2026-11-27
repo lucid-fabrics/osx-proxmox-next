@@ -132,6 +132,7 @@ class LiveScreen(Widget):
         self._cells: list[Strip] = []
         self._cells_size = Size(0, 0)
         self._busy = False
+        self._started = False   # a first grab has been started (the first frame waits for a real size, not a timer)
         self.grabs = 0          # finished grabs, for tests and the status line
         self._dir = ""      # a private (0700) directory for the probe file, made on the first grab
         self._probe = ""
@@ -182,13 +183,18 @@ class LiveScreen(Widget):
 
     def on_mount(self) -> None:
         self.set_interval(self.interval, self.grab_now)
-        self.set_timer(0.05, self.grab_now)
+        self.set_timer(0.05, self._first_grab)
 
     def on_unmount(self) -> None:
         if self._dir:
             shutil.rmtree(self._dir, ignore_errors=True)
             _FRAME_DIRS.discard(self._dir)
             self._dir = self._probe = ""
+
+    def _first_grab(self) -> None:
+        """The mount timer: only for a widget whose first resize found nothing to grab (a grab is already under way otherwise)."""
+        if not self._started:
+            self.grab_now()
 
     def grab_now(self) -> None:
         if self._busy or not self.should_grab():
@@ -200,6 +206,7 @@ class LiveScreen(Widget):
             install_cleanup()
             self._probe = os.path.join(self._dir, "frame.ppm")
         self._busy = True
+        self._started = True
         size = self.size
         self.run_worker(lambda: self._grab(size), thread=True, group=f"grab-{self.vmid}-{id(self)}",
                         exit_on_error=False)
@@ -234,6 +241,7 @@ class LiveScreen(Widget):
             if abs(ratio - LiveScreen.ratio) > 0.01:
                 LiveScreen.ratio = ratio
                 self.refresh(layout=True)
+            self._fit_to_size()     # the widget may have been resized while the grab was in flight
         self.refresh()
 
     def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
@@ -241,9 +249,16 @@ class LiveScreen(Widget):
         return max(3, -(-int(width * LiveScreen.ratio) // 2))
 
     def on_resize(self) -> None:
-        if self._frame is not None and self.size != self._cells_size and self.size.width and self.size.height:
-            self._cells = self._render(self._frame, self.size)
-            self._cells_size = self.size
+        if not self._started and self.size.width and self.size.height:
+            self.grab_now()     # the first layout pass: the 0.05 s timer may have fired before the widget had a size
+        self._fit_to_size()
+
+    def _fit_to_size(self) -> None:
+        """Render the frame we hold again when the widget's size is no longer the size its cells were made for."""
+        size = self.size
+        if self._frame is not None and size != self._cells_size and size.width and size.height:
+            self._cells = self._render(self._frame, size)
+            self._cells_size = size
 
     # ── drawing ──────────────────────────────────────────────────────
 
