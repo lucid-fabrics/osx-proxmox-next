@@ -18,7 +18,7 @@ from osx_proxmox_next.driver_targets import Choice, Target
 from osx_proxmox_next.nullmoth import ACK_PHRASE
 from osx_proxmox_next.screens import driver as drv
 from osx_proxmox_next.screens.driver import DriverScreen, DriverView
-from osx_proxmox_next.screens.gpu import ChangesDialog, GpuScreen
+from osx_proxmox_next.screens.gpu import ChangesDialog
 from osx_proxmox_next.screens.gpu_before import BeforeDialog
 from osx_proxmox_next.screens.home import HomeScreen
 from osx_proxmox_next.widgets.chrome import KeyBar
