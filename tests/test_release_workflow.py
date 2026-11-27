@@ -130,10 +130,10 @@ class Repo:
         self.git("push", "-q", "origin", "main")
 
     def run(self, script: str, sha: str | None = None) -> subprocess.CompletedProcess:
-        """Run under `bash -eo pipefail`, the shell GitHub Actions uses for a `run:` step."""
+        """Run under `bash -e`, the shell GitHub Actions uses for a `run:` step when the workflow names none."""
         env = dict(self.env, GITHUB_SHA=sha or self.git("rev-parse", "HEAD"), GITHUB_OUTPUT=str(self.out))
         return subprocess.run(
-            [BASH, "-eo", "pipefail", "-c", script], cwd=self.work, env=env, check=True, capture_output=True, text=True
+            [BASH, "-e", "-c", script], cwd=self.work, env=env, check=True, capture_output=True, text=True
         )
 
     def bump(self, sha: str | None = None) -> str:
