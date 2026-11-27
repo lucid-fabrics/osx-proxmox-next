@@ -159,7 +159,7 @@ async def test_p_opens_every_change_with_the_card_and_the_host_facts(tmp_path):
     async with app.run_test(size=SIZE) as pilot:
         screen = await at_choose(pilot, app, env)
         await pilot.press("p")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, ChangesDialog)
         text = F.text_of(dialog.query_one("#changes-text"))
         assert "Address: 0000:06:00" in text and "Card: " in text and "This host: CPU:" in text
@@ -221,7 +221,7 @@ async def test_nvidia_asks_its_notice_once_in_the_dialog_and_never_carries_it_ov
         assert nullmoth.NOTICE_BODY not in hint                       # the choose screen stays clean
         assert not screen.query_one("#g-primary", Button).disabled
         await pilot.press("enter")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, BeforeDialog)
         assert "Before you continue" in F.text_of(dialog.query(".dialog-title").first())
         assert nullmoth.NOTICE_TITLE in F.text_of(dialog.query_one("#before-notice-title"))
@@ -249,7 +249,7 @@ async def test_the_notice_scrolls_and_says_how_many_lines_are_left(tmp_path):
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await at_choose(pilot, app, env)
         await pilot.press("enter")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         await pilot.pause(0.3)
         more = F.text_of(dialog.query_one("#before-more"))
         assert more.startswith("↓ ") and more.endswith(" more lines")
@@ -357,7 +357,7 @@ async def test_only_display_adapter_is_careful_and_needs_the_typed_phrase(tmp_pa
         assert not screen.query_one("#g-primary", Button).disabled    # the phrase is asked in the dialog
         assert "! Read the warnings first. You confirm before anything changes." in flat(row(screen, "#g-card"))
         await pilot.press("enter")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, BeforeDialog)
         warnings = F.text_of(dialog.query_one("#before-warnings"))
         assert "Careful: This card is the only display adapter" in warnings.replace("\n  ", " ")
@@ -385,13 +385,13 @@ async def test_the_dialog_opens_again_when_the_plan_changed_after_the_phrase(tmp
     async with app.run_test(size=SIZE) as pilot:
         screen = await at_choose(pilot, app, env)
         await pilot.press("enter")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, BeforeDialog)
         env.qm.vms[100] = ("stopped", SEQUOIA.replace("args: ", "args: -smbios type=1 "))   # the Mac was edited meanwhile
         dialog.query_one("#g-confirm", Input).value = CONFIRM_PHRASE
         await F.settle(pilot, lambda: not dialog.query_one("#before-go", Button).disabled)
         await pilot.press("enter")
-        await F.settle(pilot, lambda: app.screen is not dialog and isinstance(app.screen, BeforeDialog))
+        await F.settle(pilot, lambda: app.screen is not dialog and isinstance(app.screen, BeforeDialog) and app.screen.is_mounted)
         again = app.screen
         assert again is not dialog and again.query_one("#before-go", Button).disabled   # the phrase is asked again
         assert "Careful: This card is the only display adapter" in \
@@ -410,7 +410,7 @@ async def test_a_plan_with_a_warning_but_no_phrase_asks_in_the_dialog_without_a_
         screen.preview.plan["warnings"].append("A made-up warning")  # a plan with a plain warning
         screen.preview.vm_plan.warnings.clear()
         await pilot.press("enter")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, BeforeDialog) and not dialog.query("Input")
         assert "! A made-up warning" in F.text_of(dialog.query_one("#before-warnings"))
         assert not dialog.query_one("#before-go", Button).disabled
@@ -520,7 +520,7 @@ async def test_a_stopped_holder_is_confirmed_once_in_before_you_continue(tmp_pat
         screen = await at_choose(pilot, app, env)
         assert "stopped VM 120" in row(screen, "#g-card")
         await pilot.press("enter")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, BeforeDialog) and "stopped VM 120" in flat(F.text_of(dialog.query_one("#before-warnings")))
         assert screen.s.state["gpu"] is None                         # nothing is stored before the approval
         await pilot.press("escape")
@@ -665,7 +665,7 @@ async def test_the_bios_screen_lists_the_settings_and_restarts_into_the_bios_aft
         for key in ("Restart into BIOS", "Check again"):
             assert key in keys(app)
         await pilot.press("enter")
-        dialog = app.screen
+        dialog = await F.settle_dialog(pilot, app)
         assert isinstance(dialog, ChoiceDialog) and "101 (vm101)" in dialog_text(dialog)
         await pilot.press("escape")
         await pilot.pause(0.2)

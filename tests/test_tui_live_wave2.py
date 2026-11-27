@@ -23,7 +23,7 @@ async def test_every_change_scrolls_one_line_or_one_page_per_key(tmp_path):
     app = NextApp()
     async with app.run_test(size=SIZE) as pilot:
         app.push_screen(ChangesDialog("\n".join(f"line {i}" for i in range(200))))
-        await F.settle(pilot, lambda: isinstance(app.screen, ChangesDialog))
+        await F.settle_dialog(pilot, app, ChangesDialog)
         scroll = app.screen.query_one("#changes-scroll")
         await pilot.pause(0.2)
         for _ in range(5):

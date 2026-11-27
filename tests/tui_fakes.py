@@ -140,6 +140,20 @@ async def settle_screen(pilot, app, screen_cls, what: str = "") -> None:
                  what=what or f"{screen_cls.__name__} to be the active screen")
 
 
+async def settle_dialog(pilot, app, dialog_cls=None, what: str = ""):
+    """Wait until a *dialog_cls* is the active screen and has composed every widget. Returns it.
+
+    A pushed screen is the active one before its children exist: a read of its text or a query for its button in
+    that gap finds nothing, and so does the app closing under its `on_mount`. `is_mounted` is set once the screen and
+    all its children have been mounted."""
+    from textual.screen import ModalScreen
+
+    dialog_cls = dialog_cls or ModalScreen
+    await settle(pilot, lambda: isinstance(app.screen, dialog_cls) and app.screen.is_mounted,
+                 what=what or f"{dialog_cls.__name__} to be open and built")
+    return app.screen
+
+
 async def settle_query(pilot, app, selector: str, what: str = "") -> None:
     """Wait until the active screen holds a node matching *selector* (a pushed screen has finished composing)."""
     await settle(pilot, lambda: bool(app.screen.query(selector)), what=what or f"{selector} on the active screen")

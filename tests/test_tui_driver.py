@@ -218,7 +218,7 @@ async def test_p_shows_every_change_and_x_the_commands(host):
     async with app.run_test(size=SIZE) as pilot:
         await open_driver(pilot, app)
         await pilot.press("p")
-        await F.settle_screen(pilot, app, ChangesDialog)
+        await F.settle_dialog(pilot, app, ChangesDialog)
         body = F.text_of(app.screen.query_one("#changes-text"))
         assert "Update the NVIDIA driver of macos-sequoia (VM 101)" in body and "  3. Stage NullMoth v2.9" in body
         await pilot.press("x")
@@ -236,7 +236,7 @@ async def test_enter_asks_once_and_the_approved_update_runs_detached(host):
     async with app.run_test(size=SIZE) as pilot:
         screen = await open_driver(pilot, app)
         await pilot.press("enter")
-        await F.settle_screen(pilot, app, BeforeDialog)
+        await F.settle_dialog(pilot, app, BeforeDialog)
         dialog = app.screen
         assert dialog.query_one("#before-go").disabled and "Update driver" in str(dialog.query_one("#before-go").label)
         text_all = " ".join(F.text_of(w) for w in dialog.query("Static"))
@@ -257,7 +257,7 @@ async def test_cancelling_the_approval_starts_nothing(host):
     async with app.run_test(size=SIZE) as pilot:
         await open_driver(pilot, app)
         await pilot.press("enter")
-        await F.settle_screen(pilot, app, BeforeDialog)
+        await F.settle_dialog(pilot, app, BeforeDialog)
         await pilot.press("escape")
         await F.settle_screen(pilot, app, DriverScreen)
         assert host["spawned"] == []
@@ -271,7 +271,7 @@ async def test_storage_without_snapshots_asks_for_the_typed_phrase(host):
     async with app.run_test(size=SIZE) as pilot:
         screen = await open_driver(pilot, app)
         await pilot.press("enter")
-        await F.settle_screen(pilot, app, BeforeDialog)
+        await F.settle_dialog(pilot, app, BeforeDialog)
         text_all = " ".join(F.text_of(w) for w in app.screen.query("Static"))
         flat = " ".join(text_all.split())
         assert "cannot take snapshots (virtio0 is on storage x (type lvm))" in flat and "A snapshot called" not in flat
@@ -750,7 +750,7 @@ def stale_focus(screen):
 async def launch(pilot, app, host):
     screen = await open_driver(pilot, app)
     await pilot.press("enter")
-    await F.settle_screen(pilot, app, BeforeDialog)
+    await F.settle_dialog(pilot, app, BeforeDialog)
     app.screen.query_one("#g-ack", Input).value = ACK_PHRASE
     await pilot.pause(0.1)
     await pilot.press("enter")
@@ -768,7 +768,7 @@ async def test_the_keys_work_after_an_update_the_tui_started(host):
         stale_focus(screen)
         await F.settle(pilot, lambda: screen.focused is None, what="the focus to be taken off the removed row")
         await pilot.press("p")                                      # the running screen
-        await F.settle_screen(pilot, app, ChangesDialog)
+        await F.settle_dialog(pilot, app, ChangesDialog)
         await pilot.press("escape")
         await F.settle_screen(pilot, app, DriverScreen)
         write_state(phase="failed", states=("done", "done", "done", "fail", "pending", "pending", "pending"), error="Staging failed.")
@@ -880,7 +880,7 @@ async def test_an_intel_mac_picks_the_graphics_package_release_on_a_second_row(h
         await pilot.press("right")
         await F.settle(pilot, lambda: screen.choice.wex == "v0.8.0" and screen.choice.graphics == "v0.4.3" and not screen.working)
         await pilot.press("enter")
-        await F.settle_screen(pilot, app, BeforeDialog)
+        await F.settle_dialog(pilot, app, BeforeDialog)
         await pilot.press("escape")
         await F.settle_screen(pilot, app, DriverScreen)
         screen._approved({})
@@ -943,7 +943,7 @@ async def test_the_dialogs_default_follows_the_risk_cancel_for_the_undo_update_f
         await F.settle_screen(pilot, app, DriverScreen)
         assert host["put_back"] == []                               # enter did not undo anything
         await pilot.press("enter")                                  # the update loses nothing: Update is the default
-        await F.settle(pilot, lambda: isinstance(app.screen, BeforeDialog))
+        await F.settle_dialog(pilot, app, BeforeDialog)
         assert app.screen.query_one("#before-go").has_focus
         assert "enter Update driver" in app.screen.query_one("#before-keys").render().plain
 
