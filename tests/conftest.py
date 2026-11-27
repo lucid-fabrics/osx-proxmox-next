@@ -156,3 +156,14 @@ def pytest_sessionfinish(session, exitstatus):
             print(line)
     if session.exitstatus == 0:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.fixture(autouse=True)
+def _keep_the_sigterm_handler():
+    """driver_cli installs a SIGTERM handler that raises KeyboardInterrupt; a test that runs it in-process would leave
+    it in the pytest process for every later test. Put back whatever was there before the test."""
+    import signal
+
+    before = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, before)
