@@ -58,7 +58,15 @@ jobs:
       - name: Determine version bump from commits
         id: bump
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          git fetch --quiet origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "::warning::main has moved past this commit, so the run for the newer commit cuts the release"
+            echo "bump=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PREV_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' 2>/dev/null || echo "")
+          echo "Previous release tag: ${PREV_TAG:-none}"
           if [ -z "$PREV_TAG" ]; then
             COMMITS=$(git log --format="%s" --no-decorate)
           else
@@ -134,7 +142,7 @@ jobs:
         if: steps.bump.outputs.bump != 'none' && steps.check.outputs.exists == 'false'
         id: notes
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          PREV_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' HEAD^ 2>/dev/null || echo "")
 
           if [ -z "$PREV_TAG" ]; then
             RANGE=""
