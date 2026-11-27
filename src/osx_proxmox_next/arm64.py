@@ -28,8 +28,8 @@ KEY_DIR = "/root/.ssh"              # on the Proxmox host: the runner's login ke
 # or a full commit id (a branch moves), and the checksum is mandatory. The defaults below are pinned to the beta tag;
 # `arm64/scripts/arm64-source-pin.sh <ref>` prints both lines for a new tag.
 DEFAULT_SOURCE_URL = "https://github.com/lucid-fabrics/osx-proxmox-next/archive/{ref}.tar.gz"
-DEFAULT_SOURCE_REF = "v0.38.4-beta.2"
-DEFAULT_SOURCE_SHA256 = "755553a3af7d5c0d25db4aff320837e75cfe80d89ae3cc40aaace6cc3ae21f1f"
+DEFAULT_SOURCE_REF = "v0.38.5-beta.1"
+DEFAULT_SOURCE_SHA256 = "8d83314d783d8be984c0586f67b540e940acca1938ad7fb83b685999c1dde4c8"
 
 MIN_VMID = 100
 MAX_VMID = 999999
