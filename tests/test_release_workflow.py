@@ -130,9 +130,10 @@ class Repo:
         self.git("push", "-q", "origin", "main")
 
     def run(self, script: str, sha: str | None = None) -> subprocess.CompletedProcess:
+        """Run under `bash -eo pipefail`, the shell GitHub Actions uses for a `run:` step."""
         env = dict(self.env, GITHUB_SHA=sha or self.git("rev-parse", "HEAD"), GITHUB_OUTPUT=str(self.out))
         return subprocess.run(
-            [BASH, "-c", script], cwd=self.work, env=env, check=True, capture_output=True, text=True
+            [BASH, "-eo", "pipefail", "-c", script], cwd=self.work, env=env, check=True, capture_output=True, text=True
         )
 
     def bump(self, sha: str | None = None) -> str:
@@ -189,6 +190,22 @@ def test_a_run_for_a_commit_main_has_moved_past_bumps_nothing(repo: Repo):
     repo.push()
     assert repo.bump(sha=old) == "none"
     assert "::warning::main has moved past this commit" in repo.last.stdout
+
+
+def test_push_and_dispatch_runs_use_different_concurrency_groups():
+    """A dispatch must not cancel a pending push run, so the group has to include the event name."""
+    match = re.search(r"^concurrency:\n  group: (.+)$", workflow(), re.MULTILINE)
+    assert match, "no workflow-level concurrency group"
+    assert "github.event_name" in match.group(1)
+
+
+def test_the_bump_step_fails_and_writes_no_bump_when_the_fetch_fails(repo: Repo):
+    repo.commit("fix(x): a fix")
+    repo.push()
+    repo.git("remote", "set-url", "origin", str(repo.origin.parent / "missing.git"))
+    with pytest.raises(subprocess.CalledProcessError):
+        repo.bump()
+    assert "bump=" not in repo.out.read_text(encoding="utf-8")
 
 
 def test_feat_bumps_minor(repo: Repo):

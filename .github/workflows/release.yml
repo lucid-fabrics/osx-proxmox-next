@@ -21,7 +21,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
