@@ -53,7 +53,7 @@ t firstboot-help bash -c "'$S' --help | grep -q -- 'firstboot --disk F --aux F -
 t shellcheck-firstboot shellcheck -x -P "$HERE" "$HERE/lib/install/firstboot/boot.sh" "$HERE/lib/install/firstboot/run.sh"
 t shellcheck-user-plist shellcheck -s sh "$HERE/lib/install/firstboot/user-plist.sh"
 t m2bhost-cdn-allowlist bash -c "grep -q 'fcs-keys-pub-prod.cdn-apple.com' '$HERE/lib/install/m2bhost.py' && grep -q 'class CheckedRedirect' '$HERE/lib/install/m2bhost.py' && grep -q 'final_url = r.geturl()' '$HERE/lib/install/m2bhost.py'"
-t go-kills-qemu-with-pkill bash -c "[ \$(grep -c 'pkill -x qemu-system-aar' '$HERE/lib/install/go.sh') -eq 2 ]"
+t go-kills-qemu-with-pkill bash -c "[ \$(grep -c 'pkill -x qemu-system-aar' '$HERE/lib/install/go.sh') -eq 1 ] && [ \$(grep -c 'stop_qemu\$' '$HERE/lib/install/go.sh') -eq 2 ]"
 t install-readme-patch-path bash -c "grep -q 'git am ../arm64/patches/qemu/' '$HERE/lib/install/README.md' && ! grep -q '\\.\\./\\.\\./arm64/patches' '$HERE/lib/install/README.md'"
 t build-needs-repo bash -c "! '$S' build --only qemu 2>&1 | grep -q 'unexpected'; REIMS_REPO=file:///nonexistent M2V_REPO=file:///nonexistent '$S' build --only reims 2>&1 | grep -q 'is not in'"
 t renderer-pin bash -c ". '$HERE/pins.env'; [ -z \"\$REIMS_REPO\" ] && [ -z \"\$M2V_REPO\" ] && [ \${#RENDERER_SHA256} -eq 64 ] && case \$RENDERER_URL in https://*) ;; *) exit 1 ;; esac && [ ! -e '$HERE/vendor' ] && grep -q \"\$REIMS_REF\" '$HERE/docs/RENDERER.md' && grep -q \"\$M2V_REF\" '$HERE/docs/RENDERER.md'"
