@@ -94,7 +94,7 @@ async def test_choosing_arm64_hides_the_rows_that_only_an_opencore_mac_has(monke
         for rid in ("#r-install", "#r-apple", "#r-more"):
             assert not screen.query_one(rid).display
         after = F.text_of(screen.query_one("#after"))
-        assert "Create the runner VM" in after and "not in this beta build yet" in after
+        assert "Create the runner VM" in after and "automatic after the build" in after
         assert "Check, download, rehearse" not in after
         screen.query_one("#r-macos", ChoiceRow).focus()
         await pilot.press("left")            # back to Monterey: the rows come back
@@ -143,10 +143,10 @@ async def test_enter_creates_the_runner_through_its_own_build_screen(monkeypatch
         steps, execute = seen[0]
         assert execute is True and steps[3].argv[:5] == ["qm", "create", "105", "--name", "macos-arm64"]
         assert build.ok and build.crumb() == "macos-arm64"
-        await F.settle_text(pilot, lambda: build_log(build), "not in this beta build yet")   # `finished` is set a line early
+        await F.settle_text(pilot, lambda: build_log(build), "The firstboot VNC tunnel")   # `finished` is set a line early
         log = build_log(build)
         assert "[4/10] Create the runner VM" in log and "starts" not in log
-        assert "is starting" in log and "not in this beta build yet" in log
+        assert "is starting" in log and "The firstboot VNC tunnel" in log
         await pilot.press("escape")
         await F.settle(pilot, lambda: isinstance(app.screen, HomeScreen))
 

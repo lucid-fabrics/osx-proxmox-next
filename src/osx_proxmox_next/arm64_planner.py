@@ -60,6 +60,70 @@ mkdir -p "$(dirname "$priv")"; chmod 700 "$(dirname "$priv")"
 chmod 600 "$out"
 """
 
+_UPLOAD = """\
+set -euo pipefail
+vmid=$1; key=$2; ipsw=$3; bundle=$4; ramdisk=$5; ambrosia=$6; cache=$7; aux=$8; kdk=$9; template=${10}
+password=${11}; timeout=${12:-900}; runner=snapintosh
+upload_dir=/home/snapintosh/osx-next-arm64
+upload_ipsw=$upload_dir/restore.ipsw
+upload_bundle=$upload_dir/restore.cpio
+upload_ramdisk=$upload_dir/restore-ramdisk.im4p
+upload_ambrosia=$upload_dir/ambrosia-r4.bin
+upload_cache=$upload_dir/tsscache
+upload_aux=$upload_dir/aux.img
+upload_kdk=$upload_dir/kdk
+upload_template=$upload_dir/golden-policy.img4
+upload_password=$upload_dir/password
+deadline=$(( $(date +%s) + timeout ))
+ip=""
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  ip=$(qm guest cmd "$vmid" network-get-interfaces 2>/dev/null | python3 -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for iface in data:
+    if iface.get("name") == "lo":
+        continue
+    for address in iface.get("ip-addresses", []):
+        if address.get("ip-address-type") == "ipv4" and not address["ip-address"].startswith("127."):
+            print(address["ip-address"]); raise SystemExit(0)
+' || true)
+  [ -n "$ip" ] && break
+  sleep 5
+done
+[ -n "$ip" ] || { echo "no guest-agent address for VM $vmid after $timeout s" >&2; exit 1; }
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+opts=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile="$tmp/known_hosts" -o ConnectTimeout=10)
+ssh -i "$key" "${opts[@]}" "$runner@$ip" "mkdir -p $upload_dir && chmod 700 $upload_dir"
+[ -z "$ipsw" ] || scp -i "$key" "${opts[@]}" "$ipsw" "$runner@$ip:$upload_ipsw"
+[ -z "$bundle" ] || scp -i "$key" "${opts[@]}" "$bundle" "$runner@$ip:$upload_bundle"
+[ -z "$ramdisk" ] || scp -i "$key" "${opts[@]}" "$ramdisk" "$runner@$ip:$upload_ramdisk"
+[ -z "$ambrosia" ] || scp -i "$key" "${opts[@]}" "$ambrosia" "$runner@$ip:$upload_ambrosia"
+if [ -n "$cache" ]; then
+  scp -i "$key" "${opts[@]}" -r "$cache" "$runner@$ip:$upload_dir/"
+  if [ "$upload_dir/$(basename "$cache")" != "$upload_cache" ]; then
+    ssh -i "$key" "${opts[@]}" "$runner@$ip" "rm -rf $upload_cache; mv $upload_dir/$(basename "$cache") $upload_cache"
+  fi
+fi
+[ -z "$aux" ] || scp -i "$key" "${opts[@]}" "$aux" "$runner@$ip:$upload_aux"
+if [ -n "$kdk" ]; then
+  base=$(basename "$kdk")
+  scp -i "$key" "${opts[@]}" -r "$kdk" "$runner@$ip:$upload_dir/"
+  if [ "$upload_dir/$base" != "$upload_kdk" ]; then
+    ssh -i "$key" "${opts[@]}" "$runner@$ip" "rm -rf $upload_kdk; mv $upload_dir/$base $upload_kdk"
+  fi
+fi
+[ -z "$template" ] || scp -i "$key" "${opts[@]}" "$template" "$runner@$ip:$upload_template"
+if [ -n "$password" ]; then
+  scp -i "$key" "${opts[@]}" "$password" "$runner@$ip:$upload_password"
+  ssh -i "$key" "${opts[@]}" "$runner@$ip" "chmod 600 $upload_password"
+fi
+echo "uploaded the install inputs to $runner@$ip ($upload_dir)"
+"""
+
+
 _CHECK_SNIPPETS = """\
 set -euo pipefail
 pvesm status --content snippets | awk 'NR > 1 { print $1 }' | grep -qx "$1" \\
@@ -131,6 +195,15 @@ def build_arm64_plan(config: Arm64Config) -> list[PlanStep]:
         steps.append(PlanStep(title="Pass the GPU to the runner",
                               argv=["qm", "set", vmid, "--hostpci0", f"{config.gpu_pci},pcie=1"], risk="warn"))
     steps.append(PlanStep(title="Start the runner", argv=["qm", "start", vmid]))
+    if (config.ipsw_file or config.bundle_file or config.ramdisk_file or config.restore_ambrosia_file
+            or config.cache_dir or config.aux_file or config.kdk_dir or config.template_file or config.password_file):
+        if config.ssh_public_key:
+            steps.append(_sh("Make the upload key", _MAKE_KEY, host_key_path(config.vmid), key_path(config.vmid),
+                             f"osx-next-arm64-{config.vmid}"))
+        steps.append(_sh("Upload the install inputs", _UPLOAD, vmid, host_key_path(config.vmid),
+                         config.ipsw_file, config.bundle_file, config.ramdisk_file, config.restore_ambrosia_file,
+                         config.cache_dir, config.aux_file, config.kdk_dir, config.template_file,
+                         config.password_file, "900"))
     return steps
 
 

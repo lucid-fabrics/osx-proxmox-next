@@ -51,6 +51,8 @@ class Ipsw:
         self.lock = threading.Lock()
         self.info = {i.filename: i for i in self.z.infolist()}
         self.data_off = {}
+        self.streams = {}
+        self.stream_pos = {}
 
     def size(self, name):
         return self.info[name].file_size
@@ -69,8 +71,18 @@ class Ipsw:
             with self.lock:
                 self.f.seek(self.data_off[name] + off)
                 return self.f.read(n)
-        data = self.z.read(name)
-        return data[off : off + n]
+        # Compressed members can be gigabytes. One ZipExtFile per member, seeked under the lock, keeps the
+        # whole member out of memory (the old self.z.read loaded it for every chunk request).
+        with self.lock:
+            stream = self.streams.get(name)
+            if stream is None:
+                stream = self.z.open(name)
+                self.streams[name] = stream
+            if self.stream_pos.get(name, 0) != off:
+                stream.seek(off)
+            data = stream.read(n)
+            self.stream_pos[name] = off + len(data)
+            return data
 
 
 # ------------------------------------------------------------------- image4 pieces
@@ -285,6 +297,14 @@ class Host:
     def send_file(self, conn, data, chunk=8192):
         for i in range(0, len(data), chunk):
             self.send(conn, {"FileData": data[i : i + chunk]}, binary=True)
+        self.send(conn, {"FileDataDone": True}, binary=True)
+
+    def send_ipsw_file(self, conn, path, chunk=128 * 1024):
+        """Stream a large IPSW member in chunks: SourceBootObjectV4 can be gigabytes, and holding it whole
+        alongside the guest RAM is what OOM-killed m2bhost on a 10 GiB runner."""
+        size = self.ipsw.size(path)
+        for off in range(0, size, chunk):
+            self.send(conn, {"FileData": self.ipsw.read(path, off, min(chunk, size - off))}, binary=True)
         self.send(conn, {"FileDataDone": True}, binary=True)
 
 
@@ -535,8 +555,14 @@ class Host:
                 data = self.ipsw.read("SystemVersion.plist")
             elif kind == "PersonalizedBootObjectV3":
                 data = self.personalize(ident, name, args)
+                conn = mux.connect(port) if port else st
+                self.send_file(conn, data)
+                return None
             else:
-                data = self.ipsw.read(ident["Manifest"][name]["Info"]["Path"])
+                path = ident["Manifest"][name]["Info"]["Path"]
+                conn = mux.connect(port) if port else st
+                self.send_ipsw_file(conn, path)
+                return None
             conn = mux.connect(port) if port else st
             self.send_file(conn, data)
             return None
@@ -583,27 +609,29 @@ def main():
     h.mark("driver_ok")
     usb = V.UsbHost(link)
     time.sleep(1.0)
-    for attempt in range(3):
+    def read_config():
+        dev = usb.get_descriptor(1, 0, 18)
+        ncfg = dev[17]
+        for i in range(ncfg):
+            hd = usb.get_descriptor(2, i, 9)
+            total = struct.unpack_from("<H", hd, 2)[0]
+            c = V.parse_config(usb.get_descriptor(2, i, total))
+            for itf in c["interfaces"]:
+                if (itf["class"], itf["subclass"], itf["protocol"]) == (0xFF, 0xFE, 2) and len(itf["endpoints"]) >= 2:
+                    return (c, itf)
+        raise SystemExit("no restore interface in the guest's USB configuration")
+
+    cfg = None
+    for attempt in range(6):
         try:
             usb.reset()
+            cfg = read_config()
             break
         except TimeoutError:
-            log("reset attempt %d timed out" % (attempt + 1))
-    else:
-        raise SystemExit("no reset response")
-    dev = usb.get_descriptor(1, 0, 18)
-    ncfg = dev[17]
-    cfg = None
-    for i in range(ncfg):
-        hd = usb.get_descriptor(2, i, 9)
-        total = struct.unpack_from("<H", hd, 2)[0]
-        c = V.parse_config(usb.get_descriptor(2, i, total))
-        for itf in c["interfaces"]:
-            if (itf["class"], itf["subclass"], itf["protocol"]) == (0xFF, 0xFE, 2) and len(itf["endpoints"]) >= 2:
-                cfg = (c, itf)
-                break
-        if cfg:
-            break
+            log("USB enumeration attempt %d timed out" % (attempt + 1))
+            time.sleep(0.5)
+    if cfg is None:
+        raise SystemExit("no USB configuration after 6 attempts")
     c, itf = cfg
     ep_in = [e["bEndpointAddress"] for e in itf["endpoints"] if e["bEndpointAddress"] & 0x80][0]
     ep_out = [e["bEndpointAddress"] for e in itf["endpoints"] if not e["bEndpointAddress"] & 0x80][0]

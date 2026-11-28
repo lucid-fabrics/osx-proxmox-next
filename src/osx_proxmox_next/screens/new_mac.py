@@ -245,7 +245,7 @@ class NewMacScreen(OsxScreen):
         if st.is_arm64:
             steps = [("Create the runner VM", f"VM {st.vmid.strip() or '?'}, about 2 min"),
                      ("The runner builds the beta", "about 10 min, on its own"),
-                     ("Install macOS", "not in this beta build yet")]
+                     ("Install macOS and boot the desktop", "automatic after the build")]
         else:
             steps = self._opencore_steps()
         self._paint_after(steps, pal)

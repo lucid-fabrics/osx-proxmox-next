@@ -13,6 +13,7 @@ from .arm64 import (
     DEFAULT_MEMORY_MB,
     DEFAULT_SOURCE_REF,
     DEFAULT_SOURCE_SHA256,
+    DEFAULT_GUEST_USER,
     DEFAULT_SOURCE_URL,
     Arm64Config,
     validate_arm64_config,
@@ -50,10 +51,21 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
         cmd.add_argument("--renderer-url", default="",
                          help="Renderer tarball to build from instead of the release one (with --renderer-sha256)")
         cmd.add_argument("--renderer-sha256", default="")
-        cmd.add_argument("--ipsw", default="", help="Path on the runner to the IPSW the Mac-free install restores")
+        cmd.add_argument("--ipsw", default="", help="Path on the runner to the IPSW (default: fetch 26B131 inside the runner)")
         cmd.add_argument("--aux", default="", help="Path on the runner to the aux image the restore boots with")
         cmd.add_argument("--ecid", default="", help="Machine uuid (ECID) the restore is personalized for, decimal")
         cmd.add_argument("--disk-target", default="", help="Path on the runner for the raw disk the install writes")
+        cmd.add_argument("--ipsw-file", default="", help="IPSW on this Proxmox host, uploaded to the runner")
+        cmd.add_argument("--bundle-file", default="", help="Ambrosia restore bundle on this Proxmox host, uploaded")
+        cmd.add_argument("--ramdisk-file", default="", help="Restore ramdisk im4p on this Proxmox host, uploaded")
+        cmd.add_argument("--restore-ambrosia-file", default="", help="Ambrosia restore build on this Proxmox host, uploaded")
+        cmd.add_argument("--cache-dir", default="", help="TSS cache directory on this Proxmox host, uploaded")
+        cmd.add_argument("--aux-file", default="", help="Aux image on this Proxmox host, uploaded to the runner")
+        cmd.add_argument("--kdk-dir", default="", help="KDK directory on this Proxmox host, uploaded to the runner")
+        cmd.add_argument("--template-file", default="", help="Golden LocalPolicy img4 on this Proxmox host, uploaded")
+        cmd.add_argument("--user", default=DEFAULT_GUEST_USER,
+                         help="First macOS account made by firstboot (default snap)")
+        cmd.add_argument("--password-file", default="", help="Password for that account on this Proxmox host, uploaded")
         if name == "plan":
             cmd.add_argument("--json", action="store_true", help="Print the plan as JSON")
         else:
@@ -73,6 +85,10 @@ def _config(args: argparse.Namespace) -> Arm64Config:
         gpu_pci=args.gpu_pci, source_url=args.source_url, source_ref=args.source_ref,
         source_sha256=args.source_sha256, renderer_url=args.renderer_url, renderer_sha256=args.renderer_sha256,
         ipsw=args.ipsw, aux=args.aux, ecid=args.ecid, disk_target=args.disk_target,
+        ipsw_file=args.ipsw_file, bundle_file=args.bundle_file, ramdisk_file=args.ramdisk_file,
+        restore_ambrosia_file=args.restore_ambrosia_file, cache_dir=args.cache_dir, aux_file=args.aux_file, kdk_dir=args.kdk_dir,
+        template_file=args.template_file, guest_user=args.user,
+        password_file=args.password_file,
     )
 
 
@@ -110,6 +126,20 @@ def run(args: argparse.Namespace) -> int:
     if issues:
         print("\n".join(f"ERROR: {issue}" for issue in issues))
         return 2
+    for label, path, want_dir in (("IPSW file", config.ipsw_file, False), ("Restore bundle", config.bundle_file, False),
+                                  ("Restore ramdisk", config.ramdisk_file, False),
+                                  ("Restore Ambrosia", config.restore_ambrosia_file, False),
+                                  ("Aux file", config.aux_file, False), ("KDK directory", config.kdk_dir, True),
+                                  ("TSS cache", config.cache_dir, True),
+                                  ("Policy template", config.template_file, False), ("Password file", config.password_file, False)):
+        if not path:
+            continue
+        if want_dir and not Path(path).is_dir():
+            print(f"ERROR: {label} does not exist or is not a directory: {path}")
+            return 2
+        if not want_dir and not Path(path).is_file():
+            print(f"ERROR: {label} does not exist or is not a file: {path}")
+            return 2
     steps = build_arm64_plan(config)
     if args.arm64_cmd == "plan":
         _print_plan(steps, args.json)

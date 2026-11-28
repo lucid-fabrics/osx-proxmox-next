@@ -352,13 +352,77 @@ cmd_install() {
   ok "installed: $disk"
 }
 
+# firstboot: restored disk to a running desktop. Reads vuid/nsih/spih/lpnh/rpnh from the disk and aux, builds the
+# LocalPolicy with mkpolicy-hack.py, runs the single-user offline pass, then one normal boot, waits for Dock/Finder,
+# captures a frame and prints the VNC tunnel. QEMU is left running on success. --dry-run writes nothing.
+cmd_firstboot() {
+  local disk="" aux="" ecid="" kdk="" template="" user=snap pw="" secs=1500 dry=0 work=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --disk) disk=${2:-}; shift ;;
+      --aux) aux=${2:-}; shift ;;
+      --ecid) ecid=${2:-}; shift ;;
+      --kdk) kdk=${2:-}; shift ;;
+      --template) template=${2:-}; shift ;;
+      --user) user=${2:-}; shift ;;
+      --password-file) pw=${2:-}; shift ;;
+      --secs) secs=${2:-}; shift ;;
+      --work) work=${2:-}; shift ;;
+      --dry-run) dry=1 ;;
+      -h|--help) usage; return 0 ;;
+      *) install_die "unknown option $1 (firstboot takes --disk --aux --ecid --kdk --template [--user] [--password-file] [--secs] [--dry-run])" ;;
+    esac
+    shift
+  done
+  [ -n "$disk" ] && [ -n "$aux" ] && [ -n "$ecid" ] && [ -n "$kdk" ] && [ -n "$template" ] \
+    || install_die "usage: firstboot --disk F --aux F --ecid N --kdk DIR --template FILE [--user U] [--password-file F] [--secs N] [--dry-run]"
+  install_path_ok "$disk" || install_die "--disk: an absolute path of letters, digits and . _ + @ / - (no ..)"
+  install_path_ok "$aux" || install_die "--aux: an absolute path of letters, digits and . _ + @ / - (no ..)"
+  install_path_ok "$kdk" || install_die "--kdk: an absolute path of letters, digits and . _ + @ / - (no ..)"
+  install_path_ok "$template" || install_die "--template: an absolute path of letters, digits and . _ + @ / - (no ..)"
+  # shellcheck disable=SC2015
+  [[ $ecid =~ ^[0-9]{1,20}$ ]] && python3 -I -c 'import sys; raise SystemExit(not 0 < int(sys.argv[1]) < 2**64)' "$ecid" \
+    || install_die "--ecid: decimal digits (at most 20), not 0 and below 2^64"
+  [[ $user =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || install_die "--user: lower case letters, digits, _ and -, at most 32, not starting with a digit or dash"
+  [[ $secs =~ ^[0-9]+$ ]] || install_die "--secs: a whole number of seconds (0 = no desktop timeout)"
+  [ -f "$disk" ] || install_die "no such disk: $disk"
+  [ -f "$aux" ] || install_die "no such aux image: $aux"
+  [ -e "$kdk" ] || install_die "no such KDK: $kdk"
+  [ -f "$template" ] || install_die "no such policy template: $template"
+  if [ -n "$pw" ]; then install_path_ok "$pw" || install_die "--password-file: an absolute path of letters, digits and . _ + @ / - (no ..)"; [ -f "$pw" ] || install_die "no such password file: $pw"; fi
+  if [ -n "$work" ]; then install_path_ok "$work" || install_die "--work: an absolute path of letters, digits and . _ + @ / - (no ..)"; fi
+  if [ "$dry" = 1 ]; then
+    echo "firstboot plan (dry run, nothing is written)"
+    echo "  disk:     $disk"
+    echo "  aux:      $aux (its bank 0 nonces become lpnh/rpnh; vuid, nsih and spih come from the disk)"
+    echo "  ecid:     $ecid"
+    echo "  kdk:      $kdk (AppleVPBootPolicy kext)"
+    echo "  template: $template (golden LocalPolicy img4)"
+    echo "  user:     $user (password from ${pw:-the default snaplab})"
+    echo "  work:     ${work:-$HOME_DIR/firstboot}"
+    echo "  1. build the LocalPolicy with lib/install/mkpolicy-hack.py"
+    echo "  2. single-user offline pass: persist-sshd, the $user account, autologin (bound ${secs}s)"
+    echo "  3. normal boot: prefix QEMU, memfd RAM, NBD overlay, Kernel patch, local-policy.img4, KeepAppleGfx"
+    echo "  4. wait for Dock and Finder, capture a screendump, print the VNC tunnel; QEMU stays up"
+    echo "QEMU:"
+    echo "  single: MODE=single QEMU=<single qemu> RAM=6G disk=$disk aux=$aux"
+    echo "  desktop: MODE=desktop QEMU=$PREFIX/bin/qemu-system-aarch64 RAM=6G disk=$disk aux=$aux VNC_PORT=5900"
+    return 0
+  fi
+  export SNAPINTOSH_HOME="$HOME_DIR" SNAPINTOSH_PREFIX="$PREFIX" SNAPINTOSH_LIB="$LIB"
+  bash "$LIB/install/firstboot/run.sh" --disk "$disk" --aux "$aux" --ecid "$ecid" --kdk "$kdk" \
+    --template "$template" --user "$user" --secs "$secs" ${work:+--work "$work"} ${pw:+--password-file "$pw"}
+}
+
 usage() {
   cat <<'EOF'
 usage: snapintosh <command> [options]
 
   check-host                 CPU, RAM, disk, Vulkan device and extensions, udmabuf limits
-  build [--only X] [-j N] [--pgo]
+  build [--only X] [-j N] [--pgo] [--m2b]
                              build reims-vgpu + metal2vulkan, the QEMU fork and Ambrosia (X: reims, qemu, ambrosia, mesa).
+                             --m2b adds patches/qemu-m2b to the QEMU build: the vmapple USB device and rnd property the
+                             Mac-free install and firstboot need.
                              --pgo (opt-in, off by default): build QEMU with profile-guided optimisation and full LTO. It trains on a boot
                              of your golden, so it needs a working build and a golden first and takes about 50 minutes on 6 cores, up to 4 h at its bounds (README)
   build --deps [--apt]       print the Debian/Ubuntu packages and the cross toolchain the build needs (--apt: package names only, one per line)
@@ -391,6 +455,11 @@ usage: snapintosh <command> [options]
   resume NAME [options]      restore a snapshot
   install --ipsw F --aux F --ecid N --disk F [--policy F] [--cache D] [--tss] [--dry-run]
                              restore macOS into a raw disk with no Mac, over the virtio USB restore host (lib/install).
+  firstboot --disk F --aux F --ecid N --kdk DIR --template FILE [--user U] [--password-file F] [--secs N] [--dry-run]
+                             finish a restored disk, no Mac and no manual step: build the LocalPolicy from the disk and aux,
+                             run the single-user offline pass, boot the desktop (prefix QEMU, memfd, NBD, Kernel patch,
+                             KeepAppleGfx), wait for Dock/Finder, capture a frame and print the VNC tunnel. QEMU is left
+                             running on success. --dry-run prints the plan and writes nothing.
                              --dry-run prints the restore plan and the QEMU command and writes nothing. 0 is installed,
                              3 is install-pending (restore done, first-boot LocalPolicy still needed: --policy),
                              other is a failure. --tss allows the requests to Apple's TSS; the first boot and the
@@ -628,7 +697,8 @@ cmd_build_deps() {
 # no longer changes the binary: the same sources and toolchain give the same md5 on any package set.
 sudo apt install build-essential git curl ca-certificates python3 python3-venv pkg-config ninja-build meson cmake \
   clang lld llvm libglib2.0-dev libpixman-1-dev libslirp-dev libfdt-dev libgnutls28-dev libvulkan-dev \
-  vulkan-tools mesa-vulkan-drivers libzstd-dev zlib1g-dev flex bison xz-utils qemu-utils cpio \
+  vulkan-tools mesa-vulkan-drivers libzstd-dev zlib1g-dev flex bison xz-utils qemu-utils cpio gdisk libfsapfs-utils \
+  python3-cryptography \
   libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev
 # Rust: the pinned reims-vgpu tree selects nightly-2026-11-03 through rust-toolchain.toml
 curl -sSf https://sh.rustup.rs | sh
@@ -646,7 +716,7 @@ EOF
 # to the working tree (git apply, no commits), so QEMU's version string stays the one of the plain tag and the build is the same
 # bytes wherever it runs. A tree that already carries exactly this series is left alone (its mtimes keep make from rebuilding).
 clone_pin() {
-  local name=$1 repo=$2 ref=$3 dest=$4 pdir=${5:-} f stamp
+  local name=$1 repo=$2 ref=$3 dest=$4 pdir=${5:-} f stamp dirs
   [ -n "$repo" ] || die "${name}_REPO is not set: export ${name}_REPO=file:///path/to/clone (or a https or ssh URL) or put it in $CONF"
   # a pin is a full commit id: a tag or branch name can move, an abbreviation can become ambiguous
   [ "${#ref}" -eq 40 ] && [ -z "$(printf '%s' "$ref" | tr -d '0-9a-f')" ] || die "$name: the pin must be a full 40 digit commit id, got '$ref'"
@@ -663,15 +733,21 @@ clone_pin() {
     || git -C "$dest" fetch --quiet origin 2>/dev/null || true
   git -C "$dest" cat-file -e "$ref^{commit}" 2>/dev/null || die "$name: commit $ref is not in $repo"
   if [ -n "$pdir" ]; then
-    stamp="$ref $(cat "$pdir"/*.patch | sha256sum | cut -c1-64)"
+    dirs=$pdir
+    # The Mac-free install needs the vmapple-virtio-usb-pci device and the rnd property. --m2b adds that series for QEMU only.
+    if [ "$name" = QEMU ] && [ "${QEMU_M2B:-0}" = 1 ]; then dirs="$dirs $ROOT/$QEMU_M2B_SERIES"; fi
+    stamp="$ref $(for f in $dirs; do cat "$f"/*.patch; done | sha256sum | cut -c1-64)"
     if [ "$(cat "$dest/.git/snapintosh-patched" 2>/dev/null)" != "$stamp" ]; then
       rm -f "$dest/.git/snapintosh-patched"
       git -C "$dest" checkout --quiet --force --detach "$ref" && git -C "$dest" clean -fdxq
-      for f in "$pdir"/*.patch; do git -C "$dest" apply --whitespace=nowarn "$f" || die "$name: patch does not apply: $f"; done
+      for f in $(for d in $dirs; do printf '%s\n' "$d"/*.patch; done); do
+        git -C "$dest" apply --whitespace=nowarn "$f" || die "$name: patch does not apply: $f"
+      done
       printf '%s\n' "$stamp" > "$dest/.git/snapintosh-patched"
     fi
     [ "$(git -C "$dest" rev-parse HEAD)" = "$ref" ] || die "$name: the checkout is at $(git -C "$dest" rev-parse HEAD), not at the pin $ref"
-    set -- "$pdir"/*.patch
+    # shellcheck disable=SC2046  # one argument per patch path, deliberately split on the newlines
+    set -- $(for d in $dirs; do printf '%s\n' "$d"/*.patch; done)
     ok "$name at $(git -C "$dest" rev-parse --short=12 HEAD) plus $# patches"
     return 0
   fi
@@ -1191,6 +1267,7 @@ deps_apt_names() {
        on { l = $0; more = (l ~ /\\$/); sub(/\\$/, "", l); print l; if (!more) on = 0 }' | tr -s ' ' '\n' | sed '/^$/d' | sort -u
 }
 
+QEMU_M2B=${QEMU_M2B:-0}
 cmd_build() {
   local only=all pgo=0 deps=0 apt_only=0
   JOBS=$(nproc)
@@ -1199,6 +1276,7 @@ cmd_build() {
       --deps) deps=1 ;;
       --apt) apt_only=1 ;;
       --pgo) pgo=1 ;;
+      --m2b) QEMU_M2B=1 ;;
       --only) only=$2; shift ;;
       -j) JOBS=$2; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -1945,6 +2023,7 @@ case $sub in
   resume) cmd_resume "$@" ;;
   bench) cmd_bench "$@" ;;
   install) cmd_install "$@" ;;
+  firstboot) cmd_firstboot "$@" ;;
   status) cmd_status "$@" ;;
   ""|-h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;

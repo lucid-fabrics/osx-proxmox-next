@@ -18,7 +18,7 @@ def good(**kw) -> Arm64Config:
 def test_the_defaults_are_valid_and_sized_for_the_beta():
     cfg = good()
     assert validate_arm64_config(cfg) == []
-    assert (cfg.cores, cfg.memory_mb, cfg.disk_gb, cfg.vlan, cfg.cpu_units) == (6, 8192, 120, 0, 0)
+    assert (cfg.cores, cfg.memory_mb, cfg.disk_gb, cfg.vlan, cfg.cpu_units) == (10, 12288, 120, 0, 0)
     assert cfg.gpu_pci == "" and cfg.ssh_public_key == ""
 
 

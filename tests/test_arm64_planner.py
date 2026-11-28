@@ -46,7 +46,7 @@ def test_the_plan_creates_a_tagged_runner_and_starts_it_last():
         "Start the runner"]
     create = by_title(steps, "Create the runner VM").argv
     assert create[:5] == ["qm", "create", "478", "--name", "macos27-runner"]
-    assert create[create.index("--cores") + 1] == "6" and create[create.index("--memory") + 1] == "8192"
+    assert create[create.index("--cores") + 1] == "10" and create[create.index("--memory") + 1] == "12288"
     assert create[create.index("--tags") + 1] == ARM64_TAG and "--cpuunits" not in create
     assert create[create.index("--net0") + 1] == "virtio,bridge=vmbr0"
     assert steps[-1].argv == ["qm", "start", "478"]
@@ -140,8 +140,8 @@ def test_the_setup_script_fetches_the_ref_and_runs_snapintosh_as_the_runner_user
     script = render_setup_script(cfg(source_ref="a" * 40))
     assert f"archive/{'a' * 40}.tar.gz" in script
     assert f"{INSTALL_DIR}/snapintosh build --deps --apt" in script
-    assert "build -j" in script and "build --only mesa" in script and "install" in script
-    assert STATUS_PATH in script and LOG_PATH in script and "install-pending" in script
+    assert "build --m2b -j" in script and "build --only mesa" in script and "install" in script
+    assert STATUS_PATH in script and LOG_PATH in script and "firstboot" in script and "ready" in script
     assert script.count("runuser -l snapintosh") == 1   # one helper, every call goes through it
 
 
@@ -150,8 +150,8 @@ def test_the_install_inputs_become_arguments_and_the_script_stays_bash():
     script = render_setup_script(cfg(ipsw="/var/lib/ipsw/a.ipsw", aux="/var/lib/vm/aux.img",
                                      ecid="4533301000242790675", disk_target="/var/lib/vm/install.raw"))
     assert ("snapintosh install --ipsw /var/lib/ipsw/a.ipsw --aux /var/lib/vm/aux.img "
-            "--disk /var/lib/vm/install.raw --ecid 4533301000242790675 || rc=$?") in script
-    assert "snapintosh install || rc=$?" in render_setup_script(cfg())
+            "--disk /var/lib/vm/install.raw --ecid 4533301000242790675 --tss || rc=$?") in script
+    assert "snapintosh install --tss || rc=$?" in render_setup_script(cfg())
     check = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
     assert check.returncode == 0, check.stderr
 
@@ -191,7 +191,7 @@ def test_the_setup_script_is_valid_bash():
 def test_no_secret_reaches_the_cloud_init_file():
     text = render_cloud_init(cfg(ssh_public_key=KEY))
     assert KEY not in text and "AAAAC3" not in text   # the key goes through qm --sshkeys, not the snippet
-    for word in ("password", "passwd", "chpasswd", "vnc"):
+    for word in ("snaplab", "chpasswd", "vncpass"):
         assert word not in text.lower().replace("snapintosh", "")
 
 
@@ -267,7 +267,7 @@ def test_the_renderer_override_reaches_the_build_only_when_set():
     assert "RENDERER_URL" not in plain
     custom = render_setup_script(cfg(renderer_url="http://192.168.1.50:8000/r.tar.gz", renderer_sha256=RENDERER_SHA))
     assert f"as_user env RENDERER_URL=http://192.168.1.50:8000/r.tar.gz RENDERER_SHA256={RENDERER_SHA} " in custom
-    assert "build -j" in custom.split("RENDERER_SHA256=")[1]
+    assert "build --m2b -j" in custom.split("RENDERER_SHA256=")[1]
 
 
 def test_a_cached_debian_image_that_is_out_of_date_is_replaced(tmp_path):
@@ -317,3 +317,64 @@ def test_the_tag_check_comes_before_anything_that_changes_the_vm():
     steps = build_arm64_destroy_plan(478)
     assert steps[0].risk == "safe" and steps[0].argv[0] == "bash"
     assert all(s.argv[0] != "qm" for s in steps[:1])
+
+
+def test_the_setup_script_waits_for_uploads_fetches_an_absent_ipsw_and_finishes_firstboot():
+    script = render_setup_script(cfg(ipsw_file="/host/restore.ipsw", aux_file="/host/aux.img", kdk_dir="/host/kdk",
+                                     template_file="/host/tpl.img4", password_file="/host/pw", ecid="42",
+                                     guest_user="snap"))
+    assert "wait_for \"$firstboot_aux\" \"aux image\"" in script
+    assert "compgen -G \"$snap_home/dl/*.ipsw\"" in script and "--build 26B131" in script
+    assert "install --ipsw /home/snapintosh/osx-next-arm64/restore.ipsw" in script
+    assert "--aux /home/snapintosh/osx-next-arm64/aux.img --ecid 42 --tss || rc=$?" in script
+    assert "firstboot --disk /home/snapintosh/.local/share/snapintosh/vm/install.raw" in script
+    assert "--kdk /home/snapintosh/osx-next-arm64/kdk" in script
+    assert "--template /home/snapintosh/osx-next-arm64/golden-policy.img4" in script
+    assert "--user snap --password-file /home/snapintosh/osx-next-arm64/password" in script
+    assert "say ready" in script
+
+
+def test_a_firstboot_without_local_kdk_inputs_stops_after_install_not_at_ready():
+    from osx_proxmox_next.arm64_cloudinit import firstboot_args
+    script = render_setup_script(cfg())
+    assert firstboot_args(cfg()) == ""
+    assert "say installed" in script and "say ready" in script   # both branches exist; the kdk branch is empty
+    assert "wait_for \"$firstboot_aux\" \"aux image\"" in script
+
+
+def test_the_planner_uploads_the_local_inputs_after_the_runner_starts():
+    steps = build_arm64_plan(cfg(aux_file="/host/aux.img", kdk_dir="/host/kdk", template_file="/host/tpl.img4",
+                                 password_file="/host/pw"))
+    titles = [s.title for s in steps]
+    assert titles.index("Start the runner") < titles.index("Upload the install inputs")
+    upload = by_title(steps, "Upload the install inputs").argv
+    assert upload[4:] == ["478", host_key_path(478), "", "", "", "", "", "/host/aux.img", "/host/kdk",
+                          "/host/tpl.img4", "/host/pw", "900"]
+    assert "network-get-interfaces" in upload[2] and "qm guest cmd" in upload[2]
+    assert "scp" in upload[2] and "runner=snapintosh" in upload[2]
+    assert "upload_dir=/home/snapintosh/osx-next-arm64" in upload[2]
+    assert "$upload_ipsw" in upload[2] and "$upload_aux" in upload[2]
+    assert "$upload_kdk" in upload[2] and "$upload_template" in upload[2]
+
+
+def test_a_user_key_with_uploads_gets_a_separate_upload_key_without_overwriting_the_login_key():
+    steps = build_arm64_plan(cfg(ssh_public_key=KEY, aux_file="/host/aux.img", kdk_dir="/host/kdk",
+                                 template_file="/host/tpl.img4"))
+    assert "Make the upload key" in [s.title for s in steps]
+    assert by_title(steps, "Set up cloud-init").argv[by_title(steps, "Set up cloud-init").argv.index("--sshkeys") + 1] == key_path(478)
+
+
+@pytest.mark.parametrize("bad", [
+    dict(aux_file="relative.img"), dict(kdk_dir="/host/kdk"), dict(template_file="/host/tpl"),
+    dict(guest_user="Snap"), dict(guest_user="9snap"),
+])
+def test_the_new_local_inputs_and_guest_user_are_validated(bad):
+    with pytest.raises(ValueError, match="Invalid arm64 config"):
+        build_arm64_plan(cfg(**bad))
+
+
+def test_the_defaults_are_the_supported_guest_user_and_snaplab_password():
+    from osx_proxmox_next.arm64 import DEFAULT_GUEST_PASSWORD, DEFAULT_GUEST_USER
+    assert DEFAULT_GUEST_USER == "snap" and DEFAULT_GUEST_PASSWORD == "snaplab"
+    config = cfg()
+    assert config.guest_user == "snap" and config.aux_file == "" and config.kdk_dir == ""

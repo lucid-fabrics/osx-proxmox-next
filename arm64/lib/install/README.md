@@ -15,9 +15,9 @@ arguments or by defaults under the runner's snapintosh data directory. `snapinto
 4. The guest reports a final `StatusMsg`. `Status 0` with no `AMRError` is a finished restore.
 
 Exit status: `0` installed, `3` install-pending (the restore finished, but the first-boot LocalPolicy is
-not there yet; build it with `mkpolicy-hack.py` and pass `--policy FILE`), `2` a bad input, anything else
-the restore host's own status. A live run on 2026-11-26 restored macOS 27.2.1 to a fresh disk with
-`Status 0` and `AMRError 0`; the disk then booted to a `snap` console session.
+not there yet; build it with `mkpolicy-hack.py` and pass `--policy FILE`, or run `snapintosh firstboot`),
+`2` a bad input, anything else the restore host's own status. A live run on 2026-11-26 restored macOS 27.2.1
+to a fresh disk with `Status 0` and `AMRError 0`; the disk then booted to a `snap` console session.
 
 ## Inputs
 
@@ -40,21 +40,22 @@ the restore host's own status. A live run on 2026-11-26 restored macOS 27.2.1 to
 
 ## QEMU with the install patches
 
-`patches/qemu-m2b/` has three patches that apply on top of `patches/qemu/` (see `pins.env`). `snapintosh
-build` does not apply them yet, so its release-v2 md5s stay the same. To get the USB device:
+`patches/qemu-m2b/` has three patches that apply on top of `patches/qemu/` (see `pins.env`). Build with them
+with `snapintosh build --m2b`; the one-command cloud-init runs `build --m2b` so the runner has the USB device
+and the rnd property. A plain build keeps the release-v2 md5s. To apply them by hand to a QEMU tree:
 
 ```sh
-git clone "$QEMU_REPO" qemu && cd qemu && git checkout "$QEMU_REF"
 git am ../arm64/patches/qemu/*.patch ../arm64/patches/qemu-m2b/*.patch
-./configure --target-list=aarch64-softmmu --enable-pvg --enable-slirp ... && make -j"$(nproc)"
 ```
 
-## What remains
+## firstboot
 
-The restore is proven in the lab; this packaged path has not run end to end. After it runs, the first boot
-still needs the LocalPolicy: `mkpolicy-hack.py` builds one with the restore's vuid, nsih and a boot nonce
-from the restored aux, signed with `hackkey.pem`, for the patched `AppleVPBootPolicy` kext. Then a normal
-Ambrosia boot, Setup Assistant, `make-disk golden`.
+`snapintosh firstboot` finishes the restored disk without a Mac: it reads `vuid`, `nsih` and `spih` from the
+restored disk and `lpnh`/`rpnh` from bank 0 of the restored aux, builds the LocalPolicy with
+`mkpolicy-hack.py`, runs the single-user offline pass (sshd job, account, autologin), boots the desktop with
+the local policy and the Kernel patch, waits for Dock/Finder and prints the VNC tunnel. The KDK and the
+golden template are runtime inputs; keep them on the runner and out of this repository. The one-command
+planner uploads them from the Proxmox host, then runs firstboot after the restore.
 
 ## Licenses
 

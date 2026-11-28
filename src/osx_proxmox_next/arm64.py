@@ -12,13 +12,30 @@ from dataclasses import dataclass
 __all__ = [
     "ARM64_LABEL", "ARM64_TAG", "DEBIAN_IMAGE_URL", "DEBIAN_SUMS_URL", "DEFAULT_SOURCE_REF", "DEFAULT_SOURCE_SHA256",
     "DEFAULT_SOURCE_URL", "Arm64Config", "KEY_DIR",
-    "DEFAULT_CORES", "DEFAULT_DISK_GB", "DEFAULT_MEMORY_MB", "MIN_CORES", "MIN_DISK_GB", "MIN_MEMORY_MB",
-    "RUNNER_USER", "validate_arm64_config",
+    "DEFAULT_CORES", "DEFAULT_DISK_GB", "DEFAULT_GUEST_PASSWORD", "DEFAULT_GUEST_USER", "DEFAULT_MEMORY_MB",
+    "INSTALL_AUX", "INSTALL_DISK", "MIN_CORES", "MIN_DISK_GB", "MIN_MEMORY_MB",
+    "RUNNER_USER", "UPLOAD_AUX", "UPLOAD_BUNDLE", "UPLOAD_CACHE", "UPLOAD_DIR", "UPLOAD_IPSW", "UPLOAD_KDK", "UPLOAD_PASSWORD",
+    "UPLOAD_RAMDISK", "UPLOAD_RESTORE_AMBROSIA", "UPLOAD_TEMPLATE",
+    "validate_arm64_config",
 ]
 
 ARM64_LABEL = "macOS 27 arm64 (beta)"
 ARM64_TAG = "osx-next-arm64"        # the Proxmox tag the runner VM carries
 RUNNER_USER = "snapintosh"
+DEFAULT_GUEST_USER = "snap"
+DEFAULT_GUEST_PASSWORD = "snaplab"
+UPLOAD_DIR = f"/home/{RUNNER_USER}/osx-next-arm64"    # local Apple inputs the Proxmox host copies in before the install
+UPLOAD_AUX = f"{UPLOAD_DIR}/aux.img"
+UPLOAD_IPSW = f"{UPLOAD_DIR}/restore.ipsw"
+UPLOAD_BUNDLE = f"{UPLOAD_DIR}/restore.cpio"
+UPLOAD_RAMDISK = f"{UPLOAD_DIR}/restore-ramdisk.im4p"
+UPLOAD_RESTORE_AMBROSIA = f"{UPLOAD_DIR}/ambrosia-r4.bin"
+UPLOAD_CACHE = f"{UPLOAD_DIR}/tsscache"
+UPLOAD_KDK = f"{UPLOAD_DIR}/kdk"
+UPLOAD_TEMPLATE = f"{UPLOAD_DIR}/golden-policy.img4"
+UPLOAD_PASSWORD = f"{UPLOAD_DIR}/password"
+INSTALL_AUX = f"/home/{RUNNER_USER}/.local/share/snapintosh/vm/aux.img"
+INSTALL_DISK = f"/home/{RUNNER_USER}/.local/share/snapintosh/vm/install.raw"
 
 DEBIAN_IMAGE_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
 DEBIAN_SUMS_URL = "https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
@@ -33,9 +50,9 @@ DEFAULT_SOURCE_SHA256 = "2f5a6cdad7067cb484e5612ccec86db5fb9bacd0ae07b344c3fdd3d
 
 MIN_VMID = 100
 MAX_VMID = 999999
-DEFAULT_CORES = 6
+DEFAULT_CORES = 10
 MIN_CORES = 4
-DEFAULT_MEMORY_MB = 8192
+DEFAULT_MEMORY_MB = 12288
 MIN_MEMORY_MB = 8192
 DEFAULT_DISK_GB = 120
 MIN_DISK_GB = 100
@@ -50,6 +67,7 @@ _URL_RE = re.compile(r"https?://[A-Za-z0-9._\-]+(:[0-9]{1,5})?/[A-Za-z0-9._/\-{}
 _PCI_RE = re.compile(r"([0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]")
 _SSH_KEY_RE = re.compile(r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}( [A-Za-z0-9_.@\-]{1,64})?")
 _PATH_RE = re.compile(r"/[A-Za-z0-9._@+/\-]+")
+_USER_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 _ECID_RE = re.compile(r"[0-9]{1,20}")
 
 
@@ -71,10 +89,20 @@ class Arm64Config:
     source_sha256: str = DEFAULT_SOURCE_SHA256  # sha256 of the archive at source_ref; the runner refuses any other file
     renderer_url: str = ""           # empty = the release tarball named in pins.env; a build from a local copy sets both
     renderer_sha256: str = ""
-    ipsw: str = ""                   # path on the runner to the IPSW the Mac-free install restores
+    ipsw: str = ""                   # path on the runner to the IPSW the Mac-free install restores (empty = fetch 26B131)
     aux: str = ""                    # path on the runner to the aux image the restore boots with
     ecid: str = ""                   # the machine uuid (ECID) the restore is personalized for, decimal
     disk_target: str = ""            # path on the runner for the raw disk the restore writes
+    ipsw_file: str = ""              # IPSW on this Proxmox host, uploaded to the runner (empty and no ipsw = fetch)
+    bundle_file: str = ""            # Ambrosia restore bundle on this Proxmox host, uploaded to the runner
+    ramdisk_file: str = ""           # restore ramdisk im4p on this Proxmox host, uploaded to the runner
+    restore_ambrosia_file: str = ""  # Ambrosia build with restore mode on this Proxmox host, uploaded to the runner
+    cache_dir: str = ""              # TSS cache directory on this Proxmox host, uploaded to the runner
+    aux_file: str = ""               # aux image on this Proxmox host, uploaded to the runner
+    kdk_dir: str = ""                # KDK directory on this Proxmox host, uploaded to the runner
+    template_file: str = ""          # golden LocalPolicy template on this Proxmox host, uploaded to the runner
+    guest_user: str = DEFAULT_GUEST_USER   # the first macOS account, made by firstboot
+    password_file: str = ""          # password for that account on this Proxmox host, uploaded to the runner
 
     @property
     def archive_url(self) -> str:
@@ -125,4 +153,15 @@ def validate_arm64_config(config: Arm64Config) -> list[str]:
             issues.append(f"{label} must be an absolute path of letters, digits and . _ + @ / - (no ..).")
     if config.ecid and (not _ECID_RE.fullmatch(config.ecid) or not 0 < int(config.ecid) < 2**64):
         issues.append("ECID must be decimal digits (1 to 20) and fit in 64 bits.")
+    for label, value in (("IPSW file", config.ipsw_file), ("Restore bundle", config.bundle_file),
+                         ("Restore ramdisk", config.ramdisk_file), ("Restore Ambrosia", config.restore_ambrosia_file),
+                         ("Aux file", config.aux_file), ("KDK directory", config.kdk_dir), ("TSS cache", config.cache_dir),
+                         ("Policy template", config.template_file), ("Password file", config.password_file)):
+        if value and (not _PATH_RE.fullmatch(value) or ".." in value):
+            issues.append(f"{label} must be an absolute path of letters, digits and . _ + @ / - (no ..).")
+    if bool(config.kdk_dir) != bool(config.template_file):
+        issues.append("KDK directory and policy template are given together or not at all.")
+    if not _USER_RE.fullmatch(config.guest_user):
+        issues.append("Guest user must be a short name: lower case letters, digits, _ and -, at most 32, "
+                      "not starting with a digit or dash.")
     return issues

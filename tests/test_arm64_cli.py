@@ -145,3 +145,59 @@ def test_the_install_inputs_reach_the_setup_script(capsys):
 def test_a_bad_ecid_is_named_and_exits_2(capsys):
     assert run_cli([*BASE, "--ecid", "abc"]) == 2
     assert "ECID" in capsys.readouterr().out
+
+
+def _apple_inputs(tmp_path):
+    ipsw = tmp_path / "restore.ipsw"
+    ipsw.write_text("ipsw")
+    aux = tmp_path / "aux.img"
+    aux.write_text("aux")
+    kdk = tmp_path / "kdk"
+    kdk.mkdir()
+    template = tmp_path / "golden-policy.img4"
+    template.write_text("tpl")
+    password = tmp_path / "password"
+    password.write_text("secret")
+    return ipsw, aux, kdk, template, password
+
+
+def test_the_local_apple_inputs_are_uploaded_after_the_runner_starts(tmp_path, capsys):
+    ipsw, aux, kdk, template, password = _apple_inputs(tmp_path)
+    assert run_cli([*BASE, "--json", "--ipsw-file", str(ipsw), "--aux-file", str(aux), "--kdk-dir", str(kdk),
+                    "--template-file", str(template), "--password-file", str(password),
+                    "--ecid", "42", "--user", "snap"]) == 0
+    steps = json.loads(capsys.readouterr().out)
+    titles = [step["title"] for step in steps]
+    assert titles.index("Start the runner") < titles.index("Upload the install inputs")
+    upload = next(step for step in steps if step["title"] == "Upload the install inputs")["argv"]
+    assert upload[4:] == ["478", "/root/.ssh/osx-next-arm64-478", str(ipsw), "", "", "", "", str(aux), str(kdk),
+                          str(template), str(password), "900"]
+    script = next(step for step in steps if step["title"] == "Write the cloud-init file")["argv"][4]
+    assert "--tss" in script and "firstboot --disk" in script and "--user snap" in script
+
+
+def test_a_missing_local_input_is_named(tmp_path, capsys):
+    _, aux, _, template, _ = _apple_inputs(tmp_path)
+    assert run_cli([*BASE, "--aux-file", str(aux), "--template-file", str(template)]) == 2
+    out = capsys.readouterr().out
+    assert "KDK directory and policy template" in out
+
+
+def test_an_aux_file_that_is_not_there_is_named(tmp_path, capsys):
+    assert run_cli([*BASE, "--aux-file", str(tmp_path / "nope.img")]) == 2
+    assert "Aux file does not exist" in capsys.readouterr().out
+
+
+def test_a_kdk_file_where_a_directory_belongs_is_named(tmp_path, capsys):
+    _, aux, kdk, template, _ = _apple_inputs(tmp_path)
+    file_kdk = tmp_path / "kdk-file"
+    file_kdk.write_text("x")
+    assert run_cli([*BASE, "--kdk-dir", str(file_kdk), "--template-file", str(template)]) == 2
+    assert "KDK directory" in capsys.readouterr().out
+
+
+def test_a_bad_guest_user_is_refused(tmp_path, capsys):
+    _, aux, kdk, template, _ = _apple_inputs(tmp_path)
+    assert run_cli([*BASE, "--aux-file", str(aux), "--kdk-dir", str(kdk), "--template-file", str(template),
+                    "--user", "Snap"]) == 2
+    assert "Guest user" in capsys.readouterr().out

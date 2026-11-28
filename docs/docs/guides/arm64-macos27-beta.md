@@ -26,15 +26,70 @@ Every runner gets a login: the wizard makes an ed25519 key on the Proxmox host (
 
 ```
 host     x86-64 Proxmox VE 8.1 or newer, 6 free cores or more (16 threads is the comfortable size)
-RAM      runner 8 GB at least (the default), 24 GB or more on the host is better
+RAM      runner 12 GB with a 6 GB guest (10 GB is the floor; the restore can OOM there); 24 GB or more on the host is better
 disk     120 GB on the storage you pick (build tree, the macOS disk, the translation cache, one snapshot)
+Apple    an aux image, a KDK directory and a golden LocalPolicy img4, passed as local files (see below)
 storage  a storage with the Snippets content type (the local one by default), for the runner's cloud-init file
 network  the runner downloads from cloud.debian.org, github.com, gitlab.com and Apple's servers
 ```
 
-## Install status in this beta build
+## One command, end to end
 
-Creating the runner and building the stack works. **The Mac-free install of macOS itself is not in this beta build yet.** After the build the runner reports `install-pending` (read `/var/lib/osx-next-arm64/status` inside the runner, the log is `/var/log/osx-next-arm64.log`). Until the install lands, the target is useful for trying the build on your host and for checking that the runner is set up correctly.
+The runner no longer stops at `install-pending`. One `arm64 apply --execute` creates the VM, builds the stack (including the QEMU USB patches), restores macOS, runs the offline firstboot pass, boots the desktop and writes `ready` only after Dock and Finder answer.
+
+Supply the Apple inputs on the Proxmox host. They are uploaded to the runner over the generated runner key; nothing Apple is stored in this repository:
+
+```
+osx-next-cli arm64 apply --vmid 310 --name macos27-runner --storage local-lvm \
+  --cores 10 --memory 12288 --disk 120 --bridge vmbr1 \
+  --bundle-file /local-4tb/macos27/artifacts/restore.cpio \
+  --ramdisk-file /local-4tb/macos27/artifacts/restore-ramdisk.im4p \
+  --restore-ambrosia-file /local-4tb/macos27/artifacts/ambrosia-r4.bin \
+  --cache-dir /local-4tb/macos27/artifacts/tsscache \
+  --aux-file /local-4tb/macos27/cfg/aux.img \
+  --kdk-dir  /local-4tb/macos27/artifacts/kdk \
+  --template-file /local-4tb/macos27/artifacts/golden-policy.img4 \
+  --ecid 4533301000242790675 --password-file /local-4tb/macos27/password \
+  --execute
+```
+
+- `--bundle-file`, `--ramdisk-file` and `--restore-ambrosia-file` are the Ambrosia restore bundle, the restore ramdisk from the IPSW image set and Ambrosia's restore-mode build. The build produces the desktop Ambrosia; these three are runtime inputs.
+- `--cache-dir` is the TSS cache the restore reuses; without it the live Apple TSS answers can be rejected with `failed to request root ticket`.
+- `--aux-file` is the aux image the restore boots with. The copy the restore writes is preferred when present, so the policy nonces match the disk.
+- `--kdk-dir` is the KDK directory; the `AppleVPBootPolicy` kext is found inside it.
+- `--template-file` is a golden LocalPolicy img4 for the same macOS build.
+- `--password-file` is the first macOS account's password. `--user` names the account (`snap` by default).
+- `--ipsw-file` copies an IPSW from the Proxmox host to the runner; that is the fastest path when the file is already there. Without it (and without a runner path in `--ipsw`) the runner runs `snapintosh fetch --build 26B131` before the restore.
+- The planner polls `qm guest cmd <vmid> network-get-interfaces` through the guest agent, then copies the inputs with `scp` and the host key at `/root/.ssh/osx-next-arm64-<vmid>`. Enable the guest agent (the plan does) and give the runner a reachable bridge.
+
+Progress is in `/var/lib/osx-next-arm64/status` inside the runner and in `/var/log/osx-next-arm64.log`. The values are `fetching-source`, `building`, `waiting-for-inputs`, `fetching-ipsw`, `installing-macos`, `firstboot` and finally `ready`; a failed step says `failed: <command>`.
+
+## Standalone firstboot
+
+The same flow is a verb on the runner, for a disk restored by another run:
+
+```
+snapintosh firstboot --disk /home/snapintosh/macos.raw --aux /home/snapintosh/aux.img \
+  --ecid 4533301000242790675 --kdk /home/snapintosh/kdk \
+  --template /home/snapintosh/golden-policy.img4 --user snap --password-file /home/snapintosh/password
+```
+
+`--dry-run` prints the plan and writes nothing. The verb reads `vuid`, `nsih`, `spih` from the restored disk and `lpnh`, `rpnh` from the aux bank 0, builds the LocalPolicy with `lib/install/mkpolicy-hack.py`, and runs one single-user boot and one desktop boot. Both boots are bounded by `--secs` (1500 by default). On success QEMU is left running.
+
+## Memory
+
+Use 12 GB for the runner and 6 GB for the guest (10 GB is the floor). The restore was OOM-killed on an 8 GB runner and on a 6 GB guest with 8 vCPUs; the working shape is a 10 GB runner, 12 vCPUs, a 6 GB guest and a second swap file. The cloud-init setup adds one swap file; add a second (`/swap2`) only on a memory-tight host. `--memory 8192` is the minimum, not the comfortable size.
+
+## VNC
+
+The desktop QEMU listens on `127.0.0.1:5900` inside the runner with a random password. Tunnel it from your workstation and open the VNC client:
+
+```
+ssh -L 5900:127.0.0.1:5900 -i /root/.ssh/osx-next-arm64-310 snapintosh@<runner address>
+vncviewer 127.0.0.1:5900
+```
+
+The password file is the `vnc.pass` path printed with the tunnel line in `/var/log/osx-next-arm64.log` (mode 600, usually under `/home/snapintosh/.local/share/snapintosh/firstboot/desktop/`). The guest account is `snap` and its password is the one supplied to `--password-file`.
 
 ## Expected speed
 
