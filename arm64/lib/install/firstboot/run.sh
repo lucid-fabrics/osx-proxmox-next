@@ -78,23 +78,22 @@ policy() { # OUT TEMPLATE
     --spih "$SPIH" --template "$2" --key "$LIB/install/hackkey.pem" --kdk "$KEXT" --out "$1"
 }
 
-# The live run-directory aux carries the nonces the restore settled on; the original full aux is what the boot
-# reads (its boot objects are still valid at the new xid). Use each for its job.
-AUX_VALUES=$AUX
+# The policy nonces and the guest pflash must come from the same aux: BootPolicy panics when the NVRAM
+# nonces and the LocalPolicy disagree. Prefer the live run-directory aux, which the restore rewrote with this
+# disk's nonces and volume group; fall back to the aux the caller supplied.
 LIVE_AUX=$SNAP_HOME/install/runs/install/aux
-[ -s "$LIVE_AUX" ] && AUX_VALUES=$LIVE_AUX
-say "reading the policy inputs from $DISK and $AUX_VALUES"
-values "$DISK" "$AUX_VALUES" "$WORK/single/preboot" "$WORK/single/values.sh"
+AUX_EFF=$AUX
+[ -s "$LIVE_AUX" ] && AUX_EFF=$LIVE_AUX
+say "reading the policy inputs from $DISK and $AUX_EFF"
+values "$DISK" "$AUX_EFF" "$WORK/single/preboot" "$WORK/single/values.sh"
 say "building the LocalPolicy with $TEMPLATE"
 policy "$WORK/policy.img4" "$TEMPLATE"
 # The aux passed by the one-command path is the full 32 MiB image; the guest pflash wants the first 16 KiB dropped.
 # A caller that already passes the dropped live aux is used as it is.
-AUX_BOOT=$AUX
-[ -s "$LIVE_AUX" ] && AUX_BOOT=$LIVE_AUX
-if [ "$(stat -c %s "$AUX_BOOT")" -gt 33562780 ]; then
-  dd if="$AUX_BOOT" of="$WORK/single/aux" bs=16384 skip=1 status=none
+if [ "$(stat -c %s "$AUX_EFF")" -gt 33562780 ]; then
+  dd if="$AUX_EFF" of="$WORK/single/aux" bs=16384 skip=1 status=none
 else
-  cp "$AUX_BOOT" "$WORK/single/aux"
+  cp "$AUX_EFF" "$WORK/single/aux"
 fi
 eval "$(python3 -I "$HERE/patch-points.py" "$LIB/install/hackkey.pem")"
 
@@ -142,13 +141,10 @@ wait "$qemu_pid" 2>/dev/null || true
 say "offline pass done"
 
 say "normal desktop boot (bound ${SECS}s)"
-values "$DISK" "$AUX_VALUES" "$WORK/desktop/preboot" "$WORK/desktop/values.sh"
+values "$DISK" "$AUX_EFF" "$WORK/desktop/preboot" "$WORK/desktop/values.sh"
 policy "$WORK/desktop/policy.img4" "$TEMPLATE"
-if [ "$(stat -c %s "$AUX")" -gt 33562780 ]; then
-  dd if="$AUX" of="$WORK/desktop/aux" bs=16384 skip=1 status=none
-else
-  cp "$AUX" "$WORK/desktop/aux"
-fi
+# Same pflash image as the single-user pass, so the desktop boot matches the policy nonces it was built with.
+cp "$WORK/single/aux" "$WORK/desktop/aux"
 MODE=desktop ECID="$ECID" DISK="$DISK" AUX="$WORK/desktop/aux" QEMU="$QEMU" AMBROSIA="$AMBROSIA" RAM="${FIRSTBOOT_RAM:-6G}" \
   CPUS="${FIRSTBOOT_CPUS:-8}" PATCH_FIND="$PATCH_FIND" PATCH_REPL="$PATCH_REPL" VNC_PORT="$VNC_PORT" \
   SNAPINTOSH_LIB="$LIB" MEMFD_HOLD=86400 bash "$HERE/boot.sh" "$WORK/desktop" "$WORK/desktop/policy.img4" 0
@@ -187,7 +183,13 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 [ "$desk" = 1 ] || fail "Dock and Finder did not start within ${SECS}s (see $WORK/desktop/desktop.log)"
 say "desktop session ready, taking a frame"
-python3 -I "$HERE/frame.py" "$WORK/desktop/qmp.sock" "$WORK/desktop/shot.ppm" || fail "the captured frame is black"
+# The first screendump can land on the blank frame the login transition leaves behind; retry before giving up.
+frame_ok=0
+for _ in 1 2 3 4 5; do
+  if python3 -I "$HERE/frame.py" "$WORK/desktop/qmp.sock" "$WORK/desktop/shot.ppm"; then frame_ok=1; break; fi
+  sleep 5
+done
+[ "$frame_ok" = 1 ] || fail "the captured frame is black"
 cat > "$WORK/desktop/vnc.txt" <<EOF
 VNC: ssh -L $VNC_PORT:127.0.0.1:$VNC_PORT -i <runner key> snapintosh@<runner address>
      then open vnc://127.0.0.1:$VNC_PORT or vncviewer 127.0.0.1:$VNC_PORT

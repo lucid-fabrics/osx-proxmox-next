@@ -104,6 +104,29 @@ def test_the_aux_nonce_values_are_hashes_of_bank_zero(tmp_path):
     assert lpnh == hashlib.sha384(slot1).hexdigest()
 
 
+def test_the_restore_qemu_is_stopped_before_firstboot_opens_the_disk():
+    """The restore QEMU flushes the keybag into the disk on exit; firstboot uses the same file with locking off."""
+    script = (ROOT / "arm64" / "lib" / "install" / "go.sh").read_text()
+    body = script.split("stop_qemu()", 1)[1]
+    assert "pkill -x qemu-system-aar" in body and "sync" in body
+    assert script.count("stop_qemu\n") >= 2
+
+
+def test_the_desktop_frame_is_taken_again_before_it_is_called_black():
+    script = (HELPERS / "run.sh").read_text()
+    assert "for _ in 1 2 3 4 5; do" in script
+    assert "sleep 5" in script and 'fail "the captured frame is black"' in script
+
+
+def test_the_policy_nonces_and_the_pflash_come_from_one_aux():
+    """BootPolicy panics when the NVRAM nonces and the LocalPolicy disagree, so both passes read the same aux."""
+    script = (HELPERS / "run.sh").read_text()
+    assert '[ -s "$LIVE_AUX" ] && AUX_EFF=$LIVE_AUX' in script
+    assert script.count('values "$DISK" "$AUX_EFF"') == 2
+    assert 'dd if="$AUX_EFF" of="$WORK/single/aux"' in script
+    assert 'cp "$WORK/single/aux" "$WORK/desktop/aux"' in script
+
+
 def test_the_aux_needs_the_marker(tmp_path):
     read_values = load("read-values")
     aux = tmp_path / "aux.img"
