@@ -21,7 +21,7 @@ echo "timed UseFilesystemTimestamp: $(/usr/bin/plutil -extract UseFilesystemTime
 # no cfprefsd in single-user mode: `defaults` fails, so the plist is read and written with plutil
 LW=/Library/Preferences/com.apple.loginwindow.plist
 cur=$(/usr/bin/plutil -extract autoLoginUser raw "$LW" 2>/dev/null || true)
-if test -n "$cur" && test -f /private/etc/kcpassword; then
+if test "${AUTOLOGIN_FORCE:-0}" != 1 && test -n "$cur" && test -f /private/etc/kcpassword; then
   echo "autologin: already set for $cur (kept)"
 elif test -f "$stage/kcpassword" && test -n "${AUTOLOGIN_USER:-}"; then
   cp "$stage/kcpassword" /private/etc/kcpassword

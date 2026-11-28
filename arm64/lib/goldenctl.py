@@ -45,7 +45,8 @@ def extra(sock, helper, guestdir, user, password):
     stage = ps.discover_stage(sp)
     ps.upload(sp, stage, "golden-phase1.sh", open(os.path.join(guestdir, "golden-phase1.sh"), "rb").read(), 0o700)
     ps.upload(sp, stage, "kcpassword", kcpassword(password), 0o600)
-    out = ps.run_serial(sp, "AUTOLOGIN_USER=%s %s" % (shlex.quote(user), shlex.quote(stage + "/golden-phase1.sh")), timeout=300)
+    force = " AUTOLOGIN_FORCE=1" if os.environ.get("SNAPINTOSH_AUTOLOGIN_FORCE") == "1" else ""
+    out = ps.run_serial(sp, "AUTOLOGIN_USER=%s%s %s" % (shlex.quote(user), force, shlex.quote(stage + "/golden-phase1.sh")), timeout=300)
     print(out, end="")
     if "golden phase 1 done" not in out:
         raise RuntimeError("golden-phase1.sh did not finish")

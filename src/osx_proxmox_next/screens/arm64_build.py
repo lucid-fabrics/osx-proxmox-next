@@ -64,11 +64,12 @@ class Arm64BuildScreen(OsxScreen):
             self._say(f"Unexpected error: {exc}")
         self.finished = True
         if self.ok:
-            self._say(f"The runner VM {self.config.vmid} is starting. It builds the beta on its first boot (about 10 minutes).\n"
+            self._say(f"The runner VM {self.config.vmid} is starting. On its first boot it builds the beta, restores macOS,\n"
+                      f"runs the offline firstboot pass and boots the desktop (the restore is the long part).\n"
                       f"Progress: {STATUS_PATH} inside the runner, log: {LOG_PATH}.\n"
                       f"Log in from this host: ssh -i {host_key_path(self.config.vmid)} snapintosh@<runner address> "
                       f"(the address is in the VM's Summary page).\n"
-                      "The Mac-free install of macOS itself is not in this beta build yet.")
+                      "The firstboot VNC tunnel and password are printed in the log when the desktop is ready.")
         else:
             self._say("Stopped. Nothing else was changed; fix the cause and run again, or remove the VM with: "
                       f"osx-next-cli arm64 uninstall --vmid {self.config.vmid} --execute")

@@ -253,10 +253,10 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 
 ## 🧪 macOS 27 arm64 (beta)
 
-The New Mac screen has one more choice at the end of the macOS list: **27 arm64 (beta)**. It runs a real arm64 macOS 27 guest, emulated in software on your x86 host, inside a Debian runner VM that the wizard creates (6 cores and 8 GB by default, 120 GB of disk). Nothing is installed on the Proxmox host itself.
+The New Mac screen has one more choice at the end of the macOS list: **27 arm64 (beta)**. It runs a real arm64 macOS 27 guest, emulated in software on your x86 host, inside a Debian runner VM that the wizard creates (10 cores and 12 GB by default, 120 GB of disk). Nothing is installed on the Proxmox host itself.
 
 - Expect it to be slow: about 66 s from QEMU start to the Dock on a 16-thread host, 15 frames per second when dragging a window, and roughly three times slower on 6 shared threads.
-- The runner builds the stack by itself on its first boot (about 10 minutes). **The Mac-free install of macOS is not in this beta build yet**, so the runner stops at `install-pending`.
+- One `arm64 apply --execute` with the local Apple inputs creates the runner, builds the stack, restores macOS, runs firstboot and ends at a live desktop with a VNC tunnel; `ready` is written only after Dock and Finder answer. See the beta guide for the inputs, the 10 GB runner / 6 GB guest guidance and the tunnel.
 - Known issues: Safari can loop through "A problem repeatedly occurred" for a few minutes on hosts with 6 to 8 weak cores, and there is no audio.
 - From the command line: `osx-next-cli arm64 plan --vmid 478 --name macos27-runner --storage local-lvm`.
 
