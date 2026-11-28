@@ -185,7 +185,7 @@ done
 say "desktop session ready, taking a frame"
 # The first screendump can land on the blank frame the login transition leaves behind; retry before giving up.
 frame_ok=0
-for _ in 1 2 3 4 5; do
+for _ in $(seq 1 12); do
   if python3 -I "$HERE/frame.py" "$WORK/desktop/qmp.sock" "$WORK/desktop/shot.ppm"; then frame_ok=1; break; fi
   sleep 5
 done

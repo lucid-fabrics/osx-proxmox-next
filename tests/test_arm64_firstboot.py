@@ -114,7 +114,7 @@ def test_the_restore_qemu_is_stopped_before_firstboot_opens_the_disk():
 
 def test_the_desktop_frame_is_taken_again_before_it_is_called_black():
     script = (HELPERS / "run.sh").read_text()
-    assert "for _ in 1 2 3 4 5; do" in script
+    assert "for _ in $(seq 1 12); do" in script
     assert "sleep 5" in script and 'fail "the captured frame is black"' in script
 
 
